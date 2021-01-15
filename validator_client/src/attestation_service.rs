@@ -12,12 +12,15 @@ use slot_clock::SlotClock;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
+use tokio::sync::oneshot;
 use tokio::time::{interval_at, sleep_until, Duration, Instant};
 use tree_hash::TreeHash;
 use types::{
     AggregateSignature, Attestation, AttestationData, BitList, ChainSpec, CommitteeIndex, EthSpec,
     Slot,
 };
+
+const SIGNING_TASK_NAME: &str = "attestation_signing";
 
 /// Builds an `AttestationService`.
 pub struct AttestationServiceBuilder<T, E: EthSpec> {
@@ -121,7 +124,7 @@ impl<T, E: EthSpec> Deref for AttestationService<T, E> {
     }
 }
 
-impl<T: SlotClock + 'static, E: EthSpec> AttestationService<T, E> {
+impl<T: SlotClock + 'static + Clone, E: EthSpec> AttestationService<T, E> {
     /// Starts the service which periodically produces attestations.
     pub fn start_update_service(self, spec: &ChainSpec) -> Result<(), String> {
         let log = self.context.log().clone();
@@ -257,7 +260,7 @@ impl<T: SlotClock + 'static, E: EthSpec> AttestationService<T, E> {
         //
         // Download, sign and publish an `Attestation` for each validator.
         let attestation_opt = self
-            .produce_and_publish_attestations(slot, committee_index, &validator_duties)
+            .produce_and_publish_attestations(slot, committee_index, validator_duties.clone())
             .await
             .map_err(move |e| {
                 crit!(
@@ -322,7 +325,7 @@ impl<T: SlotClock + 'static, E: EthSpec> AttestationService<T, E> {
         &self,
         slot: Slot,
         committee_index: CommitteeIndex,
-        validator_duties: &[DutyAndProof],
+        validator_duties: Vec<DutyAndProof>,
     ) -> Result<Option<AttestationData>, String> {
         let log = self.context.log();
 
@@ -348,98 +351,135 @@ impl<T: SlotClock + 'static, E: EthSpec> AttestationService<T, E> {
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut attestations = Vec::with_capacity(validator_duties.len());
+        let (tx, rx) = oneshot::channel::<Vec<Attestation<E>>>();
+        let validator_store = self.validator_store.clone();
+        let inner_attestation_data = attestation_data.clone();
+        let inner_log = log.clone();
+        self.context.executor.spawn_blocking(
+            move || {
+                let log = inner_log;
+                let attestation_data = inner_attestation_data;
 
-        for duty in validator_duties {
-            // Ensure that all required fields are present in the validator duty.
-            let (
-                duty_slot,
-                duty_committee_index,
-                validator_committee_position,
-                _,
-                _,
-                committee_length,
-            ) = if let Some(tuple) = duty.attestation_duties() {
-                tuple
-            } else {
-                crit!(
-                    log,
-                    "Missing validator duties when signing";
-                    "duties" => format!("{:?}", duty)
-                );
-                continue;
-            };
+                let mut attestations: Vec<Attestation<E>> =
+                    Vec::with_capacity(validator_duties.len());
 
-            // Ensure that the attestation matches the duties.
-            if duty_slot != attestation_data.slot || duty_committee_index != attestation_data.index
-            {
-                crit!(
-                    log,
-                    "Inconsistent validator duties during signing";
-                    "validator" => format!("{:?}", duty.validator_pubkey()),
-                    "duty_slot" => duty_slot,
-                    "attestation_slot" => attestation_data.slot,
-                    "duty_index" => duty_committee_index,
-                    "attestation_index" => attestation_data.index,
-                );
-                continue;
+                for duty in validator_duties {
+                    // Ensure that all required fields are present in the validator duty.
+                    let (
+                        duty_slot,
+                        duty_committee_index,
+                        validator_committee_position,
+                        _,
+                        _,
+                        committee_length,
+                    ) = if let Some(tuple) = duty.attestation_duties() {
+                        tuple
+                    } else {
+                        crit!(
+                            log,
+                            "Missing validator duties when signing";
+                            "duties" => format!("{:?}", duty)
+                        );
+                        continue;
+                    };
+
+                    // Ensure that the attestation matches the duties.
+                    if duty_slot != attestation_data.slot
+                        || duty_committee_index != attestation_data.index
+                    {
+                        crit!(
+                            log,
+                            "Inconsistent validator duties during signing";
+                            "validator" => format!("{:?}", duty.validator_pubkey()),
+                            "duty_slot" => duty_slot,
+                            "attestation_slot" => attestation_data.slot,
+                            "duty_index" => duty_committee_index,
+                            "attestation_index" => attestation_data.index,
+                        );
+                        continue;
+                    }
+
+                    let mut attestation = Attestation {
+                        aggregation_bits: BitList::with_capacity(committee_length as usize)
+                            .unwrap(),
+                        data: attestation_data.clone(),
+                        signature: AggregateSignature::infinity(),
+                    };
+
+                    if validator_store
+                        .sign_attestation(
+                            duty.validator_pubkey(),
+                            validator_committee_position,
+                            &mut attestation,
+                            current_epoch,
+                        )
+                        .is_some()
+                    {
+                        attestations.push(attestation);
+                    } else {
+                        crit!(
+                            log,
+                            "Failed to sign attestation";
+                            "committee_index" => committee_index,
+                            "slot" => slot.as_u64(),
+                        );
+                        continue;
+                    }
+                }
+
+                if let Err(e) = tx.send(attestations) {
+                    crit!(
+                        log,
+                        "Failed to send signed attestations";
+                        "error" => ?e,
+                        "committee_index" => committee_index,
+                        "slot" => slot.as_u64(),
+                    );
+                }
+            },
+            SIGNING_TASK_NAME,
+        );
+
+        match rx.await {
+            Ok(attestations) => {
+                let attestations_slice = attestations.as_slice();
+                match self
+                    .beacon_nodes
+                    .first_success(RequireSynced::No, |beacon_node| async move {
+                        beacon_node
+                            .post_beacon_pool_attestations(&attestations_slice)
+                            .await
+                    })
+                    .await
+                {
+                    Ok(()) => info!(
+                        log,
+                        "Successfully published attestations";
+                        "count" => attestations.len(),
+                        "head_block" => ?attestation_data.beacon_block_root,
+                        "committee_index" => attestation_data.index,
+                        "slot" => attestation_data.slot.as_u64(),
+                        "type" => "unaggregated",
+                    ),
+                    Err(e) => error!(
+                        log,
+                        "Unable to publish attestations";
+                        "error" => %e,
+                        "committee_index" => attestation_data.index,
+                        "slot" => slot.as_u64(),
+                        "type" => "unaggregated",
+                    ),
+                }
             }
-
-            let mut attestation = Attestation {
-                aggregation_bits: BitList::with_capacity(committee_length as usize).unwrap(),
-                data: attestation_data.clone(),
-                signature: AggregateSignature::infinity(),
-            };
-
-            if self
-                .validator_store
-                .sign_attestation(
-                    duty.validator_pubkey(),
-                    validator_committee_position,
-                    &mut attestation,
-                    current_epoch,
-                )
-                .is_some()
-            {
-                attestations.push(attestation);
-            } else {
+            Err(e) => {
                 crit!(
                     log,
-                    "Failed to sign attestation";
+                    "Failed to receive signed attestations";
+                    "error" => ?e,
                     "committee_index" => committee_index,
                     "slot" => slot.as_u64(),
                 );
-                continue;
             }
-        }
-
-        let attestations_slice = attestations.as_slice();
-        match self
-            .beacon_nodes
-            .first_success(RequireSynced::No, |beacon_node| async move {
-                beacon_node
-                    .post_beacon_pool_attestations(attestations_slice)
-                    .await
-            })
-            .await
-        {
-            Ok(()) => info!(
-                log,
-                "Successfully published attestations";
-                "count" => attestations.len(),
-                "head_block" => ?attestation_data.beacon_block_root,
-                "committee_index" => attestation_data.index,
-                "slot" => attestation_data.slot.as_u64(),
-                "type" => "unaggregated",
-            ),
-            Err(e) => error!(
-                log,
-                "Unable to publish attestations";
-                "error" => %e,
-                "committee_index" => attestation_data.index,
-                "slot" => slot.as_u64(),
-                "type" => "unaggregated",
-            ),
         }
 
         Ok(Some(attestation_data))
