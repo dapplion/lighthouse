@@ -40,13 +40,14 @@
 //!            END
 //!
 //! ```
+use crate::snapshot_cache::PreProcessingSnapshot;
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
 use crate::{
     beacon_chain::{
         BLOCK_PROCESSING_CACHE_LOCK_TIMEOUT, MAXIMUM_GOSSIP_CLOCK_DISPARITY,
         VALIDATOR_PUBKEY_CACHE_LOCK_TIMEOUT,
     },
-    metrics, BeaconChain, BeaconChainError, BeaconChainTypes, BeaconSnapshot,
+    metrics, BeaconChain, BeaconChainError, BeaconChainTypes,
 };
 use fork_choice::{ForkChoice, ForkChoiceStore};
 use parking_lot::RwLockReadGuard;
@@ -348,11 +349,8 @@ pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
         .map(|(_, block)| block.slot())
         .unwrap_or_else(|| slot);
 
-    let state = cheap_state_advance_to_obtain_committees(
-        &mut parent.beacon_state,
-        highest_slot,
-        &chain.spec,
-    )?;
+    let state =
+        cheap_state_advance_to_obtain_committees(&mut parent.pre_state, highest_slot, &chain.spec)?;
 
     let pubkey_cache = get_validator_pubkey_cache(chain)?;
     let mut signature_verifier = get_signature_verifier(&state, &pubkey_cache, &chain.spec);
@@ -388,7 +386,7 @@ pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
 pub struct GossipVerifiedBlock<T: BeaconChainTypes> {
     pub block: SignedBeaconBlock<T::EthSpec>,
     pub block_root: Hash256,
-    parent: BeaconSnapshot<T::EthSpec>,
+    parent: PreProcessingSnapshot<T::EthSpec>,
 }
 
 /// A wrapper around a `SignedBeaconBlock` that indicates that all signatures (except the deposit
@@ -396,7 +394,7 @@ pub struct GossipVerifiedBlock<T: BeaconChainTypes> {
 pub struct SignatureVerifiedBlock<T: BeaconChainTypes> {
     block: SignedBeaconBlock<T::EthSpec>,
     block_root: Hash256,
-    parent: Option<BeaconSnapshot<T::EthSpec>>,
+    parent: Option<PreProcessingSnapshot<T::EthSpec>>,
 }
 
 /// A wrapper around a `SignedBeaconBlock` that indicates that this block is fully verified and
@@ -526,7 +524,7 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
         check_block_skip_slots(chain, &parent.beacon_block.message, &block.message)?;
 
         let state = cheap_state_advance_to_obtain_committees(
-            &mut parent.beacon_state,
+            &mut parent.pre_state,
             block.slot(),
             &chain.spec,
         )?;
@@ -620,7 +618,7 @@ impl<T: BeaconChainTypes> SignatureVerifiedBlock<T> {
         let block_root = get_block_root(&block);
 
         let state = cheap_state_advance_to_obtain_committees(
-            &mut parent.beacon_state,
+            &mut parent.pre_state,
             block.slot(),
             &chain.spec,
         )?;
@@ -661,7 +659,7 @@ impl<T: BeaconChainTypes> SignatureVerifiedBlock<T> {
         let block = from.block;
 
         let state = cheap_state_advance_to_obtain_committees(
-            &mut parent.beacon_state,
+            &mut parent.pre_state,
             block.slot(),
             &chain.spec,
         )?;
@@ -749,7 +747,7 @@ impl<'a, T: BeaconChainTypes> FullyVerifiedBlock<'a, T> {
     pub fn from_signature_verified_components(
         block: SignedBeaconBlock<T::EthSpec>,
         block_root: Hash256,
-        parent: BeaconSnapshot<T::EthSpec>,
+        parent: PreProcessingSnapshot<T::EthSpec>,
         chain: &BeaconChain<T>,
     ) -> Result<Self, BlockError<T::EthSpec>> {
         // Reject any block if its parent is not known to fork choice.
@@ -790,20 +788,20 @@ impl<'a, T: BeaconChainTypes> FullyVerifiedBlock<'a, T> {
         let mut confirmation_db_batch = vec![];
 
         // The block must have a higher slot than its parent.
-        if block.slot() <= parent.beacon_state.slot {
+        if block.slot() <= parent.beacon_block.slot() {
             return Err(BlockError::BlockIsNotLaterThanParent {
                 block_slot: block.slot(),
-                state_slot: parent.beacon_state.slot,
+                state_slot: parent.beacon_block.slot(),
             });
         }
 
         let mut summaries = vec![];
 
         // Transition the parent state to the block slot.
-        let mut state = parent.beacon_state;
+        let mut state = parent.pre_state;
         let distance = block.slot().as_u64().saturating_sub(state.slot.as_u64());
-        for i in 0..distance {
-            let state_root = if i == 0 {
+        for _ in 0..distance {
+            let state_root = if parent.beacon_block.slot() == state.slot {
                 parent.beacon_block.state_root()
             } else {
                 // This is a new state we've reached, so stage it for storage in the DB.
@@ -1079,7 +1077,13 @@ pub fn get_block_root<E: EthSpec>(block: &SignedBeaconBlock<E>) -> Hash256 {
 fn load_parent<T: BeaconChainTypes>(
     block: SignedBeaconBlock<T::EthSpec>,
     chain: &BeaconChain<T>,
-) -> Result<(BeaconSnapshot<T::EthSpec>, SignedBeaconBlock<T::EthSpec>), BlockError<T::EthSpec>> {
+) -> Result<
+    (
+        PreProcessingSnapshot<T::EthSpec>,
+        SignedBeaconBlock<T::EthSpec>,
+    ),
+    BlockError<T::EthSpec>,
+> {
     // Reject any block if its parent is not known to fork choice.
     //
     // A block that is not in fork choice is either:
@@ -1105,7 +1109,7 @@ fn load_parent<T: BeaconChainTypes>(
         .try_write_for(BLOCK_PROCESSING_CACHE_LOCK_TIMEOUT)
         .and_then(|mut snapshot_cache| snapshot_cache.try_remove(block.parent_root()))
     {
-        Ok((snapshot, block))
+        Ok((snapshot.into_pre_state(), block))
     } else {
         // Load the blocks parent block from the database, returning invalid if that block is not
         // found.
@@ -1136,11 +1140,10 @@ fn load_parent<T: BeaconChainTypes>(
             })?;
 
         Ok((
-            BeaconSnapshot {
+            PreProcessingSnapshot {
                 beacon_block: parent_block,
                 beacon_block_root: root,
-                beacon_state: parent_state,
-                beacon_state_root: parent_state_root,
+                pre_state: parent_state,
             },
             block,
         ))
