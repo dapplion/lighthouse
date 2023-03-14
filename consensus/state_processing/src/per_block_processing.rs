@@ -1,8 +1,17 @@
 use crate::consensus_context::ConsensusContext;
+use crate::upgrade::capella::compute_initial_whisk_k;
+use curdleproofs_whisk::{
+    is_g1_generator, is_matching_tracker, is_valid_whisk_tracker_proof, BLSG1Point,
+    TrackerProofBytes, WhiskShuffleProofBytes, TRACKER_PROOF_SIZE, WHISK, WHISK_SHUFFLE_ELL,
+    WHISK_SHUFFLE_PROOF_SIZE,
+};
 use errors::{BlockOperationError, BlockProcessingError, HeaderInvalid};
+use ethereum_hashing::hash;
+use int_to_bytes::int_to_bytes8;
 use rayon::prelude::*;
 use safe_arith::{ArithError, SafeArith};
 use signature_sets::{block_proposal_signature_set, get_pubkey_from_state, randao_signature_set};
+use ssz::Encode;
 use std::borrow::Cow;
 use tree_hash::TreeHash;
 use types::*;
@@ -141,13 +150,7 @@ pub fn per_block_processing<T: EthSpec, Payload: AbstractExecPayload<T>>(
         BlockSignatureStrategy::VerifyRandao => VerifySignatures::False,
     };
 
-    let proposer_index = process_block_header(
-        state,
-        block.temporary_block_header(),
-        verify_block_root,
-        ctxt,
-        spec,
-    )?;
+    let proposer_index = process_block_header(state, block, verify_block_root, ctxt, spec)?;
 
     if verify_signatures.is_true() {
         verify_block_signature(state, signed_block, ctxt, spec)?;
@@ -175,7 +178,7 @@ pub fn per_block_processing<T: EthSpec, Payload: AbstractExecPayload<T>>(
 
     process_randao(state, block, verify_randao, ctxt, spec)?;
     process_eth1_data(state, block.body().eth1_data())?;
-    process_operations(state, block.body(), verify_signatures, ctxt, spec)?;
+    process_operations(state, block, verify_signatures, ctxt, spec)?;
 
     if let Ok(sync_aggregate) = block.body().sync_aggregate() {
         process_sync_aggregate(
@@ -191,17 +194,232 @@ pub fn per_block_processing<T: EthSpec, Payload: AbstractExecPayload<T>>(
         update_progressive_balances_metrics(state.progressive_balances_cache())?;
     }
 
+    process_shuffled_trackers(state, block.body())?;
+    process_whisk_registration(state, block)?;
+
     Ok(())
 }
 
-/// Processes the block header, returning the proposer index.
-pub fn process_block_header<T: EthSpec>(
+fn process_whisk_registration<T: EthSpec, Payload: AbstractExecPayload<T>>(
     state: &mut BeaconState<T>,
-    block_header: BeaconBlockHeader,
+    block: BeaconBlockRef<T, Payload>,
+) -> Result<(), BlockProcessingError> {
+    if let (
+        Ok(whisk_registration_proof),
+        Ok(whisk_tracker),
+        Ok(whisk_k_commitment),
+        BeaconState::Capella(BeaconStateCapella {
+            ref mut whisk_validator_trackers,
+            ref mut whisk_validator_k_commitments,
+            ..
+        }),
+    ) = (
+        block.body().whisk_registration_proof(),
+        block.body().whisk_tracker(),
+        block.body().whisk_k_commitment(),
+        state,
+    ) {
+        // TODO: This function needs access to mut fields + a method state.is_k_commitment_unique()
+        // A better way to do this?
+        let proposer = block.proposer_index() as usize;
+        let proposer_tracker = &whisk_validator_trackers
+            .get(proposer)
+            .ok_or(BlockProcessingError::ProposerOutOfBounds)?;
+
+        if is_g1_generator(&proposer_tracker.r_g) {
+            // First whisk proposal
+            block_verify!(
+                !is_g1_generator(&whisk_tracker.r_g),
+                BlockProcessingError::InvalidWhisk("r_g not g1 generator".to_string())
+            );
+            block_verify!(
+                is_k_commitment_unique(whisk_validator_k_commitments, whisk_k_commitment),
+                BlockProcessingError::InvalidWhisk("k_commitment not unique".to_string())
+            );
+            block_verify!(
+                is_valid_whisk_tracker_proof(
+                    whisk_tracker,
+                    whisk_k_commitment,
+                    &ssz_tracker_proof_to_crypto_tracker_proof::<T>(whisk_registration_proof),
+                )
+                .unwrap_or(false),
+                BlockProcessingError::InvalidWhisk("invalid registration proof".to_string())
+            );
+
+            *whisk_validator_k_commitments
+                .get_mut(proposer)
+                .ok_or(BlockProcessingError::ProposerOutOfBounds)? = whisk_k_commitment.clone();
+            *whisk_validator_trackers
+                .get_mut(proposer)
+                .ok_or(BlockProcessingError::ProposerOutOfBounds)? = whisk_tracker.clone();
+        } else {
+            block_verify!(
+                whisk_registration_proof == &WhiskTrackerProof::<T>::default(),
+                BlockProcessingError::InvalidWhisk(
+                    "expected default registration proof".to_string()
+                )
+            );
+            block_verify!(
+                whisk_tracker == &WhiskTracker::default(),
+                BlockProcessingError::InvalidWhisk(format!(
+                    "expected default registration tracker: {:?}",
+                    whisk_tracker
+                ))
+            );
+            block_verify!(
+                whisk_k_commitment == &BLSG1Point::default(),
+                BlockProcessingError::InvalidWhisk(format!(
+                    "expected default registration commitment: {:?}",
+                    whisk_tracker
+                ))
+            );
+        }
+    }
+
+    Ok(())
+}
+
+pub fn ssz_tracker_proof_to_crypto_tracker_proof<T: EthSpec>(
+    tracker_proof: &WhiskTrackerProof<T>,
+) -> TrackerProofBytes {
+    let vec: Vec<u8> = tracker_proof.as_ssz_bytes();
+    let mut arr = [0; TRACKER_PROOF_SIZE];
+    arr.copy_from_slice(&vec);
+    arr
+}
+
+fn ssz_shuffle_proof_to_crypto_shuffle_proof<T: EthSpec>(
+    shuffle_proof: &WhiskShuffleProof<T>,
+) -> WhiskShuffleProofBytes {
+    let vec: Vec<u8> = shuffle_proof.as_ssz_bytes();
+    let mut arr = [0; WHISK_SHUFFLE_PROOF_SIZE];
+    arr.copy_from_slice(&vec);
+    arr
+}
+
+pub fn is_k_commitment_unique(
+    whisk_validator_k_commitments: &[BLSG1Point],
+    k_commitment: &BLSG1Point,
+) -> bool {
+    for whisk_k_commitment in whisk_validator_k_commitments {
+        if whisk_k_commitment == k_commitment {
+            return false;
+        }
+    }
+    true
+}
+
+/// Given a `randao_reveal` return the list of indices that got shuffled from the entire candidate set
+pub fn get_shuffle_indices<T: EthSpec>(randao_reveal: &Signature) -> Vec<usize> {
+    let randao_reveal = randao_reveal.as_ssz_bytes();
+    let mut shuffle_indices: Vec<usize> = Vec::with_capacity(T::whisk_validators_per_shuffle());
+
+    for i in 0..T::whisk_validators_per_shuffle() as u64 {
+        let mut pre_image = randao_reveal.clone();
+        pre_image.append(&mut int_to_bytes8(i));
+        // TODO: from_be_bytes truncates the output correctly?
+        // TODO: big or little endian?.
+        #[allow(clippy::expect_used)]
+        #[allow(clippy::arithmetic_side_effects)]
+        let shuffle_index = usize::from_be_bytes(
+            hash(&pre_image)
+                .get(0..8)
+                .expect("hash is 32 bytes")
+                .try_into()
+                .expect("first 8 bytes of signature should always convert to fixed array"),
+        )
+        .wrapping_rem(T::whisk_candidate_trackers_count());
+        shuffle_indices.push(shuffle_index);
+    }
+
+    shuffle_indices
+}
+
+fn process_shuffled_trackers<T: EthSpec, Payload: AbstractExecPayload<T>>(
+    state: &mut BeaconState<T>,
+    body: BeaconBlockBodyRef<T, Payload>,
+) -> Result<(), BlockProcessingError> {
+    let current_epoch = state.current_epoch();
+
+    // Check shuffle proof
+    if let (
+        Ok(whisk_candidate_trackers),
+        Ok(whisk_post_shuffle_trackers),
+        Ok(whisk_shuffle_proof),
+    ) = (
+        state.whisk_candidate_trackers_mut(),
+        body.whisk_post_shuffle_trackers(),
+        body.whisk_shuffle_proof(),
+    ) {
+        // Given a `randao_reveal` return the list of indices that got shuffled from the entire candidate set
+        let shuffle_indices = get_shuffle_indices::<T>(body.randao_reveal());
+        let mut pre_shuffle_trackers: Vec<WhiskTracker> = vec![];
+        for i in shuffle_indices.iter() {
+            pre_shuffle_trackers.push(
+                whisk_candidate_trackers
+                    .get(*i)
+                    .ok_or(BlockProcessingError::ShuffleIndexOutOfBounds)?
+                    .clone(),
+            );
+        }
+
+        // Actual count of shuffled trackers is `ELL - N_BLINDERS`. See:
+        // https://github.com/dapplion/curdleproofs/blob/641c5692f285c3f3672c53022f52a1b199f0b338/src/lib.rs#L32-L33
+        let post_shuffle_trackers: Vec<WhiskTracker> = whisk_post_shuffle_trackers
+            .iter()
+            .take(WHISK_SHUFFLE_ELL)
+            .cloned()
+            .collect();
+
+        if !should_shuffle_trackers::<T>(current_epoch) {
+            // Require unchanged trackers during cooldown
+            block_verify!(
+                pre_shuffle_trackers == post_shuffle_trackers,
+                BlockProcessingError::InvalidWhisk("changed trackers during cooldown".to_string())
+            );
+        } else {
+            // Require shuffled trackers during shuffle
+            block_verify!(
+                WHISK
+                    .is_valid_whisk_shuffle_proof(
+                        pre_shuffle_trackers.as_ref(),
+                        post_shuffle_trackers.as_ref(),
+                        &ssz_shuffle_proof_to_crypto_shuffle_proof::<T>(whisk_shuffle_proof),
+                    )
+                    .is_ok(),
+                BlockProcessingError::InvalidWhisk("invalid shuffle proof".to_string())
+            );
+        }
+
+        // Shuffle candidate trackers
+        for (tracker, index) in post_shuffle_trackers.into_iter().zip(shuffle_indices) {
+            *whisk_candidate_trackers
+                .get_mut(index)
+                .ok_or(BlockProcessingError::ShuffleIndexOutOfBounds)? = tracker;
+        }
+    }
+
+    Ok(())
+}
+
+/// Return true if at `epoch` validator should shuffle candidate trackers
+#[allow(clippy::arithmetic_side_effects)]
+pub fn should_shuffle_trackers<T: EthSpec>(epoch: Epoch) -> bool {
+    // (clippy::arithmetic_side_effects) Will never divide by zero
+    epoch % T::whisk_epochs_per_shuffling_phase() + T::whisk_proposer_selection_gap() + 1
+        < T::whisk_epochs_per_shuffling_phase()
+}
+
+/// Processes the block header, returning the proposer index.
+pub fn process_block_header<T: EthSpec, Payload: AbstractExecPayload<T>>(
+    state: &mut BeaconState<T>,
+    block: BeaconBlockRef<T, Payload>,
     verify_block_root: VerifyBlockRoot,
     ctxt: &mut ConsensusContext<T>,
     spec: &ChainSpec,
 ) -> Result<u64, BlockOperationError<HeaderInvalid>> {
+    let block_header = block.temporary_block_header();
+
     // Verify that the slots match
     verify!(
         block_header.slot == state.slot(),
@@ -219,14 +437,61 @@ pub fn process_block_header<T: EthSpec>(
 
     // Verify that proposer index is the correct index
     let proposer_index = block_header.proposer_index;
-    let state_proposer_index = ctxt.get_proposer_index(state, spec)?;
-    verify!(
-        proposer_index == state_proposer_index,
-        HeaderInvalid::ProposerIndexMismatch {
-            block_proposer_index: proposer_index,
-            state_proposer_index,
+
+    if let (
+        Ok(whisk_opening_proof),
+        Ok(whisk_proposer_trackers),
+        Ok(whisk_validator_k_commitments),
+    ) = (
+        block.body().whisk_opening_proof(),
+        state.whisk_proposer_trackers(),
+        state.whisk_validator_k_commitments(),
+    ) {
+        // process_whisk_opening_proof
+        #[allow(clippy::expect_used)]
+        let tracker = whisk_proposer_trackers
+            .get(
+                state
+                    .slot()
+                    .as_usize()
+                    .safe_rem(T::whisk_proposer_trackers_count())
+                    .expect("whisk_proposer_tracker_count is never 0"),
+            )
+            .expect("arr[x mod arr.len] always in bounds");
+
+        // Proposal against tracker created with deterministic k
+        if whisk_opening_proof == &WhiskTrackerProof::<T>::default() {
+            let validator = state.get_validator(proposer_index as usize)?;
+            let initial_k = compute_initial_whisk_k(validator);
+            verify!(
+                tracker
+                    .try_into()
+                    .map(|tracker| is_matching_tracker(&tracker, &initial_k))
+                    .unwrap_or(false),
+                HeaderInvalid::InitialWhiskProposerMismatch
+            );
+        } else {
+            let k_commitment = &whisk_validator_k_commitments
+                .get(proposer_index as usize)
+                .ok_or(BeaconStateError::UnknownValidator(proposer_index as usize))?;
+            let whisk_opening_proof =
+                ssz_tracker_proof_to_crypto_tracker_proof::<T>(whisk_opening_proof);
+            verify!(
+                is_valid_whisk_tracker_proof(tracker, k_commitment, &whisk_opening_proof)
+                    .unwrap_or(false),
+                HeaderInvalid::ProposerProofInvalid
+            )
         }
-    );
+    } else {
+        let state_proposer_index = ctxt.get_proposer_index(state, spec)?;
+        verify!(
+            proposer_index == state_proposer_index,
+            HeaderInvalid::ProposerIndexMismatch {
+                block_proposer_index: proposer_index,
+                state_proposer_index,
+            }
+        );
+    }
 
     if verify_block_root == VerifyBlockRoot::True {
         let expected_previous_block_root = state.latest_block_header().tree_hash_root();
@@ -260,14 +525,12 @@ pub fn verify_block_signature<T: EthSpec, Payload: AbstractExecPayload<T>>(
     spec: &ChainSpec,
 ) -> Result<(), BlockOperationError<HeaderInvalid>> {
     let block_root = Some(ctxt.get_current_block_root(block)?);
-    let proposer_index = Some(ctxt.get_proposer_index(state, spec)?);
     verify!(
         block_proposal_signature_set(
             state,
             |i| get_pubkey_from_state(state, i),
             block,
             block_root,
-            proposer_index,
             spec
         )?
         .verify(),
@@ -283,18 +546,19 @@ pub fn process_randao<T: EthSpec, Payload: AbstractExecPayload<T>>(
     state: &mut BeaconState<T>,
     block: BeaconBlockRef<'_, T, Payload>,
     verify_signatures: VerifySignatures,
-    ctxt: &mut ConsensusContext<T>,
+    _ctxt: &mut ConsensusContext<T>,
     spec: &ChainSpec,
 ) -> Result<(), BlockProcessingError> {
     if verify_signatures.is_true() {
         // Verify RANDAO reveal signature.
-        let proposer_index = ctxt.get_proposer_index(state, spec)?;
         block_verify!(
             randao_signature_set(
                 state,
                 |i| get_pubkey_from_state(state, i),
                 block,
-                Some(proposer_index),
+                // TODO Whisk: proposer index correctness is checked in the paths I'm aware of. Is
+                // process_randao ever called with unchecked proposer index?
+                block.proposer_index(),
                 spec
             )?
             .verify(),

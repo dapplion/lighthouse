@@ -273,6 +273,18 @@ pub enum BlockProductionError {
     TokioJoin(tokio::task::JoinError),
     BeaconChain(BeaconChainError),
     InvalidPayloadFork,
+    MissingWhiskProposerK,
+    MissingWhiskFields,
+    ExpectedPostWhiskData,
+    WhiskSerializationError(curdleproofs_whisk::SerializationError),
+    WhiskInvalid(String),
+    WhiskNotTrackerProposer {
+        proposer_index: u64,
+        is_first_proposal: bool,
+    },
+    WhiskImpossibleDuplicateBootstrapProposal,
+    WhiskNotNewProposerK,
+    ProposerOutOfBounds,
 }
 
 easy_from_to!(BlockProcessingError, BlockProductionError);

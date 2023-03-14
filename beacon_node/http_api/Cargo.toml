@@ -14,6 +14,7 @@ types = { path = "../../consensus/types" }
 hex = "0.4.2"
 beacon_chain = { path = "../beacon_chain" }
 eth2 = { path = "../../common/eth2", features = ["lighthouse"] }
+curdleproofs_whisk = { path = "../../crypto/curdleproofs_whisk" }
 slog = "2.5.2"
 network = { path = "../network" }
 lighthouse_network = { path = "../lighthouse_network" }

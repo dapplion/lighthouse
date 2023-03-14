@@ -76,31 +76,16 @@ pub fn block_proposal_signature_set<'a, T, F, Payload: AbstractExecPayload<T>>(
     get_pubkey: F,
     signed_block: &'a SignedBeaconBlock<T, Payload>,
     block_root: Option<Hash256>,
-    verified_proposer_index: Option<u64>,
     spec: &'a ChainSpec,
 ) -> Result<SignatureSet<'a>>
 where
     T: EthSpec,
     F: Fn(usize) -> Option<Cow<'a, PublicKey>>,
 {
-    let block = signed_block.message();
-
-    let proposer_index = if let Some(proposer_index) = verified_proposer_index {
-        proposer_index
-    } else {
-        state.get_beacon_proposer_index(block.slot(), spec)? as u64
-    };
-    if proposer_index != block.proposer_index() {
-        return Err(Error::IncorrectBlockProposer {
-            block: block.proposer_index(),
-            local_shuffling: proposer_index,
-        });
-    }
-
     block_proposal_signature_set_from_parts(
         signed_block,
         block_root,
-        proposer_index,
+        signed_block.message().proposer_index(),
         &state.fork(),
         state.genesis_validators_root(),
         get_pubkey,
@@ -187,19 +172,13 @@ pub fn randao_signature_set<'a, T, F, Payload: AbstractExecPayload<T>>(
     state: &'a BeaconState<T>,
     get_pubkey: F,
     block: BeaconBlockRef<'a, T, Payload>,
-    verified_proposer_index: Option<u64>,
+    proposer_index: u64,
     spec: &'a ChainSpec,
 ) -> Result<SignatureSet<'a>>
 where
     T: EthSpec,
     F: Fn(usize) -> Option<Cow<'a, PublicKey>>,
 {
-    let proposer_index = if let Some(proposer_index) = verified_proposer_index {
-        proposer_index
-    } else {
-        state.get_beacon_proposer_index(block.slot(), spec)? as u64
-    };
-
     let domain = spec.get_domain(
         block.slot().epoch(T::slots_per_epoch()),
         Domain::Randao,

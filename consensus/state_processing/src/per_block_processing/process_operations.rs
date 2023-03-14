@@ -1,24 +1,32 @@
 use super::*;
-use crate::common::{
-    altair::{get_base_reward, BaseRewardPerIncrement},
-    get_attestation_participation_flag_indices, increase_balance, initiate_validator_exit,
-    slash_validator,
-};
 use crate::per_block_processing::errors::{BlockProcessingError, IntoWithIndex};
 use crate::VerifySignatures;
+use crate::{
+    common::{
+        altair::{get_base_reward, BaseRewardPerIncrement},
+        get_attestation_participation_flag_indices, increase_balance, initiate_validator_exit,
+        slash_validator,
+    },
+    upgrade::capella::compute_initial_whisk_k_from_pubkey,
+};
+use curdleproofs_whisk::compute_initial_tracker;
 use safe_arith::SafeArith;
 use types::consts::altair::{PARTICIPATION_FLAG_WEIGHTS, PROPOSER_WEIGHT, WEIGHT_DENOMINATOR};
 
 pub fn process_operations<T: EthSpec, Payload: AbstractExecPayload<T>>(
     state: &mut BeaconState<T>,
-    block_body: BeaconBlockBodyRef<T, Payload>,
+    block: BeaconBlockRef<T, Payload>,
     verify_signatures: VerifySignatures,
     ctxt: &mut ConsensusContext<T>,
     spec: &ChainSpec,
 ) -> Result<(), BlockProcessingError> {
+    let block_body = block.body();
+    let proposer_index = block.proposer_index();
+
     process_proposer_slashings(
         state,
         block_body.proposer_slashings(),
+        proposer_index,
         verify_signatures,
         ctxt,
         spec,
@@ -26,11 +34,19 @@ pub fn process_operations<T: EthSpec, Payload: AbstractExecPayload<T>>(
     process_attester_slashings(
         state,
         block_body.attester_slashings(),
+        proposer_index,
         verify_signatures,
         ctxt,
         spec,
     )?;
-    process_attestations(state, block_body, verify_signatures, ctxt, spec)?;
+    process_attestations(
+        state,
+        block_body,
+        proposer_index,
+        verify_signatures,
+        ctxt,
+        spec,
+    )?;
     process_deposits(state, block_body.deposits(), spec)?;
     process_exits(state, block_body.voluntary_exits(), verify_signatures, spec)?;
 
@@ -51,14 +67,13 @@ pub mod base {
     pub fn process_attestations<T: EthSpec>(
         state: &mut BeaconState<T>,
         attestations: &[Attestation<T>],
+        proposer_index: u64,
         verify_signatures: VerifySignatures,
         ctxt: &mut ConsensusContext<T>,
         spec: &ChainSpec,
     ) -> Result<(), BlockProcessingError> {
         // Ensure the previous epoch cache exists.
         state.build_committee_cache(RelativeEpoch::Previous, spec)?;
-
-        let proposer_index = ctxt.get_proposer_index(state, spec)?;
 
         // Verify and apply each attestation.
         for (i, attestation) in attestations.iter().enumerate() {
@@ -103,6 +118,7 @@ pub mod altair {
     pub fn process_attestations<T: EthSpec>(
         state: &mut BeaconState<T>,
         attestations: &[Attestation<T>],
+        proposer_index: u64,
         verify_signatures: VerifySignatures,
         ctxt: &mut ConsensusContext<T>,
         spec: &ChainSpec,
@@ -111,7 +127,15 @@ pub mod altair {
             .iter()
             .enumerate()
             .try_for_each(|(i, attestation)| {
-                process_attestation(state, attestation, i, ctxt, verify_signatures, spec)
+                process_attestation(
+                    state,
+                    attestation,
+                    i,
+                    proposer_index,
+                    ctxt,
+                    verify_signatures,
+                    spec,
+                )
             })
     }
 
@@ -119,14 +143,13 @@ pub mod altair {
         state: &mut BeaconState<T>,
         attestation: &Attestation<T>,
         att_index: usize,
+        proposer_index: u64,
         ctxt: &mut ConsensusContext<T>,
         verify_signatures: VerifySignatures,
         spec: &ChainSpec,
     ) -> Result<(), BlockProcessingError> {
         state.build_committee_cache(RelativeEpoch::Previous, spec)?;
         state.build_committee_cache(RelativeEpoch::Current, spec)?;
-
-        let proposer_index = ctxt.get_proposer_index(state, spec)?;
 
         let attesting_indices = &verify_attestation_for_block_inclusion(
             state,
@@ -194,6 +217,7 @@ pub mod altair {
 pub fn process_proposer_slashings<T: EthSpec>(
     state: &mut BeaconState<T>,
     proposer_slashings: &[ProposerSlashing],
+    proposer_index: u64,
     verify_signatures: VerifySignatures,
     ctxt: &mut ConsensusContext<T>,
     spec: &ChainSpec,
@@ -212,6 +236,7 @@ pub fn process_proposer_slashings<T: EthSpec>(
                 state,
                 proposer_slashing.signed_header_1.message.proposer_index as usize,
                 None,
+                proposer_index,
                 ctxt,
                 spec,
             )?;
@@ -227,6 +252,7 @@ pub fn process_proposer_slashings<T: EthSpec>(
 pub fn process_attester_slashings<T: EthSpec>(
     state: &mut BeaconState<T>,
     attester_slashings: &[AttesterSlashing<T>],
+    proposer_index: u64,
     verify_signatures: VerifySignatures,
     ctxt: &mut ConsensusContext<T>,
     spec: &ChainSpec,
@@ -239,7 +265,7 @@ pub fn process_attester_slashings<T: EthSpec>(
             get_slashable_indices(state, attester_slashing).map_err(|e| e.into_with_index(i))?;
 
         for i in slashable_indices {
-            slash_validator(state, i as usize, None, ctxt, spec)?;
+            slash_validator(state, i as usize, None, proposer_index, ctxt, spec)?;
         }
     }
 
@@ -251,6 +277,7 @@ pub fn process_attester_slashings<T: EthSpec>(
 pub fn process_attestations<T: EthSpec, Payload: AbstractExecPayload<T>>(
     state: &mut BeaconState<T>,
     block_body: BeaconBlockBodyRef<T, Payload>,
+    proposer_index: u64,
     verify_signatures: VerifySignatures,
     ctxt: &mut ConsensusContext<T>,
     spec: &ChainSpec,
@@ -260,6 +287,7 @@ pub fn process_attestations<T: EthSpec, Payload: AbstractExecPayload<T>>(
             base::process_attestations(
                 state,
                 block_body.attestations(),
+                proposer_index,
                 verify_signatures,
                 ctxt,
                 spec,
@@ -271,6 +299,7 @@ pub fn process_attestations<T: EthSpec, Payload: AbstractExecPayload<T>>(
             altair::process_attestations(
                 state,
                 block_body.attestations(),
+                proposer_index,
                 verify_signatures,
                 ctxt,
                 spec,
@@ -428,6 +457,23 @@ pub fn process_deposit<T: EthSpec>(
         if let Ok(inactivity_scores) = state.inactivity_scores_mut() {
             inactivity_scores.push(0)?;
         }
+
+        // TODO: clippy wants an if let for a single fork
+        if let BeaconState::Capella(BeaconStateCapella {
+            ref mut whisk_validator_trackers,
+            ref mut whisk_validator_k_commitments,
+            ..
+        }) = state
+        {
+            // TODO: The resulting k may not be unique
+            let k = compute_initial_whisk_k_from_pubkey(&deposit.data.pubkey);
+            let (k_commitment, tracker) = compute_initial_tracker(&k)?;
+            whisk_validator_trackers.push(tracker)?;
+            whisk_validator_k_commitments.push(k_commitment)?;
+        }
+
+        // Whisk or later initializations
+        if state.whisk_validator_trackers().is_ok() {}
     }
 
     Ok(())

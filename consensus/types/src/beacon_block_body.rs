@@ -65,6 +65,18 @@ pub struct BeaconBlockBody<T: EthSpec, Payload: AbstractExecPayload<T> = FullPay
     #[superstruct(only(Capella))]
     pub bls_to_execution_changes:
         VariableList<SignedBlsToExecutionChange, T::MaxBlsToExecutionChanges>,
+    #[superstruct(only(Capella))]
+    pub whisk_opening_proof: WhiskTrackerProof<T>,
+    #[superstruct(only(Capella))]
+    pub whisk_post_shuffle_trackers: ShuffleTrackers<T>,
+    #[superstruct(only(Capella))]
+    pub whisk_shuffle_proof: WhiskShuffleProof<T>,
+    #[superstruct(only(Capella))]
+    pub whisk_registration_proof: WhiskTrackerProof<T>,
+    #[superstruct(only(Capella))]
+    pub whisk_tracker: WhiskTracker,
+    #[superstruct(only(Capella))]
+    pub whisk_k_commitment: BLSG1Point,
     #[superstruct(only(Base, Altair))]
     #[ssz(skip_serializing, skip_deserializing)]
     #[tree_hash(skip_hashing)]
@@ -298,6 +310,12 @@ impl<E: EthSpec> From<BeaconBlockBodyCapella<E, FullPayload<E>>>
             sync_aggregate,
             execution_payload: FullPayloadCapella { execution_payload },
             bls_to_execution_changes,
+            whisk_opening_proof,
+            whisk_post_shuffle_trackers,
+            whisk_shuffle_proof,
+            whisk_registration_proof,
+            whisk_tracker,
+            whisk_k_commitment,
         } = body;
 
         (
@@ -315,6 +333,12 @@ impl<E: EthSpec> From<BeaconBlockBodyCapella<E, FullPayload<E>>>
                     execution_payload_header: From::from(&execution_payload),
                 },
                 bls_to_execution_changes,
+                whisk_opening_proof,
+                whisk_post_shuffle_trackers,
+                whisk_shuffle_proof,
+                whisk_registration_proof,
+                whisk_tracker,
+                whisk_k_commitment,
             },
             Some(execution_payload),
         )
@@ -382,6 +406,12 @@ impl<E: EthSpec> BeaconBlockBodyCapella<E, FullPayload<E>> {
             sync_aggregate,
             execution_payload: FullPayloadCapella { execution_payload },
             bls_to_execution_changes,
+            whisk_opening_proof,
+            whisk_post_shuffle_trackers,
+            whisk_shuffle_proof,
+            whisk_registration_proof,
+            whisk_tracker,
+            whisk_k_commitment,
         } = self;
 
         BeaconBlockBodyCapella {
@@ -398,6 +428,12 @@ impl<E: EthSpec> BeaconBlockBodyCapella<E, FullPayload<E>> {
                 execution_payload_header: execution_payload.into(),
             },
             bls_to_execution_changes: bls_to_execution_changes.clone(),
+            whisk_opening_proof: whisk_opening_proof.clone(),
+            whisk_post_shuffle_trackers: whisk_post_shuffle_trackers.clone(),
+            whisk_shuffle_proof: whisk_shuffle_proof.clone(),
+            whisk_registration_proof: whisk_registration_proof.clone(),
+            whisk_tracker: whisk_tracker.clone(),
+            whisk_k_commitment: whisk_k_commitment.clone(),
         }
     }
 }

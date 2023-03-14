@@ -23,6 +23,9 @@ pub enum Domain {
     SyncCommittee,
     ContributionAndProof,
     SyncCommitteeSelectionProof,
+    WhiskCandidateSelection,
+    WhiskShuffle,
+    WhiskProposerSelection,
     ApplicationMask(ApplicationDomain),
 }
 
@@ -159,6 +162,13 @@ pub struct ChainSpec {
     /// The Capella fork epoch is optional, with `None` representing "Capella never happens".
     pub capella_fork_epoch: Option<Epoch>,
     pub max_validators_per_withdrawals_sweep: u64,
+
+    /*
+     * Whisk
+     */
+    pub(crate) domain_whisk_candidate_selection: u32,
+    pub(crate) domain_whisk_shuffle: u32,
+    pub(crate) domain_whisk_proposer_selection: u32,
 
     /*
      * Networking
@@ -365,6 +375,9 @@ impl ChainSpec {
             Domain::SyncCommittee => self.domain_sync_committee,
             Domain::ContributionAndProof => self.domain_contribution_and_proof,
             Domain::SyncCommitteeSelectionProof => self.domain_sync_committee_selection_proof,
+            Domain::WhiskCandidateSelection => self.domain_whisk_candidate_selection,
+            Domain::WhiskShuffle => self.domain_whisk_shuffle,
+            Domain::WhiskProposerSelection => self.domain_whisk_proposer_selection,
             Domain::ApplicationMask(application_domain) => application_domain.get_domain_constant(),
             Domain::BlsToExecutionChange => self.domain_bls_to_execution_change,
         }
@@ -622,6 +635,13 @@ impl ChainSpec {
             max_validators_per_withdrawals_sweep: 16384,
 
             /*
+             * Whisk / TODO: Review values
+             */
+            domain_whisk_candidate_selection: 0x0107,
+            domain_whisk_shuffle: 0x0207,
+            domain_whisk_proposer_selection: 0x0307,
+
+            /*
              * Network specific
              */
             boot_nodes: vec![],
@@ -852,6 +872,13 @@ impl ChainSpec {
             capella_fork_version: [0x03, 0x00, 0x00, 0x64],
             capella_fork_epoch: Some(Epoch::new(648704)),
             max_validators_per_withdrawals_sweep: 8192,
+
+            /*
+             * Whisk / TODO: Review values
+             */
+            domain_whisk_candidate_selection: 0x0107,
+            domain_whisk_shuffle: 0x0207,
+            domain_whisk_proposer_selection: 0x0307,
 
             /*
              * Network specific

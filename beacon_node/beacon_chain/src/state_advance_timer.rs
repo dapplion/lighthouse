@@ -29,7 +29,7 @@ use std::sync::{
 };
 use task_executor::TaskExecutor;
 use tokio::time::{sleep, sleep_until, Instant};
-use types::{AttestationShufflingId, EthSpec, Hash256, RelativeEpoch, Slot};
+use types::{AttestationShufflingId, EthSpec, ForkName, Hash256, RelativeEpoch, Slot};
 
 /// If the head slot is more than `MAX_ADVANCE_DISTANCE` from the current slot, then don't perform
 /// the state advancement.
@@ -384,18 +384,23 @@ fn advance_head<T: BeaconChainTypes>(
         //
         // We supply the `head_root` as the decision block since the prior `if` statement guarantees
         // the head root is the latest block from the prior epoch.
-        beacon_chain
-            .beacon_proposer_cache
-            .lock()
-            .insert(
-                state.current_epoch(),
-                head_root,
-                state
-                    .get_beacon_proposer_indices(&beacon_chain.spec)
-                    .map_err(BeaconChainError::from)?,
-                state.fork(),
-            )
-            .map_err(BeaconChainError::from)?;
+
+        // beacon proposer cannot be known after enabling SSLE Whisk
+        // TODO WHISK generalize for any fork after capella
+        if state.fork_name(&beacon_chain.spec) != Ok(ForkName::Capella) {
+            beacon_chain
+                .beacon_proposer_cache
+                .lock()
+                .insert(
+                    state.current_epoch(),
+                    head_root,
+                    state
+                        .get_beacon_proposer_indices(&beacon_chain.spec)
+                        .map_err(BeaconChainError::from)?,
+                    state.fork(),
+                )
+                .map_err(BeaconChainError::from)?;
+        }
 
         // Update the attester cache.
         let shuffling_id = AttestationShufflingId::new(head_root, &state, RelativeEpoch::Next)

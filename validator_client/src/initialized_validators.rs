@@ -15,7 +15,9 @@ use account_utils::{
     },
     ZeroizeString,
 };
+use curdleproofs_whisk::{deserialize_fr, serialize_fr, FieldElementBytes, Fr};
 use eth2_keystore::Keystore;
+use ethereum_hashing::hash;
 use lighthouse_metrics::set_gauge;
 use lockfile::{Lockfile, LockfileError};
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
@@ -133,6 +135,10 @@ pub struct InitializedValidator {
     builder_proposals: Option<bool>,
     /// The validators index in `state.validators`, to be updated by an external service.
     index: Option<u64>,
+    /// Secret k for whisk SSLE
+    proposer_k: Fr,
+    /// Initial deterministic (publicly known) k for whisk SSLE
+    initial_proposer_k: Fr,
 }
 
 impl InitializedValidator {
@@ -329,6 +335,26 @@ impl InitializedValidator {
             }
         };
 
+        let pubkey = match &signing_method {
+            SigningMethod::LocalKeystore { voting_keypair, .. } => {
+                voting_keypair.sk.public_key().serialize()
+            }
+            SigningMethod::Web3Signer {
+                voting_public_key, ..
+            } => voting_public_key.serialize(),
+        };
+        let initial_proposer_k = deserialize_fr(&hash(&pubkey));
+
+        let proposer_k = match &signing_method {
+            // TODO: Temp, standarize a derivation fn for k common between remote and local keys
+            SigningMethod::LocalKeystore { voting_keypair, .. } => {
+                deserialize_fr(&hash(voting_keypair.sk.serialize().as_bytes()))
+            }
+            SigningMethod::Web3Signer {
+                voting_public_key, ..
+            } => deserialize_fr(&hash(&voting_public_key.serialize())),
+        };
+
         Ok(Self {
             signing_method: Arc::new(signing_method),
             graffiti: def.graffiti.map(Into::into),
@@ -336,6 +362,8 @@ impl InitializedValidator {
             gas_limit: def.gas_limit,
             builder_proposals: def.builder_proposals,
             index: None,
+            proposer_k,
+            initial_proposer_k,
         })
     }
 
@@ -496,6 +524,20 @@ impl InitializedValidators {
     /// Iterate through all voting public keys in `self` that should be used when querying for duties.
     pub fn iter_voting_pubkeys(&self) -> impl Iterator<Item = &PublicKeyBytes> {
         self.validators.keys()
+    }
+
+    /// Iterate through all proposer k values in `self`
+    pub fn iter_proposer_k_entries(
+        &self,
+    ) -> impl Iterator<Item = (&PublicKeyBytes, &Option<u64>, &Fr, &Fr)> {
+        self.validators.iter().map(|(pubkey, validator)| {
+            (
+                pubkey,
+                &validator.index,
+                &validator.proposer_k,
+                &validator.initial_proposer_k,
+            )
+        })
     }
 
     /// Returns the voting `Keypair` for a given voting `PublicKey`, if all are true:
@@ -714,6 +756,13 @@ impl InitializedValidators {
     /// Returns the `graffiti` for a given public key specified in the `ValidatorDefinitions`.
     pub fn graffiti(&self, public_key: &PublicKeyBytes) -> Option<Graffiti> {
         self.validators.get(public_key).and_then(|v| v.graffiti)
+    }
+
+    /// Returns the `k` secret for a given public key specified in the `ValidatorDefinitions`.
+    pub fn proposer_k(&self, public_key: &PublicKeyBytes) -> Option<FieldElementBytes> {
+        self.validators
+            .get(public_key)
+            .map(|v| serialize_fr(&v.proposer_k))
     }
 
     /// Returns a `HashMap` of `public_key` -> `graffiti` for all initialized validators.

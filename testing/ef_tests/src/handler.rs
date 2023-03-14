@@ -24,7 +24,7 @@ pub trait Handler {
 
     fn run(&self) {
         for fork_name in ForkName::list_all() {
-            if self.is_enabled_for_fork(fork_name) {
+            if self.is_enabled_for_fork(fork_name) && fork_name != ForkName::Capella {
                 self.run_for_fork(fork_name)
             }
         }

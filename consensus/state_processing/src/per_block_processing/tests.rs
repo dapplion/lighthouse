@@ -397,9 +397,11 @@ async fn invalid_attestation_no_committee_for_index() {
         .data
         .index += 1;
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attestations(
         &mut state,
         head_block.body(),
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -436,9 +438,11 @@ async fn invalid_attestation_wrong_justified_checkpoint() {
         .source = new_justified_checkpoint;
 
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attestations(
         &mut state,
         head_block.body(),
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -476,9 +480,11 @@ async fn invalid_attestation_bad_aggregation_bitfield_len() {
         Bitfield::with_capacity(spec.target_committee_size).unwrap();
 
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attestations(
         &mut state,
         head_block.body(),
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -509,9 +515,11 @@ async fn invalid_attestation_bad_signature() {
     head_block.to_mut().body_mut().attestations_mut()[0].signature = AggregateSignature::empty();
 
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attestations(
         &mut state,
         head_block.body(),
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -548,9 +556,11 @@ async fn invalid_attestation_included_too_early() {
         .slot = new_attesation_slot;
 
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attestations(
         &mut state,
         head_block.body(),
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -591,9 +601,11 @@ async fn invalid_attestation_included_too_late() {
         .slot = new_attesation_slot;
 
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attestations(
         &mut state,
         head_block.body(),
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -630,9 +642,11 @@ async fn invalid_attestation_target_epoch_slot_mismatch() {
         .epoch += Epoch::new(1);
 
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attestations(
         &mut state,
         head_block.body(),
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -658,9 +672,11 @@ async fn valid_insert_attester_slashing() {
 
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attester_slashings(
         &mut state,
         &[attester_slashing],
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -680,9 +696,11 @@ async fn invalid_attester_slashing_not_slashable() {
 
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attester_slashings(
         &mut state,
         &[attester_slashing],
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -708,9 +726,11 @@ async fn invalid_attester_slashing_1_invalid() {
 
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attester_slashings(
         &mut state,
         &[attester_slashing],
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -739,9 +759,11 @@ async fn invalid_attester_slashing_2_invalid() {
 
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_attester_slashings(
         &mut state,
         &[attester_slashing],
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -767,9 +789,11 @@ async fn valid_insert_proposer_slashing() {
     let proposer_slashing = harness.make_proposer_slashing(1);
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -788,9 +812,11 @@ async fn invalid_proposer_slashing_proposals_identical() {
 
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -817,9 +843,11 @@ async fn invalid_proposer_slashing_proposer_unknown() {
 
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -843,9 +871,11 @@ async fn invalid_proposer_slashing_duplicate_slashing() {
     let proposer_slashing = harness.make_proposer_slashing(1);
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result_1 = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing.clone()],
+        proposer_index,
         VerifySignatures::False,
         &mut ctxt,
         &spec,
@@ -855,6 +885,7 @@ async fn invalid_proposer_slashing_duplicate_slashing() {
     let result_2 = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
+        proposer_index,
         VerifySignatures::False,
         &mut ctxt,
         &spec,
@@ -877,9 +908,11 @@ async fn invalid_bad_proposal_1_signature() {
     proposer_slashing.signed_header_1.signature = Signature::empty();
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -903,9 +936,11 @@ async fn invalid_bad_proposal_2_signature() {
     proposer_slashing.signed_header_2.signature = Signature::empty();
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
+        proposer_index,
         VerifySignatures::True,
         &mut ctxt,
         &spec,
@@ -930,9 +965,11 @@ async fn invalid_proposer_slashing_proposal_epoch_mismatch() {
     proposer_slashing.signed_header_2.message.slot = Slot::new(128);
     let mut state = harness.get_current_state();
     let mut ctxt = ConsensusContext::new(state.slot());
+    let proposer_index = ctxt.get_proposer_index(&state, &spec).unwrap();
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
+        proposer_index,
         VerifySignatures::False,
         &mut ctxt,
         &spec,

@@ -786,6 +786,12 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             }
             Err(e @ BlockError::StateRootMismatch { .. })
             | Err(e @ BlockError::IncorrectBlockProposer { .. })
+            // TODO Whisk: Just followed `IncorrectBlockProposer logic, review if needs other logic
+            | Err(e @ BlockError::InitialWhiskProposerMismatch { .. })
+            // TODO Whisk: Just followed `IncorrectBlockProposer logic, review if needs other logic
+            | Err(e @ BlockError::ProposerProofInvalid { .. })
+            // TODO Whisk: Just followed `IncorrectBlockProposer logic, review if needs other logic
+            | Err(e @ BlockError::RepeatProposal { .. })
             | Err(e @ BlockError::BlockSlotLimitReached)
             | Err(e @ BlockError::ProposalSignatureInvalid)
             | Err(e @ BlockError::NonLinearSlots)

@@ -28,7 +28,7 @@ mod version;
 use beacon_chain::{
     attestation_verification::VerifiedAttestation, observed_operations::ObservationOutcome,
     validator_monitor::timestamp_now, AttestationError as AttnError, BeaconChain, BeaconChainError,
-    BeaconChainTypes, ProduceBlockVerification, WhenSlotSkipped,
+    BeaconChainTypes, ProduceBlockVerification, StateSkipConfig, WhenSlotSkipped,
 };
 use beacon_processor::BeaconProcessorSend;
 pub use block_id::BlockId;
@@ -36,7 +36,7 @@ use bytes::Bytes;
 use directory::DEFAULT_ROOT_DIR;
 use eth2::types::{
     self as api_types, BroadcastValidation, EndpointVersion, ForkChoice, ForkChoiceNode,
-    SkipRandaoVerification, ValidatorId, ValidatorStatus,
+    SkipRandaoVerification, StateId as CoreStateId, ValidatorId, ValidatorStatus, WhiskProposer,
 };
 use lighthouse_network::{types::SyncState, EnrExt, NetworkGlobals, PeerId, PubsubMessage};
 use lighthouse_version::version_with_platform;
@@ -72,7 +72,7 @@ use types::{
     ProposerPreparationData, ProposerSlashing, RelativeEpoch, SignedAggregateAndProof,
     SignedBeaconBlock, SignedBlindedBeaconBlock, SignedBlsToExecutionChange,
     SignedContributionAndProof, SignedValidatorRegistrationData, SignedVoluntaryExit, Slot,
-    SyncCommitteeMessage, SyncContributionData,
+    SyncCommitteeMessage, SyncContributionData, WhiskProposerPreparationData, WhiskTracker,
 };
 use validator::pubkey_to_validator_index;
 use version::{
@@ -246,6 +246,7 @@ pub fn prometheus_metrics() -> warp::filters::log::Log<impl Fn(warp::filters::lo
                 .or_else(|| starts_with("v1/beacon/pool/sync_committees"))
                 .or_else(|| starts_with("v1/beacon/blocks/head/root"))
                 .or_else(|| starts_with("v1/validator/prepare_beacon_proposer"))
+                .or_else(|| starts_with("v1/validator/prepare_beacon_whisk_proposer"))
                 .or_else(|| starts_with("v1/validator/register_validator"))
                 .or_else(|| starts_with("v1/beacon/"))
                 .or_else(|| starts_with("v2/beacon/"))
@@ -1110,6 +1111,87 @@ pub fn serve<T: BeaconChainTypes>(
                         api_types::GenericResponse::from(api_types::RandaoMix { randao })
                             .add_execution_optimistic_finalized(execution_optimistic, finalized),
                     )
+                })
+            },
+        );
+
+    // GET beacon/states/{state_id}/proposer_trackers
+    let get_beacon_state_proposer_trackers = beacon_states_path
+        .clone()
+        .and(warp::path("proposer_trackers"))
+        .and(warp::path::end())
+        .then(
+            |state_id: StateId,
+             task_spawner: TaskSpawner<T::EthSpec>,
+             chain: Arc<BeaconChain<T>>| {
+                task_spawner.blocking_json_task(Priority::P1, move || {
+                    // proposer trackers are fixed per shuffling round
+                    let whisk_fork_slot = if let Some(epoch) = chain.spec.capella_fork_epoch {
+                        epoch.start_slot(T::EthSpec::slots_per_epoch())
+                    } else {
+                        return Err(warp_utils::reject::custom_bad_request(
+                            "whisk fork not configured".into(),
+                        ));
+                    };
+
+                    // TODO WHISK: support arbitrary state retrieval and state advance
+                    let requested_slot = match state_id.0 {
+                        CoreStateId::Slot(slot) => Ok(slot),
+                        _ => Err(warp_utils::reject::custom_bad_request(
+                            "state_id must be slot".into(),
+                        )),
+                    }?;
+
+                    if requested_slot < whisk_fork_slot {
+                        return Err(warp_utils::reject::custom_bad_request(format!(
+                            "request slot {requested_slot} before whisk fork"
+                        )));
+                    }
+
+                    let (head_slot, execution_optimistic) = {
+                        let (head, execution_status) = chain
+                            .canonical_head
+                            .head_and_execution_status()
+                            .map_err(warp_utils::reject::beacon_chain_error)?;
+                        (
+                            head.head_slot(),
+                            execution_status.is_optimistic_or_invalid(),
+                        )
+                    };
+
+                    let requested_shuffle_round_start_slot =
+                        T::EthSpec::whisk_shuffle_round_start_slot(requested_slot);
+                    let retrieve_state_at_slot = std::cmp::max(
+                        head_slot,
+                        std::cmp::max(whisk_fork_slot, requested_shuffle_round_start_slot),
+                    );
+
+                    let state = chain
+                        .state_at_slot(retrieve_state_at_slot, StateSkipConfig::WithoutStateRoots)
+                        .map_err(|e| {
+                            warp_utils::reject::custom_server_error(format!(
+                                "Error advancing state: {e:?}"
+                            ))
+                        })?;
+
+                    let proposer_trackers = state.whisk_proposer_trackers().map_err(|e| {
+                        let fork = state.fork_name(&chain.spec);
+                        warp_utils::reject::custom_bad_request(format!(
+                            "Not a whisk state, slot = {state_id} fork = {fork:?}: {e:?}"
+                        ))
+                    })?;
+                    let dependent_root = state
+                        .whisk_proposer_shuffling_decision_root(chain.genesis_validators_root)
+                        .map_err(|e| {
+                            warp_utils::reject::custom_server_error(format!(
+                                "cannot compute shuffling root: {e:?}"
+                            ))
+                        })?;
+                    Ok(api_types::WhiskDutiesResponse::<Vec<WhiskTracker>> {
+                        dependent_root,
+                        execution_optimistic: Some(execution_optimistic),
+                        data: proposer_trackers.to_vec(),
+                    })
                 })
             },
         );
@@ -3006,11 +3088,16 @@ pub fn serve<T: BeaconChainTypes>(
                             ProduceBlockVerification::VerifyRandao
                         };
 
+                    let whisk_proposer = WhiskProposer::from_query(&query)
+                        .map_err(warp_utils::reject::custom_bad_request)
+                        .unwrap();
+
                     let (block, _) = chain
                         .produce_block_with_verification::<FullPayload<T::EthSpec>>(
                             randao_reveal,
                             slot,
                             query.graffiti.map(Into::into),
+                            whisk_proposer,
                             randao_verification,
                         )
                         .await
@@ -3067,11 +3154,15 @@ pub fn serve<T: BeaconChainTypes>(
                             ProduceBlockVerification::VerifyRandao
                         };
 
+                    let whisk_proposer = WhiskProposer::from_query(&query)
+                        .map_err(warp_utils::reject::custom_bad_request)?;
+
                     let (block, _) = chain
                         .produce_block_with_verification::<BlindedPayload<T::EthSpec>>(
                             randao_reveal,
                             slot,
                             query.graffiti.map(Into::into),
+                            whisk_proposer,
                             randao_verification,
                         )
                         .await
@@ -3486,6 +3577,54 @@ pub fn serve<T: BeaconChainTypes>(
 
                     Ok::<_, warp::reject::Rejection>(warp::reply::json(&()).into_response())
                 })
+            },
+        );
+
+    // POST validator/prepare_beacon_whisk_proposer
+    let post_validator_prepare_beacon_whisk_proposer = eth_v1
+        .and(warp::path("validator"))
+        .and(warp::path("prepare_beacon_whisk_proposer"))
+        .and(warp::path::end())
+        .and(not_while_syncing_filter.clone())
+        .and(chain_filter.clone())
+        .and(log_filter.clone())
+        .and(warp::body::json())
+        .and_then(
+            |chain: Arc<BeaconChain<T>>,
+             log: Logger,
+             preparation_data: Vec<WhiskProposerPreparationData>| async move {
+                let current_slot = chain
+                    .slot()
+                    .map_err(warp_utils::reject::beacon_chain_error)?;
+
+                debug!(
+                    log,
+                    "Received proposer preparation data";
+                    "count" => preparation_data.len(),
+                );
+
+                // Register proposer for slot with beacon chain
+                for data in preparation_data {
+                    chain.register_whisk_proposer(&data).map_err(|e| {
+                        warp_utils::reject::custom_bad_request(format!(
+                            "error registering whisk proposer: {:?}",
+                            e
+                        ))
+                    })?;
+                }
+
+                // TODO WHISK: is this call necessary?
+                chain
+                    .prepare_beacon_proposer(current_slot)
+                    .await
+                    .map_err(|e| {
+                        warp_utils::reject::custom_bad_request(format!(
+                            "error updating proposer preparations: {:?}",
+                            e
+                        ))
+                    })?;
+
+                Ok::<_, warp::reject::Rejection>(warp::reply::json(&()).into_response())
             },
         );
 
@@ -4438,6 +4577,7 @@ pub fn serve<T: BeaconChainTypes>(
                 .uor(get_beacon_state_committees)
                 .uor(get_beacon_state_sync_committees)
                 .uor(get_beacon_state_randao)
+                .uor(get_beacon_state_proposer_trackers)
                 .uor(get_beacon_headers)
                 .uor(get_beacon_headers_block_id)
                 .uor(get_beacon_block)
@@ -4524,6 +4664,7 @@ pub fn serve<T: BeaconChainTypes>(
                     .uor(post_validator_beacon_committee_subscriptions)
                     .uor(post_validator_sync_committee_subscriptions)
                     .uor(post_validator_prepare_beacon_proposer)
+                    .uor(post_validator_prepare_beacon_whisk_proposer)
                     .uor(post_validator_register_validator)
                     .uor(post_validator_liveness_epoch)
                     .uor(post_lighthouse_liveness)

@@ -11,6 +11,7 @@ tokio = { version = "1.14.0", features = ["rt-multi-thread"] }
 
 [dependencies]
 bls = { path = "../../crypto/bls" }
+curdleproofs_whisk = { path = "../../crypto/curdleproofs_whisk" }
 integer-sqrt = "0.1.5"
 itertools = "0.10.0"
 ethereum_ssz = "0.5.0"

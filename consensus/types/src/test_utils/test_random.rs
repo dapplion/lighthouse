@@ -9,6 +9,7 @@ use std::sync::Arc;
 mod address;
 mod aggregate_signature;
 mod bitfield;
+mod bls_g1_point;
 mod hash256;
 mod public_key;
 mod public_key_bytes;
@@ -16,6 +17,7 @@ mod secret_key;
 mod signature;
 mod signature_bytes;
 mod uint256;
+mod whisk_tracker;
 
 pub fn test_random_instance<T: TestRandom>() -> T {
     let mut rng = XorShiftRng::from_seed([0x42; 16]);

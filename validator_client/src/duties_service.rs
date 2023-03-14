@@ -8,13 +8,14 @@
 
 mod sync;
 
-use crate::beacon_node_fallback::{BeaconNodeFallback, OfflineOnFailure, RequireSynced};
+use crate::beacon_node_fallback::{BeaconNodeFallback, Errors, OfflineOnFailure, RequireSynced};
 use crate::http_metrics::metrics::{get_int_gauge, set_int_gauge, ATTESTATION_DUTY};
 use crate::{
     block_service::BlockServiceNotification,
     http_metrics::metrics,
     validator_store::{DoppelgangerStatus, Error as ValidatorStoreError, ValidatorStore},
 };
+use curdleproofs_whisk::G1Affine;
 use environment::RuntimeContext;
 use eth2::types::{
     AttesterData, BeaconCommitteeSubscription, DutiesResponse, ProposerData, StateId, ValidatorId,
@@ -31,7 +32,10 @@ use std::time::Duration;
 use sync::poll_sync_committee_duties;
 use sync::SyncDutiesMap;
 use tokio::{sync::mpsc::Sender, time::sleep};
-use types::{ChainSpec, Epoch, EthSpec, Hash256, PublicKeyBytes, SelectionProof, Slot};
+use types::{
+    ChainSpec, Epoch, EthSpec, Hash256, PublicKeyBytes, SelectionProof, Slot,
+    WhiskProposerPreparationData, WhiskProposerShufflingRoot,
+};
 
 /// Since the BN does not like it when we subscribe to slots that are close to the current time, we
 /// will only subscribe to slots which are further than `SUBSCRIPTION_BUFFER_SLOTS` away.
@@ -75,6 +79,27 @@ pub enum Error {
 impl From<ArithError> for Error {
     fn from(e: ArithError) -> Self {
         Self::Arith(e)
+    }
+}
+
+#[derive(Debug)]
+enum PollError {
+    InvalidProposerTracker(curdleproofs_whisk::SerializationError),
+    BeaconApiErrors(Errors<eth2::Error>),
+}
+
+impl From<Errors<eth2::Error>> for PollError {
+    fn from(e: Errors<eth2::Error>) -> Self {
+        Self::BeaconApiErrors(e)
+    }
+}
+
+impl std::fmt::Display for PollError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            PollError::InvalidProposerTracker(e) => write!(f, "InvalidProposerTracker: {}", e),
+            PollError::BeaconApiErrors(e) => write!(f, "BeaconApiErrors: {}", e),
+        }
     }
 }
 
@@ -1058,44 +1083,64 @@ async fn poll_beacon_proposers<T: SlotClock + 'static, E: EthSpec>(
     )
     .await;
 
-    // Collect *all* pubkeys, even those undergoing doppelganger protection.
-    //
-    // It is useful to keep the duties for all validators around, so they're on hand when
-    // doppelganger finishes.
-    let local_pubkeys: HashSet<_> = duties_service
-        .validator_store
-        .voting_pubkeys(DoppelgangerStatus::ignored);
+    // validators, even those undergoing doppelganger protection
+    if duties_service.validator_store.has_some_voting_pubkey() {
+        let is_post_whisk = if let Some(fork_epoch) = duties_service.spec.capella_fork_epoch {
+            current_slot.epoch(E::slots_per_epoch()) >= fork_epoch
+        } else {
+            false
+        };
 
-    // Only download duties and push out additional block production events if we have some
-    // validators.
-    if !local_pubkeys.is_empty() {
-        let download_result = duties_service
-            .beacon_nodes
-            .first_success(
-                RequireSynced::No,
-                OfflineOnFailure::Yes,
-                |beacon_node| async move {
-                    let _timer = metrics::start_timer_vec(
-                        &metrics::DUTIES_SERVICE_TIMES,
-                        &[metrics::PROPOSER_DUTIES_HTTP_GET],
+        let response = if is_post_whisk {
+            let response = poll_beacon_proposers_post_whisk(duties_service, current_slot).await;
+
+            // Notify beacon node that validator has duties for future blocks
+            // TODO WHISK: This routine should happen BEFORE the block to allow time to prepare
+            if let Ok((dependant_root, duties)) = response.as_ref() {
+                if !duties.is_empty() {
+                    let preparation_data = duties
+                        .iter()
+                        .map(|duty| WhiskProposerPreparationData {
+                            proposer_slot: duty.slot.into(),
+                            validator_index: duty.validator_index,
+                            whisk_shuffling_decision_root: *dependant_root,
+                        })
+                        .collect::<Vec<_>>();
+                    debug!(
+                        log,
+                        "Registering beacon whisk proposers with beacon node";
+                        "preparation_data" => ?preparation_data
                     );
-                    beacon_node
-                        .get_validator_duties_proposer(current_epoch)
+
+                    if let Err(e) = duties_service
+                        .beacon_nodes
+                        .first_success(RequireSynced::No, OfflineOnFailure::Yes, |beacon_node| {
+                            let preparation_data = preparation_data.clone();
+                            async move {
+                                beacon_node
+                                    .post_validator_prepare_beacon_whisk_proposer(&preparation_data)
+                                    .await
+                            }
+                        })
                         .await
-                },
-            )
-            .await;
+                    {
+                        error!(
+                            log,
+                            "Failed to prepare beacon whisk proposer";
+                            "err" => %e,
+                        )
+                    }
+                }
+            }
 
-        match download_result {
-            Ok(response) => {
-                let dependent_root = response.dependent_root;
+            // TODO WHISK: Casting dependant_root here to prevent having to modify more code
+            response.map(|(dependant_root, duties)| (dependant_root.0, duties))
+        } else {
+            poll_beacon_proposers_before_whisk(duties_service, current_epoch).await
+        };
 
-                let relevant_duties = response
-                    .data
-                    .into_iter()
-                    .filter(|proposer_duty| local_pubkeys.contains(&proposer_duty.pubkey))
-                    .collect::<Vec<_>>();
-
+        match response {
+            Ok((dependent_root, relevant_duties)) => {
                 debug!(
                     log,
                     "Downloaded proposer duties";
@@ -1167,6 +1212,110 @@ async fn poll_beacon_proposers<T: SlotClock + 'static, E: EthSpec>(
         .retain(|&epoch, _| epoch + HISTORICAL_DUTIES_EPOCHS >= current_epoch);
 
     Ok(())
+}
+
+/// Poll beacon proposers from `GET validator/duties/proposer/{epoch}`
+/// Filter relevant duties by their declared pubkey
+async fn poll_beacon_proposers_before_whisk<T: SlotClock + 'static, E: EthSpec>(
+    duties_service: &DutiesService<T, E>,
+    current_epoch: Epoch,
+) -> Result<(Hash256, Vec<ProposerData>), PollError> {
+    let response = duties_service
+        .beacon_nodes
+        .first_success(
+            RequireSynced::No,
+            OfflineOnFailure::Yes,
+            |beacon_node| async move {
+                let _timer = metrics::start_timer_vec(
+                    &metrics::DUTIES_SERVICE_TIMES,
+                    &[metrics::PROPOSER_DUTIES_HTTP_GET],
+                );
+                beacon_node
+                    .get_validator_duties_proposer(current_epoch)
+                    .await
+            },
+        )
+        .await?;
+
+    let local_pubkeys: HashSet<_> = duties_service
+        .validator_store
+        .voting_pubkeys(DoppelgangerStatus::ignored);
+
+    let dependent_root = response.dependent_root;
+    let relevant_duties = response
+        .data
+        .into_iter()
+        .filter(|proposer_duty| local_pubkeys.contains(&proposer_duty.pubkey))
+        .collect::<Vec<_>>();
+    Ok((dependent_root, relevant_duties))
+}
+
+/// Poll beacon proposers from `GET beacon/states/{state_id}/proposer_trackers`
+/// Filter relevant duties by checking each BLS tracker commitment
+///
+/// Note: On each call to this function SLOTS_PER_EPOCH * local_validators BLS scalar
+///       multiplications are done. From @@sproul benchmarks, its ~200us/op. With 32
+///       SLOTS_PER_EPOCH and 1000 keys that's 6.4 sec of CPU time.
+///
+/// Note: Trackers are static for 8192 slots, so polling that often wastes bandwith
+///       for simplicity of the flow. A future optimization should cache the trackers
+///       query and check progressively every epoch.
+async fn poll_beacon_proposers_post_whisk<T: SlotClock + 'static, E: EthSpec>(
+    duties_service: &DutiesService<T, E>,
+    current_slot: Slot,
+) -> Result<(WhiskProposerShufflingRoot, Vec<ProposerData>), PollError> {
+    let response = duties_service
+        .beacon_nodes
+        .first_success(
+            RequireSynced::No,
+            OfflineOnFailure::Yes,
+            |beacon_node| async move {
+                let _timer = metrics::start_timer_vec(
+                    &metrics::DUTIES_SERVICE_TIMES,
+                    &[metrics::PROPOSER_DUTIES_HTTP_GET],
+                );
+                beacon_node
+                    .get_beacon_states_proposer_trackers(StateId::Slot(current_slot))
+                    .await
+            },
+        )
+        .await?;
+
+    let dependent_root = response.dependent_root;
+    let current_slot_index = current_slot % E::whisk_proposer_trackers_count() as u64;
+    let first_slot_tracker = current_slot - current_slot_index;
+
+    let relevant_duties = response
+        .data
+        .into_iter()
+        .enumerate()
+        .skip(current_slot_index.as_usize())
+        .take(E::slots_per_epoch() as usize)
+        .filter_map(|(slot_index, tracker)| {
+            let r_g: G1Affine = match (&tracker.r_g).try_into() {
+                Ok(r_g) => r_g,
+                Err(e) => return Some(Err(PollError::InvalidProposerTracker(e))),
+            };
+            let k_r_g: G1Affine = match (&tracker.k_r_g).try_into() {
+                Ok(k_r_g) => k_r_g,
+                Err(e) => return Some(Err(PollError::InvalidProposerTracker(e))),
+            };
+
+            duties_service
+                .validator_store
+                .find_whisk_tracker_match(r_g, k_r_g)
+                .map(|(pubkey, validator_index)| {
+                    Ok(ProposerData {
+                        pubkey,
+                        validator_index: validator_index
+                            .expect("whisk validator should have index defined"),
+                        slot: first_slot_tracker + slot_index as u64,
+                    })
+                })
+        })
+        .collect::<Result<Vec<ProposerData>, PollError>>()?;
+
+    Ok((dependent_root, relevant_duties))
 }
 
 /// Notify the block service if it should produce a block.

@@ -5,7 +5,7 @@ pub use crate::{
     migrate::MigratorConfig,
     sync_committee_verification::Error as SyncCommitteeError,
     validator_monitor::DEFAULT_INDIVIDUAL_TRACKING_THRESHOLD,
-    BeaconChainError, NotifyExecutionLayer, ProduceBlockVerification,
+    BeaconChainError, BlockProductionError, NotifyExecutionLayer, ProduceBlockVerification,
 };
 use crate::{
     builder::{BeaconChainBuilder, Witness},
@@ -14,6 +14,11 @@ use crate::{
     StateSkipConfig,
 };
 use bls::get_withdrawal_credentials;
+use curdleproofs_whisk::{
+    deserialize_fr, is_matching_tracker, serialize_fr, FieldElementBytes, Fr,
+};
+use eth2::types::WhiskProposer;
+use ethereum_hashing::hash;
 use execution_layer::{
     auth::JwtKey,
     test_utils::{
@@ -37,6 +42,7 @@ use sensitive_url::SensitiveUrl;
 use slog::Logger;
 use slot_clock::{SlotClock, TestingSlotClock};
 use state_processing::per_block_processing::compute_timestamp_at_slot;
+use state_processing::upgrade::capella::compute_initial_whisk_k;
 use state_processing::{
     state_advance::{complete_state_advance, partial_state_advance},
     StateProcessingStrategy,
@@ -761,7 +767,7 @@ where
 
         state.build_caches(&self.spec).expect("should build caches");
 
-        let proposer_index = state.get_beacon_proposer_index(slot, &self.spec).unwrap();
+        let (proposer_index, whisk_proposer) = self.get_proposer(&state, slot);
 
         // If we produce two blocks for the same slot, they hash up to the same value and
         // BeaconChain errors out with `BlockIsAlreadyKnown`.  Vary the graffiti so that we produce
@@ -778,6 +784,7 @@ where
                 slot,
                 randao_reveal,
                 Some(graffiti),
+                whisk_proposer,
                 ProduceBlockVerification::VerifyRandao,
             )
             .await
@@ -808,7 +815,7 @@ where
 
         state.build_caches(&self.spec).expect("should build caches");
 
-        let proposer_index = state.get_beacon_proposer_index(slot, &self.spec).unwrap();
+        let (proposer_index, whisk_proposer) = self.get_proposer(&state, slot);
 
         // If we produce two blocks for the same slot, they hash up to the same value and
         // BeaconChain errors out with `BlockIsAlreadyKnown`.  Vary the graffiti so that we produce
@@ -827,6 +834,7 @@ where
                 slot,
                 randao_reveal,
                 Some(graffiti),
+                whisk_proposer,
                 ProduceBlockVerification::VerifyRandao,
             )
             .await
@@ -840,6 +848,68 @@ where
         );
 
         (signed_block, pre_state)
+    }
+
+    pub fn get_proposer(&self, state: &BeaconState<E>, slot: Slot) -> (usize, WhiskProposer) {
+        if self.spec.fork_name_at_slot::<E>(slot) == ForkName::Capella {
+            let (index, k) = self
+                .find_whisk_proposer(state, slot)
+                .expect("whisk proposer not found");
+            (index as usize, WhiskProposer::PostWhisk { index, k })
+        } else {
+            let index = state.get_beacon_proposer_index(slot, &self.spec).unwrap();
+            (index, WhiskProposer::PreWhisk)
+        }
+    }
+
+    pub fn get_proposer_k(&self, proposer_index: usize) -> Fr {
+        // TEMP: Same logic as initialized_validators.rs:312
+        let sk = &self.validator_keypairs[proposer_index].sk;
+        deserialize_fr(&hash(sk.serialize().as_bytes()))
+    }
+
+    pub fn find_whisk_proposer(
+        &self,
+        state: &BeaconState<E>,
+        slot: Slot,
+    ) -> Option<(u64, FieldElementBytes)> {
+        // Get the slot's proposer tracker
+        let proposer_tracker = state
+            .whisk_proposer_trackers()
+            .unwrap()
+            .get(slot.as_usize() % E::whisk_proposer_trackers_count())
+            .unwrap();
+        let proposer_tracker = proposer_tracker.try_into().unwrap();
+
+        // Find what validator's k is the one that matches proposer_tracker
+        // NOTE: May be either the initial deterministic k or the subsequent secret k
+        (0..self.validator_keypairs.len())
+            .map(|i| (i, self.get_proposer_k(i)))
+            .find(|(index, k)| {
+                let validator = state.validators().get(*index).unwrap();
+                let initial_k = compute_initial_whisk_k(validator);
+                is_matching_tracker(&proposer_tracker, k)
+                    || is_matching_tracker(&proposer_tracker, &initial_k)
+            })
+            .map(|(index, k)| (index as u64, serialize_fr(&k)))
+    }
+
+    pub fn find_and_register_whisk_proposer(&self, state: &BeaconState<E>, slot: Slot) {
+        let (index, _) = self
+            .find_whisk_proposer(state, slot)
+            .expect("whisk proposer not found");
+
+        // TODO WHISK: is it necessary to register whisk proposer here?
+        let whisk_shuffling_decision_root = state
+            .whisk_proposer_shuffling_decision_root(self.chain.head_beacon_block_root())
+            .unwrap();
+        self.chain
+            .register_whisk_proposer(&WhiskProposerPreparationData {
+                validator_index: index,
+                proposer_slot: slot.as_u64(),
+                whisk_shuffling_decision_root,
+            })
+            .unwrap();
     }
 
     /// Create a randao reveal for a block at `slot`.

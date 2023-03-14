@@ -25,6 +25,7 @@ pub enum EpochProcessingError {
     InvalidJustificationBit(ssz_types::Error),
     InvalidFlagIndex(usize),
     ParticipationCache(ParticipationCacheError),
+    WhiskIndexOutOfBounds,
 }
 
 impl From<InclusionError> for EpochProcessingError {

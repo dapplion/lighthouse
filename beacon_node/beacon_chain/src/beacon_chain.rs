@@ -7,6 +7,7 @@ use crate::attester_cache::{AttesterCache, AttesterCacheKey};
 use crate::beacon_block_streamer::{BeaconBlockStreamer, CheckEarlyAttesterCache};
 use crate::beacon_proposer_cache::compute_proposer_duties_from_head;
 use crate::beacon_proposer_cache::BeaconProposerCache;
+use crate::beacon_whisk_proposer_registry::{self, BeaconWhiskProposerRegistry};
 use crate::block_times_cache::BlockTimesCache;
 use crate::block_verification::{
     check_block_is_finalized_checkpoint_or_descendant, check_block_relevancy, get_block_root,
@@ -58,7 +59,12 @@ use crate::validator_monitor::{
 };
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
 use crate::{metrics, BeaconChainError, BeaconForkChoiceStore, BeaconSnapshot, CachedHead};
-use eth2::types::{EventKind, SseBlock, SseExtendedPayloadAttributes, SyncDuty};
+use curdleproofs_whisk::{
+    bls_g1_scalar_multiply_generator, compute_tracker, deserialize_fr,
+    generate_whisk_tracker_proof, is_g1_generator, is_matching_tracker, BLSG1Point,
+    TRACKER_PROOF_SIZE, WHISK, WHISK_SHUFFLE_PROOF_SIZE,
+};
+use eth2::types::{EventKind, SseBlock, SseExtendedPayloadAttributes, SyncDuty, WhiskProposer};
 use execution_layer::{
     BlockProposalContents, BuilderParams, ChainHealth, ExecutionLayer, FailedCondition,
     PayloadAttributes, PayloadStatus,
@@ -78,6 +84,8 @@ use slasher::Slasher;
 use slog::{crit, debug, error, info, trace, warn, Logger};
 use slot_clock::SlotClock;
 use ssz::Encode;
+use state_processing::per_block_processing::{get_shuffle_indices, should_shuffle_trackers};
+use state_processing::upgrade::capella::compute_initial_whisk_k;
 use state_processing::{
     common::get_attesting_indices_from_state,
     per_block_processing,
@@ -290,6 +298,16 @@ struct PartialBeaconBlock<E: EthSpec, Payload: AbstractExecPayload<E>> {
     sync_aggregate: Option<SyncAggregate<E>>,
     prepare_payload_handle: Option<PreparePayloadHandle<E, Payload>>,
     bls_to_execution_changes: Vec<SignedBlsToExecutionChange>,
+    whisk_fields: Option<PartialWhiskBlockFields<E>>,
+}
+
+struct PartialWhiskBlockFields<E: EthSpec> {
+    whisk_opening_proof: WhiskTrackerProof<E>,
+    whisk_post_shuffle_trackers: ShuffleTrackers<E>,
+    whisk_shuffle_proof: WhiskShuffleProof<E>,
+    whisk_registration_proof: WhiskTrackerProof<E>,
+    whisk_tracker: WhiskTracker,
+    whisk_k_commitment: BLSG1Point,
 }
 
 pub type BeaconForkChoice<T> = ForkChoice<
@@ -405,6 +423,8 @@ pub struct BeaconChain<T: BeaconChainTypes> {
     pub eth1_finalization_cache: TimeoutRwLock<Eth1FinalizationCache>,
     /// Caches the beacon block proposer shuffling for a given epoch and shuffling key root.
     pub beacon_proposer_cache: Mutex<BeaconProposerCache>,
+    /// Tracks validators self-submissions that they will propose at a slot post-whisk
+    pub beacon_whisk_proposer_registry: Arc<RwLock<BeaconWhiskProposerRegistry>>,
     /// Caches a map of `validator_index -> validator_pubkey`.
     pub(crate) validator_pubkey_cache: TimeoutRwLock<ValidatorPubkeyCache<T>>,
     /// A cache used when producing attestations.
@@ -3618,11 +3638,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         randao_reveal: Signature,
         slot: Slot,
         validator_graffiti: Option<Graffiti>,
+        whisk_proposer: WhiskProposer,
     ) -> Result<BeaconBlockAndState<T::EthSpec, Payload>, BlockProductionError> {
         self.produce_block_with_verification(
             randao_reveal,
             slot,
             validator_graffiti,
+            whisk_proposer,
             ProduceBlockVerification::VerifyRandao,
         )
         .await
@@ -3636,6 +3658,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         randao_reveal: Signature,
         slot: Slot,
         validator_graffiti: Option<Graffiti>,
+        whisk_proposer: WhiskProposer,
         verification: ProduceBlockVerification,
     ) -> Result<BeaconBlockAndState<T::EthSpec, Payload>, BlockProductionError> {
         // Part 1/2 (blocking)
@@ -3661,6 +3684,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             slot,
             randao_reveal,
             validator_graffiti,
+            whisk_proposer,
             verification,
         )
         .await
@@ -3890,71 +3914,101 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(None);
         }
 
-        // Compute the proposer index.
-        let head_epoch = cached_head.head_slot().epoch(T::EthSpec::slots_per_epoch());
-        let shuffling_decision_root = if head_epoch == proposal_epoch {
-            cached_head
+        // TODO: Any fork before whisk, refactor to be explicity
+        let proposer_index = if self.spec.fork_name_at_slot::<T::EthSpec>(proposal_slot)
+            != ForkName::Capella
+        {
+            // Compute the proposer index.
+            let head_epoch = cached_head.head_slot().epoch(T::EthSpec::slots_per_epoch());
+            let shuffling_decision_root = if head_epoch == proposal_epoch {
+                cached_head
+                    .snapshot
+                    .beacon_state
+                    .proposer_shuffling_decision_root(proposer_head)?
+            } else {
+                proposer_head
+            };
+
+            let cached_proposer = self
+                .beacon_proposer_cache
+                .lock()
+                .get_slot::<T::EthSpec>(shuffling_decision_root, proposal_slot);
+            if let Some(proposer) = cached_proposer {
+                proposer.index as u64
+            } else {
+                if head_epoch + 2 < proposal_epoch {
+                    warn!(
+                        self.log,
+                        "Skipping proposer preparation";
+                        "msg" => "this is a non-critical issue that can happen on unhealthy nodes or \
+                                  networks.",
+                        "proposal_epoch" => proposal_epoch,
+                        "head_epoch" => head_epoch,
+                    );
+
+                    // Don't skip the head forward more than two epochs. This avoids burdening an
+                    // unhealthy node.
+                    //
+                    // Although this node might miss out on preparing for a proposal, they should still
+                    // be able to propose. This will prioritise beacon chain health over efficient
+                    // packing of execution blocks.
+                    return Ok(None);
+                }
+
+                let (proposers, decision_root, _, fork) =
+                    compute_proposer_duties_from_head(proposal_epoch, self)?;
+
+                let proposer_offset = (proposal_slot % T::EthSpec::slots_per_epoch()).as_usize();
+                let proposer = *proposers
+                    .get(proposer_offset)
+                    .ok_or(BeaconChainError::NoProposerForSlot(proposal_slot))?;
+
+                self.beacon_proposer_cache.lock().insert(
+                    proposal_epoch,
+                    decision_root,
+                    proposers,
+                    fork,
+                )?;
+
+                // It's possible that the head changes whilst computing these duties. If so, abandon
+                // this routine since the change of head would have also spawned another instance of
+                // this routine.
+                //
+                // Exit now, after updating the cache.
+                if decision_root != shuffling_decision_root {
+                    warn!(
+                        self.log,
+                        "Head changed during proposer preparation";
+                    );
+                    return Ok(None);
+                }
+
+                proposer as u64
+            }
+        } else {
+            let whisk_shuffling_decision_root = cached_head
                 .snapshot
                 .beacon_state
-                .proposer_shuffling_decision_root(proposer_head)?
-        } else {
-            proposer_head
-        };
-        let cached_proposer = self
-            .beacon_proposer_cache
-            .lock()
-            .get_slot::<T::EthSpec>(shuffling_decision_root, proposal_slot);
-        let proposer_index = if let Some(proposer) = cached_proposer {
-            proposer.index as u64
-        } else {
-            if head_epoch + 2 < proposal_epoch {
+                .whisk_proposer_shuffling_decision_root(self.genesis_block_root)?;
+
+            // After whisk the beacon node cannot compute the beacon proposer
+            // A validator voluntarily declares in advance that it is the proposer of a slot
+            if let Some(proposer) = self
+                .beacon_whisk_proposer_registry
+                .read()
+                .get_slot::<T::EthSpec>(whisk_shuffling_decision_root, proposal_slot)
+            {
+                *proposer as u64
+            } else {
+                // No known proposer for this fork and slot
                 warn!(
                     self.log,
-                    "Skipping proposer preparation";
-                    "msg" => "this is a non-critical issue that can happen on unhealthy nodes or \
-                              networks.",
-                    "proposal_epoch" => proposal_epoch,
-                    "head_epoch" => head_epoch,
-                );
-
-                // Don't skip the head forward more than two epochs. This avoids burdening an
-                // unhealthy node.
-                //
-                // Although this node might miss out on preparing for a proposal, they should still
-                // be able to propose. This will prioritise beacon chain health over efficient
-                // packing of execution blocks.
-                return Ok(None);
-            }
-
-            let (proposers, decision_root, _, fork) =
-                compute_proposer_duties_from_head(proposal_epoch, self)?;
-
-            let proposer_offset = (proposal_slot % T::EthSpec::slots_per_epoch()).as_usize();
-            let proposer = *proposers
-                .get(proposer_offset)
-                .ok_or(BeaconChainError::NoProposerForSlot(proposal_slot))?;
-
-            self.beacon_proposer_cache.lock().insert(
-                proposal_epoch,
-                decision_root,
-                proposers,
-                fork,
-            )?;
-
-            // It's possible that the head changes whilst computing these duties. If so, abandon
-            // this routine since the change of head would have also spawned another instance of
-            // this routine.
-            //
-            // Exit now, after updating the cache.
-            if decision_root != shuffling_decision_root {
-                warn!(
-                    self.log,
-                    "Head changed during proposer preparation";
+                    "No known whisk proposer in registry";
+                    "whisk_shuffling_decision_root" => ?whisk_shuffling_decision_root,
+                    "proposal_slot" => proposal_slot,
                 );
                 return Ok(None);
             }
-
-            proposer as u64
         };
 
         // Get the `prev_randao` and parent block number.
@@ -4124,7 +4178,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
 
         // Only attempt a re-org if we have a proposer registered for the re-org slot.
-        let proposing_at_re_org_slot = {
+        // TODO: Any fork before whisk, refactor to be explicity
+        let before_whisk =
+            self.spec.fork_name_at_slot::<T::EthSpec>(re_org_block_slot) != ForkName::Capella;
+        let proposing_at_re_org_slot = if before_whisk {
             // The proposer shuffling has the same decision root as the next epoch attestation
             // shuffling. We know our re-org block is not on the epoch boundary, so it has the
             // same proposer shuffling as the head (but not necessarily the parent which may lie
@@ -4152,6 +4209,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .as_ref()
                 .ok_or(ProposerHeadError::Error(Error::ExecutionLayerMissing))?
                 .has_proposer_preparation_data_blocking(proposer_index)
+        } else {
+            self.beacon_whisk_proposer_registry
+                .read()
+                .has_some_at_slot(re_org_block_slot)
         };
         if !proposing_at_re_org_slot {
             return Err(DoNotReOrg::NotProposing.into());
@@ -4227,6 +4288,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// The provided `state_root_opt` should only ever be set to `Some` if the contained value is
     /// equal to the root of `state`. Providing this value will serve as an optimization to avoid
     /// performing a tree hash in some scenarios.
+    #[allow(clippy::too_many_arguments)]
     pub async fn produce_block_on_state<Payload: AbstractExecPayload<T::EthSpec> + 'static>(
         self: &Arc<Self>,
         state: BeaconState<T::EthSpec>,
@@ -4234,6 +4296,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         produce_at_slot: Slot,
         randao_reveal: Signature,
         validator_graffiti: Option<Graffiti>,
+        whisk_proposer: WhiskProposer,
         verification: ProduceBlockVerification,
     ) -> Result<BeaconBlockAndState<T::EthSpec, Payload>, BlockProductionError> {
         // Part 1/3 (blocking)
@@ -4250,6 +4313,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         produce_at_slot,
                         randao_reveal,
                         validator_graffiti,
+                        whisk_proposer,
                     )
                 },
                 "produce_partial_beacon_block",
@@ -4300,6 +4364,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         produce_at_slot: Slot,
         randao_reveal: Signature,
         validator_graffiti: Option<Graffiti>,
+        whisk_proposer: WhiskProposer,
     ) -> Result<PartialBeaconBlock<T::EthSpec, Payload>, BlockProductionError> {
         let eth1_chain = self
             .eth1_chain
@@ -4331,7 +4396,15 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             state.latest_block_header().canonical_root()
         };
 
-        let proposer_index = state.get_beacon_proposer_index(state.slot(), &self.spec)? as u64;
+        let proposer_index = match self.spec.fork_name_at_slot::<T::EthSpec>(produce_at_slot) {
+            ForkName::Capella => match whisk_proposer {
+                WhiskProposer::PreWhisk => return Err(BlockProductionError::ExpectedPostWhiskData),
+                WhiskProposer::Dummy => 0,
+                WhiskProposer::PostWhisk { index, .. } => index,
+            },
+            // TODO: Any fork before whisk, refactor to be explicity
+            _ => state.get_beacon_proposer_index(state.slot(), &self.spec)? as u64,
+        };
 
         let pubkey = state
             .validators()
@@ -4513,6 +4586,172 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             Some(sync_aggregate)
         };
 
+        let whisk_fields = match &state {
+            BeaconState::Capella(BeaconStateCapella {
+                ref whisk_candidate_trackers,
+                ref whisk_proposer_trackers,
+                ref whisk_validator_trackers,
+                ref whisk_validator_k_commitments,
+                ref validators,
+                ..
+            }) => {
+                let proposer_k = deserialize_fr(match &whisk_proposer {
+                    WhiskProposer::PreWhisk => {
+                        return Err(BlockProductionError::ExpectedPostWhiskData)
+                    }
+                    // Set to a dummy value, TODO review if 0 is an ok value for whisk's crypto fns
+                    WhiskProposer::Dummy => [0; 32].as_slice(),
+                    WhiskProposer::PostWhisk { k, .. } => k,
+                });
+
+                // verified in `whisk_process_shuffled_trackers`, assert `is_valid_whisk_shuffle_proof`
+                // with `whisk_post_shuffle_trackers`, `whisk_shuffle_proof`, `pre_shuffle_trackers`
+                // is derived from that state at this slot.
+                // - shuffle requires forgetable randomness, so it can be generated by the beacon node
+                let shuffle_indices = get_shuffle_indices::<T::EthSpec>(&randao_reveal);
+                let pre_shuffle_trackers: Vec<WhiskTracker> = shuffle_indices
+                    .iter()
+                    .map(|i| whisk_candidate_trackers[*i].clone())
+                    .collect();
+                let (whisk_post_shuffle_trackers, whisk_shuffle_proof) =
+                    if should_shuffle_trackers::<T::EthSpec>(
+                        produce_at_slot.epoch(T::EthSpec::slots_per_epoch()),
+                    ) {
+                        WHISK
+                            .generate_whisk_shuffle_proof(&pre_shuffle_trackers)
+                            .map_err(BlockProductionError::WhiskSerializationError)?
+                    } else {
+                        // Require unchanged trackers during cooldown
+                        (pre_shuffle_trackers, [0; WHISK_SHUFFLE_PROOF_SIZE])
+                    };
+
+                // proposer_index is untrusted data submited by an API caller
+                let proposer_validator_tracker = &whisk_validator_trackers
+                    .get(proposer_index as usize)
+                    .ok_or(BlockProductionError::ProposerOutOfBounds)?;
+                let is_first_proposal = is_g1_generator(&proposer_validator_tracker.r_g);
+
+                // verified in `process_whisk`, assert `is_valid_whisk_tracker_proof`
+                // with `whisk_registration_proof` adding new data `whisk_tracker`, `whisk_k_commitment`
+                // - Proposer must keep knowledge of `k` for next proposal. To produce `whisk_opening_proof`
+                // - If tracker is already registered, must leave this fields to default value
+                // - Generating all these requires knowledge of k, may have to be created by the validator
+                let (whisk_registration_proof, whisk_tracker, whisk_k_commitment) =
+                    if is_first_proposal {
+                        // First proposal, validator creates tracker for registering
+                        let (whisk_k_commitment, whisk_tracker) = compute_tracker(&proposer_k)
+                            .map_err(BlockProductionError::WhiskSerializationError)?;
+                        let whisk_registration_proof =
+                            generate_whisk_tracker_proof(&whisk_tracker, &proposer_k)
+                                .map_err(BlockProductionError::WhiskSerializationError)?;
+                        (
+                            // TODO: More efficient conversion?
+                            whisk_registration_proof.to_vec().try_into().map_err(|_| {
+                                BlockProductionError::WhiskInvalid(
+                                    "tracker proof serde error".to_string(),
+                                )
+                            })?,
+                            whisk_tracker,
+                            (&whisk_k_commitment).try_into().map_err(|_| {
+                                BlockProductionError::WhiskInvalid(
+                                    "k commitment serde error".to_string(),
+                                )
+                            })?,
+                        )
+                    } else {
+                        // And subsequent proposals leave registration fields empty
+                        let whisk_registration_proof = WhiskTrackerProof::<T::EthSpec>::default();
+                        let whisk_tracker = WhiskTracker::default();
+                        let whisk_k_commitment = BLSG1Point::default();
+                        (whisk_registration_proof, whisk_tracker, whisk_k_commitment)
+                    };
+
+                // verified in `process_block_header`, assert `is_valid_whisk_tracker_proof`
+                // with proposer's tracker in `whisk_proposer_trackers` and `whisk_validator_k_commitments`
+                // - How to construct this proof with dummy trackers? Initial tracker and commitment are
+                //   generated on the fork by all validators
+                // - Generating this proof requires knowledge of k, may have to be created by the validator
+                let initial_proposer_k = compute_initial_whisk_k(
+                    validators
+                        .get(proposer_index as usize)
+                        .ok_or(BlockProductionError::ProposerOutOfBounds)?,
+                );
+                // Indexes with mod len, always in bounds
+                let proposer_slot_tracker_bytes = &whisk_proposer_trackers
+                    [produce_at_slot.as_usize() % whisk_proposer_trackers.len()];
+                let proposer_slot_tracker = proposer_slot_tracker_bytes
+                    .try_into()
+                    .map_err(BlockProductionError::WhiskSerializationError)?;
+
+                // Force proposers into picking a safe k
+                if proposer_k == initial_proposer_k {
+                    return Err(BlockProductionError::WhiskNotNewProposerK);
+                }
+
+                // Verify knowledge of `k` such that `tracker.k_r_g == k * tracker.r_g` and `k_commitment == k * BLS_G1_GENERATOR`.
+                // For repeated proposals during the bootstrap period, tracker was done with
+                // k_init, while k_commitment is already updated with the new K, so this
+                // equality won't hold
+
+                // | slot tracker | validator K_commitment | proof
+                // | ------------ | ---------------------- | -----
+                // | tracker(k0)  | commitment(k0)         | Proof with k0
+                // | tracker(k0)  | commitment(k1)         | Return zeroed proof
+                // | tracker(k1)  | commitment(k0)         | Impossible, commitment is set first
+                // | tracker(k1)  | commitment(k1)         | Proof with k1
+                let whisk_opening_proof =
+                    if is_matching_tracker(&proposer_slot_tracker, &proposer_k) {
+                        // Must check before that proposer_k != initial_proposer_k
+                        // if slot tracker == tracker(k1), validator's k commitment can not be c(k0)
+                        generate_whisk_tracker_proof(proposer_slot_tracker_bytes, &proposer_k)
+                            .map_err(BlockProductionError::WhiskSerializationError)?
+                    } else if is_matching_tracker(&proposer_slot_tracker, &initial_proposer_k) {
+                        // Check if proposer's k commitment is for k0 or k1
+                        let proposer_k_commitment = whisk_validator_k_commitments
+                            .get(proposer_index as usize)
+                            .ok_or(BlockProductionError::ProposerOutOfBounds)?;
+                        let initial_proposer_k_commitment: BLSG1Point =
+                            bls_g1_scalar_multiply_generator(&initial_proposer_k)
+                                .try_into()
+                                .map_err(BlockProductionError::WhiskSerializationError)?;
+                        if proposer_k_commitment == &initial_proposer_k_commitment {
+                            // tracker(k0) & commitment(k0)
+                            generate_whisk_tracker_proof(
+                                proposer_slot_tracker_bytes,
+                                &initial_proposer_k,
+                            )
+                            .map_err(BlockProductionError::WhiskSerializationError)?
+                        } else {
+                            // tracker(k0) & commitment(k1)
+                            // The same proposer can be in the proposer_trackers more than once, which are
+                            // produced with the initial k. In that case it's impossible to produce a valid proof
+                            // since `tracker.k0_r_g == k0 * tracker.r_g and k1_commitment == k1 * G1`.
+                            [0; TRACKER_PROOF_SIZE]
+                        }
+                    } else {
+                        return Err(BlockProductionError::WhiskNotTrackerProposer {
+                            proposer_index,
+                            is_first_proposal,
+                        });
+                    };
+
+                Some(PartialWhiskBlockFields::<T::EthSpec> {
+                    // TODO: More efficient conversion?
+                    whisk_opening_proof: whisk_opening_proof.to_vec().try_into().map_err(|_| {
+                        BlockProductionError::WhiskInvalid("tracker proof serde error".to_string())
+                    })?,
+                    whisk_post_shuffle_trackers: whisk_post_shuffle_trackers.into(),
+                    whisk_shuffle_proof: whisk_shuffle_proof.to_vec().try_into().map_err(|_| {
+                        BlockProductionError::WhiskInvalid("shuffle proof serde error".to_string())
+                    })?,
+                    whisk_registration_proof,
+                    whisk_tracker,
+                    whisk_k_commitment,
+                })
+            }
+            _ => None,
+        };
+
         Ok(PartialBeaconBlock {
             state,
             slot,
@@ -4529,6 +4768,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             sync_aggregate,
             prepare_payload_handle,
             bls_to_execution_changes,
+            whisk_fields,
         })
     }
 
@@ -4557,6 +4797,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // produce said `execution_payload`.
             prepare_payload_handle: _,
             bls_to_execution_changes,
+            whisk_fields,
         } = partial_beacon_block;
 
         let inner_block = match &state {
@@ -4619,30 +4860,39 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         .map_err(|_| BlockProductionError::InvalidPayloadFork)?,
                 },
             }),
-            BeaconState::Capella(_) => BeaconBlock::Capella(BeaconBlockCapella {
-                slot,
-                proposer_index,
-                parent_root,
-                state_root: Hash256::zero(),
-                body: BeaconBlockBodyCapella {
-                    randao_reveal,
-                    eth1_data,
-                    graffiti,
-                    proposer_slashings: proposer_slashings.into(),
-                    attester_slashings: attester_slashings.into(),
-                    attestations: attestations.into(),
-                    deposits: deposits.into(),
-                    voluntary_exits: voluntary_exits.into(),
-                    sync_aggregate: sync_aggregate
-                        .ok_or(BlockProductionError::MissingSyncAggregate)?,
-                    execution_payload: block_contents
-                        .ok_or(BlockProductionError::MissingExecutionPayload)?
-                        .to_payload()
-                        .try_into()
-                        .map_err(|_| BlockProductionError::InvalidPayloadFork)?,
-                    bls_to_execution_changes: bls_to_execution_changes.into(),
-                },
-            }),
+            BeaconState::Capella(_) => {
+                let whisk_fields = whisk_fields.ok_or(BlockProductionError::MissingWhiskFields)?;
+                BeaconBlock::Capella(BeaconBlockCapella {
+                    slot,
+                    proposer_index,
+                    parent_root,
+                    state_root: Hash256::zero(),
+                    body: BeaconBlockBodyCapella {
+                        randao_reveal,
+                        eth1_data,
+                        graffiti,
+                        proposer_slashings: proposer_slashings.into(),
+                        attester_slashings: attester_slashings.into(),
+                        attestations: attestations.into(),
+                        deposits: deposits.into(),
+                        voluntary_exits: voluntary_exits.into(),
+                        sync_aggregate: sync_aggregate
+                            .ok_or(BlockProductionError::MissingSyncAggregate)?,
+                        execution_payload: block_contents
+                            .ok_or(BlockProductionError::MissingExecutionPayload)?
+                            .to_payload()
+                            .try_into()
+                            .map_err(|_| BlockProductionError::InvalidPayloadFork)?,
+                        bls_to_execution_changes: bls_to_execution_changes.into(),
+                        whisk_opening_proof: whisk_fields.whisk_opening_proof,
+                        whisk_post_shuffle_trackers: whisk_fields.whisk_post_shuffle_trackers,
+                        whisk_shuffle_proof: whisk_fields.whisk_shuffle_proof,
+                        whisk_registration_proof: whisk_fields.whisk_registration_proof,
+                        whisk_tracker: whisk_fields.whisk_tracker,
+                        whisk_k_commitment: whisk_fields.whisk_k_commitment,
+                    },
+                })
+            }
         };
 
         let block = SignedBeaconBlock::from_block(
@@ -4803,6 +5053,18 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         self.canonical_head
             .fork_choice_read_lock()
             .contains_block(root)
+    }
+
+    /// Registers a validator self-declaration that it is the proposer for a whisk slot
+    pub fn register_whisk_proposer(
+        self: &Arc<Self>,
+        data: &WhiskProposerPreparationData,
+    ) -> Result<(), beacon_whisk_proposer_registry::Error> {
+        self.beacon_whisk_proposer_registry.write().insert(
+            Slot::new(data.proposer_slot),
+            data.whisk_shuffling_decision_root,
+            data.validator_index as usize,
+        )
     }
 
     /// Determines the beacon proposer for the next slot. If that proposer is registered in the
@@ -5420,6 +5682,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // sync anyway).
             self.naive_aggregation_pool.write().prune(slot);
             self.block_times_cache.write().prune(slot);
+            self.beacon_whisk_proposer_registry.write().prune(slot);
 
             // Don't run heavy-weight tasks during sync.
             if self.best_slot() + MAX_PER_SLOT_FORK_CHOICE_DISTANCE < slot {

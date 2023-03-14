@@ -86,6 +86,9 @@ pub enum BlockProcessingError {
     },
     WithdrawalCredentialsInvalid,
     ParticipationCacheError(ParticipationCacheError),
+    InvalidWhisk(String),
+    ProposerOutOfBounds,
+    ShuffleIndexOutOfBounds,
 }
 
 impl From<BeaconStateError> for BlockProcessingError {
@@ -127,6 +130,12 @@ impl From<SyncAggregateInvalid> for BlockProcessingError {
 impl From<ContextError> for BlockProcessingError {
     fn from(e: ContextError) -> Self {
         BlockProcessingError::ConsensusContext(e)
+    }
+}
+
+impl From<curdleproofs_whisk::SerializationError> for BlockProcessingError {
+    fn from(e: curdleproofs_whisk::SerializationError) -> Self {
+        BlockProcessingError::InvalidWhisk(e.to_string())
     }
 }
 
@@ -261,6 +270,9 @@ pub enum HeaderInvalid {
         block: Hash256,
     },
     ProposerSlashed(u64),
+    ProposerProofInvalid,
+    InitialWhiskProposerMismatch,
+    ProposerIndexOutOfBounds,
 }
 
 #[derive(Debug, PartialEq, Clone)]
