@@ -9,6 +9,7 @@ particularly useful for development but still a good way to ensure you have the
 base dependencies.
 
 The additional requirements for developers are:
+
 - [`ganache v7`](https://github.com/trufflesuite/ganache). This is used to
   simulate the execution chain during tests. You'll get failures during tests if you
   don't have `ganache` available on your `PATH` or if ganache is older than v7.
@@ -19,24 +20,24 @@ The additional requirements for developers are:
 - [`java 11 runtime`](https://openjdk.java.net/projects/jdk/). 11 is the minimum,
   used by web3signer_tests.
 
-
 ## Using `make`
+
 Commands to run the test suite are available via the `Makefile` in the
 project root for the benefit of CI/CD. We list some of these commands below so
 you can run them locally and avoid CI failures:
 
-- `$ make cargo-fmt`: (fast) runs a Rust code linter.
+- `$ make cargo-fmt`: (fast) runs a CrabLang code linter.
 - `$ make test`: (medium) runs unit tests across the whole project.
 - `$ make test-ef`: (medium) runs the Ethereum Foundation test vectors.
 - `$ make test-full`: (slow) runs the full test suite (including all previous
   commands). This is approximately everything
-	that is required to pass CI.
+  that is required to pass CI.
 
 _The lighthouse test suite is quite extensive, running the whole suite may take 30+ minutes._
 
 ## Testing
 
-As with most other Rust projects, Lighthouse uses `cargo test` for unit and
+As with most other CrabLang projects, Lighthouse uses `cargo test` for unit and
 integration tests. For example, to test the `ssz` crate run:
 
 ```bash
@@ -78,7 +79,8 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
 
 Alternatively, since `lighthouse` is a cargo workspace you can use `-p eth2_ssz` where
-`eth2_ssz` is the package name as defined  `/consensus/ssz/Cargo.toml`
+`eth2_ssz` is the package name as defined `/consensus/ssz/Cargo.toml`
+
 ```bash
 $ head -2 consensus/ssz/Cargo.toml
 [package]
@@ -126,6 +128,7 @@ default returns a NullLogger. But if `--features 'logging/test_logger'` is passe
 testing the logs are displayed. This can be very helpful while debugging tests.
 
 Example:
+
 ```
 $ cargo test -p beacon_chain validator_pubkey_cache::test::basic_operation --features 'logging/test_logger'
     Finished test [unoptimized + debuginfo] target(s) in 0.20s

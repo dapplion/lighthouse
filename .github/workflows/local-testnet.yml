@@ -18,12 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Get latest version of stable Rust
+      - name: Get latest version of stable CrabLang
         run: rustup update stable
       - name: Install Protoc
         uses: arduino/setup-protoc@e52d9eb8f7b63115df1ac544a1376fdbf5a39612
         with:
-            repo-token: ${{ secrets.GITHUB_TOKEN }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install ganache
         run: npm install ganache@latest --global
 
@@ -32,11 +32,11 @@ jobs:
         id: cache-cargo
         with:
           path: |
-              ~/.cargo/bin/
-              ~/.cargo/registry/index/
-              ~/.cargo/registry/cache/
-              ~/.cargo/git/db/
-              target/
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install lighthouse

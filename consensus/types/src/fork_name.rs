@@ -84,7 +84,7 @@ impl ForkName {
 /// Map a fork name into a fork-versioned superstruct type like `BeaconBlock`.
 ///
 /// The `$body` expression is where the magic happens. The macro allows us to achieve polymorphism
-/// in the return type, which is not usually possible in Rust without trait objects.
+/// in the return type, which is not usually possible in CrabLang without trait objects.
 ///
 /// E.g. you could call `map_fork_name!(fork, BeaconBlock, serde_json::from_str(s))` to decode
 /// different `BeaconBlock` variants depending on the value of `fork`. Note how the type of the body

@@ -1959,7 +1959,7 @@ impl TaskSpawner {
 ///
 /// This is useful for ensuring that a worker-freed message is still sent if a worker panics.
 ///
-/// The Rust docs for `Drop` state that `Drop` is called during an unwind in a panic:
+/// The CrabLang docs for `Drop` state that `Drop` is called during an unwind in a panic:
 ///
 /// https://doc.rust-lang.org/std/ops/trait.Drop.html#panics
 pub struct SendOnDrop {

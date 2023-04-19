@@ -199,7 +199,7 @@ arbitrary-fuzz:
 	cargo check -p state_processing --features arbitrary-fuzz
 	cargo check -p slashing_protection --features arbitrary-fuzz
 
-# Runs cargo audit (Audit Cargo.lock files for crates with security vulnerabilities reported to the RustSec Advisory Database)
+# Runs cargo audit (Audit Cargo.lock files for crates with security vulnerabilities reported to the CrabLangSec Advisory Database)
 audit:
 	cargo install --force cargo-audit
 	cargo audit --ignore RUSTSEC-2020-0071

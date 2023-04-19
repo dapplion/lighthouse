@@ -5,10 +5,10 @@ the instructions below, and then proceed to [Building Lighthouse](#build-lightho
 
 ## Dependencies
 
-First, **install Rust** using [rustup](https://rustup.rs/). The rustup installer provides an easy way
-to update the Rust compiler, and works on all platforms.
+First, **install CrabLang** using [rustup](https://rustup.rs/). The rustup installer provides an easy way
+to update the CrabLang compiler, and works on all platforms.
 
-With Rust installed, follow the instructions below to install dependencies relevant to your
+With CrabLang installed, follow the instructions below to install dependencies relevant to your
 operating system.
 
 #### Ubuntu
@@ -33,11 +33,12 @@ brew install cmake
 ```
 
 1. Install protoc using Homebrew:
+
 ```
 brew install protobuf
 ```
 
-[Homebrew]: https://brew.sh/
+[homebrew]: https://brew.sh/
 
 #### Windows
 
@@ -62,14 +63,14 @@ choco install protoc
 ```
 
 These dependencies are for compiling Lighthouse natively on Windows. Lighthouse can also run
-successfully under the [Windows Subsystem for Linux (WSL)][WSL]. If using Ubuntu under WSL, you
+successfully under the [Windows Subsystem for Linux (WSL)][wsl]. If using Ubuntu under WSL, you
 should follow the instructions for Ubuntu listed in the [Dependencies (Ubuntu)](#ubuntu) section.
 
-[WSL]: https://docs.microsoft.com/en-us/windows/wsl/about
+[wsl]: https://docs.microsoft.com/en-us/windows/wsl/about
 
 ## Build Lighthouse
 
-Once you have Rust and the build dependencies you're ready to build Lighthouse:
+Once you have CrabLang and the build dependencies you're ready to build Lighthouse:
 
 ```
 git clone https://github.com/sigp/lighthouse.git
@@ -126,14 +127,14 @@ FEATURES=gnosis,slasher-lmdb make
 
 Commonly used features include:
 
-* `gnosis`: support for the Gnosis Beacon Chain.
-* `portable`: support for legacy hardware.
-* `modern`: support for exclusively modern hardware.
-* `slasher-mdbx`: support for the MDBX slasher backend. Enabled by default.
-* `slasher-lmdb`: support for the LMDB slasher backend.
-* `jemalloc`: use [`jemalloc`][jemalloc] to allocate memory. Enabled by default on Linux and macOS.
+- `gnosis`: support for the Gnosis Beacon Chain.
+- `portable`: support for legacy hardware.
+- `modern`: support for exclusively modern hardware.
+- `slasher-mdbx`: support for the MDBX slasher backend. Enabled by default.
+- `slasher-lmdb`: support for the LMDB slasher backend.
+- `jemalloc`: use [`jemalloc`][jemalloc] to allocate memory. Enabled by default on Linux and macOS.
   Not supported on Windows.
-* `spec-minimal`: support for the minimal preset (useful for testing).
+- `spec-minimal`: support for the minimal preset (useful for testing).
 
 Default features (e.g. `slasher-mdbx`) may be opted out of using the `--no-default-features`
 argument for `cargo`, which can plumbed in via the `CARGO_INSTALL_EXTRA_FLAGS` environment variable.
@@ -152,9 +153,9 @@ You can customise the compiler settings used to compile Lighthouse via
 
 Lighthouse includes several profiles which can be selected via the `PROFILE` environment variable.
 
-* `release`: default for source builds, enables most optimisations while not taking too long to
+- `release`: default for source builds, enables most optimisations while not taking too long to
   compile.
-* `maxperf`: default for binary releases, enables aggressive optimisations including full LTO.
+- `maxperf`: default for binary releases, enables aggressive optimisations including full LTO.
   Although compiling with this profile improves some benchmarks by around 20% compared to `release`,
   it imposes a _significant_ cost at compile time and is only recommended if you have a fast CPU.
 
@@ -176,10 +177,10 @@ See ["Configuring the `PATH` environment variable"
 
 ### Compilation error
 
-Make sure you are running the latest version of Rust. If you have installed Rust using rustup, simply type `rustup update`.
+Make sure you are running the latest version of CrabLang. If you have installed CrabLang using rustup, simply type `rustup update`.
 
-If you can't install the latest version of Rust you can instead compile using the Minimum Supported
-Rust Version (MSRV) which is listed under the `rust-version` key in Lighthouse's
+If you can't install the latest version of CrabLang you can instead compile using the Minimum Supported
+CrabLang Version (MSRV) which is listed under the `rust-version` key in Lighthouse's
 [Cargo.toml](https://github.com/sigp/lighthouse/blob/stable/lighthouse/Cargo.toml).
 
 If compilation fails with `(signal: 9, SIGKILL: kill)`, this could mean your machine ran out of
@@ -188,4 +189,3 @@ look into [cross compilation](./cross-compiling.md), or use a [pre-built
 binary](./installation-binaries.md).
 
 If compilation fails with `error: linking with cc failed: exit code: 1`, try running `cargo clean`.
-

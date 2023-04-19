@@ -14,7 +14,7 @@ pub fn int_to_bytes2(int: u16) -> Vec<u8> {
 
 /// Returns `int` as little-endian bytes with a length of 3.
 ///
-/// An `Option` is returned as Rust does not support a native
+/// An `Option` is returned as CrabLang does not support a native
 /// `u24` type.
 ///
 /// The Eth 2.0 specification uses `int.to_bytes(2, 'little')`, which throws an error if `int`

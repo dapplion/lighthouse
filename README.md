@@ -1,13 +1,13 @@
 # Lighthouse: Ethereum consensus client
 
-An open-source Ethereum consensus client, written in Rust and maintained by Sigma Prime.
+An open-source Ethereum consensus client, written in CrabLang and maintained by Sigma Prime.
 
-[![Book Status]][Book Link] [![Chat Badge]][Chat Link]
+[![Book Status]][book link] [![Chat Badge]][chat link]
 
-[Chat Badge]: https://img.shields.io/badge/chat-discord-%237289da
-[Chat Link]: https://discord.gg/cyAszAh
-[Book Status]:https://img.shields.io/badge/user--docs-unstable-informational
-[Book Link]: https://lighthouse-book.sigmaprime.io
+[chat badge]: https://img.shields.io/badge/chat-discord-%237289da
+[chat link]: https://discord.gg/cyAszAh
+[book status]: https://img.shields.io/badge/user--docs-unstable-informational
+[book link]: https://lighthouse-book.sigmaprime.io
 [stable]: https://github.com/sigp/lighthouse/tree/stable
 [unstable]: https://github.com/sigp/lighthouse/tree/unstable
 [blog]: https://lighthouse.sigmaprime.io
@@ -23,12 +23,12 @@ Lighthouse is:
 - Ready for use on Ethereum consensus mainnet.
 - Fully open-source, licensed under Apache 2.0.
 - Security-focused. Fuzzing techniques have been continuously applied and several external security reviews have been performed.
-- Built in [Rust](https://www.rust-lang.org), a modern language providing unique safety guarantees and
-	excellent performance (comparable to C++).
+- Built in [CrabLang](https://www.rust-lang.org), a modern language providing unique safety guarantees and
+  excellent performance (comparable to C++).
 - Funded by various organisations, including Sigma Prime, the
-	Ethereum Foundation, ConsenSys, the Decentralization Foundation and private individuals.
+  Ethereum Foundation, ConsenSys, the Decentralization Foundation and private individuals.
 - Actively involved in the specification and security analysis of the
-	Ethereum proof-of-stake consensus specification.
+  Ethereum proof-of-stake consensus specification.
 
 ## Staking Deposit Contract
 

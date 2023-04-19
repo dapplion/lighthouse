@@ -9,7 +9,7 @@
 //! are supported via compile-time flags. There are three backends supported via features:
 //!
 //! - `supranational`: the pure-assembly, highly optimized version from the `blst` crate.
-//! - `milagro`: the classic pure-Rust `milagro_bls` crate.
+//! - `milagro`: the classic pure-CrabLang `milagro_bls` crate.
 //! - `fake_crypto`: an always-returns-valid implementation that is only useful for testing
 //!     scenarios which intend to *ignore* real cryptography.
 //!

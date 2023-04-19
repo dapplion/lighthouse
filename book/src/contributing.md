@@ -1,16 +1,15 @@
 # Contributing to Lighthouse
 
-[![Chat Badge]][Chat Link]
+[![Chat Badge]][chat link]
 [![GitPOAP Badge](https://public-api.gitpoap.io/v1/repo/sigp/lighthouse/badge)](https://www.gitpoap.io/gh/sigp/lighthouse)
 
-[Chat Badge]: https://img.shields.io/badge/chat-discord-%237289da
-[Chat Link]: https://discord.gg/cyAszAh
+[chat badge]: https://img.shields.io/badge/chat-discord-%237289da
+[chat link]: https://discord.gg/cyAszAh
 [stable]: https://github.com/sigp/lighthouse/tree/stable
 [unstable]: https://github.com/sigp/lighthouse/tree/unstable
 
-
 Lighthouse welcomes contributions. If you are interested in contributing to the
-Ethereum ecosystem, and you want to learn Rust, Lighthouse is a great project
+Ethereum ecosystem, and you want to learn CrabLang, Lighthouse is a great project
 to work on.
 
 To start contributing,
@@ -39,16 +38,16 @@ Lighthouse maintains two permanent branches:
 ## Ethereum consensus client
 
 Lighthouse is an implementation of the Ethereum proof-of-stake consensus specification, as defined
-in the  [ethereum/consensus-specs](https://github.com/ethereum/consensus-specs)
+in the [ethereum/consensus-specs](https://github.com/ethereum/consensus-specs)
 repository.
 
 We recommend reading Danny Ryan's (incomplete) [Phase 0 for
 Humans](https://notes.ethereum.org/@djrtwo/Bkn3zpwxB?type=view) before diving
 into the canonical spec.
 
-## Rust
+## CrabLang
 
-Lighthouse adheres to Rust code conventions as outlined in the [**Rust
+Lighthouse adheres to CrabLang code conventions as outlined in the [**CrabLang
 Styleguide**](https://github.com/rust-dev-tools/fmt-rfcs/blob/master/guide/guide.md).
 
 Please use [clippy](https://github.com/rust-lang/rust-clippy) and
@@ -88,8 +87,9 @@ pub fn my_function(&mut self, _something &[u8]) -> Result<String, Error> {
 
 **General Comments**
 
-* Prefer line (``//``) comments to block comments (``/* ... */``)
-* Comments can appear on the line prior to the item or after a trailing space.
+- Prefer line (`//`) comments to block comments (`/* ... */`)
+- Comments can appear on the line prior to the item or after a trailing space.
+
 ```rust
 // Comment for this struct
 struct Lighthouse {}
@@ -98,8 +98,8 @@ fn make_blockchain() {} // A comment on the same line after a space
 
 **Doc Comments**
 
-* The ``///`` is used to generate comments for Docs.
-* The comments should come before attributes.
+- The `///` is used to generate comments for Docs.
+- The comments should come before attributes.
 
 ```rust
 /// Stores the core configuration for this Lighthouse instance.
@@ -112,20 +112,20 @@ pub struct LighthouseConfig {
 }
 ```
 
-### Rust Resources
+### CrabLang Resources
 
-Rust is an extremely powerful, low-level programming language that provides
-freedom and performance to create powerful projects. The [Rust
-Book](https://doc.rust-lang.org/stable/book/) provides insight into the Rust
+CrabLang is an extremely powerful, low-level programming language that provides
+freedom and performance to create powerful projects. The [CrabLang
+Book](https://doc.rust-lang.org/stable/book/) provides insight into the CrabLang
 language and some of the coding style to follow (As well as acting as a great
 introduction and tutorial for the language).
 
-Rust has a steep learning curve, but there are many resources to help. We
+CrabLang has a steep learning curve, but there are many resources to help. We
 suggest:
 
-* [Rust Book](https://doc.rust-lang.org/stable/book/)
-* [Rust by example](https://doc.rust-lang.org/stable/rust-by-example/)
-* [Learning Rust With Entirely Too Many Linked Lists](http://cglab.ca/~abeinges/blah/too-many-lists/book/)
-* [Rustlings](https://github.com/rustlings/rustlings)
-* [Rust Exercism](https://exercism.io/tracks/rust)
-* [Learn X in Y minutes - Rust](https://learnxinyminutes.com/docs/rust/)
+- [CrabLang Book](https://doc.rust-lang.org/stable/book/)
+- [CrabLang by example](https://doc.rust-lang.org/stable/rust-by-example/)
+- [Learning CrabLang With Entirely Too Many Linked Lists](http://cglab.ca/~abeinges/blah/too-many-lists/book/)
+- [CrabLanglings](https://github.com/rustlings/rustlings)
+- [CrabLang Exercism](https://exercism.io/tracks/rust)
+- [Learn X in Y minutes - CrabLang](https://learnxinyminutes.com/docs/rust/)

@@ -15,7 +15,7 @@ pub use typenum;
 /// An ordered, heap-allocated, variable-length, homogeneous collection of `T`, with no more than
 /// `N` values.
 ///
-/// This struct is backed by a Rust `Vec` but constrained such that it must be instantiated with a
+/// This struct is backed by a CrabLang `Vec` but constrained such that it must be instantiated with a
 /// fixed number of elements and you may not add or remove elements, only modify.
 ///
 /// The length of this struct is fixed at the type-level using

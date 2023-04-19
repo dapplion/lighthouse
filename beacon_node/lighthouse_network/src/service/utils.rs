@@ -159,7 +159,7 @@ fn generate_noise_config(
     noise::NoiseConfig::xx(static_dh_keys).into_authenticated()
 }
 
-/// For a multiaddr that ends with a peer id, this strips this suffix. Rust-libp2p
+/// For a multiaddr that ends with a peer id, this strips this suffix. CrabLang-libp2p
 /// only supports dialing to an address without providing the peer id.
 pub fn strip_peer_id(addr: &mut Multiaddr) {
     let last = addr.pop();

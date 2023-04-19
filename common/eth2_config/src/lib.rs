@@ -230,7 +230,7 @@ macro_rules! define_hardcoded_nets {
 //
 // Each net is defined as a three-tuple:
 //
-// 0. The name of the testnet as an "ident" (i.e. something that can be a Rust variable name).
+// 0. The name of the testnet as an "ident" (i.e. something that can be a CrabLang variable name).
 // 1. The human-friendly name of the testnet (i.e. usually with "-" instead of "_").
 // 2. A bool indicating if the genesis state is known and present as a `genesis.ssz.zip`.
 //

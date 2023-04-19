@@ -10,11 +10,11 @@ use typenum::Unsigned;
 
 pub use typenum;
 
-/// Emulates a SSZ `Vector` (distinct from a Rust `Vec`).
+/// Emulates a SSZ `Vector` (distinct from a CrabLang `Vec`).
 ///
 /// An ordered, heap-allocated, fixed-length, homogeneous collection of `T`, with `N` values.
 ///
-/// This struct is backed by a Rust `Vec` but constrained such that it must be instantiated with a
+/// This struct is backed by a CrabLang `Vec` but constrained such that it must be instantiated with a
 /// fixed number of elements and you may not add or remove elements, only modify.
 ///
 /// The length of this struct is fixed at the type-level using
