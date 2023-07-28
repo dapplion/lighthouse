@@ -97,6 +97,7 @@ fn syncing_sim(
     beacon_config.http_api.allow_sync_stalled = true;
 
     beacon_config.network.enr_address = (Some(Ipv4Addr::LOCALHOST), None);
+    beacon_config.network.target_peers = 1;
 
     // Generate the directories and keystores required for the validator clients.
     let validator_indices = (0..num_validators).collect::<Vec<_>>();
