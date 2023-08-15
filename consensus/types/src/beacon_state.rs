@@ -54,6 +54,7 @@ pub enum Error {
     IncorrectStateVariant,
     EpochOutOfBounds,
     SlotOutOfBounds,
+    NotCurrentEpoch,
     UnknownValidator(usize),
     UnableToDetermineProducer,
     InvalidBitfield,
@@ -886,10 +887,6 @@ impl<T: EthSpec> BeaconState<T> {
         epoch: Epoch,
         spec: &ChainSpec,
     ) -> Result<Vec<usize>, Error> {
-        if epoch != self.current_epoch() {
-            return Err(Error::SlotOutOfBounds);
-        }
-
         let indices = self.get_active_validator_indices(epoch, spec)?;
 
         let seed_base = self

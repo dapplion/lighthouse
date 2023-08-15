@@ -1,8 +1,7 @@
 use bls::Signature;
 use curdleproofs_whisk::{
     is_g1_generator, is_valid_whisk_tracker_proof, BLSG1Point, TrackerProofBytes,
-    WhiskShuffleProofBytes, WhiskTracker, TRACKER_PROOF_SIZE, WHISK, WHISK_SHUFFLE_ELL,
-    WHISK_SHUFFLE_PROOF_SIZE,
+    WhiskShuffleProofBytes, WhiskTracker, TRACKER_PROOF_SIZE, WHISK, WHISK_SHUFFLE_PROOF_SIZE,
 };
 use ethereum_hashing::hash;
 use int_to_bytes::int_to_bytes8;
@@ -13,14 +12,6 @@ use types::{
 };
 
 use crate::BlockProcessingError;
-
-/// Return true if at `epoch` validator should shuffle candidate trackers
-#[allow(clippy::arithmetic_side_effects)]
-pub fn should_shuffle_trackers<T: EthSpec>(epoch: Epoch) -> bool {
-    // (clippy::arithmetic_side_effects) Will never divide by zero
-    epoch % T::whisk_epochs_per_shuffling_phase() + T::whisk_proposer_selection_gap() + 1
-        < T::whisk_epochs_per_shuffling_phase()
-}
 
 pub fn process_whisk_registration<T: EthSpec, Payload: AbstractExecPayload<T>>(
     state: &mut BeaconState<T>,
@@ -187,16 +178,16 @@ pub fn process_shuffled_trackers<T: EthSpec, Payload: AbstractExecPayload<T>>(
 
         // Actual count of shuffled trackers is `ELL - N_BLINDERS`. See:
         // https://github.com/dapplion/curdleproofs/blob/641c5692f285c3f3672c53022f52a1b199f0b338/src/lib.rs#L32-L33
-        let post_shuffle_trackers: Vec<WhiskTracker> = whisk_post_shuffle_trackers
-            .iter()
-            .take(WHISK_SHUFFLE_ELL)
-            .cloned()
-            .collect();
+        let post_shuffle_trackers: Vec<WhiskTracker> =
+            whisk_post_shuffle_trackers.iter().cloned().collect();
 
         if !should_shuffle_trackers::<T>(current_epoch) {
-            // Require unchanged trackers during cooldown
+            // Require zero-ed trackers during cooldown
+            let zero_tracker = WhiskTracker::default();
             block_verify!(
-                pre_shuffle_trackers == post_shuffle_trackers,
+                post_shuffle_trackers
+                    .iter()
+                    .all(|tracker| tracker == &zero_tracker),
                 BlockProcessingError::InvalidWhisk("changed trackers during cooldown".to_string())
             );
         } else {
@@ -224,19 +215,37 @@ pub fn process_shuffled_trackers<T: EthSpec, Payload: AbstractExecPayload<T>>(
     Ok(())
 }
 
+/// Return true if at `epoch` validator should shuffle candidate trackers
+#[allow(clippy::arithmetic_side_effects)]
+pub fn should_shuffle_trackers<T: EthSpec>(epoch: Epoch) -> bool {
+    // (clippy::arithmetic_side_effects) Will never divide by zero
+    epoch % T::whisk_epochs_per_shuffling_phase() + T::whisk_proposer_selection_gap() + 1
+        < T::whisk_epochs_per_shuffling_phase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types::MinimalEthSpec;
+    use types::{MainnetEthSpec, MinimalEthSpec};
 
     #[test]
     fn test_should_shuffle_trackers_minimal_spec() {
         test_should_shuffle_trackers_on_spec::<MinimalEthSpec>("minimal");
     }
 
+    #[test]
+    fn test_should_shuffle_trackers_mainnet_spec() {
+        test_should_shuffle_trackers_on_spec::<MainnetEthSpec>("mainnet");
+    }
+
     fn test_should_shuffle_trackers_on_spec<T: EthSpec>(spec_name: &str) {
+        dbg!((
+            T::whisk_proposer_selection_gap(),
+            T::whisk_epochs_per_shuffling_phase()
+        ));
         for (i, (epoch, expected_result)) in [
             (0, true),
+            (1, true),
             (T::whisk_epochs_per_shuffling_phase(), true),
             (T::whisk_epochs_per_shuffling_phase() - 1, false),
             (

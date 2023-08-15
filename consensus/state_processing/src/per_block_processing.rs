@@ -13,10 +13,7 @@ pub use self::verify_attester_slashing::{
     get_slashable_indices, get_slashable_indices_modular, verify_attester_slashing,
 };
 pub use self::verify_proposer_slashing::verify_proposer_slashing;
-use self::whisk::{
-    process_shuffled_trackers, process_whisk_registration,
-    ssz_tracker_proof_to_crypto_tracker_proof,
-};
+use self::whisk::{process_shuffled_trackers, process_whisk_registration};
 pub use altair::sync_committee::process_sync_aggregate;
 pub use block_signature_verifier::{BlockSignatureVerifier, ParallelSignatureSets};
 pub use is_valid_indexed_attestation::is_valid_indexed_attestation;
@@ -29,7 +26,9 @@ pub use verify_deposit::{
     get_existing_validator_index, verify_deposit_merkle_proof, verify_deposit_signature,
 };
 pub use verify_exit::verify_exit;
-pub use whisk::{get_shuffle_indices, should_shuffle_trackers};
+pub use whisk::{
+    get_shuffle_indices, should_shuffle_trackers, ssz_tracker_proof_to_crypto_tracker_proof,
+};
 
 pub mod altair;
 pub mod block_signature_verifier;

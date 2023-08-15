@@ -4613,17 +4613,21 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     .iter()
                     .map(|i| whisk_candidate_trackers[*i].clone())
                     .collect();
-                let (whisk_post_shuffle_trackers, whisk_shuffle_proof) =
-                    if should_shuffle_trackers::<T::EthSpec>(
-                        produce_at_slot.epoch(T::EthSpec::slots_per_epoch()),
-                    ) {
-                        WHISK
-                            .generate_whisk_shuffle_proof(&pre_shuffle_trackers)
-                            .map_err(BlockProductionError::WhiskSerializationError)?
-                    } else {
-                        // Require unchanged trackers during cooldown
-                        (pre_shuffle_trackers, [0; WHISK_SHUFFLE_PROOF_SIZE])
-                    };
+                let (whisk_post_shuffle_trackers, whisk_shuffle_proof) = if should_shuffle_trackers::<
+                    T::EthSpec,
+                >(
+                    produce_at_slot.epoch(T::EthSpec::slots_per_epoch()),
+                ) {
+                    WHISK
+                        .generate_whisk_shuffle_proof(&pre_shuffle_trackers)
+                        .map_err(BlockProductionError::WhiskSerializationError)?
+                } else {
+                    // Require zero-ed trackers during cooldown
+                    (
+                        vec![WhiskTracker::default(); T::EthSpec::whisk_validators_per_shuffle()],
+                        [0; WHISK_SHUFFLE_PROOF_SIZE],
+                    )
+                };
 
                 // proposer_index is untrusted data submited by an API caller
                 let proposer_validator_tracker = &whisk_validator_trackers

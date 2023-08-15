@@ -2,6 +2,7 @@ use crate::*;
 
 use safe_arith::SafeArith;
 use serde_derive::{Deserialize, Serialize};
+use ssz_types::typenum::U124;
 use ssz_types::typenum::{
     bit::B0, op, UInt, Unsigned, U0, U1024, U1048576, U1073741824, U1099511627776, U128, U16,
     U16384, U16777216, U2, U2048, U256, U32, U4, U4096, U48, U480, U512, U625, U64, U65536, U8,
@@ -331,7 +332,8 @@ impl EthSpec for MainnetEthSpec {
     type WhiskCandidateTrackersCount = U16384;
     type WhiskProposerTrackersCount = U8192;
     type WhiskEpochsPerShufflingPhase = U256;
-    type WhiskValidatorsPerShuffle = U128;
+    // Actual count of shuffled trackers is `ELL = N - N_BLINDERS`
+    type WhiskValidatorsPerShuffle = U124;
     type WhiskProposerSelectionGap = U2;
     type WhiskMaxShuffleProofSize = U4576;
     type WhiskMaxOpeningProofSize = U128;
@@ -364,7 +366,7 @@ impl EthSpec for MinimalEthSpec {
     type WhiskCandidateTrackersCount = U256;
     type WhiskProposerTrackersCount = U128;
     type WhiskEpochsPerShufflingPhase = U16;
-    type WhiskValidatorsPerShuffle = U128;
+    type WhiskValidatorsPerShuffle = U124;
     type WhiskProposerSelectionGap = U2;
     type WhiskMaxShuffleProofSize = U4576;
     type WhiskMaxOpeningProofSize = U128;
@@ -438,7 +440,7 @@ impl EthSpec for GnosisEthSpec {
     type WhiskCandidateTrackersCount = U16384;
     type WhiskProposerTrackersCount = U8192;
     type WhiskEpochsPerShufflingPhase = U256;
-    type WhiskValidatorsPerShuffle = U128;
+    type WhiskValidatorsPerShuffle = U124;
     type WhiskProposerSelectionGap = U2;
     type WhiskMaxShuffleProofSize = U4576;
     type WhiskMaxOpeningProofSize = U128;
