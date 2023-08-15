@@ -164,18 +164,6 @@ pub fn process_shuffled_trackers<T: EthSpec, Payload: AbstractExecPayload<T>>(
         body.whisk_post_shuffle_trackers(),
         body.whisk_shuffle_proof(),
     ) {
-        // Given a `randao_reveal` return the list of indices that got shuffled from the entire candidate set
-        let shuffle_indices = get_shuffle_indices::<T>(body.randao_reveal());
-        let mut pre_shuffle_trackers: Vec<WhiskTracker> = vec![];
-        for i in shuffle_indices.iter() {
-            pre_shuffle_trackers.push(
-                whisk_candidate_trackers
-                    .get(*i)
-                    .ok_or(BlockProcessingError::ShuffleIndexOutOfBounds)?
-                    .clone(),
-            );
-        }
-
         // Actual count of shuffled trackers is `ELL - N_BLINDERS`. See:
         // https://github.com/dapplion/curdleproofs/blob/641c5692f285c3f3672c53022f52a1b199f0b338/src/lib.rs#L32-L33
         let post_shuffle_trackers: Vec<WhiskTracker> =
@@ -191,6 +179,18 @@ pub fn process_shuffled_trackers<T: EthSpec, Payload: AbstractExecPayload<T>>(
                 BlockProcessingError::InvalidWhisk("changed trackers during cooldown".to_string())
             );
         } else {
+            // Given a `randao_reveal` return the list of indices that got shuffled from the entire candidate set
+            let shuffle_indices = get_shuffle_indices::<T>(body.randao_reveal());
+            let mut pre_shuffle_trackers: Vec<WhiskTracker> = vec![];
+            for i in shuffle_indices.iter() {
+                pre_shuffle_trackers.push(
+                    whisk_candidate_trackers
+                        .get(*i)
+                        .ok_or(BlockProcessingError::ShuffleIndexOutOfBounds)?
+                        .clone(),
+                );
+            }
+
             // Require shuffled trackers during shuffle
             block_verify!(
                 WHISK
@@ -202,13 +202,13 @@ pub fn process_shuffled_trackers<T: EthSpec, Payload: AbstractExecPayload<T>>(
                     .is_ok(),
                 BlockProcessingError::InvalidWhisk("invalid shuffle proof".to_string())
             );
-        }
 
-        // Shuffle candidate trackers
-        for (tracker, index) in post_shuffle_trackers.into_iter().zip(shuffle_indices) {
-            *whisk_candidate_trackers
-                .get_mut(index)
-                .ok_or(BlockProcessingError::ShuffleIndexOutOfBounds)? = tracker;
+            // Shuffle candidate trackers
+            for (tracker, index) in post_shuffle_trackers.into_iter().zip(shuffle_indices) {
+                *whisk_candidate_trackers
+                    .get_mut(index)
+                    .ok_or(BlockProcessingError::ShuffleIndexOutOfBounds)? = tracker;
+            }
         }
     }
 

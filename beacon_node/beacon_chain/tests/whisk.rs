@@ -15,8 +15,37 @@ use types::*;
 //   the state are computed with different k values.
 
 const VALIDATOR_COUNT: usize = 32;
-type E = MainnetEthSpec;
-// type E = MinimalEthSpec;
+// type E = MainnetEthSpec;
+type E = MinimalEthSpec;
+
+fn assert_non_zero_tracker_list(trackers: &[WhiskTracker], id: &str) {
+    let zero_tracker = WhiskTracker::default();
+    let zero_indexes = trackers
+        .iter()
+        .enumerate()
+        .filter(|(_, tracker)| *tracker == &zero_tracker)
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    assert!(
+        zero_indexes.is_empty(),
+        "whisk trackers {id} has zero trackers on indexes {zero_indexes:?}"
+    );
+}
+
+fn assert_whisk_state_is_populated<E: EthSpec>(state: &BeaconState<E>) {
+    assert_non_zero_tracker_list(
+        state.whisk_validator_trackers().expect("not a whisk state"),
+        "validator",
+    );
+    assert_non_zero_tracker_list(
+        state.whisk_candidate_trackers().expect("not a whisk state"),
+        "candidate",
+    );
+    assert_non_zero_tracker_list(
+        state.whisk_proposer_trackers().expect("not a whisk state"),
+        "proposer",
+    );
+}
 
 #[tokio::test]
 async fn whisk_few_epochs() {
@@ -42,6 +71,9 @@ async fn whisk_few_epochs() {
 
     println!("built harness");
 
+    // Sanity check to ensure all trackers are properly initialized
+    assert_whisk_state_is_populated(&harness.chain.head_snapshot().beacon_state);
+
     /*
      * Start with the base fork.
      */
@@ -64,6 +96,7 @@ async fn whisk_few_epochs() {
             .clone()
             .into();
 
+        assert_whisk_state_is_populated(&harness.chain.head_snapshot().beacon_state);
         // post-capella should have withdrawals
         assert!(full_payload.withdrawals_root().is_ok());
 
