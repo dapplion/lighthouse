@@ -241,6 +241,8 @@ easy_from_to!(StateAdvanceError, BeaconChainError);
 easy_from_to!(BlockReplayError, BeaconChainError);
 easy_from_to!(InconsistentFork, BeaconChainError);
 
+type WhiskSerializationError = curdleproofs_whisk::SerializationError;
+
 #[derive(Debug)]
 pub enum BlockProductionError {
     UnableToGetBlockRootFromState,
@@ -276,7 +278,7 @@ pub enum BlockProductionError {
     MissingWhiskProposerK,
     MissingWhiskFields,
     ExpectedPostWhiskData,
-    WhiskSerializationError(curdleproofs_whisk::SerializationError),
+    WhiskSerializationError(WhiskSerializationError),
     WhiskInvalid(String),
     WhiskNotTrackerProposer {
         proposer_index: u64,
@@ -293,3 +295,4 @@ easy_from_to!(SlotProcessingError, BlockProductionError);
 easy_from_to!(Eth1ChainError, BlockProductionError);
 easy_from_to!(StateAdvanceError, BlockProductionError);
 easy_from_to!(ForkChoiceError, BlockProductionError);
+easy_from_to!(WhiskSerializationError, BlockProductionError);

@@ -4618,9 +4618,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 >(
                     produce_at_slot.epoch(T::EthSpec::slots_per_epoch()),
                 ) {
-                    WHISK
-                        .generate_whisk_shuffle_proof(&pre_shuffle_trackers)
-                        .map_err(BlockProductionError::WhiskSerializationError)?
+                    WHISK.generate_whisk_shuffle_proof(&pre_shuffle_trackers)?
                 } else {
                     // Require zero-ed trackers during cooldown
                     (
@@ -4643,11 +4641,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 let (whisk_registration_proof, whisk_tracker, whisk_k_commitment) =
                     if is_first_proposal {
                         // First proposal, validator creates tracker for registering
-                        let (whisk_k_commitment, whisk_tracker) = compute_tracker(&proposer_k)
-                            .map_err(BlockProductionError::WhiskSerializationError)?;
+                        let (whisk_k_commitment, whisk_tracker) = compute_tracker(&proposer_k)?;
                         let whisk_registration_proof =
-                            generate_whisk_tracker_proof(&whisk_tracker, &proposer_k)
-                                .map_err(BlockProductionError::WhiskSerializationError)?;
+                            generate_whisk_tracker_proof(&whisk_tracker, &proposer_k)?;
                         (
                             // TODO: More efficient conversion?
                             whisk_registration_proof.to_vec().try_into().map_err(|_| {
@@ -4683,9 +4679,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 // Indexes with mod len, always in bounds
                 let proposer_slot_tracker_bytes = &whisk_proposer_trackers
                     [produce_at_slot.as_usize() % whisk_proposer_trackers.len()];
-                let proposer_slot_tracker = proposer_slot_tracker_bytes
-                    .try_into()
-                    .map_err(BlockProductionError::WhiskSerializationError)?;
+                let proposer_slot_tracker = proposer_slot_tracker_bytes.try_into()?;
 
                 // Force proposers into picking a safe k
                 if proposer_k == initial_proposer_k {
@@ -4707,24 +4701,20 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     if is_matching_tracker(&proposer_slot_tracker, &proposer_k) {
                         // Must check before that proposer_k != initial_proposer_k
                         // if slot tracker == tracker(k1), validator's k commitment can not be c(k0)
-                        generate_whisk_tracker_proof(proposer_slot_tracker_bytes, &proposer_k)
-                            .map_err(BlockProductionError::WhiskSerializationError)?
+                        generate_whisk_tracker_proof(proposer_slot_tracker_bytes, &proposer_k)?
                     } else if is_matching_tracker(&proposer_slot_tracker, &initial_proposer_k) {
                         // Check if proposer's k commitment is for k0 or k1
                         let proposer_k_commitment = whisk_validator_k_commitments
                             .get(proposer_index as usize)
                             .ok_or(BlockProductionError::ProposerOutOfBounds)?;
                         let initial_proposer_k_commitment: BLSG1Point =
-                            bls_g1_scalar_multiply_generator(&initial_proposer_k)
-                                .try_into()
-                                .map_err(BlockProductionError::WhiskSerializationError)?;
+                            bls_g1_scalar_multiply_generator(&initial_proposer_k).try_into()?;
                         if proposer_k_commitment == &initial_proposer_k_commitment {
                             // tracker(k0) & commitment(k0)
                             generate_whisk_tracker_proof(
                                 proposer_slot_tracker_bytes,
                                 &initial_proposer_k,
-                            )
-                            .map_err(BlockProductionError::WhiskSerializationError)?
+                            )?
                         } else {
                             // tracker(k0) & commitment(k1)
                             // The same proposer can be in the proposer_trackers more than once, which are
