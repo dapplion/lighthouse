@@ -1,5 +1,5 @@
 use curdleproofs::curdleproofs::SerializationError;
-use curdleproofs::whisk::{from_g1_compressed, to_g1_compressed};
+use curdleproofs::whisk::{from_bytes_g1affine, to_bytes_g1affine};
 use derivative::Derivative;
 use serde::de::{Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
@@ -123,27 +123,27 @@ impl arbitrary::Arbitrary<'_> for BLSG1Point {
 impl TryInto<curdleproofs::whisk::G1Affine> for &BLSG1Point {
     type Error = SerializationError;
     fn try_into(self) -> Result<curdleproofs::whisk::G1Affine, Self::Error> {
-        from_g1_compressed(&self.0)
+        from_bytes_g1affine(&self.0)
     }
 }
 
 impl TryInto<curdleproofs::whisk::G1Affine> for BLSG1Point {
     type Error = SerializationError;
     fn try_into(self) -> Result<curdleproofs::whisk::G1Affine, Self::Error> {
-        from_g1_compressed(&self.0)
+        from_bytes_g1affine(&self.0)
     }
 }
 
 impl TryFrom<&curdleproofs::whisk::G1Affine> for BLSG1Point {
     type Error = SerializationError;
     fn try_from(value: &curdleproofs::whisk::G1Affine) -> Result<Self, Self::Error> {
-        Ok(BLSG1Point(to_g1_compressed(value)?))
+        Ok(BLSG1Point(to_bytes_g1affine(value)?))
     }
 }
 
 impl TryFrom<curdleproofs::whisk::G1Affine> for BLSG1Point {
     type Error = SerializationError;
     fn try_from(value: curdleproofs::whisk::G1Affine) -> Result<Self, Self::Error> {
-        Ok(BLSG1Point(to_g1_compressed(&value)?))
+        Ok(BLSG1Point(to_bytes_g1affine(&value)?))
     }
 }

@@ -1445,7 +1445,7 @@ dependencies = [
 [[package]]
 name = "curdleproofs"
 version = "0.0.1"
-source = "git+https://github.com/asn-d6/curdleproofs.git?rev=9f1802653c67c78d9aacf22c3a51bb663577f540#9f1802653c67c78d9aacf22c3a51bb663577f540"
+source = "git+https://github.com/asn-d6/curdleproofs.git?rev=38df4e5dbf9ea84e9e612a4fd675e8278969f81f#38df4e5dbf9ea84e9e612a4fd675e8278969f81f"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",

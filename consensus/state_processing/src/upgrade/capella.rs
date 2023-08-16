@@ -1,5 +1,5 @@
 use bls::PublicKeyBytes;
-use curdleproofs_whisk::{compute_initial_tracker, deserialize_fr, Fr};
+use curdleproofs_whisk::{compute_initial_tracker, from_bytes_fr, Fr};
 use ethereum_hashing::hash;
 use ssz_types::{FixedVector, VariableList};
 use std::mem;
@@ -137,5 +137,5 @@ pub fn compute_initial_whisk_k(validator: &Validator) -> Fr {
 }
 
 pub fn compute_initial_whisk_k_from_pubkey(pubkey: &PublicKeyBytes) -> Fr {
-    deserialize_fr(&hash(pubkey.as_serialized()))
+    from_bytes_fr(&hash(pubkey.as_serialized()))
 }

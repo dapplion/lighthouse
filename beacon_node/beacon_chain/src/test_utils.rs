@@ -14,9 +14,7 @@ use crate::{
     StateSkipConfig,
 };
 use bls::get_withdrawal_credentials;
-use curdleproofs_whisk::{
-    deserialize_fr, is_matching_tracker, serialize_fr, FieldElementBytes, Fr,
-};
+use curdleproofs_whisk::{from_bytes_fr, is_matching_tracker, to_bytes_fr, FieldElementBytes, Fr};
 use eth2::types::WhiskProposer;
 use ethereum_hashing::hash;
 use execution_layer::{
@@ -865,7 +863,7 @@ where
     pub fn get_proposer_k(&self, proposer_index: usize) -> Fr {
         // TEMP: Same logic as initialized_validators.rs:312
         let sk = &self.validator_keypairs[proposer_index].sk;
-        deserialize_fr(&hash(sk.serialize().as_bytes()))
+        from_bytes_fr(&hash(sk.serialize().as_bytes()))
     }
 
     pub fn find_whisk_proposer(

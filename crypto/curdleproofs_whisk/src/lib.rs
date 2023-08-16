@@ -5,14 +5,13 @@ pub use crate::{bls_g1_point::BLSG1Point, whisk_tracker::WhiskTracker};
 pub use curdleproofs::{
     curdleproofs::SerializationError,
     whisk::{
-        bls_g1_scalar_multiply, bytes_to_bls_field, deserialize_fr, serialize_fr,
-        FieldElementBytes, Fr, G1Affine, TrackerProofBytes, WhiskShuffleProofBytes,
-        TRACKER_PROOF_SIZE, WHISK_SHUFFLE_PROOF_SIZE,
+        bls_g1_scalar_multiply, from_bytes_fr, to_bytes_fr, FieldElementBytes, Fr, G1Affine,
+        TrackerProofBytes, WhiskShuffleProofBytes, TRACKER_PROOF_SIZE, WHISK_SHUFFLE_PROOF_SIZE,
     },
 };
 use curdleproofs::{
     curdleproofs::{generate_crs, CanonicalDeserialize, CanonicalSerialize, CurdleproofsCrs},
-    whisk::{from_g1_compressed, g1_generator, rand_scalar, to_g1_compressed},
+    whisk::{from_bytes_g1affine, g1_generator, rand_scalar, to_bytes_g1affine},
     N_BLINDERS,
 };
 use lazy_static::lazy_static;
@@ -30,7 +29,7 @@ lazy_static! {
         Whisk::new_from_trusted_setup(Cursor::new(TRUSTED_SETUP)).unwrap();
     pub static ref BLS_G1_GENERATOR: G1Affine = g1_generator();
     pub static ref BLS_G1_GENERATOR_BYTES: BLSG1Point =
-        BLSG1Point(to_g1_compressed(&g1_generator()).unwrap());
+        BLSG1Point(to_bytes_g1affine(&g1_generator()).unwrap());
 }
 
 pub struct Whisk {
@@ -139,8 +138,8 @@ pub fn bls_g1_scalar_multiply_generator(scalar: &Fr) -> G1Affine {
 pub fn compute_initial_tracker(k: &Fr) -> Result<(BLSG1Point, WhiskTracker), SerializationError> {
     let k_g = bls_g1_scalar_multiply(&BLS_G1_GENERATOR, k);
     let tracker = curdleproofs::whisk::WhiskTracker {
-        r_G: to_g1_compressed(&BLS_G1_GENERATOR)?,
-        k_r_G: to_g1_compressed(&k_g)?,
+        r_G: to_bytes_g1affine(&BLS_G1_GENERATOR)?,
+        k_r_G: to_bytes_g1affine(&k_g)?,
     };
     Ok(((&k_g).try_into()?, (&tracker).into()))
 }
@@ -151,8 +150,8 @@ pub fn compute_tracker(k: &Fr) -> Result<(G1Affine, WhiskTracker), Serialization
     let r = rand_scalar(rng);
     let k_g = bls_g1_scalar_multiply(&BLS_G1_GENERATOR, k);
     let tracker = curdleproofs::whisk::WhiskTracker {
-        r_G: to_g1_compressed(&bls_g1_scalar_multiply(&BLS_G1_GENERATOR, &r))?,
-        k_r_G: to_g1_compressed(&bls_g1_scalar_multiply(&k_g, &r))?,
+        r_G: to_bytes_g1affine(&bls_g1_scalar_multiply(&BLS_G1_GENERATOR, &r))?,
+        k_r_G: to_bytes_g1affine(&bls_g1_scalar_multiply(&k_g, &r))?,
     };
     Ok((k_g, (&tracker).into()))
 }
@@ -198,8 +197,8 @@ pub fn deserialize_tracker(
     tracker: &curdleproofs::whisk::WhiskTracker,
 ) -> Result<WhiskTrackerG1Affine, SerializationError> {
     Ok(WhiskTrackerG1Affine {
-        r_g: from_g1_compressed(&tracker.r_G)?,
-        k_r_g: from_g1_compressed(&tracker.k_r_G)?,
+        r_g: from_bytes_g1affine(&tracker.r_G)?,
+        k_r_g: from_bytes_g1affine(&tracker.k_r_G)?,
     })
 }
 
@@ -216,25 +215,34 @@ mod tests {
     fn compute_tracker_rand_r() {
         let k = compute_initial_k(12345678);
         let (k_commitment, tracker) = compute_tracker(&k).unwrap();
-        assert_ne!(tracker.r_g.0, to_g1_compressed(&BLS_G1_GENERATOR).unwrap());
-        assert_ne!(k_commitment, from_g1_compressed(&tracker.k_r_g.0).unwrap());
+        assert_ne!(tracker.r_g.0, to_bytes_g1affine(&BLS_G1_GENERATOR).unwrap());
+        assert_ne!(k_commitment, from_bytes_g1affine(&tracker.k_r_g.0).unwrap());
+    }
+
+    #[test]
+    fn serde_fr_rand() {
+        let k_bytes =
+            hex::decode("9ebde6d84a58debe5ef02c729366a76078a15a653aa6234aeab6996ce47f8d2a")
+                .unwrap();
+        let k = from_bytes_fr(&k_bytes);
+        assert_eq!(to_bytes_fr(&k).as_slice(), &k_bytes);
     }
 
     #[test]
     fn serdes_fr_low_val() {
         let k_bytes = [0x02; 32]; // some rand value < mod
-        let k = deserialize_fr(&k_bytes);
+        let k = from_bytes_fr(&k_bytes);
         assert_eq!(k.serialized_size(), 32);
-        assert_eq!(serialize_fr(&k), k_bytes);
+        assert_eq!(to_bytes_fr(&k), k_bytes);
     }
 
     #[test]
     fn serdes_fr_high_val() {
         let k_bytes = [0xff; 32]; // some rand value > mod
-        let k = deserialize_fr(&k_bytes);
+        let k = from_bytes_fr(&k_bytes);
         assert_eq!(k.serialized_size(), 32);
         assert_eq!(
-            hex::encode(serialize_fr(&k)),
+            hex::encode(to_bytes_fr(&k)),
             "fdffffff0100000002480300fab78458f54fbcecef4f8c996f05c5ac59b12418"
         );
     }
@@ -248,7 +256,7 @@ mod tests {
 
     /// Compute k for validator at `index` for its first proposal after Whisk
     pub fn compute_initial_k(index: u64) -> Fr {
-        deserialize_fr(&index.to_be_bytes())
+        from_bytes_fr(&index.to_be_bytes())
     }
 
     #[test]
@@ -415,7 +423,7 @@ mod tests {
         };
 
         // k must be kept
-        let proposer_k = deserialize_fr([1; 32].as_slice());
+        let proposer_k = from_bytes_fr([1; 32].as_slice());
 
         // On first proposal, validator creates tracker for registering
         let block_0 = produce_block(&state, &proposer_k, proposer_index);

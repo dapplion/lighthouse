@@ -60,9 +60,9 @@ use crate::validator_monitor::{
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
 use crate::{metrics, BeaconChainError, BeaconForkChoiceStore, BeaconSnapshot, CachedHead};
 use curdleproofs_whisk::{
-    bls_g1_scalar_multiply_generator, compute_tracker, deserialize_fr,
-    generate_whisk_tracker_proof, is_g1_generator, is_matching_tracker, BLSG1Point,
-    TRACKER_PROOF_SIZE, WHISK, WHISK_SHUFFLE_PROOF_SIZE,
+    bls_g1_scalar_multiply_generator, compute_tracker, from_bytes_fr, generate_whisk_tracker_proof,
+    is_g1_generator, is_matching_tracker, BLSG1Point, TRACKER_PROOF_SIZE, WHISK,
+    WHISK_SHUFFLE_PROOF_SIZE,
 };
 use eth2::types::{EventKind, SseBlock, SseExtendedPayloadAttributes, SyncDuty, WhiskProposer};
 use execution_layer::{
@@ -4595,7 +4595,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 ref validators,
                 ..
             }) => {
-                let proposer_k = deserialize_fr(match &whisk_proposer {
+                let proposer_k = from_bytes_fr(match &whisk_proposer {
                     WhiskProposer::PreWhisk => {
                         return Err(BlockProductionError::ExpectedPostWhiskData)
                     }

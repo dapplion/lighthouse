@@ -4,9 +4,7 @@ use beacon_chain::{
     test_utils::{AttestationStrategy, BlockStrategy, SyncCommitteeStrategy},
     ChainConfig,
 };
-use curdleproofs_whisk::{
-    deserialize_fr, is_matching_tracker, serialize_fr, FieldElementBytes, Fr,
-};
+use curdleproofs_whisk::{from_bytes_fr, is_matching_tracker, to_bytes_fr, FieldElementBytes, Fr};
 use eth2::types::{BeaconState, ChainSpec, DepositContractData, StateId, WhiskProposer};
 use execution_layer::{ForkchoiceState, PayloadAttributes};
 use http_api::test_utils::InteractiveTester;
@@ -373,7 +371,7 @@ pub async fn proposer_boost_re_org_weight_misprediction() {
 fn get_proposer_k(proposer_index: usize) -> Fr {
     let mut slice = [0xffu8; 32];
     slice[..8].copy_from_slice(&(proposer_index as u64).to_ne_bytes());
-    deserialize_fr(&slice)
+    from_bytes_fr(&slice)
 }
 
 fn find_whisk_proposer(state: &BeaconState<E>, slot: Slot) -> Option<(usize, FieldElementBytes)> {
@@ -395,7 +393,7 @@ fn find_whisk_proposer(state: &BeaconState<E>, slot: Slot) -> Option<(usize, Fie
             is_matching_tracker(&proposer_tracker, k)
                 || is_matching_tracker(&proposer_tracker, &initial_k)
         })
-        .map(|(index, k)| (index, serialize_fr(&k)))
+        .map(|(index, k)| (index, to_bytes_fr(&k)))
 }
 
 fn get_proposer(spec: &ChainSpec, state: &BeaconState<E>, slot: Slot) -> (usize, WhiskProposer) {

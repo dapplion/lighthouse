@@ -19,7 +19,7 @@ serde_derive = "1.0.116"
 ethereum_serde_utils = "0.5.0"
 hex = "0.4.2"
 arbitrary = { version = "1.0", features = ["derive"], optional = true }
-curdleproofs = { git = "https://github.com/asn-d6/curdleproofs.git", rev = "9f1802653c67c78d9aacf22c3a51bb663577f540" }
+curdleproofs = { git = "https://github.com/asn-d6/curdleproofs.git", rev = "38df4e5dbf9ea84e9e612a4fd675e8278969f81f" }
 ark-std = "^0.3.0"
 
 [dev-dependencies]

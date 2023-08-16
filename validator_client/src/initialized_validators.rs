@@ -15,7 +15,7 @@ use account_utils::{
     },
     ZeroizeString,
 };
-use curdleproofs_whisk::{deserialize_fr, serialize_fr, FieldElementBytes, Fr};
+use curdleproofs_whisk::{from_bytes_fr, to_bytes_fr, FieldElementBytes, Fr};
 use eth2_keystore::Keystore;
 use ethereum_hashing::hash;
 use lighthouse_metrics::set_gauge;
@@ -343,16 +343,16 @@ impl InitializedValidator {
                 voting_public_key, ..
             } => voting_public_key.serialize(),
         };
-        let initial_proposer_k = deserialize_fr(&hash(&pubkey));
+        let initial_proposer_k = from_bytes_fr(&hash(&pubkey));
 
         let proposer_k = match &signing_method {
             // TODO: Temp, standarize a derivation fn for k common between remote and local keys
             SigningMethod::LocalKeystore { voting_keypair, .. } => {
-                deserialize_fr(&hash(voting_keypair.sk.serialize().as_bytes()))
+                from_bytes_fr(&hash(voting_keypair.sk.serialize().as_bytes()))
             }
             SigningMethod::Web3Signer {
                 voting_public_key, ..
-            } => deserialize_fr(&hash(&voting_public_key.serialize())),
+            } => from_bytes_fr(&hash(&voting_public_key.serialize())),
         };
 
         Ok(Self {
@@ -762,7 +762,7 @@ impl InitializedValidators {
     pub fn proposer_k(&self, public_key: &PublicKeyBytes) -> Option<FieldElementBytes> {
         self.validators
             .get(public_key)
-            .map(|v| serialize_fr(&v.proposer_k))
+            .map(|v| to_bytes_fr(&v.proposer_k))
     }
 
     /// Returns a `HashMap` of `public_key` -> `graffiti` for all initialized validators.
