@@ -16,7 +16,6 @@ use curdleproofs::{
     N_BLINDERS,
 };
 use lazy_static::lazy_static;
-use rand::{rngs::StdRng, SeedableRng};
 use std::io::{Cursor, Read};
 
 pub type BLSFieldElement = [u8; 32];
@@ -67,11 +66,10 @@ impl Whisk {
         post_shuffle_trackers: &[WhiskTracker],
         shuffle_proof: &WhiskShuffleProofBytes,
     ) -> Result<bool, SerializationError> {
-        // TODO: Where to instantiate RNG?
-        let mut rng = StdRng::seed_from_u64(0u64);
+        let rng = &mut rand::thread_rng();
 
         curdleproofs::whisk::is_valid_whisk_shuffle_proof(
-            &mut rng,
+            rng,
             &self.crs,
             &deserialize_shuffle_trackers(pre_shuffle_trackers),
             &deserialize_shuffle_trackers(post_shuffle_trackers),
@@ -83,14 +81,13 @@ impl Whisk {
         &self,
         pre_shuffle_trackers: &[WhiskTracker],
     ) -> Result<(Vec<WhiskTracker>, WhiskShuffleProofBytes), SerializationError> {
-        // TODO: Where to instantiate RNG?
-        let mut rng = StdRng::seed_from_u64(0u64);
+        let rng = &mut rand::thread_rng();
 
         let pre_shuffle_trackers = deserialize_shuffle_trackers(pre_shuffle_trackers);
 
         let (post_shuffle_trackers, shuffle_proof) =
             curdleproofs::whisk::generate_whisk_shuffle_proof(
-                &mut rng,
+                rng,
                 &self.crs,
                 &pre_shuffle_trackers,
             )?;
@@ -126,9 +123,8 @@ pub fn generate_whisk_tracker_proof(
     tracker: &WhiskTracker,
     k: &Fr,
 ) -> Result<TrackerProofBytes, SerializationError> {
-    // TODO: Where to instantiate RNG?
-    let mut rng = StdRng::seed_from_u64(0u64);
-    curdleproofs::whisk::generate_whisk_tracker_proof(&mut rng, &tracker.into(), k)
+    let rng = &mut rand::thread_rng();
+    curdleproofs::whisk::generate_whisk_tracker_proof(rng, &tracker.into(), k)
 }
 
 pub fn is_g1_generator(g1_point: &BLSG1Point) -> bool {
@@ -151,8 +147,8 @@ pub fn compute_initial_tracker(k: &Fr) -> Result<(BLSG1Point, WhiskTracker), Ser
 
 /// Returns Tracker where r is random, and forgotten
 pub fn compute_tracker(k: &Fr) -> Result<(G1Affine, WhiskTracker), SerializationError> {
-    let mut rng = StdRng::seed_from_u64(0u64);
-    let r = rand_scalar(&mut rng);
+    let rng = &mut rand::thread_rng();
+    let r = rand_scalar(rng);
     let k_g = bls_g1_scalar_multiply(&BLS_G1_GENERATOR, k);
     let tracker = curdleproofs::whisk::WhiskTracker {
         r_G: to_g1_compressed(&bls_g1_scalar_multiply(&BLS_G1_GENERATOR, &r))?,
@@ -215,6 +211,14 @@ pub fn is_matching_tracker(tracker: &WhiskTrackerG1Affine, k: &Fr) -> bool {
 mod tests {
     use super::*;
     use curdleproofs::whisk::TRACKER_PROOF_SIZE;
+
+    #[test]
+    fn compute_tracker_rand_r() {
+        let k = compute_initial_k(12345678);
+        let (k_commitment, tracker) = compute_tracker(&k).unwrap();
+        assert_ne!(tracker.r_g.0, to_g1_compressed(&BLS_G1_GENERATOR).unwrap());
+        assert_ne!(k_commitment, from_g1_compressed(&tracker.k_r_g.0).unwrap());
+    }
 
     #[test]
     fn serdes_fr_low_val() {
