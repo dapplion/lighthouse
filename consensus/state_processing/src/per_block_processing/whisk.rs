@@ -1,17 +1,21 @@
 use bls::Signature;
 use curdleproofs_whisk::{
-    is_g1_generator, is_valid_whisk_tracker_proof, BLSG1Point, TrackerProofBytes,
-    WhiskShuffleProofBytes, WhiskTracker, TRACKER_PROOF_SIZE, WHISK, WHISK_SHUFFLE_PROOF_SIZE,
+    is_g1_generator, is_matching_tracker, is_valid_whisk_tracker_proof, BLSG1Point,
+    TrackerProofBytes, WhiskShuffleProofBytes, WhiskTracker, TRACKER_PROOF_SIZE, WHISK,
+    WHISK_SHUFFLE_PROOF_SIZE,
 };
 use ethereum_hashing::hash;
 use int_to_bytes::int_to_bytes8;
+use safe_arith::SafeArith;
 use ssz::Encode;
 use types::{
     AbstractExecPayload, BeaconBlockBodyRef, BeaconBlockRef, BeaconState, BeaconStateCapella,
-    Epoch, EthSpec, WhiskShuffleProof, WhiskTrackerProof,
+    BeaconStateError, Epoch, EthSpec, WhiskShuffleProof, WhiskTrackerProof,
 };
 
-use crate::BlockProcessingError;
+use crate::{upgrade::capella::compute_initial_whisk_k, BlockProcessingError};
+
+use super::errors::{BlockOperationError, HeaderInvalid};
 
 pub fn process_whisk_registration<T: EthSpec, Payload: AbstractExecPayload<T>>(
     state: &mut BeaconState<T>,
@@ -221,6 +225,56 @@ pub fn should_shuffle_trackers<T: EthSpec>(epoch: Epoch) -> bool {
     // (clippy::arithmetic_side_effects) Will never divide by zero
     epoch % T::whisk_epochs_per_shuffling_phase() + T::whisk_proposer_selection_gap() + 1
         < T::whisk_epochs_per_shuffling_phase()
+}
+
+pub fn verify_whisk_opening_proof<T: EthSpec, Payload: AbstractExecPayload<T>>(
+    state: &BeaconState<T>,
+    block: BeaconBlockRef<T, Payload>,
+) -> Result<(), BlockOperationError<HeaderInvalid>> {
+    let proposer_index = block.proposer_index();
+    let whisk_opening_proof = block.body().whisk_opening_proof()?;
+    let whisk_proposer_trackers = state.whisk_proposer_trackers()?;
+    let whisk_validator_k_commitments = state.whisk_validator_k_commitments()?;
+
+    // process_whisk_opening_proof
+    #[allow(clippy::expect_used)]
+    let tracker = whisk_proposer_trackers
+        .get(
+            state
+                .slot()
+                .as_usize()
+                .safe_rem(T::whisk_proposer_trackers_count())
+                .expect("whisk_proposer_tracker_count is never 0"),
+        )
+        .expect("arr[x mod arr.len] always in bounds");
+
+    // Proposal against tracker created with deterministic k
+    if whisk_opening_proof == &WhiskTrackerProof::<T>::default() {
+        let validator = state.get_validator(proposer_index as usize)?;
+        let initial_k = compute_initial_whisk_k(validator);
+
+        verify!(
+            tracker
+                .try_into()
+                .map(|tracker| is_matching_tracker(&tracker, &initial_k))
+                .unwrap_or(false),
+            HeaderInvalid::InitialWhiskProposerMismatch
+        );
+    } else {
+        let k_commitment = &whisk_validator_k_commitments
+            .get(proposer_index as usize)
+            .ok_or(BeaconStateError::UnknownValidator(proposer_index as usize))?;
+        let whisk_opening_proof =
+            ssz_tracker_proof_to_crypto_tracker_proof::<T>(whisk_opening_proof);
+
+        verify!(
+            is_valid_whisk_tracker_proof(tracker, k_commitment, &whisk_opening_proof)
+                .unwrap_or(false),
+            HeaderInvalid::ProposerProofInvalid
+        )
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

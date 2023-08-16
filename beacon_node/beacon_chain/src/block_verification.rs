@@ -63,7 +63,6 @@ use crate::{
     },
     metrics, BeaconChain, BeaconChainError, BeaconChainTypes,
 };
-use curdleproofs_whisk::{is_matching_tracker, is_valid_whisk_tracker_proof};
 use derivative::Derivative;
 use eth2::types::EventKind;
 use execution_layer::PayloadStatus;
@@ -74,11 +73,11 @@ use safe_arith::ArithError;
 use slog::{debug, error, warn, Logger};
 use slot_clock::SlotClock;
 use ssz::Encode;
+use state_processing::per_block_processing::verify_whisk_opening_proof;
 use state_processing::per_block_processing::{errors::IntoWithIndex, is_merge_transition_block};
-use state_processing::upgrade::capella::compute_initial_whisk_k;
 use state_processing::{
     block_signature_verifier::{BlockSignatureVerifier, Error as BlockSignatureVerifierError},
-    per_block_processing::{per_block_processing, ssz_tracker_proof_to_crypto_tracker_proof},
+    per_block_processing::per_block_processing,
     per_slot_processing,
     state_advance::partial_state_advance,
     BlockProcessingError, BlockSignatureStrategy, ConsensusContext, SlotProcessingError,
@@ -89,7 +88,7 @@ use std::fs;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
-use store::{Error as DBError, HotStateSummary, KeyValueStore, StoreOp, WhiskTrackerProof};
+use store::{Error as DBError, HotStateSummary, KeyValueStore, StoreOp};
 use task_executor::JoinHandle;
 use tree_hash::TreeHash;
 use types::ExecPayload;
@@ -310,7 +309,6 @@ pub enum BlockError<T: EthSpec> {
     /// Honest peers shouldn't forward more than 1 equivocating block from the same proposer, so
     /// we penalise them with a mid-tolerance error.
     Slashable,
-    InitialWhiskProposerMismatch,
     ProposerProofInvalid,
 }
 
@@ -887,44 +885,26 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
                 &chain.spec,
             )?;
 
-            let proposer_index = block.message().proposer_index();
-            let whisk_opening_proof = block.message().body().whisk_opening_proof()?;
-            let whisk_proposer_trackers = state.whisk_proposer_trackers()?;
-            let whisk_validator_k_commitments = state.whisk_validator_k_commitments()?;
-
-            // process_whisk_opening_proof
-            let tracker = whisk_proposer_trackers
-                .get(
+            if let Err(e) = verify_whisk_opening_proof(&state, block.message()) {
+                let proposer_index = block.message().proposer_index();
+                let tracker = state.whisk_proposer_trackers()?.get(
                     state
                         .slot()
                         .as_usize()
-                        .wrapping_rem(whisk_proposer_trackers.len()),
-                )
-                .expect("arr[x mod arr.len] always in bounds");
-
-            // Proposal against tracker created with deterministic k
-            if whisk_opening_proof == &WhiskTrackerProof::<T::EthSpec>::default() {
-                let validator = state.get_validator(proposer_index as usize)?;
-                let initial_k = compute_initial_whisk_k(validator);
-                let is_valid = if let Ok(tracker) = tracker.try_into() {
-                    is_matching_tracker(&tracker, &initial_k)
-                } else {
-                    false
-                };
-                if !is_valid {
-                    return Err(BlockError::InitialWhiskProposerMismatch);
-                }
-            } else {
-                let k_commitment = &whisk_validator_k_commitments
-                    .get(proposer_index as usize)
-                    .ok_or(BeaconStateError::UnknownValidator(proposer_index as usize))?;
-                let whisk_opening_proof =
-                    ssz_tracker_proof_to_crypto_tracker_proof::<T::EthSpec>(whisk_opening_proof);
-                if !is_valid_whisk_tracker_proof(tracker, k_commitment, &whisk_opening_proof)
-                    .unwrap_or(false)
-                {
-                    return Err(BlockError::ProposerProofInvalid);
-                }
+                        .wrapping_rem(T::EthSpec::whisk_proposer_trackers_count()),
+                );
+                let whisk_validator_k_commitments = state.whisk_validator_k_commitments()?;
+                let k_commitment = &whisk_validator_k_commitments.get(proposer_index as usize);
+                debug!(
+                    chain.log,
+                    "invalid opening proof";
+                    "error" => ?e,
+                    "proposer_index" => proposer_index,
+                    "tracker" => ?tracker,
+                    "k_commitment" => ?k_commitment,
+                    "proof" => hex::encode(&block.message().body().whisk_opening_proof()?.to_vec()),
+                );
+                return Err(BlockError::ProposerProofInvalid);
             }
 
             (Some(parent), block)

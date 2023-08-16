@@ -1,6 +1,4 @@
 use crate::consensus_context::ConsensusContext;
-use crate::upgrade::capella::compute_initial_whisk_k;
-use curdleproofs_whisk::{is_matching_tracker, is_valid_whisk_tracker_proof};
 use errors::{BlockOperationError, BlockProcessingError, HeaderInvalid};
 use rayon::prelude::*;
 use safe_arith::{ArithError, SafeArith};
@@ -28,6 +26,7 @@ pub use verify_deposit::{
 pub use verify_exit::verify_exit;
 pub use whisk::{
     get_shuffle_indices, should_shuffle_trackers, ssz_tracker_proof_to_crypto_tracker_proof,
+    verify_whisk_opening_proof,
 };
 
 pub mod altair;
@@ -226,50 +225,8 @@ pub fn process_block_header<T: EthSpec, Payload: AbstractExecPayload<T>>(
     // Verify that proposer index is the correct index
     let proposer_index = block_header.proposer_index;
 
-    if let (
-        Ok(whisk_opening_proof),
-        Ok(whisk_proposer_trackers),
-        Ok(whisk_validator_k_commitments),
-    ) = (
-        block.body().whisk_opening_proof(),
-        state.whisk_proposer_trackers(),
-        state.whisk_validator_k_commitments(),
-    ) {
-        // process_whisk_opening_proof
-        #[allow(clippy::expect_used)]
-        let tracker = whisk_proposer_trackers
-            .get(
-                state
-                    .slot()
-                    .as_usize()
-                    .safe_rem(T::whisk_proposer_trackers_count())
-                    .expect("whisk_proposer_tracker_count is never 0"),
-            )
-            .expect("arr[x mod arr.len] always in bounds");
-
-        // Proposal against tracker created with deterministic k
-        if whisk_opening_proof == &WhiskTrackerProof::<T>::default() {
-            let validator = state.get_validator(proposer_index as usize)?;
-            let initial_k = compute_initial_whisk_k(validator);
-            verify!(
-                tracker
-                    .try_into()
-                    .map(|tracker| is_matching_tracker(&tracker, &initial_k))
-                    .unwrap_or(false),
-                HeaderInvalid::InitialWhiskProposerMismatch
-            );
-        } else {
-            let k_commitment = &whisk_validator_k_commitments
-                .get(proposer_index as usize)
-                .ok_or(BeaconStateError::UnknownValidator(proposer_index as usize))?;
-            let whisk_opening_proof =
-                ssz_tracker_proof_to_crypto_tracker_proof::<T>(whisk_opening_proof);
-            verify!(
-                is_valid_whisk_tracker_proof(tracker, k_commitment, &whisk_opening_proof)
-                    .unwrap_or(false),
-                HeaderInvalid::ProposerProofInvalid
-            )
-        }
+    if block.body().whisk_opening_proof().is_ok() {
+        verify_whisk_opening_proof(state, block)?;
     } else {
         let state_proposer_index = ctxt.get_proposer_index(state, spec)?;
         verify!(
