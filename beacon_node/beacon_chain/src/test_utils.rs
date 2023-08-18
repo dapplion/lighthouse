@@ -889,7 +889,7 @@ where
                 is_matching_tracker(&proposer_tracker, k)
                     || is_matching_tracker(&proposer_tracker, &initial_k)
             })
-            .map(|(index, k)| (index as u64, serialize_fr(&k)))
+            .map(|(index, k)| (index as u64, to_bytes_fr(&k)))
     }
 
     pub fn find_and_register_whisk_proposer(&self, state: &BeaconState<E>, slot: Slot) {
