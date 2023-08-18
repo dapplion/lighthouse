@@ -329,12 +329,17 @@ impl EthSpec for MainnetEthSpec {
     type SlotsPerEth1VotingPeriod = U2048; // 64 epochs * 32 slots per epoch
     type MaxBlsToExecutionChanges = U16;
     type MaxWithdrawalsPerPayload = U16;
-    type WhiskCandidateTrackersCount = U16384;
-    type WhiskProposerTrackersCount = U8192;
-    type WhiskEpochsPerShufflingPhase = U256;
+    // TODO WHISK: Reduced value for devnet testing. Must be > ValidatorsPerShuffle
+    type WhiskCandidateTrackersCount = U256;
+    // TODO WHISK: Reduced value for devnet testing. Should equal CandidateCount / 2
+    type WhiskProposerTrackersCount = U128;
+    // TODO WHISK: Reduced value for faster devnet testing.
+    // Should equal CandidateTrackerCount / SlotsPerEpoch.
+    type WhiskEpochsPerShufflingPhase = U8;
     // Actual count of shuffled trackers is `ELL = N - N_BLINDERS`
     type WhiskValidatorsPerShuffle = U124;
-    type WhiskProposerSelectionGap = U2;
+    // TODO WHISK: Reduced value faster devnet testing.
+    type WhiskProposerSelectionGap = U1;
     type WhiskMaxShuffleProofSize = U4576;
     type WhiskMaxOpeningProofSize = U128;
     type BytesPerG1Point = U48;
