@@ -240,7 +240,8 @@ pub fn verify_whisk_opening_proof<T: EthSpec, Payload: AbstractExecPayload<T>>(
     #[allow(clippy::expect_used)]
     let tracker = whisk_proposer_trackers
         .get(
-            state
+            // Use block so gossip validation can use a not dialed forward
+            block
                 .slot()
                 .as_usize()
                 .safe_rem(T::whisk_proposer_trackers_count())
