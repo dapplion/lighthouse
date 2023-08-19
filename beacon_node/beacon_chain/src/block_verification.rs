@@ -902,7 +902,7 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
                     "proposer_index" => proposer_index,
                     "tracker" => ?tracker,
                     "k_commitment" => ?k_commitment,
-                    "proof" => hex::encode(&block.message().body().whisk_opening_proof()?.to_vec()),
+                    "proof" => hex::encode(block.message().body().whisk_opening_proof()?.to_vec()),
                 );
                 return Err(BlockError::ProposerProofInvalid);
             }
