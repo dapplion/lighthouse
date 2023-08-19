@@ -92,7 +92,7 @@ fn process_whisk_updates<T: EthSpec>(
     spec: &ChainSpec,
 ) -> Result<(), EpochProcessingError> {
     let next_epoch = state.next_epoch()?;
-    if next_epoch.safe_rem(T::whisk_epochs_per_shuffling_phase())? == 0 {
+    if next_epoch.safe_rem(spec.whisk_epochs_per_shuffling_phase)? == 0 {
         select_whisk_trackers(state, next_epoch, spec)?;
     }
     Ok(())

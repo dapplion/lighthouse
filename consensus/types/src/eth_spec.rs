@@ -4,7 +4,7 @@ use safe_arith::SafeArith;
 use serde_derive::{Deserialize, Serialize};
 use ssz_types::typenum::U124;
 use ssz_types::typenum::{
-    bit::B0, op, UInt, Unsigned, U0, U1, U1024, U1048576, U1073741824, U1099511627776, U128, U16,
+    bit::B0, op, UInt, Unsigned, U0, U1024, U1048576, U1073741824, U1099511627776, U128, U16,
     U16384, U16777216, U2, U2048, U256, U32, U4, U4096, U48, U480, U512, U625, U64, U65536, U8,
     U8192,
 };
@@ -128,9 +128,7 @@ pub trait EthSpec:
      */
     type WhiskCandidateTrackersCount: Unsigned + Clone + Sync + Send + Debug + PartialEq;
     type WhiskProposerTrackersCount: Unsigned + Clone + Sync + Send + Debug + PartialEq;
-    type WhiskEpochsPerShufflingPhase: Unsigned + Clone + Sync + Send + Debug + PartialEq;
     type WhiskValidatorsPerShuffle: Unsigned + Clone + Sync + Send + Debug + PartialEq;
-    type WhiskProposerSelectionGap: Unsigned + Clone + Sync + Send + Debug + PartialEq;
     type WhiskMaxShuffleProofSize: Unsigned + Clone + Sync + Send + Debug + PartialEq;
     type WhiskMaxOpeningProofSize: Unsigned + Clone + Sync + Send + Debug + PartialEq;
     // TODO Temp
@@ -264,26 +262,8 @@ pub trait EthSpec:
         Self::WhiskProposerTrackersCount::to_usize()
     }
 
-    fn whisk_proposer_selection_gap() -> u64 {
-        Self::WhiskProposerSelectionGap::to_u64()
-    }
-
-    fn whisk_epochs_per_shuffling_phase() -> u64 {
-        Self::WhiskEpochsPerShufflingPhase::to_u64()
-    }
-
     fn whisk_validators_per_shuffle() -> usize {
         Self::WhiskValidatorsPerShuffle::to_usize()
-    }
-
-    fn whisk_shuffle_round_start_slot(slot: Slot) -> Slot {
-        let epochs_per_round = Self::whisk_epochs_per_shuffling_phase();
-        slot.epoch(Self::slots_per_epoch())
-            .safe_div(epochs_per_round)
-            .expect("epochs per shuffling phase is not zero")
-            .safe_mul(epochs_per_round)
-            .expect("not overflow")
-            .start_slot(Self::slots_per_epoch())
     }
 }
 
@@ -333,13 +313,8 @@ impl EthSpec for MainnetEthSpec {
     type WhiskCandidateTrackersCount = U256;
     // TODO WHISK: Reduced value for devnet testing. Should equal CandidateCount / 2
     type WhiskProposerTrackersCount = U128;
-    // TODO WHISK: Reduced value for faster devnet testing.
-    // Should equal CandidateTrackerCount / SlotsPerEpoch.
-    type WhiskEpochsPerShufflingPhase = U8;
     // Actual count of shuffled trackers is `ELL = N - N_BLINDERS`
     type WhiskValidatorsPerShuffle = U124;
-    // TODO WHISK: Reduced value faster devnet testing.
-    type WhiskProposerSelectionGap = U1;
     type WhiskMaxShuffleProofSize = U4576;
     type WhiskMaxOpeningProofSize = U128;
     type BytesPerG1Point = U48;
@@ -370,9 +345,7 @@ impl EthSpec for MinimalEthSpec {
     type MaxWithdrawalsPerPayload = U4;
     type WhiskCandidateTrackersCount = U256;
     type WhiskProposerTrackersCount = U128;
-    type WhiskEpochsPerShufflingPhase = U4;
     type WhiskValidatorsPerShuffle = U124;
-    type WhiskProposerSelectionGap = U1;
     type WhiskMaxShuffleProofSize = U4576;
     type WhiskMaxOpeningProofSize = U128;
     type BytesPerG1Point = U48;
@@ -444,9 +417,7 @@ impl EthSpec for GnosisEthSpec {
     type MaxWithdrawalsPerPayload = U8;
     type WhiskCandidateTrackersCount = U16384;
     type WhiskProposerTrackersCount = U8192;
-    type WhiskEpochsPerShufflingPhase = U256;
     type WhiskValidatorsPerShuffle = U124;
-    type WhiskProposerSelectionGap = U2;
     type WhiskMaxShuffleProofSize = U4576;
     type WhiskMaxOpeningProofSize = U128;
     type BytesPerG1Point = U48;

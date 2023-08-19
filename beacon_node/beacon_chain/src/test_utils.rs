@@ -899,7 +899,7 @@ where
 
         // TODO WHISK: is it necessary to register whisk proposer here?
         let whisk_shuffling_decision_root = state
-            .whisk_proposer_shuffling_decision_root(self.chain.head_beacon_block_root())
+            .whisk_proposer_shuffling_decision_root(self.chain.head_beacon_block_root(), &self.spec)
             .unwrap();
         self.chain
             .register_whisk_proposer(&WhiskProposerPreparationData {

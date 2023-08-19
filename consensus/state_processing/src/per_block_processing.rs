@@ -191,7 +191,7 @@ pub fn per_block_processing<T: EthSpec, Payload: AbstractExecPayload<T>>(
         update_progressive_balances_metrics(state.progressive_balances_cache())?;
     }
 
-    process_shuffled_trackers(state, block.body())?;
+    process_shuffled_trackers(state, block.body(), spec)?;
     process_whisk_registration(state, block)?;
 
     Ok(())

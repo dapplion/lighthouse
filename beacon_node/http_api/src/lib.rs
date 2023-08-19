@@ -1159,8 +1159,9 @@ pub fn serve<T: BeaconChainTypes>(
                         )
                     };
 
-                    let requested_shuffle_round_start_slot =
-                        T::EthSpec::whisk_shuffle_round_start_slot(requested_slot);
+                    let requested_shuffle_round_start_slot = chain
+                        .spec
+                        .whisk_shuffle_round_start_slot::<T::EthSpec>(requested_slot);
                     let retrieve_state_at_slot = std::cmp::max(
                         head_slot,
                         std::cmp::max(whisk_fork_slot, requested_shuffle_round_start_slot),
@@ -1181,7 +1182,10 @@ pub fn serve<T: BeaconChainTypes>(
                         ))
                     })?;
                     let dependent_root = state
-                        .whisk_proposer_shuffling_decision_root(chain.genesis_validators_root)
+                        .whisk_proposer_shuffling_decision_root(
+                            chain.genesis_validators_root,
+                            &chain.spec,
+                        )
                         .map_err(|e| {
                             warp_utils::reject::custom_server_error(format!(
                                 "cannot compute shuffling root: {e:?}"

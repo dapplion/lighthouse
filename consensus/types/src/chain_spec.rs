@@ -1,6 +1,7 @@
 use crate::application_domain::{ApplicationDomain, APPLICATION_DOMAIN_BUILDER};
 use crate::*;
 use int_to_bytes::int_to_bytes4;
+use safe_arith::SafeArith;
 use serde::{Deserializer, Serialize, Serializer};
 use serde_derive::Deserialize;
 use serde_utils::quoted_u64::MaybeQuoted;
@@ -162,6 +163,8 @@ pub struct ChainSpec {
     /// The Capella fork epoch is optional, with `None` representing "Capella never happens".
     pub capella_fork_epoch: Option<Epoch>,
     pub max_validators_per_withdrawals_sweep: u64,
+    pub whisk_epochs_per_shuffling_phase: Epoch,
+    pub whisk_proposer_selection_gap: Epoch,
 
     /*
      * Whisk
@@ -330,6 +333,16 @@ impl ChainSpec {
             BeaconState::Merge(_) => self.min_slashing_penalty_quotient_bellatrix,
             BeaconState::Capella(_) => self.min_slashing_penalty_quotient_bellatrix,
         }
+    }
+
+    pub fn whisk_shuffle_round_start_slot<T: EthSpec>(&self, slot: Slot) -> Slot {
+        let epochs_per_round = self.whisk_epochs_per_shuffling_phase;
+        slot.epoch(T::slots_per_epoch())
+            .safe_div(epochs_per_round)
+            .unwrap_or(Epoch::new(0))
+            .safe_mul(epochs_per_round)
+            .expect("not overflow")
+            .start_slot(T::slots_per_epoch())
     }
 
     /// Returns a full `Fork` struct for a given epoch.
@@ -633,6 +646,11 @@ impl ChainSpec {
             capella_fork_version: [0x03, 00, 00, 00],
             capella_fork_epoch: Some(Epoch::new(194048)),
             max_validators_per_withdrawals_sweep: 16384,
+            // TODO WHISK: Reduced values for faster devnet testing
+            // Should equal CandidateTrackerCount / SlotsPerEpoch.
+            whisk_epochs_per_shuffling_phase: Epoch::new(8),
+            // TODO WHISK: Reduced values for faster devnet testing
+            whisk_proposer_selection_gap: Epoch::new(1),
 
             /*
              * Whisk / TODO: Review values
@@ -712,6 +730,8 @@ impl ChainSpec {
             // Capella
             capella_fork_version: [0x03, 0x00, 0x00, 0x01],
             capella_fork_epoch: None,
+            whisk_epochs_per_shuffling_phase: Epoch::new(4),
+            whisk_proposer_selection_gap: Epoch::new(1),
             max_validators_per_withdrawals_sweep: 16,
             // Other
             network_id: 2, // lighthouse testnet network id
@@ -876,6 +896,8 @@ impl ChainSpec {
             /*
              * Whisk / TODO: Review values
              */
+            whisk_epochs_per_shuffling_phase: Epoch::new(256),
+            whisk_proposer_selection_gap: Epoch::new(2),
             domain_whisk_candidate_selection: 0x0107,
             domain_whisk_shuffle: 0x0207,
             domain_whisk_proposer_selection: 0x0307,

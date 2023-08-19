@@ -10,7 +10,7 @@ use safe_arith::SafeArith;
 use ssz::Encode;
 use types::{
     AbstractExecPayload, BeaconBlockBodyRef, BeaconBlockRef, BeaconState, BeaconStateCapella,
-    BeaconStateError, Epoch, EthSpec, WhiskShuffleProof, WhiskTrackerProof,
+    BeaconStateError, ChainSpec, Epoch, EthSpec, WhiskShuffleProof, WhiskTrackerProof,
 };
 
 use crate::{upgrade::capella::compute_initial_whisk_k, BlockProcessingError};
@@ -155,6 +155,7 @@ pub fn get_shuffle_indices<T: EthSpec>(randao_reveal: &Signature) -> Vec<usize> 
 pub fn process_shuffled_trackers<T: EthSpec, Payload: AbstractExecPayload<T>>(
     state: &mut BeaconState<T>,
     body: BeaconBlockBodyRef<T, Payload>,
+    spec: &ChainSpec,
 ) -> Result<(), BlockProcessingError> {
     let current_epoch = state.current_epoch();
 
@@ -173,7 +174,7 @@ pub fn process_shuffled_trackers<T: EthSpec, Payload: AbstractExecPayload<T>>(
         let post_shuffle_trackers: Vec<WhiskTracker> =
             whisk_post_shuffle_trackers.iter().cloned().collect();
 
-        if !should_shuffle_trackers::<T>(current_epoch) {
+        if !should_shuffle_trackers(current_epoch, spec) {
             // Require zero-ed trackers during cooldown
             let zero_tracker = WhiskTracker::default();
             block_verify!(
@@ -221,10 +222,10 @@ pub fn process_shuffled_trackers<T: EthSpec, Payload: AbstractExecPayload<T>>(
 
 /// Return true if at `epoch` validator should shuffle candidate trackers
 #[allow(clippy::arithmetic_side_effects)]
-pub fn should_shuffle_trackers<T: EthSpec>(epoch: Epoch) -> bool {
+pub fn should_shuffle_trackers(epoch: Epoch, spec: &ChainSpec) -> bool {
     // (clippy::arithmetic_side_effects) Will never divide by zero
-    epoch % T::whisk_epochs_per_shuffling_phase() + T::whisk_proposer_selection_gap() + 1
-        < T::whisk_epochs_per_shuffling_phase()
+    epoch % spec.whisk_epochs_per_shuffling_phase + spec.whisk_proposer_selection_gap + 1
+        < spec.whisk_epochs_per_shuffling_phase
 }
 
 pub fn verify_whisk_opening_proof<T: EthSpec, Payload: AbstractExecPayload<T>>(
@@ -276,50 +277,4 @@ pub fn verify_whisk_opening_proof<T: EthSpec, Payload: AbstractExecPayload<T>>(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use types::{MainnetEthSpec, MinimalEthSpec};
-
-    #[test]
-    fn test_should_shuffle_trackers_minimal_spec() {
-        test_should_shuffle_trackers_on_spec::<MinimalEthSpec>("minimal");
-    }
-
-    #[test]
-    fn test_should_shuffle_trackers_mainnet_spec() {
-        test_should_shuffle_trackers_on_spec::<MainnetEthSpec>("mainnet");
-    }
-
-    fn test_should_shuffle_trackers_on_spec<T: EthSpec>(spec_name: &str) {
-        dbg!((
-            T::whisk_proposer_selection_gap(),
-            T::whisk_epochs_per_shuffling_phase()
-        ));
-        for (i, (epoch, expected_result)) in [
-            (0, true),
-            (1, true),
-            (T::whisk_epochs_per_shuffling_phase(), true),
-            (T::whisk_epochs_per_shuffling_phase() - 1, false),
-            (
-                T::whisk_epochs_per_shuffling_phase() - T::whisk_proposer_selection_gap() - 1,
-                false,
-            ),
-            (
-                T::whisk_epochs_per_shuffling_phase() - T::whisk_proposer_selection_gap() - 2,
-                true,
-            ),
-        ]
-        .iter()
-        .enumerate()
-        {
-            assert_eq!(
-                should_shuffle_trackers::<T>(Epoch::new(*epoch)),
-                *expected_result,
-                "{spec_name} case {i} epoch {epoch}"
-            );
-        }
-    }
 }

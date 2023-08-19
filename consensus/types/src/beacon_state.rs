@@ -661,8 +661,11 @@ impl<T: EthSpec> BeaconState<T> {
     pub fn whisk_proposer_shuffling_decision_root(
         &self,
         block_root: Hash256,
+        spec: &ChainSpec,
     ) -> Result<WhiskProposerShufflingRoot, Error> {
-        let decision_slot = T::whisk_shuffle_round_start_slot(self.slot()).saturating_sub(1_u64);
+        let decision_slot = spec
+            .whisk_shuffle_round_start_slot::<T>(self.slot())
+            .saturating_sub(1_u64);
 
         if self.slot() == decision_slot {
             Ok(WhiskProposerShufflingRoot(block_root))
@@ -856,7 +859,7 @@ impl<T: EthSpec> BeaconState<T> {
         spec: &ChainSpec,
     ) -> Result<Vec<usize>, Error> {
         let proposer_seed = self.get_seed(
-            epoch.saturating_sub(T::whisk_proposer_selection_gap()),
+            epoch.saturating_sub(spec.whisk_proposer_selection_gap),
             Domain::WhiskProposerSelection,
             spec,
         )?;
