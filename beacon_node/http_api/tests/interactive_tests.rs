@@ -505,17 +505,6 @@ pub async fn proposer_boost_re_org_test(
         )
         .await;
 
-    // Register whisk proposers for the next shuffling round
-    // finding a whisk proposer is expensive, do for min number of slots
-    let register_up_to_slot = head_slot + head_distance + 1;
-    assert!(register_up_to_slot < E::whisk_proposer_trackers_count() as u64);
-    {
-        let state = harness.chain.head_beacon_state_cloned();
-        for slot in 1..register_up_to_slot.as_u64() {
-            harness.find_and_register_whisk_proposer(&state, slot.into());
-        }
-    }
-
     // Create some chain depth. Sign sync committee signatures so validator balances don't dip
     // below 32 ETH and become ineligible for withdrawals.
     harness.advance_slot();
@@ -558,6 +547,15 @@ pub async fn proposer_boost_re_org_test(
     let slot_a = Slot::new(num_initial + 1);
     let slot_b = slot_a + parent_distance;
     let slot_c = slot_b + head_distance;
+
+    // Register whisk proposers for the next shuffling round
+    // finding a whisk proposer is expensive, do for min number of slots
+    {
+        let state = harness.chain.head_beacon_state_cloned();
+        for slot in [slot_a, slot_b, slot_c] {
+            harness.find_and_register_whisk_proposer(&state, slot.into());
+        }
+    }
 
     // We need to transition to at least epoch 2 in order to trigger
     // `process_rewards_and_penalties`. This allows us to test withdrawals changes at epoch
