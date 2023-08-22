@@ -10,7 +10,7 @@ while getopts "d:sh" flag; do
     h)
        echo "Start a geth node"
        echo
-       echo "usage: $0 <Options> <DATADIR> <NETWORK-PORT> <HTTP-PORT>"
+       echo "usage: $0 <Options> <DATADIR> <NETWORK-PORT> <HTTP-PORT> <METRICS-PORT>"
        echo
        echo "Options:"
        echo "   -h: this help"
@@ -20,6 +20,7 @@ while getopts "d:sh" flag; do
        echo "  NETWORK-PORT  Value for --port"
        echo "  HTTP-PORT     Value for --http.port"
        echo "  AUTH-PORT     Value for --authrpc.port"
+       echo "  METRICS-PORT  Value for --pprof.port"
        echo "  GENESIS_FILE  Value for geth init"
        exit
        ;;
@@ -31,7 +32,8 @@ data_dir=${@:$OPTIND+0:1}
 network_port=${@:$OPTIND+1:1}
 http_port=${@:$OPTIND+2:1}
 auth_port=${@:$OPTIND+3:1}
-genesis_file=${@:$OPTIND+4:1}
+metrics_port=${@:$OPTIND+4:1}
+genesis_file=${@:$OPTIND+5:1}
 
 
 # Init
@@ -51,4 +53,8 @@ exec $GETH_BINARY \
     --bootnodes $EL_BOOTNODE_ENODE \
     --port $network_port \
     --http.port $http_port \
-    --authrpc.port $auth_port
+    --authrpc.port $auth_port \
+    --metrics \
+    --metrics.addr 0.0.0.0 \
+    --metrics.port $metrics_port
+
