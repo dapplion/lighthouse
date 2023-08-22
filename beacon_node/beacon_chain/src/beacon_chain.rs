@@ -4018,7 +4018,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 *proposer as u64
             } else {
                 // No known proposer for this fork and slot
-                warn!(
+                // This will happen for every single slot that this BN's connected validators do not
+                // proposer. Thus log level is debug.
+                debug!(
                     self.log,
                     "No known whisk proposer in registry";
                     "whisk_shuffling_decision_root" => ?whisk_shuffling_decision_root,
@@ -4130,9 +4132,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         self.overridden_forkchoice_update_params_or_failure_reason(&canonical_forkchoice_params)
             .or_else(|e| match e {
                 ProposerHeadError::DoNotReOrg(reason) => {
-                    trace!(
+                    debug!(
                         self.log,
                         "Not suppressing fork choice update";
+                        "head_root" => ?canonical_forkchoice_params.head_root,
                         "reason" => %reason,
                     );
                     Ok(canonical_forkchoice_params)

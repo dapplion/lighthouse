@@ -131,6 +131,14 @@ lazy_static::lazy_static! {
         "vc_beacon_block_proposal_changed",
         "A duties update discovered a new block proposer for the current slot",
     );
+    pub static ref PROPOSER_DUTIES_NEW: Result<IntCounter> = try_create_int_counter(
+        "vc_beacon_proposer_duties_new_total",
+        "Total count of relevant new proposer duties discovered",
+    );
+    pub static ref PROPOSER_DUTIES_REORGED: Result<IntCounter> = try_create_int_counter(
+        "vc_beacon_proposer_duties_reorged_total",
+        "Total count of proposer duties reorged, dependent root changed",
+    );
     /*
      * Endpoint metrics
      */

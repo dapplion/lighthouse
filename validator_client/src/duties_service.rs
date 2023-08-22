@@ -1141,14 +1141,15 @@ async fn poll_beacon_proposers<T: SlotClock + 'static, E: EthSpec>(
 
         match response {
             Ok((dependent_root, relevant_duties)) => {
+                let num_relevant_duties = relevant_duties.len();
                 debug!(
                     log,
                     "Downloaded proposer duties";
                     "dependent_root" => %dependent_root,
-                    "num_relevant_duties" => relevant_duties.len(),
+                    "num_relevant_duties" => num_relevant_duties,
                 );
 
-                if let Some((prior_dependent_root, _)) = duties_service
+                let added_new_duties = if let Some((prior_dependent_root, _)) = duties_service
                     .proposers
                     .write()
                     .insert(current_epoch, (dependent_root, relevant_duties))
@@ -1160,8 +1161,21 @@ async fn poll_beacon_proposers<T: SlotClock + 'static, E: EthSpec>(
                             "prior_dependent_root" => %prior_dependent_root,
                             "dependent_root" => %dependent_root,
                             "msg" => "this may happen from time to time"
-                        )
+                        );
+                        metrics::inc_counter(&metrics::PROPOSER_DUTIES_REORGED);
+                        true // register re-orged duties as new
+                    } else {
+                        false // duties entry existed for same epoch and dependant root
                     }
+                } else {
+                    true // new unknown entry for epoch
+                };
+
+                if added_new_duties {
+                    metrics::inc_counter_by(
+                        &metrics::PROPOSER_DUTIES_NEW,
+                        num_relevant_duties as u64,
+                    );
                 }
             }
             // Don't return early here, we still want to try and produce blocks using the cached values.
