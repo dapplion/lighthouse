@@ -855,7 +855,9 @@ where
                 .expect("whisk proposer not found");
             (index as usize, WhiskProposer::PostWhisk { index, k })
         } else {
-            let index = state.get_beacon_proposer_index(slot, &self.spec).unwrap();
+            let index = state
+                .get_beacon_proposer_index(slot, &self.spec)
+                .expect("should find proposer index");
             (index, WhiskProposer::PreWhisk)
         }
     }
