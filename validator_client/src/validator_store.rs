@@ -1,12 +1,12 @@
 use crate::{
     doppelganger_service::DoppelgangerService,
     http_metrics::metrics,
-    initialized_validators::InitializedValidators,
+    initialized_validators::{InitializedValidators, PubkeysHash},
     signing_method::{Error as SigningError, SignableMessage, SigningContext, SigningMethod},
     Config,
 };
 use account_utils::validator_definitions::{PasswordStorage, ValidatorDefinition};
-use curdleproofs_whisk::{bls_g1_scalar_multiply, FieldElementBytes, G1Affine};
+use curdleproofs_whisk::{bls_g1_scalar_multiply, FieldElementBytes, WhiskTrackerG1Affine};
 use parking_lot::{Mutex, RwLock};
 use slashing_protection::{
     interchange::Interchange, InterchangeError, NotSafe, Safe, SlashingDatabase,
@@ -340,6 +340,10 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore<T, E> {
 
     pub fn num_voting_validators(&self) -> usize {
         self.validators.read().num_enabled()
+    }
+
+    pub fn voting_pubkeys_hash(&self) -> PubkeysHash {
+        self.validators.read().voting_pubkeys_hash()
     }
 
     fn fork(&self, epoch: Epoch) -> Fork {
@@ -879,8 +883,7 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore<T, E> {
     /// Given a whisk tracker, check if one of the registered validators matches it
     pub fn find_whisk_tracker_match(
         &self,
-        r_g: G1Affine,
-        k_r_g: G1Affine,
+        tracker: &WhiskTrackerG1Affine,
     ) -> Option<(PublicKeyBytes, Option<u64>)> {
         self.validators
             .read()
@@ -889,8 +892,8 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore<T, E> {
                 // TODO: Should the validator track if the proposer has already submited
                 // the first whisk proposal? For now always check the two possible k.
                 // Note that a proposer may proposer twice in a row, so has to be fork aware
-                bls_g1_scalar_multiply(&r_g, proposer_k) == k_r_g ||
-                bls_g1_scalar_multiply(&r_g, initial_proposer_k) == k_r_g)
+                bls_g1_scalar_multiply(&tracker.r_g, proposer_k) == tracker.k_r_g ||
+                bls_g1_scalar_multiply(&tracker.r_g, initial_proposer_k) == tracker.k_r_g)
             .map(|(pubkey, index, _, _)| (*pubkey, *index))
     }
 
