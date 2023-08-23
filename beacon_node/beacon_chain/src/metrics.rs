@@ -1,6 +1,7 @@
 use crate::observed_attesters::SlotSubcommitteeIndex;
 use crate::types::consts::altair::SYNC_COMMITTEE_SUBNET_COUNT;
 use crate::{BeaconChain, BeaconChainError, BeaconChainTypes};
+use curdleproofs_whisk::is_g1_generator;
 use lazy_static::lazy_static;
 pub use lighthouse_metrics::*;
 use slot_clock::SlotClock;
@@ -1009,6 +1010,34 @@ lazy_static! {
         "beacon_aggregated_attestation_subsets_total",
         "Count of new aggregated attestations that are subsets of already known aggregates"
     );
+
+    /*
+    * Whisk metrics
+    */
+    pub static ref BLOCK_PRODUCTION_SHUFFLE_PROOF_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_block_production_shuffle_proof_seconds",
+        "Time taken to generate a shuffle proof for a block"
+    );
+    pub static ref BLOCK_PRODUCTION_SHUFFLE_INDICES_TIMES: Result<Histogram> = try_create_histogram(
+        "beacon_block_production_shuffle_indices_seconds",
+        "Time taken to compute pre shuffle indices for a block"
+    );
+    pub static ref HEAD_STATE_WHISK_DEFAULT_TRACKERS: Result<IntGauge> = try_create_int_gauge(
+        "beacon_current_whisk_default_trackers",
+        "Count current whisk default trackers in validator trackers of the head state"
+    );
+    pub static ref BLOCK_WHISK_OPENING_PROOF_ZERO: Result<IntCounter> = try_create_int_counter(
+        "block_whisk_opening_proof_zero_total",
+        "Total count of imported blocks with opening proof set to zero"
+    );
+    pub static ref BLOCK_WHISK_REGISTRATION_PROOF_ZERO: Result<IntCounter> = try_create_int_counter(
+        "block_whisk_registration_proof_zero_total",
+        "Total count of imported blocks with registration proof set to zero"
+    );
+    pub static ref BLOCK_WHISK_SHUFFLE_PROOF_ZERO: Result<IntCounter> = try_create_int_counter(
+        "block_whisk_shuffle_proof_zero_total",
+        "Total count of imported blocks with shuffle proof set to zero"
+    );
 }
 
 /// Scrape the `beacon_chain` for metrics that are not constantly updated (e.g., the present slot,
@@ -1159,6 +1188,16 @@ fn scrape_head_state<T: EthSpec>(state: &BeaconState<T>, state_root: Hash256) {
     set_gauge_by_usize(&HEAD_STATE_ACTIVE_VALIDATORS_INTEROP, num_active);
     set_gauge_by_usize(&HEAD_STATE_SLASHED_VALIDATORS, num_slashed);
     set_gauge_by_usize(&HEAD_STATE_WITHDRAWN_VALIDATORS, num_withdrawn);
+
+    if let Ok(validator_trackers) = state.whisk_validator_trackers() {
+        let mut default_trackers: usize = 0;
+        for tracker in validator_trackers {
+            if is_g1_generator(&tracker.r_g) {
+                default_trackers += 1;
+            }
+        }
+        set_gauge_by_usize(&HEAD_STATE_WHISK_DEFAULT_TRACKERS, default_trackers);
+    }
 }
 
 fn scrape_attestation_observation<T: BeaconChainTypes>(slot_now: Slot, chain: &BeaconChain<T>) {

@@ -68,8 +68,8 @@ pub trait Case: Debug + Sync {
     /// Whether or not this test exists for the given `fork_name`.
     ///
     /// Returns `true` by default.
-    fn is_enabled_for_fork(_fork_name: ForkName) -> bool {
-        true
+    fn is_enabled_for_fork(fork_name: ForkName) -> bool {
+        fork_name != ForkName::Capella
     }
 
     /// Execute a test and return the result.

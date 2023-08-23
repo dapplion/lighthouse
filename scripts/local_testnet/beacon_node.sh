@@ -19,7 +19,7 @@ while getopts "d:sh" flag; do
     h)
        echo "Start a beacon node"
        echo
-       echo "usage: $0 <Options> <DATADIR> <NETWORK-PORT> <HTTP-PORT>"
+       echo "usage: $0 <Options> <DATADIR> <NETWORK-PORT> <HTTP-PORT> <METRICS-PORT>"
        echo
        echo "Options:"
        echo "   -s: pass --subscribe-all-subnets to 'lighthouse bn ...', default is not passed"
@@ -30,6 +30,7 @@ while getopts "d:sh" flag; do
        echo "  DATADIR       Value for --datadir parameter"
        echo "  NETWORK-PORT  Value for --enr-udp-port, --enr-tcp-port and --port"
        echo "  HTTP-PORT     Value for --http-port"
+       echo "  METRICS-PORT  Value for --metrics-port"
        echo "  EXECUTION-ENDPOINT     Value for --execution-endpoint"
        echo "  EXECUTION-JWT     Value for --execution-jwt"
        exit
@@ -41,8 +42,9 @@ done
 data_dir=${@:$OPTIND+0:1}
 network_port=${@:$OPTIND+1:1}
 http_port=${@:$OPTIND+2:1}
-execution_endpoint=${@:$OPTIND+3:1}
-execution_jwt=${@:$OPTIND+4:1}
+metrics_port=${@:$OPTIND+3:1}
+execution_endpoint=${@:$OPTIND+4:1}
+execution_jwt=${@:$OPTIND+5:1}
 
 lighthouse_binary=lighthouse
 
@@ -53,14 +55,17 @@ exec $lighthouse_binary \
 	--datadir $data_dir \
 	--testnet-dir $TESTNET_DIR \
 	--enable-private-discovery \
-  --disable-peer-scoring \
+    --disable-peer-scoring \
 	--staking \
 	--enr-address 127.0.0.1 \
 	--enr-udp-port $network_port \
 	--enr-tcp-port $network_port \
 	--port $network_port \
 	--http-port $http_port \
+    --metrics \
+    --metrics-port $metrics_port \
+    --metrics-address 0.0.0.0 \
 	--disable-packet-filter \
 	--target-peers $((BN_COUNT - 1)) \
-  --execution-endpoint $execution_endpoint \
-  --execution-jwt $execution_jwt
+    --execution-endpoint $execution_endpoint \
+    --execution-jwt $execution_jwt

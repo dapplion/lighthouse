@@ -2,14 +2,17 @@ use crate::*;
 
 use safe_arith::SafeArith;
 use serde_derive::{Deserialize, Serialize};
+use ssz_types::typenum::U124;
 use ssz_types::typenum::{
-    bit::B0, UInt, Unsigned, U0, U1024, U1048576, U1073741824, U1099511627776, U128, U16,
-    U16777216, U2, U2048, U256, U32, U4, U4096, U512, U625, U64, U65536, U8, U8192,
+    bit::B0, op, UInt, Unsigned, U0, U1024, U1048576, U1073741824, U1099511627776, U128, U16,
+    U16384, U16777216, U2, U2048, U256, U32, U4, U4096, U48, U480, U512, U625, U64, U65536, U8,
+    U8192,
 };
 use std::fmt::{self, Debug};
 use std::str::FromStr;
 
 pub type U5000 = UInt<UInt<UInt<U625, B0>, B0>, B0>; // 625 * 8 = 5000
+type U4576 = op!(U4096 + U480);
 
 const MAINNET: &str = "mainnet";
 const MINIMAL: &str = "minimal";
@@ -119,6 +122,17 @@ pub trait EthSpec:
     ///
     /// Must be set to `SyncCommitteeSize / SyncCommitteeSubnetCount`.
     type SyncSubcommitteeSize: Unsigned + Clone + Sync + Send + Debug + PartialEq;
+
+    /*
+     * New in Whisk
+     */
+    type WhiskCandidateTrackersCount: Unsigned + Clone + Sync + Send + Debug + PartialEq;
+    type WhiskProposerTrackersCount: Unsigned + Clone + Sync + Send + Debug + PartialEq;
+    type WhiskValidatorsPerShuffle: Unsigned + Clone + Sync + Send + Debug + PartialEq;
+    type WhiskMaxShuffleProofSize: Unsigned + Clone + Sync + Send + Debug + PartialEq;
+    type WhiskMaxOpeningProofSize: Unsigned + Clone + Sync + Send + Debug + PartialEq;
+    // TODO Temp
+    type BytesPerG1Point: Unsigned + Clone + Sync + Send + Debug + PartialEq;
 
     fn default_spec() -> ChainSpec;
 
@@ -239,6 +253,18 @@ pub trait EthSpec:
     fn max_withdrawals_per_payload() -> usize {
         Self::MaxWithdrawalsPerPayload::to_usize()
     }
+
+    fn whisk_candidate_trackers_count() -> usize {
+        Self::WhiskCandidateTrackersCount::to_usize()
+    }
+
+    fn whisk_proposer_trackers_count() -> usize {
+        Self::WhiskProposerTrackersCount::to_usize()
+    }
+
+    fn whisk_validators_per_shuffle() -> usize {
+        Self::WhiskValidatorsPerShuffle::to_usize()
+    }
 }
 
 /// Macro to inherit some type values from another EthSpec.
@@ -283,6 +309,15 @@ impl EthSpec for MainnetEthSpec {
     type SlotsPerEth1VotingPeriod = U2048; // 64 epochs * 32 slots per epoch
     type MaxBlsToExecutionChanges = U16;
     type MaxWithdrawalsPerPayload = U16;
+    // TODO WHISK: Reduced value for devnet testing. Must be > ValidatorsPerShuffle
+    type WhiskCandidateTrackersCount = U256;
+    // TODO WHISK: Reduced value for devnet testing. Should equal CandidateCount / 2
+    type WhiskProposerTrackersCount = U128;
+    // Actual count of shuffled trackers is `ELL = N - N_BLINDERS`
+    type WhiskValidatorsPerShuffle = U124;
+    type WhiskMaxShuffleProofSize = U4576;
+    type WhiskMaxOpeningProofSize = U128;
+    type BytesPerG1Point = U48;
 
     fn default_spec() -> ChainSpec {
         ChainSpec::mainnet()
@@ -308,6 +343,12 @@ impl EthSpec for MinimalEthSpec {
     type MaxPendingAttestations = U1024; // 128 max attestations * 8 slots per epoch
     type SlotsPerEth1VotingPeriod = U32; // 4 epochs * 8 slots per epoch
     type MaxWithdrawalsPerPayload = U4;
+    type WhiskCandidateTrackersCount = U256;
+    type WhiskProposerTrackersCount = U128;
+    type WhiskValidatorsPerShuffle = U124;
+    type WhiskMaxShuffleProofSize = U4576;
+    type WhiskMaxOpeningProofSize = U128;
+    type BytesPerG1Point = U48;
 
     params_from_eth_spec!(MainnetEthSpec {
         JustificationBitsLength,
@@ -374,6 +415,12 @@ impl EthSpec for GnosisEthSpec {
     type SlotsPerEth1VotingPeriod = U1024; // 64 epochs * 16 slots per epoch
     type MaxBlsToExecutionChanges = U16;
     type MaxWithdrawalsPerPayload = U8;
+    type WhiskCandidateTrackersCount = U16384;
+    type WhiskProposerTrackersCount = U8192;
+    type WhiskValidatorsPerShuffle = U124;
+    type WhiskMaxShuffleProofSize = U4576;
+    type WhiskMaxOpeningProofSize = U128;
+    type BytesPerG1Point = U48;
 
     fn default_spec() -> ChainSpec {
         ChainSpec::gnosis()

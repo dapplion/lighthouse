@@ -15,18 +15,27 @@ use account_utils::{
     },
     ZeroizeString,
 };
+use curdleproofs_whisk::{from_bytes_fr, to_bytes_fr, FieldElementBytes, Fr};
 use eth2_keystore::Keystore;
+use ethereum_hashing::hash;
 use lighthouse_metrics::set_gauge;
 use lockfile::{Lockfile, LockfileError};
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use reqwest::{Certificate, Client, Error as ReqwestError, Identity};
 use slog::{debug, error, info, warn, Logger};
-use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
 use std::io::{self, Read};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::Hash,
+};
+use std::{
+    fs::{self, File},
+    hash::Hasher,
+};
 use types::graffiti::GraffitiString;
 use types::{Address, Graffiti, Keypair, PublicKey, PublicKeyBytes};
 use url::{ParseError, Url};
@@ -43,6 +52,8 @@ const DEFAULT_REMOTE_SIGNER_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 
 // Use TTY instead of stdin to capture passwords from users.
 const USE_STDIN: bool = false;
+
+pub type PubkeysHash = u64;
 
 pub enum OnDecryptFailure {
     /// If the key cache fails to decrypt, create a new cache.
@@ -133,6 +144,10 @@ pub struct InitializedValidator {
     builder_proposals: Option<bool>,
     /// The validators index in `state.validators`, to be updated by an external service.
     index: Option<u64>,
+    /// Secret k for whisk SSLE
+    proposer_k: Fr,
+    /// Initial deterministic (publicly known) k for whisk SSLE
+    initial_proposer_k: Fr,
 }
 
 impl InitializedValidator {
@@ -329,6 +344,26 @@ impl InitializedValidator {
             }
         };
 
+        let pubkey = match &signing_method {
+            SigningMethod::LocalKeystore { voting_keypair, .. } => {
+                voting_keypair.sk.public_key().serialize()
+            }
+            SigningMethod::Web3Signer {
+                voting_public_key, ..
+            } => voting_public_key.serialize(),
+        };
+        let initial_proposer_k = from_bytes_fr(&hash(&pubkey));
+
+        let proposer_k = match &signing_method {
+            // TODO: Temp, standarize a derivation fn for k common between remote and local keys
+            SigningMethod::LocalKeystore { voting_keypair, .. } => {
+                from_bytes_fr(&hash(voting_keypair.sk.serialize().as_bytes()))
+            }
+            SigningMethod::Web3Signer {
+                voting_public_key, ..
+            } => from_bytes_fr(&hash(&voting_public_key.serialize())),
+        };
+
         Ok(Self {
             signing_method: Arc::new(signing_method),
             graffiti: def.graffiti.map(Into::into),
@@ -336,6 +371,8 @@ impl InitializedValidator {
             gas_limit: def.gas_limit,
             builder_proposals: def.builder_proposals,
             index: None,
+            proposer_k,
+            initial_proposer_k,
         })
     }
 
@@ -458,7 +495,7 @@ pub struct InitializedValidators {
     /// The directory that the `self.definitions` will be saved into.
     validators_dir: PathBuf,
     /// The canonical set of validators.
-    validators: HashMap<PublicKeyBytes, InitializedValidator>,
+    validators: TrackedHashMap<PublicKeyBytes, InitializedValidator>,
     /// The clients used for communications with a remote signer.
     web3_signer_client_map: Option<HashMap<Web3SignerDefinition, Client>>,
     /// For logging via `slog`.
@@ -475,12 +512,16 @@ impl InitializedValidators {
         let mut this = Self {
             validators_dir,
             definitions,
-            validators: HashMap::default(),
+            validators: TrackedHashMap::new(),
             web3_signer_client_map: None,
             log,
         };
         this.update_validators().await?;
         Ok(this)
+    }
+
+    pub fn voting_pubkeys_hash(&self) -> PubkeysHash {
+        self.validators.keys_hash
     }
 
     /// The count of enabled validators contained in `self`.
@@ -496,6 +537,20 @@ impl InitializedValidators {
     /// Iterate through all voting public keys in `self` that should be used when querying for duties.
     pub fn iter_voting_pubkeys(&self) -> impl Iterator<Item = &PublicKeyBytes> {
         self.validators.keys()
+    }
+
+    /// Iterate through all proposer k values in `self`
+    pub fn iter_proposer_k_entries(
+        &self,
+    ) -> impl Iterator<Item = (&PublicKeyBytes, &Option<u64>, &Fr, &Fr)> {
+        self.validators.iter().map(|(pubkey, validator)| {
+            (
+                pubkey,
+                &validator.index,
+                &validator.proposer_k,
+                &validator.initial_proposer_k,
+            )
+        })
     }
 
     /// Returns the voting `Keypair` for a given voting `PublicKey`, if all are true:
@@ -714,6 +769,13 @@ impl InitializedValidators {
     /// Returns the `graffiti` for a given public key specified in the `ValidatorDefinitions`.
     pub fn graffiti(&self, public_key: &PublicKeyBytes) -> Option<Graffiti> {
         self.validators.get(public_key).and_then(|v| v.graffiti)
+    }
+
+    /// Returns the `k` secret for a given public key specified in the `ValidatorDefinitions`.
+    pub fn proposer_k(&self, public_key: &PublicKeyBytes) -> Option<FieldElementBytes> {
+        self.validators
+            .get(public_key)
+            .map(|v| to_bytes_fr(&v.proposer_k))
     }
 
     /// Returns a `HashMap` of `public_key` -> `graffiti` for all initialized validators.
@@ -1308,5 +1370,66 @@ impl InitializedValidators {
     /// definition manually may result in inconsistencies.
     pub fn as_mut_slice_testing_only(&mut self) -> &mut [ValidatorDefinition] {
         self.definitions.as_mut_slice()
+    }
+}
+
+/// Tracks a cumulative hash of the HashMap keys.
+/// All read-only methods are available through the DeRef trait.
+/// Mutable methods are implemented only in demand to the `initialized_validators` use.
+struct TrackedHashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    map: HashMap<K, V>,
+    keys_hash: u64, // Hash value to track changes
+}
+
+impl<K, V> TrackedHashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            keys_hash: 0,
+        }
+    }
+
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let key_hash = TrackedHashMap::<K, V>::hash_key(&key);
+        let value = self.map.insert(key, value);
+        if value.is_none() {
+            self.keys_hash ^= key_hash; // XOR to update the hash
+        }
+        value
+    }
+
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let value = self.map.remove(key);
+        if value.is_some() {
+            self.keys_hash ^= TrackedHashMap::<K, V>::hash_key(key) // XOR again to revert the hash change
+        }
+        value
+    }
+
+    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        self.map.get_mut(k)
+    }
+
+    fn hash_key(key: &K) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+impl<K, V> Deref for TrackedHashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    type Target = HashMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.map
     }
 }

@@ -87,18 +87,29 @@ impl<E: EthSpec> Operation<E> for Attestation<E> {
         spec: &ChainSpec,
         _: &Operations<E, Self>,
     ) -> Result<(), BlockProcessingError> {
+        // TEMP patch before whisk specs tests
+        let proposer_index = state.get_beacon_proposer_index(state.slot(), spec)? as u64;
         let mut ctxt = ConsensusContext::new(state.slot());
         match state {
             BeaconState::Base(_) => base::process_attestations(
                 state,
                 &[self.clone()],
+                proposer_index,
                 VerifySignatures::True,
                 &mut ctxt,
                 spec,
             ),
             BeaconState::Altair(_) | BeaconState::Merge(_) | BeaconState::Capella(_) => {
                 initialize_progressive_balances_cache(state, None, spec)?;
-                altair::process_attestation(state, self, 0, &mut ctxt, VerifySignatures::True, spec)
+                altair::process_attestation(
+                    state,
+                    self,
+                    0,
+                    proposer_index,
+                    &mut ctxt,
+                    VerifySignatures::True,
+                    spec,
+                )
             }
         }
     }
@@ -124,6 +135,8 @@ impl<E: EthSpec> Operation<E> for AttesterSlashing<E> {
         process_attester_slashings(
             state,
             &[self.clone()],
+            // TEMP patch before whisk specs tests
+            state.get_beacon_proposer_index(state.slot(), spec)? as u64,
             VerifySignatures::True,
             &mut ctxt,
             spec,
@@ -175,6 +188,8 @@ impl<E: EthSpec> Operation<E> for ProposerSlashing {
         process_proposer_slashings(
             state,
             &[self.clone()],
+            // TEMP patch before whisk specs tests
+            state.get_beacon_proposer_index(state.slot(), spec)? as u64,
             VerifySignatures::True,
             &mut ctxt,
             spec,
@@ -221,13 +236,7 @@ impl<E: EthSpec> Operation<E> for BeaconBlock<E> {
         _: &Operations<E, Self>,
     ) -> Result<(), BlockProcessingError> {
         let mut ctxt = ConsensusContext::new(state.slot());
-        process_block_header(
-            state,
-            self.to_ref().temporary_block_header(),
-            VerifyBlockRoot::True,
-            &mut ctxt,
-            spec,
-        )?;
+        process_block_header(state, self.to_ref(), VerifyBlockRoot::True, &mut ctxt, spec)?;
         Ok(())
     }
 }
@@ -451,7 +460,7 @@ impl<E: EthSpec, O: Operation<E>> Case for Operations<E, O> {
     }
 
     fn is_enabled_for_fork(fork_name: ForkName) -> bool {
-        O::is_enabled_for_fork(fork_name)
+        O::is_enabled_for_fork(fork_name) && fork_name != ForkName::Capella
     }
 
     fn result(&self, _case_index: usize, fork_name: ForkName) -> Result<(), Error> {

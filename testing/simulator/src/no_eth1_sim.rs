@@ -93,6 +93,7 @@ pub fn run_no_eth1_sim(matches: &ArgMatches) -> Result<(), String> {
     beacon_config.sync_eth1_chain = true;
 
     beacon_config.network.enr_address = (Some(Ipv4Addr::LOCALHOST), None);
+    beacon_config.network.target_peers = node_count - 1;
 
     let main_future = async {
         let network = LocalNetwork::new(context.clone(), beacon_config.clone()).await?;

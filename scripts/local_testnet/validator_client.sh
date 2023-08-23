@@ -22,13 +22,20 @@ while getopts "pd:" flag; do
   esac
 done
 
+data_dir=${@:OPTIND+0:1}
+beacon_node_url=${@:OPTIND+1:1}
+metrics_port=${@:OPTIND+2:1}
+
 exec lighthouse \
 	--debug-level $DEBUG_LEVEL \
 	vc \
 	$BUILDER_PROPOSALS \
-	--datadir ${@:$OPTIND:1} \
+	--datadir $data_dir \
 	--testnet-dir $TESTNET_DIR \
 	--init-slashing-protection \
-	--beacon-nodes ${@:$OPTIND+1:1} \
+	--beacon-nodes $beacon_node_url \
+    --metrics \
+    --metrics-port $metrics_port \
+    --metrics-address 0.0.0.0 \
 	--suggested-fee-recipient 0x690B9A9E9aa1C9dB991C7721a92d351Db4FaC990 \
 	$VC_ARGS

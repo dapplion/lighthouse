@@ -2,11 +2,6 @@ name: test-suite
 
 on:
   push:
-    branches:
-      - stable
-      - staging
-      - trying
-      - 'pr/*'
   pull_request:
   merge_group:
 

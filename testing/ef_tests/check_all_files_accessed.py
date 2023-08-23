@@ -52,7 +52,9 @@ excluded_paths = [
     # some bls tests are not included now
     "bls12-381-tests/deserialization_G1",
     "bls12-381-tests/deserialization_G2",
-    "bls12-381-tests/hash_to_G2"
+    "bls12-381-tests/hash_to_G2",
+    # TEMP(lion) Added Whisk fields not in released spec tests
+    "tests/.*/capella",
 ]
 
 
@@ -90,6 +92,7 @@ for root, dirs, files in os.walk(tests_dir_filename):
             accessed_files += 1
 
 # Exit with an error if there were any files missed.
+print("missed files {}".format(missed))
 assert len(missed) == 0, "{} missed files".format(len(missed))
 
 print("Accessed {} files ({} intentionally excluded)".format(

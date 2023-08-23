@@ -73,10 +73,12 @@ use safe_arith::ArithError;
 use slog::{debug, error, warn, Logger};
 use slot_clock::SlotClock;
 use ssz::Encode;
+use state_processing::per_block_processing::verify_whisk_opening_proof;
 use state_processing::per_block_processing::{errors::IntoWithIndex, is_merge_transition_block};
 use state_processing::{
     block_signature_verifier::{BlockSignatureVerifier, Error as BlockSignatureVerifierError},
-    per_block_processing, per_slot_processing,
+    per_block_processing::per_block_processing,
+    per_slot_processing,
     state_advance::partial_state_advance,
     BlockProcessingError, BlockSignatureStrategy, ConsensusContext, SlotProcessingError,
     StateProcessingStrategy, VerifyBlockRoot,
@@ -156,7 +158,10 @@ pub enum BlockError<T: EthSpec> {
     /// ## Peer scoring
     ///
     /// The peer has incompatible state transition logic and is faulty.
-    StateRootMismatch { block: Hash256, local: Hash256 },
+    StateRootMismatch {
+        block: Hash256,
+        local: Hash256,
+    },
     /// The block was a genesis block, these blocks cannot be re-imported.
     GenesisBlock,
     /// The slot is finalized, no need to import.
@@ -175,13 +180,25 @@ pub enum BlockError<T: EthSpec> {
     ///
     /// It's unclear if this block is valid, but it conflicts with finality and shouldn't be
     /// imported.
-    NotFinalizedDescendant { block_parent_root: Hash256 },
+    NotFinalizedDescendant {
+        block_parent_root: Hash256,
+    },
     /// Block is already known, no need to re-import.
     ///
     /// ## Peer scoring
     ///
     /// The block is valid and we have already imported a block with this hash.
     BlockIsAlreadyKnown,
+    /// A block for this proposer and slot has already been observed.
+    ///
+    /// ## Peer scoring
+    ///
+    /// The `proposer` has already proposed a block at this slot. The existing block may or may not
+    /// be equal to the given block.
+    RepeatProposal {
+        proposer: u64,
+        slot: Slot,
+    },
     /// The block slot exceeds the MAXIMUM_BLOCK_SLOT_NUMBER.
     ///
     /// ## Peer scoring
@@ -196,7 +213,10 @@ pub enum BlockError<T: EthSpec> {
     /// ## Peer scoring
     ///
     /// The block is invalid and the peer is faulty.
-    IncorrectBlockProposer { block: u64, local_shuffling: u64 },
+    IncorrectBlockProposer {
+        block: u64,
+        local_shuffling: u64,
+    },
     /// The proposal signature in invalid.
     ///
     /// ## Peer scoring
@@ -220,7 +240,10 @@ pub enum BlockError<T: EthSpec> {
     /// ## Peer scoring
     ///
     /// The block is invalid and the peer is faulty.
-    BlockIsNotLaterThanParent { block_slot: Slot, parent_slot: Slot },
+    BlockIsNotLaterThanParent {
+        block_slot: Slot,
+        parent_slot: Slot,
+    },
     /// At least one block in the chain segment did not have it's parent root set to the root of
     /// the prior block.
     ///
@@ -276,7 +299,9 @@ pub enum BlockError<T: EthSpec> {
     /// If it's actually our fault (e.g. our execution node database is corrupt) we have bigger
     /// problems to worry about than losing peers, and we're doing the network a favour by
     /// disconnecting.
-    ParentExecutionPayloadInvalid { parent_root: Hash256 },
+    ParentExecutionPayloadInvalid {
+        parent_root: Hash256,
+    },
     /// The block is a slashable equivocation from the proposer.
     ///
     /// ## Peer scoring
@@ -284,6 +309,7 @@ pub enum BlockError<T: EthSpec> {
     /// Honest peers shouldn't forward more than 1 equivocating block from the same proposer, so
     /// we penalise them with a mid-tolerance error.
     Slashable,
+    ProposerProofInvalid,
 }
 
 /// Returned when block validation failed due to some issue verifying
@@ -806,54 +832,7 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
                 parent_block.root
             };
 
-        // We assign to a variable instead of using `if let Some` directly to ensure we drop the
-        // write lock before trying to acquire it again in the `else` clause.
-        let proposer_opt = chain
-            .beacon_proposer_cache
-            .lock()
-            .get_slot::<T::EthSpec>(proposer_shuffling_decision_block, block.slot());
-        let (expected_proposer, fork, parent, block) = if let Some(proposer) = proposer_opt {
-            // The proposer index was cached and we can return it without needing to load the
-            // parent.
-            (proposer.index, proposer.fork, None, block)
-        } else {
-            // The proposer index was *not* cached and we must load the parent in order to determine
-            // the proposer index.
-            let (mut parent, block) = load_parent(block_root, block, chain)?;
-
-            debug!(
-                chain.log,
-                "Proposer shuffling cache miss";
-                "parent_root" => ?parent.beacon_block_root,
-                "parent_slot" => parent.beacon_block.slot(),
-                "block_root" => ?block_root,
-                "block_slot" => block.slot(),
-            );
-
-            // The state produced is only valid for determining proposer/attester shuffling indices.
-            let state = cheap_state_advance_to_obtain_committees(
-                &mut parent.pre_state,
-                parent.beacon_state_root,
-                block.slot(),
-                &chain.spec,
-            )?;
-
-            let proposers = state.get_beacon_proposer_indices(&chain.spec)?;
-            let proposer_index = *proposers
-                .get(block.slot().as_usize() % T::EthSpec::slots_per_epoch() as usize)
-                .ok_or_else(|| BeaconChainError::NoProposerForSlot(block.slot()))?;
-
-            // Prime the proposer shuffling cache with the newly-learned value.
-            chain.beacon_proposer_cache.lock().insert(
-                block_epoch,
-                proposer_shuffling_decision_block,
-                proposers,
-                state.fork(),
-            )?;
-
-            (proposer_index, state.fork(), Some(parent), block)
-        };
-
+        // Check signature before spending resources getting a state
         let signature_is_valid = {
             let pubkey_cache = get_validator_pubkey_cache(chain)?;
             let pubkey = pubkey_cache
@@ -862,7 +841,7 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
             block.verify_signature(
                 Some(block_root),
                 pubkey,
-                &fork,
+                &chain.spec.fork_at_epoch(block_epoch),
                 chain.genesis_validators_root,
                 &chain.spec,
             )
@@ -888,12 +867,105 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
             SeenBlock::UniqueNonSlashable => {}
         };
 
-        if block.message().proposer_index() != expected_proposer as u64 {
-            return Err(BlockError::IncorrectBlockProposer {
-                block: block.message().proposer_index(),
-                local_shuffling: expected_proposer as u64,
-            });
-        }
+        // After whisk, the expected proposer can not be derived
+        // To check if block proposer is expect, must check opening proof validity
+        // and that the proposer commitment matches the validator commitment from the state
+        let (parent, block) = if block.message().body().whisk_opening_proof().is_ok() {
+            // TODO Whisk: implement cache for proposer trackers in the state
+
+            // The proposer index was *not* cached and we must load the parent in order to determine
+            // the proposer index.
+            let (mut parent, block) = load_parent(block_root, block, chain)?;
+
+            // The state produced is only valid for determining proposer/attester shuffling indices.
+            let state = cheap_state_advance_to_obtain_committees(
+                &mut parent.pre_state,
+                parent.beacon_state_root,
+                block.slot(),
+                &chain.spec,
+            )?;
+
+            if let Err(e) = verify_whisk_opening_proof(&state, block.message()) {
+                let proposer_index = block.message().proposer_index();
+                let tracker = state.whisk_proposer_trackers()?.get(
+                    state
+                        .slot()
+                        .as_usize()
+                        .wrapping_rem(T::EthSpec::whisk_proposer_trackers_count()),
+                );
+                let whisk_validator_k_commitments = state.whisk_validator_k_commitments()?;
+                let k_commitment = &whisk_validator_k_commitments.get(proposer_index as usize);
+                debug!(
+                    chain.log,
+                    "invalid opening proof";
+                    "error" => ?e,
+                    "proposer_index" => proposer_index,
+                    "tracker" => ?tracker,
+                    "k_commitment" => ?k_commitment,
+                    "proof" => hex::encode(block.message().body().whisk_opening_proof()?.to_vec()),
+                );
+                return Err(BlockError::ProposerProofInvalid);
+            }
+
+            (Some(parent), block)
+        } else {
+            // We assign to a variable instead of using `if let Some` directly to ensure we drop the
+            // write lock before trying to acquire it again in the `else` clause.
+            let proposer_opt = chain
+                .beacon_proposer_cache
+                .lock()
+                .get_slot::<T::EthSpec>(proposer_shuffling_decision_block, block.slot());
+            let (expected_proposer, _fork, parent, block) = if let Some(proposer) = proposer_opt {
+                // The proposer index was cached and we can return it without needing to load the
+                // parent.
+                (proposer.index, proposer.fork, None, block)
+            } else {
+                // The proposer index was *not* cached and we must load the parent in order to determine
+                // the proposer index.
+                let (mut parent, block) = load_parent(block_root, block, chain)?;
+
+                debug!(
+                    chain.log,
+                    "Proposer shuffling cache miss";
+                    "parent_root" => ?parent.beacon_block_root,
+                    "parent_slot" => parent.beacon_block.slot(),
+                    "block_root" => ?block_root,
+                    "block_slot" => block.slot(),
+                );
+
+                // The state produced is only valid for determining proposer/attester shuffling indices.
+                let state = cheap_state_advance_to_obtain_committees(
+                    &mut parent.pre_state,
+                    parent.beacon_state_root,
+                    block.slot(),
+                    &chain.spec,
+                )?;
+
+                let proposers = state.get_beacon_proposer_indices(&chain.spec)?;
+                let proposer_index = *proposers
+                    .get(block.slot().as_usize() % T::EthSpec::slots_per_epoch() as usize)
+                    .ok_or_else(|| BeaconChainError::NoProposerForSlot(block.slot()))?;
+
+                // Prime the proposer shuffling cache with the newly-learned value.
+                chain.beacon_proposer_cache.lock().insert(
+                    block_epoch,
+                    proposer_shuffling_decision_block,
+                    proposers,
+                    state.fork(),
+                )?;
+
+                (proposer_index, state.fork(), Some(parent), block)
+            };
+
+            if block.message().proposer_index() != expected_proposer as u64 {
+                return Err(BlockError::IncorrectBlockProposer {
+                    block: block.message().proposer_index(),
+                    local_shuffling: expected_proposer as u64,
+                });
+            }
+
+            (parent, block)
+        };
 
         // Validate the block's execution_payload (if any).
         validate_execution_payload_for_gossip(&parent_block, block.message(), chain)?;

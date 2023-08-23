@@ -4,11 +4,13 @@ use beacon_chain::{
     test_utils::{AttestationStrategy, BlockStrategy, SyncCommitteeStrategy},
     ChainConfig,
 };
-use eth2::types::{DepositContractData, StateId};
+use curdleproofs_whisk::{from_bytes_fr, is_matching_tracker, to_bytes_fr, FieldElementBytes, Fr};
+use eth2::types::{BeaconState, ChainSpec, DepositContractData, StateId, WhiskProposer};
 use execution_layer::{ForkchoiceState, PayloadAttributes};
 use http_api::test_utils::InteractiveTester;
 use parking_lot::Mutex;
 use slot_clock::SlotClock;
+use state_processing::upgrade::capella::compute_initial_whisk_k;
 use state_processing::{
     per_block_processing::get_expected_withdrawals, state_advance::complete_state_advance,
 };
@@ -366,6 +368,50 @@ pub async fn proposer_boost_re_org_weight_misprediction() {
     .await;
 }
 
+fn get_proposer_k(proposer_index: usize) -> Fr {
+    let mut slice = [0xffu8; 32];
+    slice[..8].copy_from_slice(&(proposer_index as u64).to_ne_bytes());
+    from_bytes_fr(&slice)
+}
+
+fn find_whisk_proposer(state: &BeaconState<E>, slot: Slot) -> Option<(usize, FieldElementBytes)> {
+    // Get the slot's proposer tracker
+    let proposer_tracker = state
+        .whisk_proposer_trackers()
+        .unwrap()
+        .get(slot.as_usize() % E::whisk_proposer_trackers_count())
+        .unwrap();
+    let proposer_tracker = proposer_tracker.try_into().unwrap();
+
+    // Find what validator's k is the one that matches proposer_tracker
+    // NOTE: May be either the initial deterministic k or the subsequent secret k
+    (0..state.validators().len())
+        .map(|i| (i, get_proposer_k(i)))
+        .find(|(index, k)| {
+            let validator = state.validators().get(*index).unwrap();
+            let initial_k = compute_initial_whisk_k(validator);
+            is_matching_tracker(&proposer_tracker, k)
+                || is_matching_tracker(&proposer_tracker, &initial_k)
+        })
+        .map(|(index, k)| (index, to_bytes_fr(&k)))
+}
+
+fn get_proposer(spec: &ChainSpec, state: &BeaconState<E>, slot: Slot) -> (usize, WhiskProposer) {
+    if spec.fork_name_at_slot::<E>(slot) == ForkName::Capella {
+        let (index, k) = find_whisk_proposer(state, slot).expect("whisk proposer not found");
+        (
+            index,
+            WhiskProposer::PostWhisk {
+                index: index as u64,
+                k,
+            },
+        )
+    } else {
+        let index = state.get_beacon_proposer_index(slot, spec).unwrap();
+        (index, WhiskProposer::PreWhisk)
+    }
+}
+
 /// Run a proposer boost re-org test.
 ///
 /// - `head_slot`: the slot of the canonical head to be reorged
@@ -502,6 +548,15 @@ pub async fn proposer_boost_re_org_test(
     let slot_b = slot_a + parent_distance;
     let slot_c = slot_b + head_distance;
 
+    // Register whisk proposers for the next shuffling round
+    // finding a whisk proposer is expensive, do for min number of slots
+    {
+        let state = harness.chain.head_beacon_state_cloned();
+        for slot in [slot_a, slot_b, slot_c] {
+            harness.find_and_register_whisk_proposer(&state, slot.into());
+        }
+    }
+
     // We need to transition to at least epoch 2 in order to trigger
     // `process_rewards_and_penalties`. This allows us to test withdrawals changes at epoch
     // boundaries.
@@ -611,15 +666,13 @@ pub async fn proposer_boost_re_org_test(
         .to_vec();
     complete_state_advance(&mut state_b, None, slot_c, &harness.chain.spec).unwrap();
 
-    let proposer_index = state_b
-        .get_beacon_proposer_index(slot_c, &harness.chain.spec)
-        .unwrap();
+    let (proposer_index, whisk_proposer) = get_proposer(&harness.chain.spec, &state_b, slot_c);
     let randao_reveal = harness
         .sign_randao_reveal(&state_b, proposer_index, slot_c)
         .into();
     let unsigned_block_c = tester
         .client
-        .get_validator_blocks(slot_c, &randao_reveal, None)
+        .get_validator_blocks(slot_c, &randao_reveal, None, whisk_proposer)
         .await
         .unwrap()
         .data;
@@ -793,15 +846,13 @@ pub async fn fork_choice_before_proposal() {
     harness.advance_slot();
     harness.chain.per_slot_task().await;
 
-    let proposer_index = state_b
-        .get_beacon_proposer_index(slot_d, &harness.chain.spec)
-        .unwrap();
+    let (proposer_index, whisk_proposer) = get_proposer(&harness.chain.spec, &state_b, slot_d);
     let randao_reveal = harness
         .sign_randao_reveal(&state_b, proposer_index, slot_d)
         .into();
     let block_d = tester
         .client
-        .get_validator_blocks::<E, FullPayload<E>>(slot_d, &randao_reveal, None)
+        .get_validator_blocks::<E, FullPayload<E>>(slot_d, &randao_reveal, None, whisk_proposer)
         .await
         .unwrap()
         .data;

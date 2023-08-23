@@ -10,6 +10,7 @@ use crate::{
     validator_store::{Error as ValidatorStoreError, ValidatorStore},
 };
 use environment::RuntimeContext;
+use eth2::types::WhiskProposer;
 use eth2::BeaconNodeHttpClient;
 use slog::{crit, debug, error, info, trace, warn};
 use slot_clock::SlotClock;
@@ -463,6 +464,15 @@ impl<T: SlotClock + 'static, E: EthSpec> BlockService<T, E> {
             proposer_nodes: self.proposer_nodes.clone(),
         };
 
+        // TODO: Only fetch and attach to requests after whisk
+        let whisk_proposer = WhiskProposer::PostWhisk {
+            index: proposer_index.expect("no proposer_index"),
+            k: self
+                .validator_store
+                .proposer_k(&validator_pubkey)
+                .expect("no proposer k"),
+        };
+
         info!(
             log,
             "Requesting unsigned block";
@@ -489,6 +499,7 @@ impl<T: SlotClock + 'static, E: EthSpec> BlockService<T, E> {
                                     slot,
                                     randao_reveal_ref,
                                     graffiti.as_ref(),
+                                    whisk_proposer,
                                 )
                                 .await
                                 .map_err(|e| {

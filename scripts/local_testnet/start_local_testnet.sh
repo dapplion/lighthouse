@@ -120,15 +120,18 @@ sleeping 1
 # Start beacon nodes
 BN_udp_tcp_base=9000
 BN_http_port_base=8000
+BN_metrics_port_base=8500
+VC_metrics_port_base=4500
 
 EL_base_network=7000
 EL_base_http=6000
 EL_base_auth_http=5000
+EL_base_metrics=6500
 
 (( $VC_COUNT < $BN_COUNT )) && SAS=-s || SAS=
 
 for (( el=1; el<=$BN_COUNT; el++ )); do
-    execute_command_add_PID geth_$el.log ./geth.sh $DATADIR/geth_datadir$el $((EL_base_network + $el)) $((EL_base_http + $el)) $((EL_base_auth_http + $el)) $genesis_file
+    execute_command_add_PID geth_$el.log ./geth.sh $DATADIR/geth_datadir$el $((EL_base_network + $el)) $((EL_base_http + $el)) $((EL_base_auth_http + $el)) $((EL_base_metrics + $el)) $genesis_file
 done
 
 sleeping 20
@@ -139,12 +142,12 @@ sed -i 's/"shanghaiTime".*$/"shanghaiTime": 0,/g' $genesis_file
 for (( bn=1; bn<=$BN_COUNT; bn++ )); do
     secret=$DATADIR/geth_datadir$bn/geth/jwtsecret
     echo $secret
-    execute_command_add_PID beacon_node_$bn.log ./beacon_node.sh $SAS -d $DEBUG_LEVEL $DATADIR/node_$bn $((BN_udp_tcp_base + $bn)) $((BN_http_port_base + $bn)) http://localhost:$((EL_base_auth_http + $bn)) $secret
+    execute_command_add_PID beacon_node_$bn.log ./beacon_node.sh $SAS -d $DEBUG_LEVEL $DATADIR/node_$bn $((BN_udp_tcp_base + $bn)) $((BN_http_port_base + $bn)) $((BN_metrics_port_base + $bn)) http://localhost:$((EL_base_auth_http + $bn)) $secret
 done
 
 # Start requested number of validator clients
 for (( vc=1; vc<=$VC_COUNT; vc++ )); do
-    execute_command_add_PID validator_node_$vc.log ./validator_client.sh $BUILDER_PROPOSALS -d $DEBUG_LEVEL $DATADIR/node_$vc http://localhost:$((BN_http_port_base + $vc))
+    execute_command_add_PID validator_node_$vc.log ./validator_client.sh $BUILDER_PROPOSALS -d $DEBUG_LEVEL $DATADIR/node_$vc http://localhost:$((BN_http_port_base + $vc)) $((VC_metrics_port_base + $vc))
 done
 
 echo "Started!"

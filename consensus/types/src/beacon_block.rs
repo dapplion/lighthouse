@@ -522,6 +522,12 @@ impl<T: EthSpec, Payload: AbstractExecPayload<T>> BeaconBlockCapella<T, Payload>
                 },
                 graffiti: Graffiti::default(),
                 execution_payload: Payload::Capella::default(),
+                whisk_opening_proof: WhiskTrackerProof::<T>::default(),
+                whisk_post_shuffle_trackers: ShuffleTrackers::<T>::default(),
+                whisk_shuffle_proof: WhiskShuffleProof::<T>::default(),
+                whisk_registration_proof: WhiskTrackerProof::<T>::default(),
+                whisk_tracker: WhiskTracker::default(),
+                whisk_k_commitment: BLSG1Point::default(),
             },
         }
     }
@@ -551,6 +557,12 @@ impl<T: EthSpec, Payload: AbstractExecPayload<T>> EmptyBlock for BeaconBlockCape
                 sync_aggregate: SyncAggregate::empty(),
                 execution_payload: Payload::Capella::default(),
                 bls_to_execution_changes: VariableList::empty(),
+                whisk_opening_proof: WhiskTrackerProof::<T>::default(),
+                whisk_post_shuffle_trackers: ShuffleTrackers::<T>::default(),
+                whisk_shuffle_proof: WhiskShuffleProof::<T>::default(),
+                whisk_registration_proof: WhiskTrackerProof::<T>::default(),
+                whisk_tracker: WhiskTracker::default(),
+                whisk_k_commitment: BLSG1Point::default(),
             },
         }
     }

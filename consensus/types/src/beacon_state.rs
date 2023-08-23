@@ -54,6 +54,7 @@ pub enum Error {
     IncorrectStateVariant,
     EpochOutOfBounds,
     SlotOutOfBounds,
+    NotCurrentEpoch,
     UnknownValidator(usize),
     UnableToDetermineProducer,
     InvalidBitfield,
@@ -136,6 +137,9 @@ pub enum Error {
     },
     IndexNotSupported(usize),
     MerkleTreeError(merkle_proof::MerkleTreeError),
+    NoProposerShuffleAfterWhisk,
+    WhiskIndexOutOfBounds,
+    WhiskInvalid(String),
 }
 
 /// Control whether an epoch-indexed field can be indexed at the next epoch or not.
@@ -311,6 +315,16 @@ where
     // Deep history valid from Capella onwards.
     #[superstruct(only(Capella))]
     pub historical_summaries: VariableList<HistoricalSummary, T::HistoricalRootsLimit>,
+
+    // Whisk
+    #[superstruct(only(Capella))]
+    pub whisk_candidate_trackers: FixedVector<WhiskTracker, T::WhiskCandidateTrackersCount>,
+    #[superstruct(only(Capella))]
+    pub whisk_proposer_trackers: FixedVector<WhiskTracker, T::WhiskProposerTrackersCount>,
+    #[superstruct(only(Capella))]
+    pub whisk_validator_trackers: VariableList<WhiskTracker, T::ValidatorRegistryLimit>,
+    #[superstruct(only(Capella))]
+    pub whisk_validator_k_commitments: VariableList<BLSG1Point, T::ValidatorRegistryLimit>,
 
     // Caching (not in the spec)
     #[serde(skip_serializing, skip_deserializing)]
@@ -637,6 +651,30 @@ impl<T: EthSpec> BeaconState<T> {
             .saturating_sub(1_u64)
     }
 
+    /// Returns the block root which decided the whisk proposer tracker election for the current
+    /// shuffling phase. This root can be used to key this whisk proposer trackers.
+    ///
+    /// ## Notes
+    ///
+    /// The `block_root` covers the one-off scenario where the genesis block decides its own
+    /// shuffling. It should be set to the latest block applied to `self` or the genesis block root.
+    pub fn whisk_proposer_shuffling_decision_root(
+        &self,
+        block_root: Hash256,
+        spec: &ChainSpec,
+    ) -> Result<WhiskProposerShufflingRoot, Error> {
+        let decision_slot = spec
+            .whisk_shuffle_round_start_slot::<T>(self.slot())
+            .saturating_sub(1_u64);
+
+        if self.slot() == decision_slot {
+            Ok(WhiskProposerShufflingRoot(block_root))
+        } else {
+            self.get_block_root(decision_slot)
+                .map(|root| WhiskProposerShufflingRoot(*root))
+        }
+    }
+
     /// Returns the block root which decided the attester shuffling for the given `relative_epoch`.
     /// This root can be used to key that attester shuffling.
     ///
@@ -782,6 +820,10 @@ impl<T: EthSpec> BeaconState<T> {
             return Err(Error::SlotOutOfBounds);
         }
 
+        if spec.fork_name_at_epoch(epoch) == ForkName::Capella {
+            return Err(Error::NoProposerShuffleAfterWhisk);
+        }
+
         let seed = self.get_beacon_proposer_seed(slot, spec)?;
         let indices = self.get_active_validator_indices(epoch, spec)?;
 
@@ -794,6 +836,10 @@ impl<T: EthSpec> BeaconState<T> {
     /// `state.current_epoch() == 1`, then `vec[0]` refers to slot `32` and `vec[1]` refers to slot
     /// `33`. It will always be the case that `vec.len() == SLOTS_PER_EPOCH`.
     pub fn get_beacon_proposer_indices(&self, spec: &ChainSpec) -> Result<Vec<usize>, Error> {
+        if spec.fork_name_at_epoch(self.current_epoch()) == ForkName::Capella {
+            return Err(Error::NoProposerShuffleAfterWhisk);
+        }
+
         // Not using the cached validator indices since they are shuffled.
         let indices = self.get_active_validator_indices(self.current_epoch(), spec)?;
 
@@ -804,6 +850,66 @@ impl<T: EthSpec> BeaconState<T> {
                 self.compute_proposer_index(&indices, &seed, spec)
             })
             .collect()
+    }
+
+    /// Compute whisk_proposer_indices
+    pub fn compute_whisk_proposer_indices(
+        &self,
+        epoch: Epoch,
+        spec: &ChainSpec,
+    ) -> Result<Vec<usize>, Error> {
+        let proposer_seed = self.get_seed(
+            epoch.saturating_sub(spec.whisk_proposer_selection_gap),
+            Domain::WhiskProposerSelection,
+            spec,
+        )?;
+
+        let whisk_proposer_trackers_count = T::whisk_proposer_trackers_count();
+        let whisk_candidate_trackers_count = T::whisk_candidate_trackers_count();
+        let mut whisk_proposer_indices: Vec<usize> =
+            Vec::with_capacity(whisk_proposer_trackers_count);
+
+        for i in 0..whisk_proposer_trackers_count {
+            whisk_proposer_indices.push(
+                compute_shuffled_index(
+                    i,
+                    whisk_candidate_trackers_count,
+                    proposer_seed.as_bytes(),
+                    spec.shuffle_round_count,
+                )
+                .ok_or(Error::UnableToShuffle)?,
+            );
+        }
+
+        Ok(whisk_proposer_indices)
+    }
+
+    /// Compute whisk_candidate_indices
+    pub fn compute_whisk_candidate_indices(
+        &self,
+        epoch: Epoch,
+        spec: &ChainSpec,
+    ) -> Result<Vec<usize>, Error> {
+        let indices = self.get_active_validator_indices(epoch, spec)?;
+
+        let seed_base = self
+            .get_seed(epoch, Domain::WhiskCandidateSelection, spec)?
+            .as_bytes()
+            .to_vec();
+
+        let whisk_candidate_trackers_count = T::whisk_candidate_trackers_count();
+        let mut whisk_candidate_indices: Vec<usize> =
+            Vec::with_capacity(whisk_candidate_trackers_count);
+
+        for i in 0..whisk_candidate_trackers_count {
+            let mut seed_preimage = seed_base.clone();
+            seed_preimage.append(&mut int_to_bytes8(i as u64));
+            let seed = hash(&seed_preimage);
+            // sample by effective balance
+            whisk_candidate_indices.push(self.compute_proposer_index(&indices, &seed, spec)?);
+        }
+
+        Ok(whisk_candidate_indices)
     }
 
     /// Compute the seed to use for the beacon proposer selection at the given `slot`.

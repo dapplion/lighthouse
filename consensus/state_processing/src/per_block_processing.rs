@@ -11,6 +11,7 @@ pub use self::verify_attester_slashing::{
     get_slashable_indices, get_slashable_indices_modular, verify_attester_slashing,
 };
 pub use self::verify_proposer_slashing::verify_proposer_slashing;
+use self::whisk::{process_shuffled_trackers, process_whisk_registration};
 pub use altair::sync_committee::process_sync_aggregate;
 pub use block_signature_verifier::{BlockSignatureVerifier, ParallelSignatureSets};
 pub use is_valid_indexed_attestation::is_valid_indexed_attestation;
@@ -23,6 +24,10 @@ pub use verify_deposit::{
     get_existing_validator_index, verify_deposit_merkle_proof, verify_deposit_signature,
 };
 pub use verify_exit::verify_exit;
+pub use whisk::{
+    get_shuffle_indices, should_shuffle_trackers, ssz_tracker_proof_to_crypto_tracker_proof,
+    verify_whisk_opening_proof,
+};
 
 pub mod altair;
 pub mod block_signature_verifier;
@@ -37,6 +42,7 @@ mod verify_bls_to_execution_change;
 mod verify_deposit;
 mod verify_exit;
 mod verify_proposer_slashing;
+mod whisk;
 
 use crate::common::decrease_balance;
 use crate::StateProcessingStrategy;
@@ -141,13 +147,7 @@ pub fn per_block_processing<T: EthSpec, Payload: AbstractExecPayload<T>>(
         BlockSignatureStrategy::VerifyRandao => VerifySignatures::False,
     };
 
-    let proposer_index = process_block_header(
-        state,
-        block.temporary_block_header(),
-        verify_block_root,
-        ctxt,
-        spec,
-    )?;
+    let proposer_index = process_block_header(state, block, verify_block_root, ctxt, spec)?;
 
     if verify_signatures.is_true() {
         verify_block_signature(state, signed_block, ctxt, spec)?;
@@ -175,7 +175,7 @@ pub fn per_block_processing<T: EthSpec, Payload: AbstractExecPayload<T>>(
 
     process_randao(state, block, verify_randao, ctxt, spec)?;
     process_eth1_data(state, block.body().eth1_data())?;
-    process_operations(state, block.body(), verify_signatures, ctxt, spec)?;
+    process_operations(state, block, verify_signatures, ctxt, spec)?;
 
     if let Ok(sync_aggregate) = block.body().sync_aggregate() {
         process_sync_aggregate(
@@ -191,17 +191,22 @@ pub fn per_block_processing<T: EthSpec, Payload: AbstractExecPayload<T>>(
         update_progressive_balances_metrics(state.progressive_balances_cache())?;
     }
 
+    process_shuffled_trackers(state, block.body(), spec)?;
+    process_whisk_registration(state, block)?;
+
     Ok(())
 }
 
 /// Processes the block header, returning the proposer index.
-pub fn process_block_header<T: EthSpec>(
+pub fn process_block_header<T: EthSpec, Payload: AbstractExecPayload<T>>(
     state: &mut BeaconState<T>,
-    block_header: BeaconBlockHeader,
+    block: BeaconBlockRef<T, Payload>,
     verify_block_root: VerifyBlockRoot,
     ctxt: &mut ConsensusContext<T>,
     spec: &ChainSpec,
 ) -> Result<u64, BlockOperationError<HeaderInvalid>> {
+    let block_header = block.temporary_block_header();
+
     // Verify that the slots match
     verify!(
         block_header.slot == state.slot(),
@@ -219,14 +224,19 @@ pub fn process_block_header<T: EthSpec>(
 
     // Verify that proposer index is the correct index
     let proposer_index = block_header.proposer_index;
-    let state_proposer_index = ctxt.get_proposer_index(state, spec)?;
-    verify!(
-        proposer_index == state_proposer_index,
-        HeaderInvalid::ProposerIndexMismatch {
-            block_proposer_index: proposer_index,
-            state_proposer_index,
-        }
-    );
+
+    if block.body().whisk_opening_proof().is_ok() {
+        verify_whisk_opening_proof(state, block)?;
+    } else {
+        let state_proposer_index = ctxt.get_proposer_index(state, spec)?;
+        verify!(
+            proposer_index == state_proposer_index,
+            HeaderInvalid::ProposerIndexMismatch {
+                block_proposer_index: proposer_index,
+                state_proposer_index,
+            }
+        );
+    }
 
     if verify_block_root == VerifyBlockRoot::True {
         let expected_previous_block_root = state.latest_block_header().tree_hash_root();
@@ -260,14 +270,12 @@ pub fn verify_block_signature<T: EthSpec, Payload: AbstractExecPayload<T>>(
     spec: &ChainSpec,
 ) -> Result<(), BlockOperationError<HeaderInvalid>> {
     let block_root = Some(ctxt.get_current_block_root(block)?);
-    let proposer_index = Some(ctxt.get_proposer_index(state, spec)?);
     verify!(
         block_proposal_signature_set(
             state,
             |i| get_pubkey_from_state(state, i),
             block,
             block_root,
-            proposer_index,
             spec
         )?
         .verify(),
@@ -283,18 +291,19 @@ pub fn process_randao<T: EthSpec, Payload: AbstractExecPayload<T>>(
     state: &mut BeaconState<T>,
     block: BeaconBlockRef<'_, T, Payload>,
     verify_signatures: VerifySignatures,
-    ctxt: &mut ConsensusContext<T>,
+    _ctxt: &mut ConsensusContext<T>,
     spec: &ChainSpec,
 ) -> Result<(), BlockProcessingError> {
     if verify_signatures.is_true() {
         // Verify RANDAO reveal signature.
-        let proposer_index = ctxt.get_proposer_index(state, spec)?;
         block_verify!(
             randao_signature_set(
                 state,
                 |i| get_pubkey_from_state(state, i),
                 block,
-                Some(proposer_index),
+                // TODO Whisk: proposer index correctness is checked in the paths I'm aware of. Is
+                // process_randao ever called with unchecked proposer index?
+                block.proposer_index(),
                 spec
             )?
             .verify(),

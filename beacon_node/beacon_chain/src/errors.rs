@@ -241,6 +241,8 @@ easy_from_to!(StateAdvanceError, BeaconChainError);
 easy_from_to!(BlockReplayError, BeaconChainError);
 easy_from_to!(InconsistentFork, BeaconChainError);
 
+type WhiskSerializationError = curdleproofs_whisk::SerializationError;
+
 #[derive(Debug)]
 pub enum BlockProductionError {
     UnableToGetBlockRootFromState,
@@ -273,6 +275,18 @@ pub enum BlockProductionError {
     TokioJoin(tokio::task::JoinError),
     BeaconChain(BeaconChainError),
     InvalidPayloadFork,
+    MissingWhiskProposerK,
+    MissingWhiskFields,
+    ExpectedPostWhiskData,
+    WhiskSerializationError(WhiskSerializationError),
+    WhiskInvalid(String),
+    WhiskNotTrackerProposer {
+        proposer_index: u64,
+        is_first_proposal: bool,
+    },
+    WhiskImpossibleDuplicateBootstrapProposal,
+    WhiskNotNewProposerK,
+    ProposerOutOfBounds,
 }
 
 easy_from_to!(BlockProcessingError, BlockProductionError);
@@ -281,3 +295,4 @@ easy_from_to!(SlotProcessingError, BlockProductionError);
 easy_from_to!(Eth1ChainError, BlockProductionError);
 easy_from_to!(StateAdvanceError, BlockProductionError);
 easy_from_to!(ForkChoiceError, BlockProductionError);
+easy_from_to!(WhiskSerializationError, BlockProductionError);

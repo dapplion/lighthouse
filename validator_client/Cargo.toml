@@ -36,6 +36,7 @@ filesystem = { path = "../common/filesystem" }
 hex = "0.4.2"
 deposit_contract = { path = "../common/deposit_contract" }
 bls = { path = "../crypto/bls" }
+curdleproofs_whisk = { path = "../crypto/curdleproofs_whisk" }
 eth2 = { path = "../common/eth2" }
 tempfile = "3.1.0"
 validator_dir = { path = "../common/validator_dir" }
@@ -47,6 +48,7 @@ warp_utils = { path = "../common/warp_utils" }
 warp = "0.3.2"
 hyper = "0.14.4"
 ethereum_serde_utils = "0.5.0"
+ethereum_hashing = "1.0.0-beta.2"
 libsecp256k1 = "0.7.0"
 ring = "0.16.19"
 rand = { version = "0.8.5", features = ["small_rng"] }
@@ -62,3 +64,4 @@ malloc_utils = { path = "../common/malloc_utils" }
 sysinfo = "0.26.5"
 system_health = { path = "../common/system_health" }
 logging = { path = "../common/logging" }
+lru = "0.7.1"

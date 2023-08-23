@@ -159,7 +159,9 @@ pub use crate::payload::{
 };
 pub use crate::pending_attestation::PendingAttestation;
 pub use crate::preset::{AltairPreset, BasePreset, BellatrixPreset, CapellaPreset};
-pub use crate::proposer_preparation_data::ProposerPreparationData;
+pub use crate::proposer_preparation_data::{
+    ProposerPreparationData, WhiskProposerPreparationData, WhiskProposerShufflingRoot,
+};
 pub use crate::proposer_slashing::ProposerSlashing;
 pub use crate::relative_epoch::{Error as RelativeEpochError, RelativeEpoch};
 pub use crate::selection_proof::SelectionProof;
@@ -205,5 +207,11 @@ pub use bls::{
     AggregatePublicKey, AggregateSignature, Keypair, PublicKey, PublicKeyBytes, SecretKey,
     Signature, SignatureBytes,
 };
+
+pub use curdleproofs_whisk::{BLSG1Point, FieldElementBytes, WhiskTracker};
+pub type WhiskTrackerProof<T> = FixedVector<u8, <T as EthSpec>::WhiskMaxOpeningProofSize>;
+pub type WhiskShuffleProof<T> = FixedVector<u8, <T as EthSpec>::WhiskMaxShuffleProofSize>;
+pub type ShuffleTrackers<T> = FixedVector<WhiskTracker, <T as EthSpec>::WhiskValidatorsPerShuffle>;
+
 pub use ssz_types::{typenum, typenum::Unsigned, BitList, BitVector, FixedVector, VariableList};
 pub use superstruct::superstruct;

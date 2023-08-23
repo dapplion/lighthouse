@@ -636,6 +636,25 @@ impl BeaconNodeHttpClient {
         self.get_opt(path).await
     }
 
+    /// `GET beacon/states/{state_id}/proposer_trackers`
+    ///
+    /// Returns `Ok(None)` on a 404 error.
+    pub async fn get_beacon_states_proposer_trackers(
+        &self,
+        state_id: StateId,
+    ) -> Result<WhiskDutiesResponse<Vec<WhiskTracker>>, Error> {
+        let mut path = self.eth_path(V1)?;
+
+        path.path_segments_mut()
+            .map_err(|()| Error::InvalidUrl(self.server.clone()))?
+            .push("beacon")
+            .push("states")
+            .push(&state_id.to_string())
+            .push("proposer_trackers");
+
+        self.get(path).await
+    }
+
     /// `GET beacon/headers?slot,parent_root`
     ///
     /// Returns `Ok(None)` on a 404 error.
@@ -1300,6 +1319,23 @@ impl BeaconNodeHttpClient {
         Ok(())
     }
 
+    /// `POST validator/prepare_beacon_whisk_proposer`
+    pub async fn post_validator_prepare_beacon_whisk_proposer(
+        &self,
+        preparation_data: &[WhiskProposerPreparationData],
+    ) -> Result<(), Error> {
+        let mut path = self.eth_path(V1)?;
+
+        path.path_segments_mut()
+            .map_err(|()| Error::InvalidUrl(self.server.clone()))?
+            .push("validator")
+            .push("prepare_beacon_whisk_proposer");
+
+        self.post(path, &preparation_data).await?;
+
+        Ok(())
+    }
+
     /// `POST validator/register_validator`
     pub async fn post_validator_register_validator(
         &self,
@@ -1576,9 +1612,16 @@ impl BeaconNodeHttpClient {
         slot: Slot,
         randao_reveal: &SignatureBytes,
         graffiti: Option<&Graffiti>,
+        whisk_proposer: WhiskProposer,
     ) -> Result<ForkVersionedResponse<BeaconBlock<T, Payload>>, Error> {
-        self.get_validator_blocks_modular(slot, randao_reveal, graffiti, SkipRandaoVerification::No)
-            .await
+        self.get_validator_blocks_modular(
+            slot,
+            randao_reveal,
+            graffiti,
+            whisk_proposer,
+            SkipRandaoVerification::No,
+        )
+        .await
     }
 
     /// `GET v2/validator/blocks/{slot}`
@@ -1587,6 +1630,7 @@ impl BeaconNodeHttpClient {
         slot: Slot,
         randao_reveal: &SignatureBytes,
         graffiti: Option<&Graffiti>,
+        whisk_proposer: WhiskProposer,
         skip_randao_verification: SkipRandaoVerification,
     ) -> Result<ForkVersionedResponse<BeaconBlock<T, Payload>>, Error> {
         let mut path = self.eth_path(V2)?;
@@ -1603,6 +1647,20 @@ impl BeaconNodeHttpClient {
         if let Some(graffiti) = graffiti {
             path.query_pairs_mut()
                 .append_pair("graffiti", &graffiti.to_string());
+        }
+
+        match whisk_proposer {
+            WhiskProposer::PreWhisk => {}
+            WhiskProposer::Dummy => {
+                path.query_pairs_mut()
+                    .append_pair("dummy_whisk_proposer", "");
+            }
+            WhiskProposer::PostWhisk { index, k } => {
+                path.query_pairs_mut()
+                    .append_pair("proposer_index", &index.to_string());
+                path.query_pairs_mut()
+                    .append_pair("k", &serde_utils::hex::encode(k.as_slice()));
+            }
         }
 
         if skip_randao_verification == SkipRandaoVerification::Yes {

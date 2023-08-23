@@ -1,11 +1,12 @@
 use crate::{
     doppelganger_service::DoppelgangerService,
     http_metrics::metrics,
-    initialized_validators::InitializedValidators,
+    initialized_validators::{InitializedValidators, PubkeysHash},
     signing_method::{Error as SigningError, SignableMessage, SigningContext, SigningMethod},
     Config,
 };
 use account_utils::validator_definitions::{PasswordStorage, ValidatorDefinition};
+use curdleproofs_whisk::{bls_g1_scalar_multiply, FieldElementBytes, WhiskTrackerG1Affine};
 use parking_lot::{Mutex, RwLock};
 use slashing_protection::{
     interchange::Interchange, InterchangeError, NotSafe, Safe, SlashingDatabase,
@@ -289,6 +290,15 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore<T, E> {
             .collect()
     }
 
+    /// Return true if validator store has at least one pubkey, including undergoing doppelganger protection
+    pub fn has_some_voting_pubkey(&self) -> bool {
+        self.validators
+            .read()
+            .iter_voting_pubkeys()
+            .next()
+            .is_some()
+    }
+
     /// Returns doppelganger statuses for all enabled validators.
     #[allow(clippy::needless_collect)] // Collect is required to avoid holding a lock.
     pub fn doppelganger_statuses(&self) -> Vec<DoppelgangerStatus> {
@@ -330,6 +340,10 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore<T, E> {
 
     pub fn num_voting_validators(&self) -> usize {
         self.validators.read().num_enabled()
+    }
+
+    pub fn voting_pubkeys_hash(&self) -> PubkeysHash {
+        self.validators.read().voting_pubkeys_hash()
     }
 
     fn fork(&self, epoch: Epoch) -> Fork {
@@ -399,6 +413,10 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore<T, E> {
 
     pub fn graffiti(&self, validator_pubkey: &PublicKeyBytes) -> Option<Graffiti> {
         self.validators.read().graffiti(validator_pubkey)
+    }
+
+    pub fn proposer_k(&self, validator_pubkey: &PublicKeyBytes) -> Option<FieldElementBytes> {
+        self.validators.read().proposer_k(validator_pubkey)
     }
 
     /// Returns the fee recipient for the given public key. The priority order for fetching
@@ -860,6 +878,23 @@ impl<T: SlotClock + 'static, E: EthSpec> ValidatorStore<T, E> {
         );
 
         Ok(SignedContributionAndProof { message, signature })
+    }
+
+    /// Given a whisk tracker, check if one of the registered validators matches it
+    pub fn find_whisk_tracker_match(
+        &self,
+        tracker: &WhiskTrackerG1Affine,
+    ) -> Option<(PublicKeyBytes, Option<u64>)> {
+        self.validators
+            .read()
+            .iter_proposer_k_entries()
+            .find(|(_, _, proposer_k, initial_proposer_k)|
+                // TODO: Should the validator track if the proposer has already submited
+                // the first whisk proposal? For now always check the two possible k.
+                // Note that a proposer may proposer twice in a row, so has to be fork aware
+                bls_g1_scalar_multiply(&tracker.r_g, proposer_k) == tracker.k_r_g ||
+                bls_g1_scalar_multiply(&tracker.r_g, initial_proposer_k) == tracker.k_r_g)
+            .map(|(pubkey, index, _, _)| (*pubkey, *index))
     }
 
     pub fn import_slashing_protection(

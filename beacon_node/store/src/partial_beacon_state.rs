@@ -106,6 +106,16 @@ where
     #[superstruct(only(Capella))]
     pub next_withdrawal_validator_index: u64,
 
+    // Whisk
+    #[superstruct(only(Capella))]
+    pub whisk_candidate_trackers: FixedVector<WhiskTracker, T::WhiskCandidateTrackersCount>,
+    #[superstruct(only(Capella))]
+    pub whisk_proposer_trackers: FixedVector<WhiskTracker, T::WhiskProposerTrackersCount>,
+    #[superstruct(only(Capella))]
+    pub whisk_validator_trackers: VariableList<WhiskTracker, T::ValidatorRegistryLimit>,
+    #[superstruct(only(Capella))]
+    pub whisk_validator_k_commitments: VariableList<BLSG1Point, T::ValidatorRegistryLimit>,
+
     #[ssz(skip_serializing, skip_deserializing)]
     #[superstruct(only(Capella))]
     pub historical_summaries: Option<VariableList<HistoricalSummary, T::HistoricalRootsLimit>>,
@@ -218,7 +228,11 @@ impl<T: EthSpec> PartialBeaconState<T> {
                     inactivity_scores,
                     latest_execution_payload_header,
                     next_withdrawal_index,
-                    next_withdrawal_validator_index
+                    next_withdrawal_validator_index,
+                    whisk_candidate_trackers,
+                    whisk_proposer_trackers,
+                    whisk_validator_trackers,
+                    whisk_validator_k_commitments
                 ],
                 [historical_summaries]
             ),
@@ -447,7 +461,11 @@ impl<E: EthSpec> TryInto<BeaconState<E>> for PartialBeaconState<E> {
                     inactivity_scores,
                     latest_execution_payload_header,
                     next_withdrawal_index,
-                    next_withdrawal_validator_index
+                    next_withdrawal_validator_index,
+                    whisk_candidate_trackers,
+                    whisk_proposer_trackers,
+                    whisk_validator_trackers,
+                    whisk_validator_k_commitments
                 ],
                 [historical_summaries]
             ),

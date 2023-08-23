@@ -16,7 +16,8 @@ pub fn slash_validator<T: EthSpec>(
     state: &mut BeaconState<T>,
     slashed_index: usize,
     opt_whistleblower_index: Option<usize>,
-    ctxt: &mut ConsensusContext<T>,
+    proposer_index: u64,
+    _ctxt: &mut ConsensusContext<T>,
     spec: &ChainSpec,
 ) -> Result<(), BlockProcessingError> {
     let epoch = state.current_epoch();
@@ -47,8 +48,7 @@ pub fn slash_validator<T: EthSpec>(
     update_progressive_balances_on_slashing(state, slashed_index)?;
 
     // Apply proposer and whistleblower rewards
-    let proposer_index = ctxt.get_proposer_index(state, spec)? as usize;
-    let whistleblower_index = opt_whistleblower_index.unwrap_or(proposer_index);
+    let whistleblower_index = opt_whistleblower_index.unwrap_or(proposer_index as usize);
     let whistleblower_reward =
         validator_effective_balance.safe_div(spec.whistleblower_reward_quotient)?;
     let proposer_reward = match state {
@@ -65,7 +65,7 @@ pub fn slash_validator<T: EthSpec>(
         return Err(BeaconStateError::UnknownValidator(whistleblower_index).into());
     }
 
-    increase_balance(state, proposer_index, proposer_reward)?;
+    increase_balance(state, proposer_index as usize, proposer_reward)?;
     increase_balance(
         state,
         whistleblower_index,

@@ -186,6 +186,14 @@ impl fmt::Display for StateId {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 #[serde(bound = "T: Serialize + serde::de::DeserializeOwned")]
+pub struct WhiskDutiesResponse<T: Serialize + serde::de::DeserializeOwned> {
+    pub dependent_root: WhiskProposerShufflingRoot,
+    pub execution_optimistic: Option<bool>,
+    pub data: T,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[serde(bound = "T: Serialize + serde::de::DeserializeOwned")]
 pub struct DutiesResponse<T: Serialize + serde::de::DeserializeOwned> {
     pub dependent_root: Hash256,
     pub execution_optimistic: Option<bool>,
@@ -687,6 +695,13 @@ pub struct ValidatorBlocksQuery {
     pub randao_reveal: SignatureBytes,
     pub graffiti: Option<Graffiti>,
     pub skip_randao_verification: SkipRandaoVerification,
+    // TODO: Implement optional quoted_u64
+    // #[serde(with = "serde_utils::quoted_u64")]
+    pub proposer_index: Option<u64>,
+    // TODO WHISK: Use proper type that serializes as a string
+    pub k: Option<Graffiti>,
+    #[serde(default)]
+    pub dummy_whisk_proposer: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -695,6 +710,31 @@ pub enum SkipRandaoVerification {
     Yes,
     #[default]
     No,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum WhiskProposer {
+    /// Alias to None
+    PreWhisk,
+    /// After whisk, reveal k to beacon node + indicate validator index
+    PostWhisk { index: u64, k: FieldElementBytes },
+    /// To allow building blocks without access to the proposer secrets
+    Dummy,
+}
+
+impl WhiskProposer {
+    pub fn from_query(query: &ValidatorBlocksQuery) -> Result<WhiskProposer, String> {
+        if query.dummy_whisk_proposer {
+            Ok(WhiskProposer::Dummy)
+        } else {
+            match (query.proposer_index, query.k) {
+                (Some(index), Some(k)) => Ok(WhiskProposer::PostWhisk { index, k: k.into() }),
+                (Some(_), None) => Err("proposer_index set without whisk k".into()),
+                (None, Some(_)) => Err("whisk_k set without proposer_index".into()),
+                (None, None) => Ok(WhiskProposer::PreWhisk),
+            }
+        }
+    }
 }
 
 /// Parse a `skip_randao_verification` query parameter.
@@ -1347,5 +1387,13 @@ mod tests {
             Accept::from_str("application/json;message=\"Hello, world!\";q=0.3,*/*;q=0.6").unwrap(),
             Accept::Any
         );
+    }
+
+    #[test]
+    fn test_deserialization() {
+        let query = "randao_reveal=0x93e04638aa8f0b71ff3ce950c9bb0f7a8fb6803fea887df8b88a0fc50bf21ad72639fde525744d703b92dd21fe3409d7026ba339e5fc173a955448311818e4526f7f87fdebaf9c6660c5185e6e0b3a6940fedb2689c9ec1fac837f38b572d729&proposer_index=213&k=0xfeffffff0000000001a40100fd5b42acfa275ef6f727c6ccb88262d6ac581261"; // Replace with your test string
+        let result: Result<ValidatorBlocksQuery, _> = serde_urlencoded::from_str(query);
+
+        assert!(result.is_ok(), "Failed to deserialize: {:?}", result.err());
     }
 }

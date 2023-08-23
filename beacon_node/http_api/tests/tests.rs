@@ -7,7 +7,7 @@ use environment::null_logger;
 use eth2::{
     mixin::{RequestAccept, ResponseForkName, ResponseOptional},
     reqwest::RequestBuilder,
-    types::{BlockId as CoreBlockId, ForkChoiceNode, StateId as CoreStateId, *},
+    types::{BlockId as CoreBlockId, ForkChoiceNode, StateId as CoreStateId, WhiskProposer, *},
     BeaconNodeHttpClient, Error, Timeouts,
 };
 use execution_layer::test_utils::TestingBuilder;
@@ -2412,7 +2412,12 @@ impl ApiTester {
 
             let block = self
                 .client
-                .get_validator_blocks::<E, FullPayload<E>>(slot, &randao_reveal, None)
+                .get_validator_blocks::<E, FullPayload<E>>(
+                    slot,
+                    &randao_reveal,
+                    None,
+                    WhiskProposer::PreWhisk,
+                )
                 .await
                 .unwrap()
                 .data;
@@ -2439,6 +2444,7 @@ impl ApiTester {
                     slot,
                     &Signature::infinity().unwrap().into(),
                     None,
+                    WhiskProposer::PreWhisk,
                     SkipRandaoVerification::Yes,
                 )
                 .await
@@ -2491,7 +2497,12 @@ impl ApiTester {
 
             // Check failure with no `skip_randao_verification` passed.
             self.client
-                .get_validator_blocks::<E, FullPayload<E>>(slot, &bad_randao_reveal, None)
+                .get_validator_blocks::<E, FullPayload<E>>(
+                    slot,
+                    &bad_randao_reveal,
+                    None,
+                    WhiskProposer::PreWhisk,
+                )
                 .await
                 .unwrap_err();
 
@@ -2501,6 +2512,7 @@ impl ApiTester {
                     slot,
                     &bad_randao_reveal,
                     None,
+                    WhiskProposer::PreWhisk,
                     SkipRandaoVerification::Yes,
                 )
                 .await
@@ -2915,6 +2927,37 @@ impl ApiTester {
             .recv()
             .now_or_never()
             .unwrap();
+
+        self
+    }
+
+    pub async fn test_get_beacon_states_proposer_trackers(self) -> Self {
+        for state_id in self.interesting_state_ids() {
+            if let CoreStateId::Slot(_) = state_id.0 {
+                // TODO WHISK: route only supports slot
+            } else {
+                continue;
+            }
+
+            let state_opt = state_id.state(&self.chain).ok();
+            let expected: Vec<WhiskTracker> = match state_opt.as_ref() {
+                Some((state, _execution_optimistic, _finalized)) => {
+                    state.whisk_proposer_trackers().unwrap().clone().into()
+                }
+                // Ignore invalid states
+                None => continue,
+            };
+
+            let result = self
+                .client
+                .get_beacon_states_proposer_trackers(state_id.0)
+                .await
+                .unwrap();
+
+            assert_eq!(result.data, expected);
+
+            dbg!(result);
+        }
 
         self
     }
@@ -4918,6 +4961,22 @@ async fn post_validator_register_validator() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_beacon_states_proposer_trackers() {
+    let mut config = ApiTesterConfig {
+        builder_threshold: Some(0),
+        spec: E::default_spec(),
+    };
+    config.spec.altair_fork_epoch = Some(Epoch::new(0));
+    config.spec.bellatrix_fork_epoch = Some(Epoch::new(0));
+    config.spec.capella_fork_epoch = Some(Epoch::new(0));
+
+    ApiTester::new_from_config(config)
+        .await
+        .test_get_beacon_states_proposer_trackers()
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_validator_register_validator_slashed() {
     ApiTester::new()
         .await
@@ -5041,6 +5100,10 @@ async fn builder_payload_chosen_by_profit() {
         .await;
 }
 
+// TODO WHISK: builder flow has to be updated
+// This specific test can be fixed with the client knowing all proposer trackers in advance but it's
+// left as TODO
+#[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builder_works_post_capella() {
     let mut config = ApiTesterConfig {

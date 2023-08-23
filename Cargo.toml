@@ -59,6 +59,7 @@ members = [
     "consensus/swap_or_not_shuffle",
 
     "crypto/bls",
+    "crypto/curdleproofs_whisk",
     "crypto/eth2_key_derivation",
     "crypto/eth2_keystore",
     "crypto/eth2_wallet",

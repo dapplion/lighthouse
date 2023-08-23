@@ -1,7 +1,7 @@
 #![cfg(not(debug_assertions))]
 
 use beacon_chain::test_utils::{
-    AttestationStrategy, BeaconChainHarness, BlockStrategy, EphemeralHarnessType,
+    test_spec, AttestationStrategy, BeaconChainHarness, BlockStrategy, EphemeralHarnessType,
 };
 use beacon_chain::{
     BeaconSnapshot, BlockError, ChainSegmentResult, IntoExecutionPendingBlock, NotifyExecutionLayer,
@@ -67,8 +67,12 @@ async fn get_chain_segment() -> Vec<BeaconSnapshot<E>> {
 }
 
 fn get_harness(validator_count: usize) -> BeaconChainHarness<EphemeralHarnessType<E>> {
+    let mut spec = test_spec::<E>();
+    // TODO WHISK: Shuffle proof production is slow, so disable for this tests
+    spec.whisk_proposer_selection_gap = spec.whisk_epochs_per_shuffling_phase - 1;
+
     let harness = BeaconChainHarness::builder(MainnetEthSpec)
-        .default_spec()
+        .spec(spec)
         .keypairs(KEYPAIRS[0..validator_count].to_vec())
         .fresh_ephemeral_store()
         .mock_execution_layer()
@@ -106,9 +110,7 @@ fn update_proposal_signatures(
         let spec = &harness.chain.spec;
         let slot = snapshot.beacon_block.slot();
         let state = &snapshot.beacon_state;
-        let proposer_index = state
-            .get_beacon_proposer_index(slot, spec)
-            .expect("should find proposer index");
+        let (proposer_index, _) = harness.get_proposer(&state, slot);
         let keypair = harness
             .validator_keypairs
             .get(proposer_index)
