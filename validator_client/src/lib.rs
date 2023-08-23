@@ -42,6 +42,7 @@ use duties_service::DutiesService;
 use environment::RuntimeContext;
 use eth2::{reqwest::ClientBuilder, types::Graffiti, BeaconNodeHttpClient, StatusCode, Timeouts};
 use http_api::ApiSecret;
+use lru::LruCache;
 use notifier::spawn_notifier;
 use parking_lot::RwLock;
 use preparation_service::{PreparationService, PreparationServiceBuilder};
@@ -446,6 +447,7 @@ impl<T: EthSpec> ProductionValidatorClient<T> {
             attesters: <_>::default(),
             proposers: <_>::default(),
             sync_duties: <_>::default(),
+            whisk_tracker_cache: RwLock::new(LruCache::new(3 * T::slots_per_epoch() as usize)),
             slot_clock: slot_clock.clone(),
             beacon_nodes: beacon_nodes.clone(),
             validator_store: validator_store.clone(),

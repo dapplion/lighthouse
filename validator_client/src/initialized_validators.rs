@@ -23,12 +23,19 @@ use lockfile::{Lockfile, LockfileError};
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use reqwest::{Certificate, Client, Error as ReqwestError, Identity};
 use slog::{debug, error, info, warn, Logger};
-use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
 use std::io::{self, Read};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::Hash,
+};
+use std::{
+    fs::{self, File},
+    hash::Hasher,
+};
 use types::graffiti::GraffitiString;
 use types::{Address, Graffiti, Keypair, PublicKey, PublicKeyBytes};
 use url::{ParseError, Url};
@@ -45,6 +52,8 @@ const DEFAULT_REMOTE_SIGNER_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 
 // Use TTY instead of stdin to capture passwords from users.
 const USE_STDIN: bool = false;
+
+pub type PubkeysHash = u64;
 
 pub enum OnDecryptFailure {
     /// If the key cache fails to decrypt, create a new cache.
@@ -486,7 +495,7 @@ pub struct InitializedValidators {
     /// The directory that the `self.definitions` will be saved into.
     validators_dir: PathBuf,
     /// The canonical set of validators.
-    validators: HashMap<PublicKeyBytes, InitializedValidator>,
+    validators: TrackedHashMap<PublicKeyBytes, InitializedValidator>,
     /// The clients used for communications with a remote signer.
     web3_signer_client_map: Option<HashMap<Web3SignerDefinition, Client>>,
     /// For logging via `slog`.
@@ -503,12 +512,16 @@ impl InitializedValidators {
         let mut this = Self {
             validators_dir,
             definitions,
-            validators: HashMap::default(),
+            validators: TrackedHashMap::new(),
             web3_signer_client_map: None,
             log,
         };
         this.update_validators().await?;
         Ok(this)
+    }
+
+    pub fn voting_pubkeys_hash(&self) -> PubkeysHash {
+        self.validators.keys_hash
     }
 
     /// The count of enabled validators contained in `self`.
@@ -1357,5 +1370,66 @@ impl InitializedValidators {
     /// definition manually may result in inconsistencies.
     pub fn as_mut_slice_testing_only(&mut self) -> &mut [ValidatorDefinition] {
         self.definitions.as_mut_slice()
+    }
+}
+
+/// Tracks a cumulative hash of the HashMap keys.
+/// All read-only methods are available through the DeRef trait.
+/// Mutable methods are implemented only in demand to the `initialized_validators` use.
+struct TrackedHashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    map: HashMap<K, V>,
+    keys_hash: u64, // Hash value to track changes
+}
+
+impl<K, V> TrackedHashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            keys_hash: 0,
+        }
+    }
+
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let key_hash = TrackedHashMap::<K, V>::hash_key(&key);
+        let value = self.map.insert(key, value);
+        if value.is_none() {
+            self.keys_hash ^= key_hash; // XOR to update the hash
+        }
+        value
+    }
+
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let value = self.map.remove(key);
+        if value.is_some() {
+            self.keys_hash ^= TrackedHashMap::<K, V>::hash_key(key) // XOR again to revert the hash change
+        }
+        value
+    }
+
+    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        self.map.get_mut(k)
+    }
+
+    fn hash_key(key: &K) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+impl<K, V> Deref for TrackedHashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    type Target = HashMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.map
     }
 }

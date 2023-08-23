@@ -175,8 +175,8 @@ fn serialize_shuffle_trackers(
 }
 
 pub struct WhiskTrackerG1Affine {
-    r_g: G1Affine,
-    k_r_g: G1Affine,
+    pub r_g: G1Affine,
+    pub k_r_g: G1Affine,
 }
 
 impl TryFrom<&WhiskTracker> for WhiskTrackerG1Affine {

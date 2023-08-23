@@ -8789,6 +8789,7 @@ dependencies = [
  "lighthouse_version",
  "lockfile",
  "logging",
+ "lru 0.7.8",
  "malloc_utils",
  "monitoring_api",
  "parking_lot 0.12.1",
