@@ -214,6 +214,13 @@ pub enum DBColumn {
     OptimisticTransitionBlock,
     #[strum(serialize = "bhs")]
     BeaconHistoricalSummaries,
+    /// Lightclient server
+    #[strum(serialize = "lcc")]
+    LightClientCurrentSyncCommitteeBranch,
+    #[strum(serialize = "lcn")]
+    LightClientNextSyncCommitteeBranch,
+    #[strum(serialize = "lcf")]
+    LightClientFinalityBranch,
 }
 
 /// A block from the database, which might have an execution payload or not.

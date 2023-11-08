@@ -30,6 +30,7 @@ use crate::light_client_finality_update_verification::{
 use crate::light_client_optimistic_update_verification::{
     Error as LightClientOptimisticUpdateError, VerifiedLightClientOptimisticUpdate,
 };
+use crate::lightclient_proofs_cache::LightclientServerCache;
 use crate::migrate::BackgroundMigrator;
 use crate::naive_aggregation_pool::{
     AggregatedAttestationMap, Error as NaiveAggregationError, NaiveAggregationPool,
@@ -106,6 +107,7 @@ use task_executor::{ShutdownReason, TaskExecutor};
 use tokio_stream::Stream;
 use tree_hash::TreeHash;
 use types::beacon_state::CloneConfig;
+use types::light_client_update::{FINALIZED_ROOT_INDEX, NEXT_SYNC_COMMITTEE_INDEX};
 use types::*;
 
 pub type ForkChoiceError = fork_choice::Error<crate::ForkChoiceStoreError>;
@@ -363,10 +365,6 @@ pub struct BeaconChain<T: BeaconChainTypes> {
     /// Maintains a record of which validators we've seen BLS to execution changes for.
     pub(crate) observed_bls_to_execution_changes:
         Mutex<ObservedOperations<SignedBlsToExecutionChange, T::EthSpec>>,
-    /// The most recently validated light client finality update received on gossip.
-    pub latest_seen_finality_update: Mutex<Option<LightClientFinalityUpdate<T::EthSpec>>>,
-    /// The most recently validated light client optimistic update received on gossip.
-    pub latest_seen_optimistic_update: Mutex<Option<LightClientOptimisticUpdate<T::EthSpec>>>,
     /// Provides information from the Ethereum 1 (PoW) chain.
     pub eth1_chain: Option<Eth1Chain<T::Eth1Chain, T::EthSpec>>,
     /// Interfaces with the execution client.
@@ -409,6 +407,8 @@ pub struct BeaconChain<T: BeaconChainTypes> {
     pub block_times_cache: Arc<RwLock<BlockTimesCache>>,
     /// A cache used to track pre-finalization block roots for quick rejection.
     pub pre_finalization_block_cache: PreFinalizationBlockCache,
+    /// A cache used to produce lightclient server messages
+    pub lightclient_server_cache: LightclientServerCache<T>,
     /// Sender given to tasks, so that if they encounter a state in which execution cannot
     /// continue they can request that everything shuts down.
     pub shutdown_sender: Sender<ShutdownReason>,
@@ -2834,7 +2834,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         parent_block: SignedBlindedBeaconBlock<T::EthSpec>,
         parent_eth1_finalization_data: Eth1FinalizationData,
         mut consensus_context: ConsensusContext<T::EthSpec>,
-    ) -> Result<Hash256, BlockError<T::EthSpec>> {
+    ) -> Result<(Hash256, LightclientBlockUpdates), BlockError<T::EthSpec>> {
         // ----------------------------- BLOCK NOT YET ATTESTABLE ----------------------------------
         // Everything in this initial section is on the hot path between processing the block and
         // being able to attest to it. DO NOT add any extra processing in this initial section
@@ -2985,6 +2985,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         let db_write_timer = metrics::start_timer(&metrics::BLOCK_PROCESSING_DB_WRITE);
 
+        ops.extend(
+            self.lightclient_server_cache
+                .import_block(block_root, &state)?,
+        );
+
         // Store the block and its state, and execute the confirmation batch for the intermediate
         // states, which will delete their temporary flags.
         // If the write fails, revert fork choice to the version from disk, else we can
@@ -3106,7 +3111,15 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             current_slot,
         );
 
-        Ok(block_root)
+        let lightclient_updates = self
+            .lightclient_server_cache
+            .produce_latest_updates_on_block(self.store, &block)
+            .unwrap_or_else(|e| {
+                error!(self.log, "error producing lightclient updates {:?}", e);
+                (None, None)
+            });
+
+        Ok((block_root, lightclient_updates))
     }
 
     /// Check block's consistentency with any configured weak subjectivity checkpoint.

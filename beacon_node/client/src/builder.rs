@@ -830,6 +830,17 @@ where
                         "addr_broadcast",
                     );
                 }
+
+                spawn_thread(async || {
+                    let last_sent_slot = 0;
+                    while Some(ev) = beacon_chain.import_block_rcv() {
+                        let up = beacon_chain
+                            .lightclient_server_cache
+                            .get_latest_finality_update();
+
+                        self.network_senders.publish(up);
+                    }
+                })
             }
 
             start_proposer_prep_service(runtime_context.executor.clone(), beacon_chain.clone());

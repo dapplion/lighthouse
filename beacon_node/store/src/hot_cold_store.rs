@@ -38,6 +38,7 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use types::light_client_update::LightClientUpdate;
 use types::*;
 
 /// On-disk database that stores finalized states efficiently.
@@ -1605,6 +1606,17 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             "payloads_pruned" => payloads_pruned,
         );
         Ok(())
+    }
+
+    pub fn put_light_client_update(&self, update: LightClientUpdate<E>) -> Result<(), Error> {
+        todo!();
+    }
+
+    pub fn get_lightclient_update(
+        &self,
+        sync_committee_period: u64,
+    ) -> Result<Option<LightClientUpdate<E>>, Error> {
+        todo!();
     }
 }
 

@@ -208,79 +208,6 @@ impl<T: BeaconChainTypes> Worker<T> {
         )
     }
 
-    /// Handle a `BlocksByRoot` request from the peer.
-    pub fn handle_light_client_bootstrap(
-        self,
-        peer_id: PeerId,
-        request_id: PeerRequestId,
-        request: LightClientBootstrapRequest,
-    ) {
-        let block_root = request.root;
-        let state_root = match self.chain.get_blinded_block(&block_root) {
-            Ok(signed_block) => match signed_block {
-                Some(signed_block) => signed_block.state_root(),
-                None => {
-                    self.send_error_response(
-                        peer_id,
-                        RPCResponseErrorCode::ResourceUnavailable,
-                        "Bootstrap not avaiable".into(),
-                        request_id,
-                    );
-                    return;
-                }
-            },
-            Err(_) => {
-                self.send_error_response(
-                    peer_id,
-                    RPCResponseErrorCode::ResourceUnavailable,
-                    "Bootstrap not avaiable".into(),
-                    request_id,
-                );
-                return;
-            }
-        };
-        let mut beacon_state = match self.chain.get_state(&state_root, None) {
-            Ok(beacon_state) => match beacon_state {
-                Some(state) => state,
-                None => {
-                    self.send_error_response(
-                        peer_id,
-                        RPCResponseErrorCode::ResourceUnavailable,
-                        "Bootstrap not avaiable".into(),
-                        request_id,
-                    );
-                    return;
-                }
-            },
-            Err(_) => {
-                self.send_error_response(
-                    peer_id,
-                    RPCResponseErrorCode::ResourceUnavailable,
-                    "Bootstrap not avaiable".into(),
-                    request_id,
-                );
-                return;
-            }
-        };
-        let bootstrap = match LightClientBootstrap::from_beacon_state(&mut beacon_state) {
-            Ok(bootstrap) => bootstrap,
-            Err(_) => {
-                self.send_error_response(
-                    peer_id,
-                    RPCResponseErrorCode::ResourceUnavailable,
-                    "Bootstrap not avaiable".into(),
-                    request_id,
-                );
-                return;
-            }
-        };
-        self.send_response(
-            peer_id,
-            Response::LightClientBootstrap(bootstrap),
-            request_id,
-        )
-    }
-
     /// Handle a `BlocksByRange` request from the peer.
     pub fn handle_blocks_by_range_request(
         self,
@@ -478,5 +405,45 @@ impl<T: BeaconChainTypes> Worker<T> {
             },
             "load_blocks_by_range_blocks",
         );
+    }
+
+    /// Handle a `LightclientBootstrap` request from the peer.
+    pub fn handle_light_client_bootstrap(
+        self,
+        peer_id: PeerId,
+        request_id: PeerRequestId,
+        request: LightClientBootstrapRequest,
+    ) {
+        match self
+            .chain
+            .lightclient_server_cache
+            .produce_bootstrap(store, chain_spec, request.root)
+        {
+            Ok(bootstrap) => self.send_response(
+                peer_id,
+                Response::LightClientBootstrap(bootstrap),
+                request_id,
+            ),
+            Err(e) => {
+                self.send_error_response(
+                    peer_id,
+                    RPCResponseErrorCode::ResourceUnavailable,
+                    "Bootstrap not avaiable".into(),
+                    request_id,
+                );
+            }
+        };
+    }
+
+    pub fn handle_light_client_updates_by_range_request(
+        self,
+        peer_id: PeerId,
+        request_id: PeerRequestId,
+        request: LightClientUpdatesByRangeRequest,
+    ) {
+        for period in request.periods() {
+            let update = self.chain.lightclient_server_cache.produce_update();
+            todo!("send update to network");
+        }
     }
 }
