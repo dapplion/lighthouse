@@ -6,9 +6,7 @@ use eth2::types::Hash256;
 use slot_clock::SlotClock;
 use std::time::Duration;
 use strum::AsRefStr;
-use types::{
-    light_client_update::Error as LightClientUpdateError, LightClientOptimisticUpdate, Slot,
-};
+use types::{light_client_update::Error as LightClientUpdateError, LightClientOptimisticUpdate};
 
 /// Returned when a light client optimistic update was not successfully verified. It might not have been verified for
 /// two reasons:
@@ -90,17 +88,19 @@ impl<T: BeaconChainTypes> VerifiedLightClientOptimisticUpdate<T> {
 
         let latest_optimistic_update = chain
             .lightclient_server_cache
-            .get_latest_optimistic_update();
+            .get_latest_optimistic_update()
+            .ok_or(Error::FailedConstructingUpdate)?;
 
         // verify that the gossiped optimistic update is the same as the locally constructed one.
-        if latest_optimistic_update != &rcv_optimistic_update {
+        if latest_optimistic_update != rcv_optimistic_update {
             return Err(Error::InvalidLightClientOptimisticUpdate);
         }
 
+        let parent_root = rcv_optimistic_update.attested_header.parent_root;
         Ok(Self {
             light_client_optimistic_update: rcv_optimistic_update,
             // TODO: why is the parent_root necessary here?
-            parent_root: rcv_optimistic_update.attested_header.parent_root,
+            parent_root,
             seen_timestamp,
         })
     }

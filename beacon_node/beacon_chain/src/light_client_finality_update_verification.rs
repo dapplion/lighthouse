@@ -5,9 +5,7 @@ use derivative::Derivative;
 use slot_clock::SlotClock;
 use std::time::Duration;
 use strum::AsRefStr;
-use types::{
-    light_client_update::Error as LightClientUpdateError, LightClientFinalityUpdate, Slot,
-};
+use types::{light_client_update::Error as LightClientUpdateError, LightClientFinalityUpdate};
 
 /// Returned when a light client finality update was not successfully verified. It might not have been verified for
 /// two reasons:
@@ -69,7 +67,10 @@ impl<T: BeaconChainTypes> VerifiedLightClientFinalityUpdate<T> {
         chain: &BeaconChain<T>,
         seen_timestamp: Duration,
     ) -> Result<Self, Error> {
-        let latest_finality_update = chain.lightclient_server_cache.get_latest_finality_update();
+        let latest_finality_update = chain
+            .lightclient_server_cache
+            .get_latest_finality_update()
+            .ok_or(Error::FailedConstructingUpdate)?;
 
         // verify that no other finality_update with a lower or equal
         // finalized_header.slot was already forwarded on the network
@@ -94,7 +95,7 @@ impl<T: BeaconChainTypes> VerifiedLightClientFinalityUpdate<T> {
         }
 
         // verify that the gossiped finality update is the same as the locally constructed one.
-        if latest_finality_update != &rcv_finality_update {
+        if latest_finality_update != rcv_finality_update {
             return Err(Error::InvalidLightClientFinalityUpdate);
         }
 

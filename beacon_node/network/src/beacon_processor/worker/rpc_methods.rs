@@ -11,7 +11,7 @@ use slog::{debug, error, warn};
 use slot_clock::SlotClock;
 use task_executor::TaskExecutor;
 use tokio_stream::StreamExt;
-use types::{light_client_bootstrap::LightClientBootstrap, Epoch, EthSpec, Hash256, Slot};
+use types::{Epoch, EthSpec, Hash256, Slot};
 
 use super::Worker;
 
@@ -414,21 +414,25 @@ impl<T: BeaconChainTypes> Worker<T> {
         request_id: PeerRequestId,
         request: LightClientBootstrapRequest,
     ) {
-        match self
-            .chain
-            .lightclient_server_cache
-            .produce_bootstrap(store, chain_spec, request.root)
-        {
-            Ok(bootstrap) => self.send_response(
+        match self.chain.get_lightclient_bootstrap(request.root) {
+            Ok(Some(bootstrap)) => self.send_response(
                 peer_id,
                 Response::LightClientBootstrap(bootstrap),
                 request_id,
             ),
-            Err(e) => {
+            Ok(None) => {
                 self.send_error_response(
                     peer_id,
                     RPCResponseErrorCode::ResourceUnavailable,
                     "Bootstrap not avaiable".into(),
+                    request_id,
+                );
+            }
+            Err(_e) => {
+                self.send_error_response(
+                    peer_id,
+                    RPCResponseErrorCode::ServerError,
+                    "Error producting bootstrap".into(),
                     request_id,
                 );
             }
@@ -437,12 +441,12 @@ impl<T: BeaconChainTypes> Worker<T> {
 
     pub fn handle_light_client_updates_by_range_request(
         self,
-        peer_id: PeerId,
-        request_id: PeerRequestId,
-        request: LightClientUpdatesByRangeRequest,
+        _peer_id: PeerId,
+        _request_id: PeerRequestId,
+        requested_periods: &[u64],
     ) {
-        for period in request.periods() {
-            let update = self.chain.lightclient_server_cache.produce_update();
+        for period in requested_periods {
+            let _update = self.chain.get_lightclient_update(*period);
             todo!("send update to network");
         }
     }

@@ -132,7 +132,7 @@ pub async fn publish_block<T: BeaconChainTypes, B: IntoGossipVerifiedBlock<T>>(
         )
         .await
     {
-        Ok((root, lightclient_updates)) => {
+        Ok(root) => {
             info!(
                 log,
                 "Valid block from HTTP API";
@@ -167,8 +167,6 @@ pub async fn publish_block<T: BeaconChainTypes, B: IntoGossipVerifiedBlock<T>>(
                     &log,
                 )
             }
-
-            network_tx.publish(lightclient_updates);
 
             Ok(())
         }

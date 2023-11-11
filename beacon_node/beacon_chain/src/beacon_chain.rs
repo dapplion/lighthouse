@@ -107,7 +107,8 @@ use task_executor::{ShutdownReason, TaskExecutor};
 use tokio_stream::Stream;
 use tree_hash::TreeHash;
 use types::beacon_state::CloneConfig;
-use types::light_client_update::{FINALIZED_ROOT_INDEX, NEXT_SYNC_COMMITTEE_INDEX};
+use types::light_client_bootstrap::LightClientBootstrap;
+use types::light_client_update::LightClientUpdate;
 use types::*;
 
 pub type ForkChoiceError = fork_choice::Error<crate::ForkChoiceStoreError>;
@@ -1170,6 +1171,41 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         .start_slot(T::EthSpec::slots_per_epoch());
 
         self.state_at_slot(load_slot, StateSkipConfig::WithoutStateRoots)
+    }
+
+    /// Returns a `LightclientBootstrap` message at `block_root`. Attempts to reconstruct the
+    /// message from pre-calculated branches first.
+    pub fn get_lightclient_bootstrap(
+        &self,
+        block_root: Hash256,
+    ) -> Result<Option<LightClientBootstrap<T::EthSpec>>, Error> {
+        self.lightclient_server_cache
+            .produce_bootstrap(self.store.clone(), &self.spec, block_root)
+    }
+
+    /// Returns the best `LightclientUpdate` available given the rules of `is_better_update()`.
+    /// For historical updates, only returns pre-computed messages.
+    pub fn get_lightclient_update(
+        &self,
+        sync_committee_period: u64,
+    ) -> Result<LightClientUpdate<T::EthSpec>, Error> {
+        self.lightclient_server_cache
+            .produce_update(self.store.clone(), sync_committee_period)
+    }
+
+    pub fn recompute_and_cache_lightclient_updates(
+        &self,
+        block_parent_root: &Hash256,
+        block_slot: Slot,
+        block_sync_aggregate: &SyncAggregate<T::EthSpec>,
+    ) -> Result<(), Error> {
+        self.lightclient_server_cache.recompute_and_cache_updates(
+            self.store.clone(),
+            &self.spec,
+            block_parent_root,
+            block_slot,
+            block_sync_aggregate,
+        )
     }
 
     /// Returns the current heads of the `BeaconChain`. For the canonical head, see `Self::head`.
@@ -2834,7 +2870,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         parent_block: SignedBlindedBeaconBlock<T::EthSpec>,
         parent_eth1_finalization_data: Eth1FinalizationData,
         mut consensus_context: ConsensusContext<T::EthSpec>,
-    ) -> Result<(Hash256, LightclientBlockUpdates), BlockError<T::EthSpec>> {
+    ) -> Result<Hash256, BlockError<T::EthSpec>> {
         // ----------------------------- BLOCK NOT YET ATTESTABLE ----------------------------------
         // Everything in this initial section is on the hot path between processing the block and
         // being able to attest to it. DO NOT add any extra processing in this initial section
@@ -2985,11 +3021,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         let db_write_timer = metrics::start_timer(&metrics::BLOCK_PROCESSING_DB_WRITE);
 
-        ops.extend(
-            self.lightclient_server_cache
-                .import_block(block_root, &state)?,
-        );
-
         // Store the block and its state, and execute the confirmation batch for the intermediate
         // states, which will delete their temporary flags.
         // If the write fails, revert fork choice to the version from disk, else we can
@@ -3058,6 +3089,22 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         };
         let current_finalized_checkpoint = state.finalized_checkpoint();
 
+        // compute state proofs for light client updates before inserting the state into the
+        // snapshot cache.
+        self.lightclient_server_cache
+            .cache_state_data(
+                self.store.clone(),
+                &self.spec,
+                block,
+                block_root,
+                // mutable reference on the state is needed to compute merkle proofs
+                &mut state,
+                parent_block.slot(),
+            )
+            .unwrap_or_else(|e| {
+                error!(self.log, "error caching lightclient data {:?}", e);
+            });
+
         self.snapshot_cache
             .try_write_for(BLOCK_PROCESSING_CACHE_LOCK_TIMEOUT)
             .ok_or(Error::SnapshotCacheLockTimeout)
@@ -3111,15 +3158,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             current_slot,
         );
 
-        let lightclient_updates = self
-            .lightclient_server_cache
-            .produce_latest_updates_on_block(self.store, &block)
-            .unwrap_or_else(|e| {
-                error!(self.log, "error producing lightclient updates {:?}", e);
-                (None, None)
-            });
-
-        Ok((block_root, lightclient_updates))
+        Ok(block_root)
     }
 
     /// Check block's consistentency with any configured weak subjectivity checkpoint.

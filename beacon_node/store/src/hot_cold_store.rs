@@ -1608,14 +1608,44 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         Ok(())
     }
 
-    pub fn put_light_client_update(&self, update: LightClientUpdate<E>) -> Result<(), Error> {
+    pub fn put_light_client_update(&self, _update: LightClientUpdate<E>) -> Result<(), Error> {
         todo!();
     }
 
     pub fn get_lightclient_update(
         &self,
-        sync_committee_period: u64,
+        _sync_committee_period: u64,
     ) -> Result<Option<LightClientUpdate<E>>, Error> {
+        todo!();
+    }
+
+    pub fn put_sync_committee(
+        &self,
+        _period: u64,
+        _sync_committee: &SyncCommittee<E>,
+    ) -> Result<(), Error> {
+        todo!();
+    }
+
+    pub fn get_sync_committee(
+        &self,
+        _sync_committee_period: u64,
+    ) -> Result<Option<SyncCommittee<E>>, Error> {
+        todo!();
+    }
+
+    pub fn put_sync_committee_branch(
+        &self,
+        _block_root: &Hash256,
+        _sync_committee_branch: &[Hash256],
+    ) -> Result<(), Error> {
+        todo!();
+    }
+
+    pub fn get_sync_committee_branch(
+        &self,
+        _block_root: &Hash256,
+    ) -> Result<Option<Vec<Hash256>>, Error> {
         todo!();
     }
 }

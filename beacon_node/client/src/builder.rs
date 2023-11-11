@@ -1,4 +1,5 @@
 use crate::address_change_broadcast::broadcast_address_changes_at_capella;
+use crate::broadcast_lightclient_updates::broadcast_lightclient_updates;
 use crate::config::{ClientGenesis, Config as ClientConfig};
 use crate::notifier::spawn_notifier;
 use crate::Client;
@@ -813,7 +814,7 @@ where
                 }
 
                 // Spawn a service to publish BLS to execution changes at the Capella fork.
-                if let Some(network_senders) = self.network_senders {
+                if let Some(network_senders) = self.network_senders.clone() {
                     let inner_chain = beacon_chain.clone();
                     let broadcast_context =
                         runtime_context.service_context("addr_bcast".to_string());
@@ -831,16 +832,24 @@ where
                     );
                 }
 
-                spawn_thread(async || {
-                    let last_sent_slot = 0;
-                    while Some(ev) = beacon_chain.import_block_rcv() {
-                        let up = beacon_chain
-                            .lightclient_server_cache
-                            .get_latest_finality_update();
-
-                        self.network_senders.publish(up);
-                    }
-                })
+                // Spawn service to publish lightclient updates at some interval into the slot
+                if let Some(network_senders) = self.network_senders {
+                    let inner_chain = beacon_chain.clone();
+                    let broadcast_context =
+                        runtime_context.service_context("lcserv_bcast".to_string());
+                    let log = broadcast_context.log().clone();
+                    broadcast_context.executor.spawn(
+                        async move {
+                            broadcast_lightclient_updates(
+                                &inner_chain,
+                                network_senders.network_send(),
+                                &log,
+                            )
+                            .await
+                        },
+                        "lcserv_broadcast",
+                    );
+                }
             }
 
             start_proposer_prep_service(runtime_context.executor.clone(), beacon_chain.clone());
