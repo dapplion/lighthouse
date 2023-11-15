@@ -289,6 +289,8 @@ struct PartialBeaconBlock<E: EthSpec, Payload: AbstractExecPayload<E>> {
     bls_to_execution_changes: Vec<SignedBlsToExecutionChange>,
 }
 
+pub type LightclientProducerEvent<T: EthSpec> = (Hash256, Slot, SyncAggregate<T>);
+
 pub type BeaconForkChoice<T> = ForkChoice<
     BeaconForkChoiceStore<
         <T as BeaconChainTypes>::EthSpec,
@@ -410,6 +412,8 @@ pub struct BeaconChain<T: BeaconChainTypes> {
     pub pre_finalization_block_cache: PreFinalizationBlockCache,
     /// A cache used to produce lightclient server messages
     pub lightclient_server_cache: LightclientServerCache<T>,
+    /// Sender to signal the lightclient server to produce new updates
+    pub lightclient_server_tx: Option<Sender<LightclientProducerEvent<T::EthSpec>>>,
     /// Sender given to tasks, so that if they encounter a state in which execution cannot
     /// continue they can request that everything shuts down.
     pub shutdown_sender: Sender<ShutdownReason>,
@@ -3475,6 +3479,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     block: block_root,
                     execution_optimistic: payload_verification_status.is_optimistic(),
                 }));
+            }
+        }
+
+        if let Some(lightclient_server_tx) = self.lightclient_server_tx {
+            if let Ok(sync_aggregate) = block.body().sync_aggregate() {
+                lightclient_server_tx.try_send((
+                    block.parent_root(),
+                    block.slot(),
+                    sync_aggregate.clone(),
+                ));
             }
         }
     }

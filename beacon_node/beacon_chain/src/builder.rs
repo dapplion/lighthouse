@@ -1,4 +1,6 @@
-use crate::beacon_chain::{CanonicalHead, BEACON_CHAIN_DB_KEY, ETH1_CACHE_DB_KEY, OP_POOL_DB_KEY};
+use crate::beacon_chain::{
+    CanonicalHead, LightclientProducerEvent, BEACON_CHAIN_DB_KEY, ETH1_CACHE_DB_KEY, OP_POOL_DB_KEY,
+};
 use crate::eth1_chain::{CachingEth1Backend, SszEth1};
 use crate::eth1_finalization_cache::Eth1FinalizationCache;
 use crate::fork_choice_signal::ForkChoiceSignalTx;
@@ -84,6 +86,7 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     event_handler: Option<ServerSentEventHandler<T::EthSpec>>,
     slot_clock: Option<T::SlotClock>,
     shutdown_sender: Option<Sender<ShutdownReason>>,
+    lightclient_server_tx: Option<Sender<LightclientProducerEvent<T::EthSpec>>>,
     head_tracker: Option<HeadTracker>,
     validator_pubkey_cache: Option<ValidatorPubkeyCache<T>>,
     spec: ChainSpec,
@@ -125,6 +128,7 @@ where
             event_handler: None,
             slot_clock: None,
             shutdown_sender: None,
+            lightclient_server_tx: None,
             head_tracker: None,
             validator_pubkey_cache: None,
             spec: TEthSpec::default_spec(),
@@ -561,6 +565,15 @@ where
         self
     }
 
+    /// Sets a `Sender` to allow the beacon chain to send shutdown signals.
+    pub fn lightclient_server_tx(
+        mut self,
+        sender: Sender<LightclientProducerEvent<TEthSpec>>,
+    ) -> Self {
+        self.lightclient_server_tx = Some(sender);
+        self
+    }
+
     /// Creates a new, empty operation pool.
     fn empty_op_pool(mut self) -> Self {
         self.op_pool = Some(OperationPool::new());
@@ -861,6 +874,7 @@ where
             attester_cache: <_>::default(),
             early_attester_cache: <_>::default(),
             lightclient_server_cache: LightclientServerCache::new(),
+            lightclient_server_tx: self.lightclient_server_tx,
             shutdown_sender: self
                 .shutdown_sender
                 .ok_or("Cannot build without a shutdown sender.")?,

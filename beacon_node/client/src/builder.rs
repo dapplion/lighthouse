@@ -838,7 +838,7 @@ where
                     let broadcast_context =
                         runtime_context.service_context("lcserv_bcast".to_string());
                     let log = broadcast_context.log().clone();
-                    broadcast_context.executor.spawn(
+                    broadcast_context.executor.spawn_blocking(
                         async move {
                             broadcast_lightclient_updates(
                                 &inner_chain,
