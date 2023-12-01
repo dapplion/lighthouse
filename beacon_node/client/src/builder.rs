@@ -857,10 +857,17 @@ where
                     let broadcast_context =
                         runtime_context.service_context("lcserv_bcast".to_string());
                     let log = broadcast_context.log().clone();
+                    let network_senders = self.network_senders.clone();
                     broadcast_context.executor.spawn(
                         async move {
-                            compute_lightclient_updates(&inner_chain, lightclient_server_rv, &log)
-                                .await
+                            compute_lightclient_updates(
+                                &inner_chain,
+                                lightclient_server_rv,
+                                &log,
+                                network_senders
+                                    .map(|network_senders| network_senders.network_send()),
+                            )
+                            .await
                         },
                         "lcserv_broadcast",
                     );

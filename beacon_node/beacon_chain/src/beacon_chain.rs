@@ -38,7 +38,7 @@ use crate::light_client_finality_update_verification::{
 use crate::light_client_optimistic_update_verification::{
     Error as LightClientOptimisticUpdateError, VerifiedLightClientOptimisticUpdate,
 };
-use crate::lightclient_proofs_cache::LightclientServerCache;
+use crate::lightclient_proofs_cache::{LightclientServerCache, LightclientUpdatesToBroadcast};
 use crate::migrate::BackgroundMigrator;
 use crate::naive_aggregation_pool::{
     AggregatedAttestationMap, Error as NaiveAggregationError, NaiveAggregationPool,
@@ -1302,7 +1302,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     pub fn recompute_and_cache_lightclient_updates(
         &self,
         (parent_root, slot, sync_aggregate): LightclientProducerEvent<T::EthSpec>,
-    ) -> Result<(), Error> {
+    ) -> Result<LightclientUpdatesToBroadcast<T::EthSpec>, Error> {
         self.lightclient_server_cache.recompute_and_cache_updates(
             &self.log,
             self.store.clone(),

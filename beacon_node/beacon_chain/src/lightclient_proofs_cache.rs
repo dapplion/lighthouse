@@ -14,6 +14,11 @@ use types::{
 /// represents unlikely re-orgs, while keeping the cache very small.
 const PREV_BLOCK_CACHE_SIZE: usize = 32;
 
+pub type LightclientUpdatesToBroadcast<T> = (
+    Option<LightClientOptimisticUpdate<T>>,
+    Option<LightClientFinalityUpdate<T>>,
+);
+
 /// This cache computes light client messages ahead of time, required to satisfy p2p and API
 /// requests. These messages include proofs on historical states, so on-demand computation is
 /// expensive.
@@ -71,7 +76,7 @@ impl<T: BeaconChainTypes> LightclientServerCache<T> {
         block_parent_root: &Hash256,
         block_slot: Slot,
         sync_aggregate: &SyncAggregate<T::EthSpec>,
-    ) -> Result<(), BeaconChainError> {
+    ) -> Result<LightclientUpdatesToBroadcast<T::EthSpec>, BeaconChainError> {
         let signature_slot = block_slot;
         let attested_block_root = block_parent_root;
 
@@ -90,6 +95,8 @@ impl<T: BeaconChainTypes> LightclientServerCache<T> {
         )?;
 
         let attested_slot = attested_block.slot();
+        let mut new_optimistic_update = None;
+        let mut new_finality_update = None;
 
         // Spec: Full nodes SHOULD provide the LightClientOptimisticUpdate with the highest
         // attested_header.beacon.slot (if multiple, highest signature_slot) as selected by fork choice
@@ -101,11 +108,12 @@ impl<T: BeaconChainTypes> LightclientServerCache<T> {
         };
         if is_latest_optimistic {
             // can create an optimistic update, that is more recent
-            *self.latest_optimistic_update.write() = Some(LightClientOptimisticUpdate {
+            new_optimistic_update = Some(LightClientOptimisticUpdate {
                 attested_header: block_to_light_client_header(attested_block.message()),
                 sync_aggregate: sync_aggregate.clone(),
                 signature_slot,
             });
+            *self.latest_optimistic_update.write() = new_optimistic_update.clone();
         };
 
         // Spec: Full nodes SHOULD provide the LightClientFinalityUpdate with the highest
@@ -121,7 +129,7 @@ impl<T: BeaconChainTypes> LightclientServerCache<T> {
             if let Some(finalized_block) =
                 store.get_blinded_block(&cached_parts.finalized_block_root)?
             {
-                *self.latest_finality_update.write() = Some(LightClientFinalityUpdate {
+                new_finality_update = Some(LightClientFinalityUpdate {
                     // TODO: may want to cache this result from latest_optimistic_update if producing a
                     // lightclient header becomes expensive
                     attested_header: block_to_light_client_header(attested_block.message()),
@@ -130,6 +138,7 @@ impl<T: BeaconChainTypes> LightclientServerCache<T> {
                     sync_aggregate: sync_aggregate.clone(),
                     signature_slot,
                 });
+                *self.latest_finality_update.write() = new_finality_update.clone();
             } else {
                 debug!(
                     log,
@@ -139,7 +148,7 @@ impl<T: BeaconChainTypes> LightclientServerCache<T> {
             }
         }
 
-        Ok(())
+        Ok((new_optimistic_update, new_finality_update))
     }
 
     /// Retrieves prev block cached data from cache. If not present re-computes by retrieving the
