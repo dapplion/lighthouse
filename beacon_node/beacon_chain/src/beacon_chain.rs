@@ -6603,7 +6603,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 impl<T: BeaconChainTypes> Drop for BeaconChain<T> {
     fn drop(&mut self) {
         let drop = || -> Result<(), Error> {
-            self.persist_head_and_fork_choice()?;
+            let mut batch = vec![];
+            let head_tracker = self.head_tracker.data.read();
+            batch.push(self.persist_head_in_batch(&head_tracker));
+
+            let _fork_choice_timer = metrics::start_timer(&metrics::PERSIST_FORK_CHOICE);
+            batch.push(self.persist_fork_choice_in_batch());
+
+            println!("forcing write serialized head tracker to be slow");
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            println!("write serialized head tracker completed");
+
+            self.store.hot_db.do_atomically(batch)?;
+
             self.persist_op_pool()?;
             self.persist_data_availability_checker()?;
             self.persist_eth1_cache()
