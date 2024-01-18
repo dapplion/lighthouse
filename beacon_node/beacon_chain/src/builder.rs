@@ -5,7 +5,6 @@ use crate::eth1_chain::{CachingEth1Backend, SszEth1};
 use crate::eth1_finalization_cache::Eth1FinalizationCache;
 use crate::fork_choice_signal::ForkChoiceSignalTx;
 use crate::fork_revert::{reset_fork_choice_to_finalization, revert_to_fork_boundary};
-use crate::head_tracker::HeadTracker;
 use crate::migrate::{BackgroundMigrator, MigratorConfig};
 use crate::persisted_beacon_chain::PersistedBeaconChain;
 use crate::shuffling_cache::{BlockShufflingIds, ShufflingCache};
@@ -87,7 +86,6 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     event_handler: Option<ServerSentEventHandler<T::EthSpec>>,
     slot_clock: Option<T::SlotClock>,
     shutdown_sender: Option<Sender<ShutdownReason>>,
-    head_tracker: Option<HeadTracker>,
     validator_pubkey_cache: Option<ValidatorPubkeyCache<T>>,
     spec: ChainSpec,
     chain_config: ChainConfig,
@@ -129,7 +127,6 @@ where
             event_handler: None,
             slot_clock: None,
             shutdown_sender: None,
-            head_tracker: None,
             validator_pubkey_cache: None,
             spec: TEthSpec::default_spec(),
             chain_config: ChainConfig::default(),
@@ -317,10 +314,6 @@ where
 
         self.genesis_block_root = Some(chain.genesis_block_root);
         self.genesis_state_root = Some(genesis_block.state_root());
-        self.head_tracker = Some(
-            HeadTracker::from_ssz_container(&chain.ssz_head_tracker)
-                .map_err(|e| format!("Failed to decode head tracker for database: {:?}", e))?,
-        );
         self.validator_pubkey_cache = Some(pubkey_cache);
         self.fork_choice = Some(fork_choice);
 
@@ -662,7 +655,6 @@ where
             .genesis_state_root
             .ok_or("Cannot build without a genesis state root")?;
         let validator_monitor_config = self.validator_monitor_config.unwrap_or_default();
-        let head_tracker = Arc::new(self.head_tracker.unwrap_or_default());
 
         let beacon_proposer_cache: Arc<Mutex<BeaconProposerCache>> = <_>::default();
         let mut validator_monitor = ValidatorMonitor::new(
@@ -716,8 +708,6 @@ where
                         &log,
                     )?;
 
-                    // Update head tracker.
-                    head_tracker.register_block(block_root, block.parent_root(), block.slot());
                     (block_root, block, true)
                 }
                 Err(e) => return Err(descriptive_db_error("head block", &e)),
@@ -807,11 +797,6 @@ where
         // doesn't write a `PersistedBeaconChain` without the rest of the batch.
         self.pending_io_batch.push(BeaconChain::<
             Witness<TSlotClock, TEth1Backend, TEthSpec, THotStore, TColdStore>,
-        >::persist_head_in_batch_standalone(
-            genesis_block_root, &head_tracker
-        ));
-        self.pending_io_batch.push(BeaconChain::<
-            Witness<TSlotClock, TEth1Backend, TEthSpec, THotStore, TColdStore>,
         >::persist_fork_choice_in_batch_standalone(
             &fork_choice
         ));
@@ -897,7 +882,6 @@ where
             fork_choice_signal_tx,
             fork_choice_signal_rx,
             event_handler: self.event_handler,
-            head_tracker,
             snapshot_cache: TimeoutRwLock::new(SnapshotCache::new(
                 DEFAULT_SNAPSHOT_CACHE_SIZE,
                 head_for_snapshot_cache,
