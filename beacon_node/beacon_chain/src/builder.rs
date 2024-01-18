@@ -724,7 +724,7 @@ where
             };
 
         let (_head_state_root, head_state) = store
-            .get_advanced_hot_state(head_block_root, head_block.slot(), head_block.state_root())
+            .get_advanced_hot_state(head_block_root, current_slot, head_block.state_root())
             .map_err(|e| descriptive_db_error("head state", &e))?
             .ok_or("Head state not found in store")?;
 
@@ -805,7 +805,7 @@ where
         //
         // This *must* be stored before constructing the `BeaconChain`, so that its `Drop` instance
         // doesn't write a `PersistedBeaconChain` without the rest of the batch.
-        let head_tracker_reader = head_tracker.data.read();
+        let head_tracker_reader = head_tracker.0.read();
         self.pending_io_batch.push(BeaconChain::<
             Witness<TSlotClock, TEth1Backend, TEthSpec, THotStore, TColdStore>,
         >::persist_head_in_batch_standalone(
