@@ -361,37 +361,6 @@ impl ParticipationCache {
         self.current_epoch_participation.total_active_balance.get()
     }
 
-    pub fn current_epoch_target_attesting_balance(&self) -> Result<u64, Error> {
-        self.current_epoch_participation
-            .total_flag_balance(TIMELY_TARGET_FLAG_INDEX)
-    }
-
-    pub fn current_epoch_target_attesting_balance_raw(&self) -> Result<Balance, Error> {
-        self.current_epoch_participation
-            .total_flag_balance_raw(TIMELY_TARGET_FLAG_INDEX)
-    }
-
-    pub fn previous_epoch_total_active_balance(&self) -> u64 {
-        self.previous_epoch_participation.total_active_balance.get()
-    }
-
-    pub fn previous_epoch_target_attesting_balance(&self) -> Result<u64, Error> {
-        self.previous_epoch_flag_attesting_balance(TIMELY_TARGET_FLAG_INDEX)
-    }
-
-    pub fn previous_epoch_target_attesting_balance_raw(&self) -> Result<Balance, Error> {
-        self.previous_epoch_participation
-            .total_flag_balance_raw(TIMELY_TARGET_FLAG_INDEX)
-    }
-
-    pub fn previous_epoch_source_attesting_balance(&self) -> Result<u64, Error> {
-        self.previous_epoch_flag_attesting_balance(TIMELY_SOURCE_FLAG_INDEX)
-    }
-
-    pub fn previous_epoch_head_attesting_balance(&self) -> Result<u64, Error> {
-        self.previous_epoch_flag_attesting_balance(TIMELY_HEAD_FLAG_INDEX)
-    }
-
     pub fn previous_epoch_flag_attesting_balance(&self, flag_index: usize) -> Result<u64, Error> {
         self.previous_epoch_participation
             .total_flag_balance(flag_index)
@@ -401,18 +370,6 @@ impl ParticipationCache {
      * Active/Unslashed
      */
 
-    pub fn is_active_unslashed_in_previous_epoch(&self, val_index: usize) -> bool {
-        self.get_validator(val_index).map_or(false, |validator| {
-            validator.is_active_previous_epoch && !validator.is_slashed
-        })
-    }
-
-    pub fn is_active_unslashed_in_current_epoch(&self, val_index: usize) -> bool {
-        self.get_validator(val_index).map_or(false, |validator| {
-            validator.is_active_current_epoch && !validator.is_slashed
-        })
-    }
-
     pub fn get_validator(&self, val_index: usize) -> Result<&ValidatorInfo, Error> {
         self.validators
             .info
@@ -420,60 +377,5 @@ impl ParticipationCache {
             .ok_or(Error::MissingValidator(val_index))?
             .as_ref()
             .ok_or(Error::MissingValidator(val_index))
-    }
-
-    /*
-     * Flags
-     */
-    /// Always returns false for a slashed validator.
-    pub fn is_previous_epoch_timely_source_attester(
-        &self,
-        val_index: usize,
-    ) -> Result<bool, Error> {
-        self.get_validator(val_index)
-            .map_or(Ok(false), |validator| {
-                Ok(!validator.is_slashed
-                    && validator
-                        .previous_epoch_participation
-                        .has_flag(TIMELY_SOURCE_FLAG_INDEX)
-                        .map_err(|_| Error::InvalidFlagIndex(TIMELY_SOURCE_FLAG_INDEX))?)
-            })
-    }
-
-    /// Always returns false for a slashed validator.
-    pub fn is_previous_epoch_timely_target_attester(
-        &self,
-        val_index: usize,
-    ) -> Result<bool, Error> {
-        self.get_validator(val_index)
-            .map_or(Ok(false), |validator| {
-                Ok(!validator.is_slashed
-                    && validator
-                        .previous_epoch_participation
-                        .has_flag(TIMELY_TARGET_FLAG_INDEX)
-                        .map_err(|_| Error::InvalidFlagIndex(TIMELY_TARGET_FLAG_INDEX))?)
-            })
-    }
-
-    /// Always returns false for a slashed validator.
-    pub fn is_previous_epoch_timely_head_attester(&self, val_index: usize) -> Result<bool, Error> {
-        self.get_validator(val_index)
-            .map_or(Ok(false), |validator| {
-                Ok(!validator.is_slashed
-                    && validator
-                        .previous_epoch_participation
-                        .has_flag(TIMELY_HEAD_FLAG_INDEX)
-                        .map_err(|_| Error::InvalidFlagIndex(TIMELY_TARGET_FLAG_INDEX))?)
-            })
-    }
-
-    /// Always returns false for a slashed validator.
-    pub fn is_current_epoch_timely_target_attester(
-        &self,
-        _val_index: usize,
-    ) -> Result<bool, Error> {
-        // FIXME(sproul): decide whether it's worth storing the current epoch participation flags
-        // *just* for this call. Perhaps the validator API could source it from the state directly.
-        Ok(false)
     }
 }
