@@ -12,17 +12,11 @@
 //! to get useful summaries about the validator participation in an epoch.
 
 use crate::common::altair::{get_base_reward, BaseRewardPerIncrement};
-use safe_arith::{ArithError, SafeArith};
-use types::milhouse::update_map::{MaxMap, UpdateMap};
+use safe_arith::ArithError;
 use types::{
-    consts::altair::{
-        NUM_FLAG_INDICES, TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX,
-        TIMELY_TARGET_FLAG_INDEX,
-    },
-    Balance, BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec, ParticipationFlags,
-    RelativeEpoch, Unsigned, Validator,
+    consts::altair::NUM_FLAG_INDICES, Balance, BeaconState, BeaconStateError, ChainSpec, Epoch,
+    EthSpec, ParticipationFlags, RelativeEpoch, Validator,
 };
-use vec_map::VecMap;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Error {
@@ -75,14 +69,6 @@ impl SingleEpochParticipationCache {
         self.total_flag_balances
             .get(flag_index)
             .map(Balance::get)
-            .ok_or(Error::InvalidFlagIndex(flag_index))
-    }
-
-    /// Returns the raw total balance of attesters who have `flag_index` set.
-    fn total_flag_balance_raw(&self, flag_index: usize) -> Result<Balance, Error> {
-        self.total_flag_balances
-            .get(flag_index)
-            .copied()
             .ok_or(Error::InvalidFlagIndex(flag_index))
     }
 
@@ -178,11 +164,6 @@ pub struct ParticipationCache {
     validators: ValidatorInfoCache,
     /// Caches the result of the `get_eligible_validator_indices` function.
     eligible_indices: Vec<usize>,
-    /// Caches the indices and effective balances of validators that need to be processed by
-    /// `process_slashings`.
-    process_slashings_indices: Vec<(usize, u64)>,
-    /// Updates to the inactivity scores if we are definitely not in an inactivity leak.
-    pub inactivity_score_updates: Option<MaxMap<VecMap<u64>>>,
 }
 
 impl ParticipationCache {
@@ -215,19 +196,6 @@ impl ParticipationCache {
         // reallocations.
         let mut eligible_indices = Vec::with_capacity(state.validators().len());
 
-        let mut process_slashings_indices = vec![];
-
-        // Fast path for inactivity scores update when we are definitely not in an inactivity leak.
-        // This breaks the dependence of `process_inactivity_updates` on the finalization
-        // re-calculation.
-        let definitely_not_in_inactivity_leak = state
-            .finalized_checkpoint()
-            .epoch
-            .safe_add(spec.min_epochs_to_inactivity_penalty)?
-            .safe_add(1)?
-            >= state.current_epoch();
-        let mut inactivity_score_updates = MaxMap::default();
-
         // Iterate through all validators, updating:
         //
         // 1. Validator participation for current and previous epochs.
@@ -240,9 +208,8 @@ impl ParticipationCache {
             .iter()
             .zip(state.current_epoch_participation()?)
             .zip(state.previous_epoch_participation()?)
-            .zip(state.inactivity_scores()?)
             .enumerate();
-        for (val_index, (((val, curr_epoch_flags), prev_epoch_flags), inactivity_score)) in iter {
+        for (val_index, ((val, curr_epoch_flags), prev_epoch_flags)) in iter {
             let is_active_current_epoch = val.is_active_at(current_epoch);
             let is_active_previous_epoch = val.is_active_at(previous_epoch);
             let is_eligible = state.is_eligible_validator(previous_epoch, val)?;
@@ -269,13 +236,6 @@ impl ParticipationCache {
                 )?;
             }
 
-            if val.slashed()
-                && current_epoch.safe_add(T::EpochsPerSlashingsVector::to_u64().safe_div(2)?)?
-                    == val.withdrawable_epoch()
-            {
-                process_slashings_indices.push((val_index, val.effective_balance()));
-            }
-
             // Note: a validator might still be "eligible" whilst returning `false` to
             // `Validator::is_active_at`. It's also possible for a validator to be active
             // in the current epoch without being eligible (if it was just activated).
@@ -292,24 +252,6 @@ impl ParticipationCache {
                 is_active_previous_epoch,
                 previous_epoch_participation: *prev_epoch_flags,
             };
-
-            // Calculate inactivity updates.
-            if is_eligible && definitely_not_in_inactivity_leak {
-                let mut new_inactivity_score =
-                    if validator_info.is_unslashed_participating_index(TIMELY_TARGET_FLAG_INDEX)? {
-                        inactivity_score.saturating_sub(1)
-                    } else {
-                        inactivity_score.safe_add(spec.inactivity_score_bias)?
-                    };
-
-                // Decrease the score of all validators for forgiveness when not during a leak
-                new_inactivity_score =
-                    new_inactivity_score.saturating_sub(spec.inactivity_score_recovery_rate);
-
-                if new_inactivity_score != *inactivity_score {
-                    inactivity_score_updates.insert(val_index, new_inactivity_score);
-                }
-            }
 
             #[allow(clippy::indexing_slicing)]
             if is_eligible || is_active_current_epoch {
@@ -338,19 +280,12 @@ impl ParticipationCache {
             previous_epoch_participation,
             validators,
             eligible_indices,
-            process_slashings_indices,
-            inactivity_score_updates: definitely_not_in_inactivity_leak
-                .then_some(inactivity_score_updates),
         })
     }
 
     /// Equivalent to the specification `get_eligible_validator_indices` function.
     pub fn eligible_validator_indices(&self) -> &[usize] {
         &self.eligible_indices
-    }
-
-    pub fn process_slashings_indices(&mut self) -> Vec<(usize, u64)> {
-        std::mem::take(&mut self.process_slashings_indices)
     }
 
     /*

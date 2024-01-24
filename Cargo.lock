@@ -7674,7 +7674,6 @@ dependencies = [
  "tokio",
  "tree_hash",
  "types",
- "vec_map",
 ]
 
 [[package]]
