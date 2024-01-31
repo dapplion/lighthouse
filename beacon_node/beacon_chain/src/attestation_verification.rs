@@ -552,14 +552,25 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
                     .fork_name_at_slot::<T::EthSpec>(attestation.data.slot)
                     >= ForkName::Deneb
                 {
-                    let validator_effective_balance = unimplemented!();
-                    let committee_total_effective_balance = unimplemented!();
-                    SelectionProof::modulo_maxeb(
-                        validator_effective_balance,
-                        committee_total_effective_balance,
-                        &chain.spec,
-                    )
-                    .map_err(|e| Error::BeaconChainError(e.into()))?
+                    if let (
+                        Some(prev_epoch_effective_balances),
+                        Some(prev_epoch_committee_total_effective_balance),
+                    ) = (
+                        committee.prev_epoch_effective_balances,
+                        committee.prev_epoch_committee_total_effective_balance,
+                    ) {
+                        let index = signed_aggregate.message.aggregator_index as usize;
+                        SelectionProof::modulo_maxeb(
+                            *prev_epoch_effective_balances
+                                .get(index)
+                                .ok_or_else(|| Error::ValidatorIndexTooHigh(index))?,
+                            prev_epoch_committee_total_effective_balance,
+                            &chain.spec,
+                        )
+                        .map_err(|e| Error::BeaconChainError(e.into()))?
+                    } else {
+                        panic!("TODO(maxeb): what do :(");
+                    }
                 } else {
                     SelectionProof::modulo_base(committee.committee.len(), &chain.spec)
                         .map_err(|e| Error::BeaconChainError(e.into()))?

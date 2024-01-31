@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::*;
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -5,6 +7,8 @@ pub struct BeaconCommittee<'a> {
     pub slot: Slot,
     pub index: CommitteeIndex,
     pub committee: &'a [usize],
+    pub prev_epoch_committee_total_effective_balance: Option<Gwei>,
+    pub prev_epoch_effective_balances: Option<Arc<Vec<Gwei>>>,
 }
 
 impl<'a> BeaconCommittee<'a> {

@@ -1604,7 +1604,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     .iter()
                     .map(|validator_index| {
                         let validator_index = *validator_index as usize;
-                        committee_cache.get_attestation_duties(validator_index)
+                        committee_cache
+                            .get_attestation_duties::<T::EthSpec>(validator_index, &self.spec)
                     })
                     .collect();
 

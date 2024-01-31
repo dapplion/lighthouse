@@ -7,7 +7,7 @@ use safe_arith::SafeArith;
 use serde::{Deserialize, Serialize};
 use ssz::{four_byte_option_impl, Decode, DecodeError, Encode};
 use ssz_derive::{Decode, Encode};
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 use swap_or_not_shuffle::shuffle_list;
 
 mod tests;
@@ -27,6 +27,8 @@ pub struct CommitteeCache {
     shuffling_positions: Vec<NonZeroUsizeOption>,
     committees_per_slot: u64,
     slots_per_epoch: u64,
+    prev_epoch_committee_total_effective_balance: Option<Vec<Gwei>>,
+    prev_epoch_effective_balances: Option<Arc<Vec<Gwei>>>,
 }
 
 impl CommitteeCache {
@@ -93,7 +95,22 @@ impl CommitteeCache {
             shuffling_positions,
             committees_per_slot,
             slots_per_epoch: T::slots_per_epoch(),
+            prev_epoch_effective_balances: state.prev_epoch_effective_balances().clone(),
+            prev_epoch_committee_total_effective_balance: state
+                .prev_epoch_effective_balances()
+                .as_ref()
+                .map(|prev_epoch_effective_balances| {
+                    Self::compute_committees_justified_total_effective_balance(
+                        prev_epoch_effective_balances.clone(),
+                    )
+                }),
         })
+    }
+
+    fn compute_committees_justified_total_effective_balance(
+        _justified_balances: Arc<Vec<Gwei>>,
+    ) -> Vec<Gwei> {
+        unimplemented!("maxeb")
     }
 
     /// Returns `true` if the cache has been initialized at the supplied `epoch`.
@@ -150,6 +167,13 @@ impl CommitteeCache {
             slot,
             index,
             committee,
+            prev_epoch_effective_balances: self.prev_epoch_effective_balances.clone(),
+            prev_epoch_committee_total_effective_balance: self
+                .prev_epoch_committee_total_effective_balance
+                .as_ref()
+                .map(|total_balances| {
+                    total_balances.get(committee_index).map(|balance| *balance)
+                })?,
         })
     }
 
@@ -186,7 +210,11 @@ impl CommitteeCache {
     ///
     /// Returns `None` if the `validator_index` does not exist, does not have duties or `Self` is
     /// non-initialized.
-    pub fn get_attestation_duties(&self, validator_index: usize) -> Option<AttestationDuty> {
+    pub fn get_attestation_duties<T: EthSpec>(
+        &self,
+        validator_index: usize,
+        spec: &ChainSpec,
+    ) -> Option<AttestationDuty> {
         let i = self.shuffled_position(validator_index)?;
 
         (0..self.epoch_committee_count())
@@ -204,13 +232,37 @@ impl CommitteeCache {
                 let committee_position = i - range.start;
                 let committee_len = range.end - range.start;
 
+                let is_aggregator_modulo = if spec.fork_name_at_slot::<T>(slot) >= ForkName::Deneb {
+                    if let (
+                        Some(prev_epoch_effective_balances),
+                        Some(prev_epoch_committee_total_effective_balance),
+                    ) = (
+                        self.prev_epoch_effective_balances.as_ref(),
+                        self.prev_epoch_committee_total_effective_balance.as_ref(),
+                    ) {
+                        SelectionProof::modulo_maxeb(
+                            *prev_epoch_effective_balances.get(validator_index).unwrap(),
+                            *prev_epoch_committee_total_effective_balance
+                                .get(nth_committee)
+                                .unwrap(),
+                            spec,
+                        )
+                        .unwrap()
+                    } else {
+                        // TODO(maxeb): can't support historical queries cheaply
+                        0
+                    }
+                } else {
+                    SelectionProof::modulo_base(committee_len, spec).unwrap()
+                };
+
                 Some(AttestationDuty {
                     slot,
                     index,
                     committee_position,
                     committee_len,
                     committees_at_slot: self.committees_per_slot(),
-                    is_aggregator_modulo: unimplemented!(),
+                    is_aggregator_modulo,
                 })
             })
     }
