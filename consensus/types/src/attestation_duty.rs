@@ -14,4 +14,6 @@ pub struct AttestationDuty {
     /// The committee count at `attestation_slot`.
     #[serde(with = "serde_utils::quoted_u64")]
     pub committees_at_slot: u64,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub is_aggregator_modulo: u64,
 }

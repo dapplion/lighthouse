@@ -547,8 +547,26 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
                 let selection_proof =
                     SelectionProof::from(signed_aggregate.message.selection_proof.clone());
 
+                let modulo = if chain
+                    .spec
+                    .fork_name_at_slot::<T::EthSpec>(attestation.data.slot)
+                    >= ForkName::Deneb
+                {
+                    let validator_effective_balance = unimplemented!();
+                    let committee_total_effective_balance = unimplemented!();
+                    SelectionProof::modulo_maxeb(
+                        validator_effective_balance,
+                        committee_total_effective_balance,
+                        &chain.spec,
+                    )
+                    .map_err(|e| Error::BeaconChainError(e.into()))?
+                } else {
+                    SelectionProof::modulo_base(committee.committee.len(), &chain.spec)
+                        .map_err(|e| Error::BeaconChainError(e.into()))?
+                };
+
                 if !selection_proof
-                    .is_aggregator(committee.committee.len(), &chain.spec)
+                    .is_aggregator_from_modulo(modulo)
                     .map_err(|e| Error::BeaconChainError(e.into()))?
                 {
                     return Err(Error::InvalidSelectionProof { aggregator_index });
