@@ -1330,7 +1330,10 @@ where
                                 );
 
                                 selection_proof
-                                    .is_aggregator(bc.committee.len(), &self.spec)
+                                    .is_aggregator_from_modulo(
+                                        SelectionProof::modulo_base(bc.committee.len(), &self.spec)
+                                            .unwrap(),
+                                    )
                                     .unwrap_or(false)
                             })
                             .copied()?;
