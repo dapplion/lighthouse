@@ -552,11 +552,11 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
                     .fork_name_at_slot::<T::EthSpec>(attestation.data.slot)
                     >= ForkName::Deneb
                 {
-                    let validator_effective_balance = unimplemented!();
-                    let committee_total_effective_balance = unimplemented!();
+                    // Need to index balances
+                    let effective_balances = chain.get_effective_balances();
                     SelectionProof::modulo_maxeb(
-                        validator_effective_balance,
-                        committee_total_effective_balance,
+                        effective_balances.get(aggregator_index as usize),
+                        effective_balances.get_committee_total(committee.committee),
                         &chain.spec,
                     )
                     .map_err(|e| Error::BeaconChainError(e.into()))?
