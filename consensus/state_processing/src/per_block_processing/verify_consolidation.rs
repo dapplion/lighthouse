@@ -6,7 +6,7 @@ use crate::{
 use types::*;
 
 pub fn verify_consolidation<T: EthSpec>(
-    state: &mut BeaconState<T>,
+    state: &BeaconState<T>,
     signed_consolidation: &SignedConsolidation,
     verify_signatures: VerifySignatures,
     spec: &ChainSpec,

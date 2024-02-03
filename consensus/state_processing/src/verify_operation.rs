@@ -1,9 +1,9 @@
 use crate::per_block_processing::{
     errors::{
-        AttesterSlashingValidationError, BlsExecutionChangeValidationError, ExitValidationError,
-        ProposerSlashingValidationError,
+        AttesterSlashingValidationError, BlsExecutionChangeValidationError,
+        ConsolidationValidationError, ExitValidationError, ProposerSlashingValidationError,
     },
-    verify_attester_slashing, verify_bls_to_execution_change, verify_exit,
+    verify_attester_slashing, verify_bls_to_execution_change, verify_consolidation, verify_exit,
     verify_proposer_slashing,
 };
 use crate::VerifySignatures;
@@ -14,7 +14,7 @@ use ssz_derive::{Decode, Encode};
 use std::marker::PhantomData;
 use types::{
     AttesterSlashing, BeaconState, ChainSpec, Epoch, EthSpec, Fork, ForkVersion, ProposerSlashing,
-    SignedBlsToExecutionChange, SignedVoluntaryExit,
+    SignedBlsToExecutionChange, SignedConsolidation, SignedVoluntaryExit,
 };
 
 const MAX_FORKS_VERIFIED_AGAINST: usize = 2;
@@ -203,6 +203,24 @@ impl<E: EthSpec> VerifyOperation<E> for SignedBlsToExecutionChange {
     #[allow(clippy::arithmetic_side_effects)]
     fn verification_epochs(&self) -> SmallVec<[Epoch; MAX_FORKS_VERIFIED_AGAINST]> {
         smallvec![]
+    }
+}
+
+impl<E: EthSpec> VerifyOperation<E> for SignedConsolidation {
+    type Error = ConsolidationValidationError;
+
+    fn validate(
+        self,
+        state: &BeaconState<E>,
+        spec: &ChainSpec,
+    ) -> Result<SigVerifiedOp<Self, E>, Self::Error> {
+        verify_consolidation(state, &self, VerifySignatures::True, spec)?;
+        Ok(SigVerifiedOp::new(self, state))
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn verification_epochs(&self) -> SmallVec<[Epoch; MAX_FORKS_VERIFIED_AGAINST]> {
+        smallvec![self.message.epoch]
     }
 }
 

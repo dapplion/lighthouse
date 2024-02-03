@@ -337,6 +337,7 @@ struct PartialBeaconBlock<E: EthSpec> {
     sync_aggregate: Option<SyncAggregate<E>>,
     prepare_payload_handle: Option<PreparePayloadHandle<E>>,
     bls_to_execution_changes: Vec<SignedBlsToExecutionChange>,
+    consolidations: Vec<SignedConsolidation>,
 }
 
 pub type BeaconForkChoice<T> = ForkChoice<
@@ -4885,6 +4886,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .op_pool
             .get_bls_to_execution_changes(&state, &self.spec);
 
+        let consolidations = self.op_pool.get_consolidations(&state, &self.spec);
+
         // Iterate through the naive aggregation pool and ensure all the attestations from there
         // are included in the operation pool.
         let unagg_import_timer =
@@ -5044,6 +5047,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             sync_aggregate,
             prepare_payload_handle,
             bls_to_execution_changes,
+            consolidations,
         })
     }
 
@@ -5072,6 +5076,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // produce said `execution_payload`.
             prepare_payload_handle: _,
             bls_to_execution_changes,
+            consolidations,
         } = partial_beacon_block;
 
         let (inner_block, maybe_blobs_and_proofs, execution_payload_value) = match &state {
@@ -5215,7 +5220,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                                     "Kzg commitments missing from block contents".to_string(),
                                 ),
                             )?,
-                            consolidations: unimplemented!(),
+                            consolidations: consolidations.into(),
                         },
                     }),
                     maybe_blobs_and_proofs,

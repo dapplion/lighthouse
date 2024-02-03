@@ -207,6 +207,7 @@ pub type SyncCommitteeMessageValidationError = BlockOperationError<SyncAggregate
 pub type DepositValidationError = BlockOperationError<DepositInvalid>;
 pub type ExitValidationError = BlockOperationError<ExitInvalid>;
 pub type BlsExecutionChangeValidationError = BlockOperationError<BlsExecutionChangeInvalid>;
+pub type ConsolidationValidationError = BlockOperationError<ConsolidationInvalid>;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum BlockOperationError<T> {
