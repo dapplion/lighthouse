@@ -58,8 +58,8 @@ pub fn verify_consolidation<T: EthSpec>(
     );
     // Verify the same withdrawal address
     verify!(
-        source_validator.withdrawal_credentials[1..]
-            == target_validator.withdrawal_credentials[1..],
+        withdrawal_credentials_suffix(source_validator)?
+            == withdrawal_credentials_suffix(target_validator)?,
         ConsolidationInvalid::NotSameCredentials
     );
 
@@ -78,4 +78,14 @@ pub fn verify_consolidation<T: EthSpec>(
     }
 
     Ok(())
+}
+
+fn withdrawal_credentials_suffix(
+    validator: &Validator,
+) -> Result<&[u8], BlockOperationError<ConsolidationInvalid>> {
+    validator
+        .withdrawal_credentials
+        .0
+        .get(1..)
+        .ok_or_else(|| BlockOperationError::invalid(ConsolidationInvalid::InvalidCredentials))
 }

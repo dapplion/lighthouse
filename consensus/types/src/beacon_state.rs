@@ -1482,7 +1482,7 @@ impl<T: EthSpec> BeaconState<T> {
             *self
                 .balances()
                 .get(index)
-                .ok_or_else(|| Error::BalancesOutOfBounds(index))?,
+                .ok_or(Error::BalancesOutOfBounds(index))?,
             active_balance_ceil,
         )
         .into())

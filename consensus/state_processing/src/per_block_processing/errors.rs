@@ -452,6 +452,7 @@ pub enum ConsolidationInvalid {
     TooEarly,
     SourceNoEth1Credentials,
     TargetNoEth1Credentials,
+    InvalidCredentials,
     NotSameCredentials,
     BadSignature,
 }

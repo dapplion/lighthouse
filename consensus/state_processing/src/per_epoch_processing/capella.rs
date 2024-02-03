@@ -171,7 +171,7 @@ pub fn process_pending_consolidations<T: EthSpec>(
                 balance_target.safe_add_assign(active_balance)?;
             }
 
-            next_pending_consolidation += 1;
+            next_pending_consolidation.safe_add_assign(1)?;
         }
 
         // TODO(maxeb), converting to vec to have something while SSZ api supports pop
