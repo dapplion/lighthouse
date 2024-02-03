@@ -35,6 +35,7 @@ pub mod tests;
 mod verify_attestation;
 mod verify_attester_slashing;
 mod verify_bls_to_execution_change;
+mod verify_consolidation;
 mod verify_deposit;
 mod verify_exit;
 mod verify_proposer_slashing;

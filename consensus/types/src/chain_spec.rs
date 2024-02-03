@@ -24,6 +24,7 @@ pub enum Domain {
     SyncCommittee,
     ContributionAndProof,
     SyncCommitteeSelectionProof,
+    Consolidation,
     ApplicationMask(ApplicationDomain),
 }
 
@@ -221,6 +222,7 @@ pub struct ChainSpec {
      * Capella params
      */
     pub(crate) domain_bls_to_execution_change: u32,
+    pub(crate) domain_consolidation: u32,
 }
 
 impl ChainSpec {
@@ -415,6 +417,7 @@ impl ChainSpec {
             Domain::SyncCommitteeSelectionProof => self.domain_sync_committee_selection_proof,
             Domain::ApplicationMask(application_domain) => application_domain.get_domain_constant(),
             Domain::BlsToExecutionChange => self.domain_bls_to_execution_change,
+            Domain::Consolidation => self.domain_consolidation,
         }
     }
 
@@ -752,6 +755,7 @@ impl ChainSpec {
              * Capella params
              */
             domain_bls_to_execution_change: 10,
+            domain_consolidation: 11,
         }
     }
 
@@ -1024,6 +1028,7 @@ impl ChainSpec {
              * Capella params
              */
             domain_bls_to_execution_change: 10,
+            domain_consolidation: 11,
         }
     }
 }

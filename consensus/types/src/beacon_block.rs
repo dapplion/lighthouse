@@ -595,6 +595,7 @@ impl<T: EthSpec, Payload: AbstractExecPayload<T>> EmptyBlock for BeaconBlockDene
                 execution_payload: Payload::Deneb::default(),
                 bls_to_execution_changes: VariableList::empty(),
                 blob_kzg_commitments: VariableList::empty(),
+                consolidations: VariableList::empty(),
             },
         }
     }

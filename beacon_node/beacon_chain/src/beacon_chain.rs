@@ -5215,6 +5215,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                                     "Kzg commitments missing from block contents".to_string(),
                                 ),
                             )?,
+                            consolidations: unimplemented!(),
                         },
                     }),
                     maybe_blobs_and_proofs,

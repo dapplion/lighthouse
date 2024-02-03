@@ -55,6 +55,10 @@ pub enum BlockProcessingError {
         index: usize,
         reason: BlsExecutionChangeInvalid,
     },
+    ConsolidationInvalid {
+        index: usize,
+        reason: ConsolidationInvalid,
+    },
     SyncAggregateInvalid {
         reason: SyncAggregateInvalid,
     },
@@ -191,7 +195,8 @@ impl_into_block_processing_error_with_index!(
     AttestationInvalid,
     DepositInvalid,
     ExitInvalid,
-    BlsExecutionChangeInvalid
+    BlsExecutionChangeInvalid,
+    ConsolidationInvalid
 );
 
 pub type HeaderValidationError = BlockOperationError<HeaderInvalid>;
@@ -435,4 +440,18 @@ pub enum SyncAggregateInvalid {
     PubkeyInvalid,
     /// The signature is invalid.
     SignatureInvalid,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ConsolidationInvalid {
+    ValidatorUnknown(usize),
+    SourceInactive,
+    TargetInactive,
+    SourceExited,
+    TargetExited,
+    TooEarly,
+    SourceNoEth1Credentials,
+    TargetNoEth1Credentials,
+    NotSameCredentials,
+    BadSignature,
 }

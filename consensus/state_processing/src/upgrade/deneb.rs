@@ -64,8 +64,14 @@ pub fn upgrade_to_deneb<E: EthSpec>(
         // MaxEB
         deposit_balance_to_consume: 0u64.into(),
         pending_balance_deposits: <_>::default(),
+        // TODO(maxeb): Should be initialized with the max([v.exit_epoch for v in state.validators if v.exit_epoch != FAR_FUTURE_EPOCH]) + 1
         earliest_exit_epoch: 0u64.into(),
+        // TODO(maxeb): Should be initialized with get_churn_limit(state)
         exit_balance_to_consume: 0u64.into(),
+        earliest_consolidation_epoch: 0u64.into(),
+        // TODO(maxeb): Should be initialized with get_consolidation_churn_limit(state)
+        consolidation_balance_to_consume: 0u64.into(),
+        pending_consolidations: <_>::default(),
         // Caches
         total_active_balance: pre.total_active_balance,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),
