@@ -2551,6 +2551,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
     }
 
+    /// Verify and import a consolidation and queue it for inclusion in an appropriate block.
+    pub fn verify_and_import_consolidation(
+        &self,
+        consolidation: SignedConsolidation,
+    ) -> Result<(), Error> {
+        // Add to the op pool (if we have the ability to propose blocks).
+        if self.eth1_chain.is_some() {
+            let head_snapshot = self.head().snapshot;
+            let head_state = &head_snapshot.beacon_state;
+
+            // TODO(maxeb): may double insert, since there's no observable cache
+            self.op_pool
+                .insert_consolidation(consolidation.validate(head_state, &self.spec)?)
+        }
+
+        Ok(())
+    }
+
     /// Attempt to obtain sync committee duties from the head.
     pub fn sync_committee_duties_from_head(
         &self,
