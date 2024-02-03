@@ -414,6 +414,7 @@ macro_rules! impl_try_into_beacon_state {
             pubkey_cache: <_>::default(),
             exit_cache: <_>::default(),
             tree_hash_cache: <_>::default(),
+            prev_epoch_effective_balances: <_>::default(),
 
             // Variant-specific fields
             $(

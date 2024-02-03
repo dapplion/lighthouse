@@ -715,6 +715,8 @@ pub struct AttesterData {
     #[serde(with = "serde_utils::quoted_u64")]
     pub validator_committee_index: u64,
     pub slot: Slot,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub is_aggregator_modulo: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

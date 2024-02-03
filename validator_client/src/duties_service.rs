@@ -124,7 +124,6 @@ impl DutyAndProof {
     pub async fn new_with_selection_proof<T: SlotClock + 'static, E: EthSpec>(
         duty: AttesterData,
         validator_store: &ValidatorStore<T, E>,
-        spec: &ChainSpec,
     ) -> Result<Self, Error> {
         let selection_proof = validator_store
             .produce_selection_proof(duty.pubkey, duty.slot)
@@ -132,7 +131,7 @@ impl DutyAndProof {
             .map_err(Error::FailedToProduceSelectionProof)?;
 
         let selection_proof = selection_proof
-            .is_aggregator(duty.committee_length as usize, spec)
+            .is_aggregator_from_modulo(duty.is_aggregator_modulo)
             .map_err(Error::InvalidModulo)
             .map(|is_aggregator| {
                 if is_aggregator {
@@ -1016,12 +1015,8 @@ async fn fill_in_selection_proofs<T: SlotClock + 'static, E: EthSpec>(
             // Sign selection proofs (serially).
             let duty_and_proof_results = stream::iter(relevant_duties.into_values().flatten())
                 .then(|duty| async {
-                    DutyAndProof::new_with_selection_proof(
-                        duty,
-                        &duties_service.validator_store,
-                        &duties_service.spec,
-                    )
-                    .await
+                    DutyAndProof::new_with_selection_proof(duty, &duties_service.validator_store)
+                        .await
                 })
                 .collect::<Vec<_>>()
                 .await;

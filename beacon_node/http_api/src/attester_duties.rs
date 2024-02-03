@@ -66,6 +66,7 @@ fn cached_attestation_duties<T: BeaconChainTypes>(
         request_indices,
         dependent_root,
         execution_status.is_optimistic_or_invalid(),
+        IsAggregatorModulo::Compute,
         chain,
     )
 }
@@ -146,7 +147,7 @@ fn compute_historic_attester_duties<T: BeaconChainTypes>(
         .iter()
         .map(|&validator_index| {
             state
-                .get_attestation_duties(validator_index as usize, relative_epoch)
+                .get_attestation_duties(validator_index as usize, relative_epoch, &chain.spec)
                 .map_err(BeaconChainError::from)
         })
         .collect::<Result<_, _>>()
@@ -157,6 +158,7 @@ fn compute_historic_attester_duties<T: BeaconChainTypes>(
         request_indices,
         dependent_root,
         execution_optimistic,
+        IsAggregatorModulo::SetToZero,
         chain,
     )
 }
@@ -190,6 +192,11 @@ fn ensure_state_knows_attester_duties_for_epoch<E: EthSpec>(
     Ok(())
 }
 
+enum IsAggregatorModulo {
+    Compute,
+    SetToZero,
+}
+
 /// Convert the internal representation of attester duties into the format returned to the HTTP
 /// client.
 fn convert_to_api_response<T: BeaconChainTypes>(
@@ -197,6 +204,7 @@ fn convert_to_api_response<T: BeaconChainTypes>(
     indices: &[u64],
     dependent_root: Hash256,
     execution_optimistic: bool,
+    compute_is_aggregator_modulo: IsAggregatorModulo,
     chain: &BeaconChain<T>,
 ) -> Result<ApiDuties, warp::reject::Rejection> {
     // Protect against an inconsistent slot clock.
@@ -226,6 +234,10 @@ fn convert_to_api_response<T: BeaconChainTypes>(
                 committee_length: duty.committee_len as u64,
                 validator_committee_index: duty.committee_position as u64,
                 slot: duty.slot,
+                is_aggregator_modulo: match compute_is_aggregator_modulo {
+                    IsAggregatorModulo::Compute => duty.is_aggregator_modulo,
+                    IsAggregatorModulo::SetToZero => 0,
+                },
             })
         })
         .collect::<Vec<_>>();

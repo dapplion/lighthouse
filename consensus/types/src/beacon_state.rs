@@ -364,6 +364,14 @@ where
     #[test_random(default)]
     #[derivative(Clone(clone_with = "clone_default"))]
     pub tree_hash_cache: BeaconTreeHashCache<T>,
+
+    /// For MaxEB
+    #[serde(skip_serializing, skip_deserializing)]
+    #[ssz(skip_serializing, skip_deserializing)]
+    #[tree_hash(skip_hashing)]
+    #[test_random(default)]
+    #[derivative(Clone(clone_with = "clone_default"))]
+    pub prev_epoch_effective_balances: Option<Arc<Vec<Gwei>>>,
 }
 
 impl<T: EthSpec> Clone for BeaconState<T> {
@@ -430,6 +438,7 @@ impl<T: EthSpec> BeaconState<T> {
             pubkey_cache: PubkeyCache::default(),
             exit_cache: ExitCache::default(),
             tree_hash_cache: <_>::default(),
+            prev_epoch_effective_balances: <_>::default(),
         })
     }
 
@@ -1429,10 +1438,11 @@ impl<T: EthSpec> BeaconState<T> {
         &self,
         validator_index: usize,
         relative_epoch: RelativeEpoch,
+        spec: &ChainSpec,
     ) -> Result<Option<AttestationDuty>, Error> {
         let cache = self.committee_cache(relative_epoch)?;
 
-        Ok(cache.get_attestation_duties(validator_index))
+        Ok(cache.get_attestation_duties::<T>(validator_index, spec))
     }
 
     /// Implementation of `get_total_balance`, matching the spec.

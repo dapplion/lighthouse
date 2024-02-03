@@ -302,7 +302,7 @@ mod committees {
                     // Assert a call to `get_attestation_duties` is consistent with a call to
                     // `get_beacon_committees_at_slot`
                     let attestation_duty = state
-                        .get_attestation_duties(*validator_i, relative_epoch)
+                        .get_attestation_duties(*validator_i, relative_epoch, spec)
                         .unwrap()
                         .unwrap();
                     assert_eq!(attestation_duty.slot, slot);

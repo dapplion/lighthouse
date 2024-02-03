@@ -1,12 +1,13 @@
 use crate::address_change_broadcast::broadcast_address_changes_at_capella;
+use crate::broadcast_lightclient_updates::compute_lightclient_updates;
 use crate::config::{ClientGenesis, Config as ClientConfig};
 use crate::notifier::spawn_notifier;
 use crate::Client;
-use beacon_chain::attestation_simulator::start_attestation_simulator_service;
 use beacon_chain::data_availability_checker::start_availability_cache_maintenance_service;
 use beacon_chain::otb_verification_service::start_otb_verification_service;
 use beacon_chain::proposer_prep_service::start_proposer_prep_service;
 use beacon_chain::schema_change::migrate_schema;
+use beacon_chain::LightclientProducerEvent;
 use beacon_chain::{
     builder::{BeaconChainBuilder, Witness},
     eth1_chain::{CachingEth1Backend, Eth1Chain},
