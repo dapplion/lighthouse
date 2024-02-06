@@ -1,5 +1,6 @@
 use crate::{
-    ChainSpec, Domain, EthSpec, Fork, Hash256, PublicKey, SecretKey, Signature, SignedRoot, Slot,
+    ChainSpec, Domain, EthSpec, Fork, Gwei, Hash256, PublicKey, SecretKey, Signature, SignedRoot,
+    Slot,
 };
 use ethereum_hashing::hash;
 use safe_arith::{ArithError, SafeArith};
@@ -30,19 +31,31 @@ impl SelectionProof {
     }
 
     /// Returns the "modulo" used for determining if a `SelectionProof` elects an aggregator.
-    pub fn modulo(committee_len: usize, spec: &ChainSpec) -> Result<u64, ArithError> {
+    pub fn modulo_base(committee_len: usize, spec: &ChainSpec) -> Result<u64, ArithError> {
         Ok(cmp::max(
             1,
             (committee_len as u64).safe_div(spec.target_aggregators_per_committee)?,
         ))
     }
 
-    pub fn is_aggregator(
-        &self,
-        committee_len: usize,
+    /// validator_effective_balance = state.validators[index].effective_balance
+    /// committee_total_effective_balance = get_total_balance(state, set(committee))
+    pub fn modulo_maxeb(
+        validator_effective_balance: Gwei,
+        committee_total_effective_balance: Gwei,
         spec: &ChainSpec,
-    ) -> Result<bool, ArithError> {
-        self.is_aggregator_from_modulo(Self::modulo(committee_len, spec)?)
+    ) -> Result<u64, ArithError> {
+        let min_balance_increments =
+            validator_effective_balance.safe_div(spec.min_activation_balance)?;
+        let committee_balance_increments =
+            committee_total_effective_balance.safe_div(spec.min_activation_balance)?;
+        let denominator = committee_balance_increments.safe_mul(min_balance_increments)?;
+        let numerator = denominator.safe_sub(
+            committee_balance_increments
+                .safe_sub(spec.target_aggregators_per_committee)?
+                .safe_mul(min_balance_increments)?,
+        )?;
+        Ok(denominator.safe_div(numerator)?.into())
     }
 
     pub fn is_aggregator_from_modulo(&self, modulo: u64) -> Result<bool, ArithError> {

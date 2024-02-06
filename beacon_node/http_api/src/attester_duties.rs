@@ -6,7 +6,8 @@ use eth2::types::{self as api_types};
 use slot_clock::SlotClock;
 use state_processing::state_advance::partial_state_advance;
 use types::{
-    AttestationDuty, BeaconState, ChainSpec, CloneConfig, Epoch, EthSpec, Hash256, RelativeEpoch,
+    AttestationDuty, BeaconState, ChainSpec, CloneConfig, Epoch, EthSpec, ForkName, Hash256,
+    RelativeEpoch, SelectionProof,
 };
 
 /// The struct that is returned to the requesting HTTP client.
@@ -66,6 +67,7 @@ fn cached_attestation_duties<T: BeaconChainTypes>(
         request_indices,
         dependent_root,
         execution_status.is_optimistic_or_invalid(),
+        AggregatorModulo::Compute,
         chain,
     )
 }
@@ -157,6 +159,8 @@ fn compute_historic_attester_duties<T: BeaconChainTypes>(
         request_indices,
         dependent_root,
         execution_optimistic,
+        // TODO(maxeb) aggregator modulo is not useful for historic queries
+        AggregatorModulo::SetToZero,
         chain,
     )
 }
@@ -190,6 +194,11 @@ fn ensure_state_knows_attester_duties_for_epoch<E: EthSpec>(
     Ok(())
 }
 
+enum AggregatorModulo {
+    Compute,
+    SetToZero,
+}
+
 /// Convert the internal representation of attester duties into the format returned to the HTTP
 /// client.
 fn convert_to_api_response<T: BeaconChainTypes>(
@@ -197,6 +206,7 @@ fn convert_to_api_response<T: BeaconChainTypes>(
     indices: &[u64],
     dependent_root: Hash256,
     execution_optimistic: bool,
+    aggregator_modulo: AggregatorModulo,
     chain: &BeaconChain<T>,
 ) -> Result<ApiDuties, warp::reject::Rejection> {
     // Protect against an inconsistent slot clock.
@@ -226,6 +236,26 @@ fn convert_to_api_response<T: BeaconChainTypes>(
                 committee_length: duty.committee_len as u64,
                 validator_committee_index: duty.committee_position as u64,
                 slot: duty.slot,
+                is_aggregator_modulo: match aggregator_modulo {
+                    AggregatorModulo::Compute => {
+                        if chain.spec.fork_name_at_slot::<T::EthSpec>(duty.slot) >= ForkName::Deneb
+                        {
+                            // Need to index balances
+                            let effective_balances = chain.get_effective_balances();
+                            SelectionProof::modulo_maxeb(
+                                effective_balances.get(validator_index as usize),
+                                effective_balances.get_committee_total(committee.committee),
+                                &chain.spec,
+                            )
+                            .map_err(|e| Error::BeaconChainError(e.into()))?
+                        } else {
+                            SelectionProof::modulo_base(duty.committee_len, &chain.spec)
+                                .map_err(|e| Error::BeaconChainError(e.into()))?
+                        }
+                    }
+
+                    AggregatorModulo::SetToZero => 0,
+                },
             })
         })
         .collect::<Vec<_>>();

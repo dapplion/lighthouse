@@ -547,7 +547,23 @@ impl FinalizationAndCanonicity {
     }
 }
 
+pub struct EffectiveBalances {}
+
+impl EffectiveBalances {
+    pub fn get(&self, index: usize) -> Gwei {
+        unimplemented!()
+    }
+
+    pub fn get_committee_total(&mut self, committee: &[usize]) -> Gwei {
+        unimplemented!()
+    }
+}
+
 impl<T: BeaconChainTypes> BeaconChain<T> {
+    pub fn get_effective_balances(&self) -> &mut EffectiveBalances {
+        unimplemented!()
+    }
+
     /// Checks if a block is finalized.
     /// The finalization check is done with the block slot. The block root is used to verify that
     /// the finalized slot is in the canonical chain.
