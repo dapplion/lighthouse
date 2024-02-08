@@ -9,6 +9,8 @@ use types::{EthSpec, MinimalEthSpec};
 pub const PREV_DEFAULT_SLOTS_PER_RESTORE_POINT: u64 = 2048;
 pub const DEFAULT_SLOTS_PER_RESTORE_POINT: u64 = 8192;
 pub const DEFAULT_BLOCK_CACHE_SIZE: NonZeroUsize = new_non_zero_usize(5);
+pub const DEFAULT_COMPRESSION_LEVEL: i32 = 1;
+const EST_COMPRESSION_FACTOR: usize = 2;
 pub const DEFAULT_HISTORIC_STATE_CACHE_SIZE: NonZeroUsize = new_non_zero_usize(1);
 pub const DEFAULT_EPOCHS_PER_BLOB_PRUNE: u64 = 1;
 pub const DEFAULT_BLOB_PUNE_MARGIN_EPOCHS: u64 = 0;
@@ -22,6 +24,8 @@ pub struct StoreConfig {
     pub slots_per_restore_point_set_explicitly: bool,
     /// Maximum number of blocks to store in the in-memory block cache.
     pub block_cache_size: NonZeroUsize,
+    /// Compression level for blocks, state diffs and other compressed values.
+    pub compression_level: i32,
     /// Maximum number of states from freezer database to store in the in-memory state cache.
     pub historic_state_cache_size: NonZeroUsize,
     /// Whether to compact the database on initialization.
@@ -30,6 +34,8 @@ pub struct StoreConfig {
     pub compact_on_prune: bool,
     /// Whether to prune payloads on initialization and finalization.
     pub prune_payloads: bool,
+    /// Whether to store finalized blocks compressed and linearised in the freezer database.
+    pub linear_blocks: bool,
     /// Whether to prune blobs older than the blob data availability boundary.
     pub prune_blobs: bool,
     /// Frequency of blob pruning in epochs. Default: 1 (every epoch).
@@ -57,10 +63,12 @@ impl Default for StoreConfig {
             slots_per_restore_point: MinimalEthSpec::slots_per_historical_root() as u64,
             slots_per_restore_point_set_explicitly: false,
             block_cache_size: DEFAULT_BLOCK_CACHE_SIZE,
+            compression_level: DEFAULT_COMPRESSION_LEVEL,
             historic_state_cache_size: DEFAULT_HISTORIC_STATE_CACHE_SIZE,
             compact_on_init: false,
             compact_on_prune: true,
             prune_payloads: true,
+            linear_blocks: true,
             prune_blobs: true,
             epochs_per_blob_prune: DEFAULT_EPOCHS_PER_BLOB_PRUNE,
             blob_prune_margin_epochs: DEFAULT_BLOB_PUNE_MARGIN_EPOCHS,
@@ -86,6 +94,25 @@ impl StoreConfig {
             });
         }
         Ok(())
+    }
+
+    /// Estimate the size of `len` bytes after compression at the current compression level.
+    pub fn estimate_compressed_size(&self, len: usize) -> usize {
+        if self.compression_level == 0 {
+            len
+        } else {
+            len / EST_COMPRESSION_FACTOR
+        }
+    }
+
+    /// Estimate the size of `len` compressed bytes after decompression at the current compression
+    /// level.
+    pub fn estimate_decompressed_size(&self, len: usize) -> usize {
+        if self.compression_level == 0 {
+            len
+        } else {
+            len * EST_COMPRESSION_FACTOR
+        }
     }
 }
 
