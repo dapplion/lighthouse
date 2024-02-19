@@ -60,7 +60,7 @@ pub fn process_sync_aggregate<T: EthSpec>(
         .zip(aggregate.sync_committee_bits.iter())
     {
         if participation_bit {
-            // Accumulate proposer rewards on tmp var in case a proposer has very low balance, is
+            // Accumulate proposer rewards in a temp var in case the proposer has very low balance, is
             // part of the sync committee, does not participate and its penalties saturate.
             if participant_index == proposer_index {
                 proposer_balance.safe_add_assign(participant_reward)?;
