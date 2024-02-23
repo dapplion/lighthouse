@@ -319,6 +319,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bddcadddf5e9015d310179a59bb28c4d4b9920ad0f11e8e14dbadf654890c9a6"
 
 [[package]]
+name = "archery"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a8da9bc4c4053ee067669762bcaeea6e241841295a2b6c948312dad6ef4cc02"
+dependencies = [
+ "static_assertions",
+]
+
+[[package]]
 name = "ark-ff"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -884,6 +893,7 @@ version = "0.2.0"
 dependencies = [
  "bitvec 1.0.1",
  "bls",
+ "crossbeam-channel",
  "derivative",
  "environment",
  "eth1",
@@ -908,9 +918,9 @@ dependencies = [
  "lru",
  "maplit",
  "merkle_proof",
- "oneshot_broadcast",
  "operation_pool",
  "parking_lot 0.12.1",
+ "promise_cache",
  "proto_array",
  "rand",
  "rayon",
@@ -5100,7 +5110,7 @@ dependencies = [
 
 [[package]]
 name = "lighthouse"
-version = "5.0.0"
+version = "5.0.111-exp"
 dependencies = [
  "account_manager",
  "account_utils",
@@ -5132,6 +5142,7 @@ dependencies = [
  "slashing_protection",
  "slog",
  "sloggers",
+ "store",
  "task_executor",
  "tempfile",
  "tracing-subscriber",
@@ -5509,6 +5520,28 @@ dependencies = [
  "lazy_static",
  "rand",
  "zeroize",
+]
+
+[[package]]
+name = "milhouse"
+version = "0.1.0"
+source = "git+https://github.com/sigp/milhouse?branch=main#40a536490b14dc95834f9ece0001e8e04f7b38d7"
+dependencies = [
+ "arbitrary",
+ "derivative",
+ "ethereum-types 0.14.1",
+ "ethereum_hashing",
+ "ethereum_ssz",
+ "ethereum_ssz_derive",
+ "itertools",
+ "parking_lot 0.11.2",
+ "rayon",
+ "serde",
+ "smallvec",
+ "tree_hash",
+ "triomphe",
+ "typenum",
+ "vec_map",
 ]
 
 [[package]]
@@ -6675,6 +6708,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "promise_cache"
+version = "0.1.0"
+dependencies = [
+ "derivative",
+ "itertools",
+ "oneshot_broadcast",
+ "slog",
+]
+
+[[package]]
 name = "proptest"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7171,6 +7214,15 @@ checksum = "ffc936cf8a7ea60c58f030fd36a612a48f440610214dc54bc36431f9ea0c3efb"
 dependencies = [
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "rpds"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ef5140bcb576bfd6d56cd2de709a7d17851ac1f3805e67fe9d99e42a11821f"
+dependencies = [
+ "archery",
 ]
 
 [[package]]
@@ -8137,6 +8189,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "stable_deref_trait"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
+
+[[package]]
 name = "state_processing"
 version = "0.2.0"
 dependencies = [
@@ -8161,6 +8219,7 @@ dependencies = [
  "tokio",
  "tree_hash",
  "types",
+ "vec_map",
 ]
 
 [[package]]
@@ -8186,6 +8245,7 @@ name = "store"
 version = "0.2.0"
 dependencies = [
  "beacon_chain",
+ "bls",
  "db-key",
  "directory",
  "ethereum_ssz",
@@ -8194,11 +8254,14 @@ dependencies = [
  "lazy_static",
  "leveldb",
  "lighthouse_metrics",
+ "logging",
  "lru",
  "parking_lot 0.12.1",
+ "safe_arith",
  "serde",
  "slog",
  "sloggers",
+ "smallvec",
  "state_processing",
  "strum",
  "tempfile",
@@ -8258,9 +8321,9 @@ checksum = "6bdef32e8150c2a081110b42772ffe7d7c9032b606bc226c8260fd97e0976601"
 
 [[package]]
 name = "superstruct"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75b9e5728aa1a87141cefd4e7509903fc01fa0dcb108022b1e841a67c5159fc5"
+checksum = "6f4e1f478a7728f8855d7e620e9a152cf8932c6614f86564c886f9b8141f3201"
 dependencies = [
  "darling",
  "itertools",
@@ -8961,6 +9024,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "triomphe"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0eee8098afad3fb0c54a9007aab6804558410503ad676d4633f9c2559a00ac0f"
+dependencies = [
+ "serde",
+ "stable_deref_trait",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8999,12 +9072,14 @@ dependencies = [
  "maplit",
  "merkle_proof",
  "metastruct",
+ "milhouse",
  "parking_lot 0.12.1",
  "paste",
  "rand",
  "rand_xorshift",
  "rayon",
  "regex",
+ "rpds",
  "rusqlite",
  "safe_arith",
  "serde",

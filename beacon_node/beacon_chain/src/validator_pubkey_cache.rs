@@ -82,8 +82,11 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
     ) -> Result<Vec<StoreOp<'static, T::EthSpec>>, BeaconChainError> {
         if state.validators().len() > self.pubkeys.len() {
             self.import(
-                state.validators()[self.pubkeys.len()..]
+                state
+                    .validators()
                     .iter()
+                    // TODO(lion): does milhouse expose an iterator that starts at non zero?
+                    .skip(self.pubkeys.len())
                     .map(|v| v.pubkey),
             )
         } else {

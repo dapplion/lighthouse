@@ -2,7 +2,7 @@ use crate::*;
 use ssz::{DecodeError, Encode};
 use ssz_derive::Encode;
 use std::convert::TryInto;
-use types::beacon_state::{CloneConfig, CommitteeCache, CACHED_EPOCHS};
+use types::beacon_state::{CommitteeCache, CACHED_EPOCHS};
 
 pub fn store_full_state<E: EthSpec>(
     state_root: &Hash256,
@@ -48,14 +48,14 @@ pub fn get_full_state<KV: KeyValueStore<E>, E: EthSpec>(
 #[derive(Encode)]
 pub struct StorageContainer<T: EthSpec> {
     state: BeaconState<T>,
-    committee_caches: Vec<CommitteeCache>,
+    committee_caches: Vec<Arc<CommitteeCache>>,
 }
 
 impl<T: EthSpec> StorageContainer<T> {
     /// Create a new instance for storing a `BeaconState`.
     pub fn new(state: &BeaconState<T>) -> Self {
         Self {
-            state: state.clone_with(CloneConfig::none()),
+            state: state.clone(),
             committee_caches: state.committee_caches().to_vec(),
         }
     }
@@ -93,7 +93,7 @@ impl<T: EthSpec> TryInto<BeaconState<T>> for StorageContainer<T> {
                 )));
             };
 
-            state.committee_caches_mut()[i] = self.committee_caches.remove(i);
+            state.committee_caches_mut()[i] = self.committee_caches.remove(i).into();
         }
 
         Ok(state)

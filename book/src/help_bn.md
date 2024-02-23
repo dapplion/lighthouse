@@ -113,6 +113,8 @@ FLAGS:
                                                --eth1` pre-merge
         --subscribe-all-subnets                Subscribe to all subnets regardless of validator count. This will also
                                                advertise the beacon node as being long-lived subscribed to all subnets.
+        --unsafe-and-dangerous-mode            Don't use this flag unless you know what you're doing. Go back and
+                                               download a stable Lighthouse release
         --validator-monitor-auto               Enables the automatic detection and monitoring of validators connected to
                                                the HTTP API and using the subnet subscription endpoint. This generally
                                                has the effect of providing additional logging and metrics for locally
@@ -375,6 +377,10 @@ OPTIONS:
         --network-dir <DIR>
             Data directory for network keys. Defaults to network/ inside the beacon node dir.
 
+        --parallel-state-cache-size <N>
+            Set the size of the cache used to de-duplicate requests for the same state. This cache is additional to
+            other state caches within Lighthouse and should be kept small unless a large number of parallel requests for
+            different states are anticipated. [default: 2]
         --port <PORT>
             The TCP/UDP ports to listen on. There are two UDP ports. The discovery UDP port will be set to this value
             and the Quic UDP port will be set to this value + 1. The discovery port can be modified by the --discovery-
@@ -459,6 +465,8 @@ OPTIONS:
         --slots-per-restore-point <SLOT_COUNT>
             Specifies how often a freezer DB restore point should be stored. Cannot be changed after initialization.
             [default: 8192 (mainnet) or 64 (minimal)]
+        --state-cache-size <SIZE>
+            Specifies how many states the database should cache in memory [default: 128]
         --suggested-fee-recipient <SUGGESTED-FEE-RECIPIENT>
             Emergency fallback fee recipient for use in case the validator client does not have one configured. You
             should set this flag on the validator client instead of (or in addition to) setting it here.

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use types::{
     consts::altair::{TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX},
     BeaconStateError, Epoch, EthSpec, ParticipationFlags, ProgressiveBalancesCache, SyncCommittee,
-    Validator, VariableList,
+    VList, Validator,
 };
 
 /// Provides a summary of validator participation during the epoch.
@@ -25,20 +25,20 @@ pub enum EpochProcessingSummary<T: EthSpec> {
 #[derive(PartialEq, Debug)]
 pub struct ParticipationEpochSummary<T: EthSpec> {
     /// Copy of the validator registry prior to mutation.
-    validators: VariableList<Validator, T::ValidatorRegistryLimit>,
+    validators: VList<Validator, T::ValidatorRegistryLimit>,
     /// Copy of the participation flags for the previous epoch.
-    previous_epoch_participation: VariableList<ParticipationFlags, T::ValidatorRegistryLimit>,
+    previous_epoch_participation: VList<ParticipationFlags, T::ValidatorRegistryLimit>,
     /// Copy of the participation flags for the current epoch.
-    current_epoch_participation: VariableList<ParticipationFlags, T::ValidatorRegistryLimit>,
+    current_epoch_participation: VList<ParticipationFlags, T::ValidatorRegistryLimit>,
     previous_epoch: Epoch,
     current_epoch: Epoch,
 }
 
 impl<T: EthSpec> ParticipationEpochSummary<T> {
     pub fn new(
-        validators: VariableList<Validator, T::ValidatorRegistryLimit>,
-        previous_epoch_participation: VariableList<ParticipationFlags, T::ValidatorRegistryLimit>,
-        current_epoch_participation: VariableList<ParticipationFlags, T::ValidatorRegistryLimit>,
+        validators: VList<Validator, T::ValidatorRegistryLimit>,
+        previous_epoch_participation: VList<ParticipationFlags, T::ValidatorRegistryLimit>,
+        current_epoch_participation: VList<ParticipationFlags, T::ValidatorRegistryLimit>,
         previous_epoch: Epoch,
         current_epoch: Epoch,
     ) -> Self {

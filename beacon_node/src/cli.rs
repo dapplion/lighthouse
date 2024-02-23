@@ -736,6 +736,13 @@ pub fn cli_app<'a, 'b>() -> App<'a, 'b> {
                 .default_value("true")
         )
         .arg(
+            Arg::with_name("state-cache-size")
+                .long("state-cache-size")
+                .value_name("SIZE")
+                .help("Specifies how many states the database should cache in memory [default: 128]")
+                .takes_value(true)
+        )
+        .arg(
             Arg::with_name("prune-payloads")
                 .long("prune-payloads")
                 .help("Prune execution payloads from Lighthouse's database. This saves space but \
@@ -771,6 +778,17 @@ pub fn cli_app<'a, 'b>() -> App<'a, 'b> {
                        up until data_availability_boundary - blob_prune_margin_epochs.")
                 .takes_value(true)
                 .default_value("0")
+        )
+        .arg(
+            Arg::with_name("parallel-state-cache-size")
+                .long("parallel-state-cache-size")
+                .value_name("N")
+                .help("Set the size of the cache used to de-duplicate requests for the same \
+                       state. This cache is additional to other state caches within Lighthouse \
+                       and should be kept small unless a large number of parallel requests for \
+                       different states are anticipated.")
+                .takes_value(true)
+                .default_value("2")
         )
 
         /*

@@ -806,7 +806,7 @@ impl ApiTester {
                 let state_opt = state_id.state(&self.chain).ok();
                 let validators: Vec<Validator> = match state_opt.as_ref() {
                     Some((state, _execution_optimistic, _finalized)) => {
-                        state.validators().clone().into()
+                        state.validators().clone().to_vec()
                     }
                     None => vec![],
                 };
@@ -865,7 +865,7 @@ impl ApiTester {
                         if i < state.balances().len() as u64 {
                             validators.push(ValidatorBalanceData {
                                 index: i as u64,
-                                balance: state.balances()[i as usize],
+                                balance: *state.balances().get(i as usize).unwrap(),
                             });
                         }
                     }
@@ -892,7 +892,7 @@ impl ApiTester {
                         .ok()
                         .map(|(state, _execution_optimistic, _finalized)| state);
                     let validators: Vec<Validator> = match state_opt.as_ref() {
-                        Some(state) => state.validators().clone().into(),
+                        Some(state) => state.validators().to_vec(),
                         None => vec![],
                     };
                     let validator_index_ids = validator_indices
@@ -955,7 +955,7 @@ impl ApiTester {
                             if i >= state.validators().len() as u64 {
                                 continue;
                             }
-                            let validator = state.validators()[i as usize].clone();
+                            let validator = state.validators().get(i as usize).unwrap().clone();
                             let status = ValidatorStatus::from_validator(
                                 &validator,
                                 epoch,
@@ -967,7 +967,7 @@ impl ApiTester {
                             {
                                 validators.push(ValidatorData {
                                     index: i as u64,
-                                    balance: state.balances()[i as usize],
+                                    balance: *state.balances().get(i as usize).unwrap(),
                                     status,
                                     validator,
                                 });
@@ -995,7 +995,7 @@ impl ApiTester {
                 .ok()
                 .map(|(state, _execution_optimistic, _finalized)| state);
             let validators = match state_opt.as_ref() {
-                Some(state) => state.validators().clone().into(),
+                Some(state) => state.validators().to_vec(),
                 None => vec![],
             };
 
@@ -1025,7 +1025,7 @@ impl ApiTester {
 
                         ValidatorData {
                             index: i as u64,
-                            balance: state.balances()[i],
+                            balance: *state.balances().get(i).unwrap(),
                             status: ValidatorStatus::from_validator(
                                 &validator,
                                 epoch,
@@ -2360,7 +2360,7 @@ impl ApiTester {
                         .unwrap()
                     {
                         let expected = AttesterData {
-                            pubkey: state.validators()[i as usize].pubkey.clone().into(),
+                            pubkey: state.validators().get(i as usize).unwrap().pubkey.clone(),
                             validator_index: i,
                             committees_at_slot: duty.committees_at_slot,
                             committee_index: duty.index,
@@ -2465,7 +2465,7 @@ impl ApiTester {
                     let index = state
                         .get_beacon_proposer_index(slot, &self.chain.spec)
                         .unwrap();
-                    let pubkey = state.validators()[index].pubkey.clone().into();
+                    let pubkey = state.validators().get(index).unwrap().pubkey.clone();
 
                     ProposerData {
                         pubkey,

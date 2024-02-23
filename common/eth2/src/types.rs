@@ -978,6 +978,7 @@ pub struct SseLateHead {
     pub proposer_graffiti: String,
     pub block_delay: Duration,
     pub observed_delay: Option<Duration>,
+    pub attestable_delay: Option<Duration>,
     pub imported_delay: Option<Duration>,
     pub set_as_head_delay: Option<Duration>,
     pub execution_optimistic: bool,

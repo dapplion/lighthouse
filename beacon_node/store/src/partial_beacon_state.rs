@@ -40,16 +40,16 @@ where
     pub state_roots: Option<FixedVector<Hash256, T::SlotsPerHistoricalRoot>>,
 
     #[ssz(skip_serializing, skip_deserializing)]
-    pub historical_roots: Option<VariableList<Hash256, T::HistoricalRootsLimit>>,
+    pub historical_roots: Option<VList<Hash256, T::HistoricalRootsLimit>>,
 
     // Ethereum 1.0 chain data
     pub eth1_data: Eth1Data,
-    pub eth1_data_votes: VariableList<Eth1Data, T::SlotsPerEth1VotingPeriod>,
+    pub eth1_data_votes: VList<Eth1Data, T::SlotsPerEth1VotingPeriod>,
     pub eth1_deposit_index: u64,
 
     // Registry
-    pub validators: VariableList<Validator, T::ValidatorRegistryLimit>,
-    pub balances: VariableList<u64, T::ValidatorRegistryLimit>,
+    pub validators: VList<Validator, T::ValidatorRegistryLimit>,
+    pub balances: VList<u64, T::ValidatorRegistryLimit>,
 
     // Shuffling
     /// Randao value from the current slot, for patching into the per-epoch randao vector.
@@ -62,15 +62,15 @@ where
 
     // Attestations (genesis fork only)
     #[superstruct(only(Base))]
-    pub previous_epoch_attestations: VariableList<PendingAttestation<T>, T::MaxPendingAttestations>,
+    pub previous_epoch_attestations: VList<PendingAttestation<T>, T::MaxPendingAttestations>,
     #[superstruct(only(Base))]
-    pub current_epoch_attestations: VariableList<PendingAttestation<T>, T::MaxPendingAttestations>,
+    pub current_epoch_attestations: VList<PendingAttestation<T>, T::MaxPendingAttestations>,
 
     // Participation (Altair and later)
     #[superstruct(only(Altair, Merge, Capella, Deneb))]
-    pub previous_epoch_participation: VariableList<ParticipationFlags, T::ValidatorRegistryLimit>,
+    pub previous_epoch_participation: VList<ParticipationFlags, T::ValidatorRegistryLimit>,
     #[superstruct(only(Altair, Merge, Capella, Deneb))]
-    pub current_epoch_participation: VariableList<ParticipationFlags, T::ValidatorRegistryLimit>,
+    pub current_epoch_participation: VList<ParticipationFlags, T::ValidatorRegistryLimit>,
 
     // Finality
     pub justification_bits: BitVector<T::JustificationBitsLength>,
@@ -80,7 +80,7 @@ where
 
     // Inactivity
     #[superstruct(only(Altair, Merge, Capella, Deneb))]
-    pub inactivity_scores: VariableList<u64, T::ValidatorRegistryLimit>,
+    pub inactivity_scores: VList<u64, T::ValidatorRegistryLimit>,
 
     // Light-client sync committees
     #[superstruct(only(Altair, Merge, Capella, Deneb))]
@@ -113,7 +113,7 @@ where
 
     #[ssz(skip_serializing, skip_deserializing)]
     #[superstruct(only(Capella, Deneb))]
-    pub historical_summaries: Option<VariableList<HistoricalSummary, T::HistoricalRootsLimit>>,
+    pub historical_summaries: Option<VList<HistoricalSummary, T::HistoricalRootsLimit>>,
 }
 
 /// Implement the conversion function from BeaconState -> PartialBeaconState.
@@ -281,11 +281,8 @@ impl<T: EthSpec> PartialBeaconState<T> {
         spec: &ChainSpec,
     ) -> Result<(), Error> {
         if self.block_roots().is_none() {
-            *self.block_roots_mut() = Some(load_vector_from_db::<BlockRoots, T, _>(
-                store,
-                self.slot(),
-                spec,
-            )?);
+            let block_roots = load_vector_from_db::<BlockRoots, T, _>(store, self.slot(), spec)?;
+            *self.block_roots_mut() = todo!();
         }
         Ok(())
     }
@@ -296,11 +293,8 @@ impl<T: EthSpec> PartialBeaconState<T> {
         spec: &ChainSpec,
     ) -> Result<(), Error> {
         if self.state_roots().is_none() {
-            *self.state_roots_mut() = Some(load_vector_from_db::<StateRoots, T, _>(
-                store,
-                self.slot(),
-                spec,
-            )?);
+            let state_roots = load_vector_from_db::<StateRoots, T, _>(store, self.slot(), spec)?;
+            *self.state_roots_mut() = todo!();
         }
         Ok(())
     }
@@ -311,9 +305,9 @@ impl<T: EthSpec> PartialBeaconState<T> {
         spec: &ChainSpec,
     ) -> Result<(), Error> {
         if self.historical_roots().is_none() {
-            *self.historical_roots_mut() = Some(
-                load_variable_list_from_db::<HistoricalRoots, T, _>(store, self.slot(), spec)?,
-            );
+            let historical_roots =
+                load_variable_list_from_db::<HistoricalRoots, T, _>(store, self.slot(), spec)?;
+            *self.historical_roots_mut() = Some(todo!());
         }
         Ok(())
     }
@@ -326,10 +320,9 @@ impl<T: EthSpec> PartialBeaconState<T> {
         let slot = self.slot();
         if let Ok(historical_summaries) = self.historical_summaries_mut() {
             if historical_summaries.is_none() {
-                *historical_summaries =
-                    Some(load_variable_list_from_db::<HistoricalSummaries, T, _>(
-                        store, slot, spec,
-                    )?);
+                let historical_summary_vec =
+                    load_variable_list_from_db::<HistoricalSummaries, T, _>(store, slot, spec)?;
+                *historical_summaries = todo!();
             }
         }
         Ok(())
@@ -350,7 +343,7 @@ impl<T: EthSpec> PartialBeaconState<T> {
             let len = randao_mixes.len();
             randao_mixes[current_epoch.as_usize() % len] = *self.latest_randao_value();
 
-            *self.randao_mixes_mut() = Some(randao_mixes)
+            *self.randao_mixes_mut() = todo!();
         }
         Ok(())
     }
@@ -401,7 +394,6 @@ macro_rules! impl_try_into_beacon_state {
             exit_cache: <_>::default(),
             slashings_cache: <_>::default(),
             epoch_cache: <_>::default(),
-            tree_hash_cache: <_>::default(),
 
             // Variant-specific fields
             $(

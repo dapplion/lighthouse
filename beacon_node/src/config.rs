@@ -15,7 +15,7 @@ use http_api::TlsConfig;
 use lighthouse_network::ListenAddress;
 use lighthouse_network::{multiaddr::Protocol, Enr, Multiaddr, NetworkConfig, PeerIdSerialized};
 use sensitive_url::SensitiveUrl;
-use slog::{info, warn, Logger};
+use slog::{crit, info, warn, Logger};
 use std::cmp;
 use std::cmp::max;
 use std::fmt::Debug;
@@ -387,6 +387,15 @@ pub fn get_config<E: EthSpec>(
     let (sprp, sprp_explicit) = get_slots_per_restore_point::<E>(cli_args)?;
     client_config.store.slots_per_restore_point = sprp;
     client_config.store.slots_per_restore_point_set_explicitly = sprp_explicit;
+
+    if let Some(state_cache_size) = clap_utils::parse_optional(cli_args, "state-cache-size")? {
+        client_config.store.state_cache_size = state_cache_size;
+    }
+    if let Some(parallel_state_cache_size) =
+        clap_utils::parse_optional(cli_args, "parallel-state-cache-size")?
+    {
+        client_config.chain.parallel_state_cache_size = parallel_state_cache_size;
+    }
 
     if let Some(block_cache_size) = cli_args.value_of("block-cache-size") {
         client_config.store.block_cache_size = block_cache_size

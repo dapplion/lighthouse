@@ -332,7 +332,11 @@ field!(
         activation_slot: Some(Slot::new(0)),
         deactivation_slot: None
     },
-    |state: &BeaconState<_>, index, _| safe_modulo_index(state.block_roots(), index)
+    |state: &BeaconState<_>, index, _| safe_modulo_index(
+        // TODO(lion): probably widly inefficient ;) implement properly
+        state.block_roots().to_vec().as_slice(),
+        index
+    )
 );
 
 field!(
@@ -346,7 +350,10 @@ field!(
         activation_slot: Some(Slot::new(0)),
         deactivation_slot: None,
     },
-    |state: &BeaconState<_>, index, _| safe_modulo_index(state.state_roots(), index)
+    |state: &BeaconState<_>, index, _| safe_modulo_index(
+        state.state_roots().to_vec().as_slice(),
+        index
+    )
 );
 
 field!(
@@ -362,7 +369,10 @@ field!(
             .capella_fork_epoch
             .map(|fork_epoch| fork_epoch.start_slot(T::slots_per_epoch())),
     },
-    |state: &BeaconState<_>, index, _| safe_modulo_index(state.historical_roots(), index)
+    |state: &BeaconState<_>, index, _| safe_modulo_index(
+        state.historical_roots().to_vec().as_slice(),
+        index
+    )
 );
 
 field!(
@@ -372,7 +382,10 @@ field!(
     T::EpochsPerHistoricalVector,
     DBColumn::BeaconRandaoMixes,
     |_| OncePerEpoch { lag: 1 },
-    |state: &BeaconState<_>, index, _| safe_modulo_index(state.randao_mixes(), index)
+    |state: &BeaconState<_>, index, _| safe_modulo_index(
+        state.randao_mixes().to_vec().as_slice(),
+        index
+    )
 );
 
 field!(
@@ -391,7 +404,9 @@ field!(
     |state: &BeaconState<_>, index, _| safe_modulo_index(
         state
             .historical_summaries()
-            .map_err(|_| ChunkError::InvalidFork)?,
+            .map_err(|_| ChunkError::InvalidFork)?
+            .to_vec()
+            .as_slice(),
         index
     )
 );
@@ -566,7 +581,7 @@ pub fn load_vector_from_db<F: FixedLengthField<E>, E: EthSpec, S: KeyValueStore<
     store: &S,
     slot: Slot,
     spec: &ChainSpec,
-) -> Result<FixedVector<F::Value, F::Length>, Error> {
+) -> Result<Vec<F::Value>, Error> {
     // Do a range query
     let chunk_size = F::chunk_size();
     let (start_vindex, end_vindex) = F::start_and_end_vindex(slot, spec);
@@ -598,7 +613,7 @@ pub fn load_variable_list_from_db<F: VariableLengthField<E>, E: EthSpec, S: KeyV
     store: &S,
     slot: Slot,
     spec: &ChainSpec,
-) -> Result<VariableList<F::Value, F::Length>, Error> {
+) -> Result<Vec<F::Value>, Error> {
     let chunk_size = F::chunk_size();
     let (start_vindex, end_vindex) = F::start_and_end_vindex(slot, spec);
     let start_cindex = start_vindex / chunk_size;

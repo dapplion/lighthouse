@@ -59,6 +59,7 @@ impl CommandLineTest {
 
     fn run_with_zero_port_and_no_genesis_sync(&mut self) -> CompletedTest<Config> {
         self.cmd.arg("-z");
+        self.cmd.arg("--unsafe-and-dangerous-mode");
         self.run()
     }
 }
@@ -854,6 +855,7 @@ fn network_port_flag_over_ipv4() {
     let port = 0;
     CommandLineTest::new()
         .flag("port", Some(port.to_string().as_str()))
+        .flag("unsafe-and-dangerous-mode", None)
         .flag("allow-insecure-genesis-sync", None)
         .run()
         .with_config(|config| {
@@ -871,6 +873,7 @@ fn network_port_flag_over_ipv4() {
     let port = 9000;
     CommandLineTest::new()
         .flag("port", Some(port.to_string().as_str()))
+        .flag("unsafe-and-dangerous-mode", None)
         .flag("allow-insecure-genesis-sync", None)
         .run()
         .with_config(|config| {
@@ -891,6 +894,7 @@ fn network_port_flag_over_ipv6() {
     CommandLineTest::new()
         .flag("listen-address", Some("::1"))
         .flag("port", Some(port.to_string().as_str()))
+        .flag("unsafe-and-dangerous-mode", None)
         .flag("allow-insecure-genesis-sync", None)
         .run()
         .with_config(|config| {
@@ -909,6 +913,7 @@ fn network_port_flag_over_ipv6() {
     CommandLineTest::new()
         .flag("listen-address", Some("::1"))
         .flag("port", Some(port.to_string().as_str()))
+        .flag("unsafe-and-dangerous-mode", None)
         .flag("allow-insecure-genesis-sync", None)
         .run()
         .with_config(|config| {
@@ -932,6 +937,7 @@ fn network_port_flag_over_ipv4_and_ipv6() {
         .flag("listen-address", Some("::1"))
         .flag("port", Some(port.to_string().as_str()))
         .flag("port6", Some(port6.to_string().as_str()))
+        .flag("unsafe-and-dangerous-mode", None)
         .flag("allow-insecure-genesis-sync", None)
         .run()
         .with_config(|config| {
@@ -963,6 +969,7 @@ fn network_port_flag_over_ipv4_and_ipv6() {
         .flag("port", Some(port.to_string().as_str()))
         .flag("port6", Some(port6.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| {
             assert_eq!(
@@ -993,6 +1000,7 @@ fn network_port_and_discovery_port_flags_over_ipv4() {
         .flag("port", Some(tcp4_port.to_string().as_str()))
         .flag("discovery-port", Some(disc4_port.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| {
             assert_eq!(
@@ -1014,6 +1022,7 @@ fn network_port_and_discovery_port_flags_over_ipv6() {
         .flag("port", Some(tcp6_port.to_string().as_str()))
         .flag("discovery-port", Some(disc6_port.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| {
             assert_eq!(
@@ -1040,6 +1049,7 @@ fn network_port_and_discovery_port_flags_over_ipv4_and_ipv6() {
         .flag("port6", Some(tcp6_port.to_string().as_str()))
         .flag("discovery-port6", Some(disc6_port.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| {
             assert_eq!(
@@ -1080,6 +1090,7 @@ fn network_port_discovery_quic_port_flags_over_ipv4_and_ipv6() {
         .flag("discovery-port6", Some(disc6_port.to_string().as_str()))
         .flag("quic-port6", Some(quic6_port.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| {
             assert_eq!(
@@ -1307,6 +1318,7 @@ fn enr_match_flag_over_ipv4() {
         .flag("discovery-port", Some(udp4_port.to_string().as_str()))
         .flag("port", Some(tcp4_port.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| {
             assert_eq!(
@@ -1339,6 +1351,7 @@ fn enr_match_flag_over_ipv6() {
         .flag("discovery-port", Some(udp6_port.to_string().as_str()))
         .flag("port", Some(tcp6_port.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| {
             assert_eq!(
@@ -1380,6 +1393,7 @@ fn enr_match_flag_over_ipv4_and_ipv6() {
         .flag("discovery-port6", Some(udp6_port.to_string().as_str()))
         .flag("port6", Some(tcp6_port.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| {
             assert_eq!(
@@ -1507,6 +1521,7 @@ fn http_port_flag() {
         .flag("http-port", Some(port1.to_string().as_str()))
         .flag("port", Some(port2.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| assert_eq!(config.http_api.listen_port, port1));
 }
@@ -1665,6 +1680,7 @@ fn metrics_port_flag() {
         .flag("metrics-port", Some(port1.to_string().as_str()))
         .flag("port", Some(port2.to_string().as_str()))
         .flag("allow-insecure-genesis-sync", None)
+        .flag("unsafe-and-dangerous-mode", None)
         .run()
         .with_config(|config| assert_eq!(config.http_metrics.listen_port, port1));
 }
@@ -1826,6 +1842,25 @@ fn historic_state_cache_size_default() {
             assert_eq!(
                 config.store.historic_state_cache_size,
                 DEFAULT_HISTORIC_STATE_CACHE_SIZE
+            );
+        });
+}
+#[test]
+fn parallel_state_cache_size_flag() {
+    CommandLineTest::new()
+        .flag("parallel-state-cache-size", Some("4"))
+        .run_with_zero_port()
+        .with_config(|config| assert_eq!(config.chain.parallel_state_cache_size, 4_usize));
+}
+#[test]
+fn parallel_state_cache_size_default() {
+    use beacon_node::beacon_chain::chain_config::DEFAULT_PARALLEL_STATE_CACHE_SIZE;
+    CommandLineTest::new()
+        .run_with_zero_port()
+        .with_config(|config| {
+            assert_eq!(
+                config.chain.parallel_state_cache_size,
+                DEFAULT_PARALLEL_STATE_CACHE_SIZE
             );
         });
 }

@@ -85,7 +85,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use store::HotColdDB;
-use types::{BeaconState, ChainSpec, CloneConfig, EthSpec, Hash256, SignedBeaconBlock};
+use types::{BeaconState, ChainSpec, EthSpec, Hash256, SignedBeaconBlock};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -234,7 +234,7 @@ pub fn run<T: EthSpec>(
     let mut output_post_state = None;
     let mut saved_ctxt = None;
     for i in 0..runs {
-        let pre_state = pre_state.clone_with(CloneConfig::all());
+        let pre_state = pre_state.clone();
         let block = block.clone();
 
         let start = Instant::now();

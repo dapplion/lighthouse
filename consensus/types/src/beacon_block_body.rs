@@ -4,7 +4,7 @@ use derivative::Derivative;
 use merkle_proof::{MerkleTree, MerkleTreeError};
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
-use ssz_types::VariableList;
+use ssz_types::{FixedVector, VariableList};
 use std::marker::PhantomData;
 use superstruct::superstruct;
 use test_random_derive::TestRandom;

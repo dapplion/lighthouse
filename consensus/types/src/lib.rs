@@ -91,7 +91,6 @@ pub mod sync_committee_contribution;
 pub mod sync_committee_message;
 pub mod sync_selection_proof;
 pub mod sync_subnet_id;
-mod tree_hash_impls;
 pub mod validator_registration_data;
 pub mod withdrawal;
 
@@ -123,7 +122,7 @@ pub use crate::beacon_block_body::{
 };
 pub use crate::beacon_block_header::BeaconBlockHeader;
 pub use crate::beacon_committee::{BeaconCommittee, OwnedBeaconCommittee};
-pub use crate::beacon_state::{BeaconTreeHashCache, Error as BeaconStateError, *};
+pub use crate::beacon_state::{Error as BeaconStateError, *};
 pub use crate::blob_sidecar::{BlobSidecar, BlobSidecarList, BlobsList};
 pub use crate::bls_to_execution_change::BlsToExecutionChange;
 pub use crate::chain_spec::{ChainSpec, Config, Domain};
@@ -212,7 +211,7 @@ pub type Uint256 = ethereum_types::U256;
 pub type Address = H160;
 pub type ForkVersion = [u8; 4];
 pub type BLSFieldElement = Uint256;
-pub type Blob<T> = FixedVector<u8, <T as EthSpec>::BytesPerBlob>;
+pub type Blob<T> = ssz_types::FixedVector<u8, <T as EthSpec>::BytesPerBlob>;
 pub type KzgProofs<T> = VariableList<KzgProof, <T as EthSpec>::MaxBlobCommitmentsPerBlock>;
 pub type VersionedHash = Hash256;
 pub type Hash64 = ethereum_types::H64;
@@ -221,8 +220,7 @@ pub use bls::{
     AggregatePublicKey, AggregateSignature, Keypair, PublicKey, PublicKeyBytes, SecretKey,
     Signature, SignatureBytes,
 };
-
 pub use kzg::{KzgCommitment, KzgProof, VERSIONED_HASH_VERSION_KZG};
-
-pub use ssz_types::{typenum, typenum::Unsigned, BitList, BitVector, FixedVector, VariableList};
+pub use milhouse::{self, Vector as FixedVector};
+pub use ssz_types::{typenum, typenum::Unsigned, BitList, BitVector, VariableList};
 pub use superstruct::superstruct;

@@ -3,7 +3,7 @@ use crate::config::StoreConfigError;
 use crate::hot_cold_store::HotColdDBError;
 use ssz::DecodeError;
 use state_processing::BlockReplayError;
-use types::{BeaconStateError, Hash256, InconsistentFork, Slot};
+use types::{milhouse, BeaconStateError, EpochCacheError, Hash256, InconsistentFork, Slot};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -42,13 +42,31 @@ pub enum Error {
         expected: Hash256,
         computed: Hash256,
     },
+    MissingStateRoot(Slot),
+    MissingState(Hash256),
+    MissingSnapshot(Slot),
     BlockReplayError(BlockReplayError),
+    MilhouseError(milhouse::Error),
+    FinalizedStateDecreasingSlot,
+    FinalizedStateUnaligned,
+    StateForCacheHasPendingUpdates {
+        state_root: Hash256,
+        slot: Slot,
+    },
     AddPayloadLogicError,
     SlotClockUnavailableForMigration,
+    MissingImmutableValidator(usize),
+    MissingValidator(usize),
+    ValidatorPubkeyCacheError(String),
+    DuplicateValidatorPublicKey,
+    InvalidValidatorPubkeyBytes(bls::Error),
+    ValidatorPubkeyCacheUninitialized,
     InvalidKey,
     InvalidBytes,
     UnableToDowngrade,
     InconsistentFork(InconsistentFork),
+    ZeroCacheSize,
+    CacheBuildError(EpochCacheError),
 }
 
 pub trait HandleUnavailable<T> {
@@ -101,6 +119,12 @@ impl From<StoreConfigError> for Error {
     }
 }
 
+impl From<milhouse::Error> for Error {
+    fn from(e: milhouse::Error) -> Self {
+        Self::MilhouseError(e)
+    }
+}
+
 impl From<BlockReplayError> for Error {
     fn from(e: BlockReplayError) -> Error {
         Error::BlockReplayError(e)
@@ -110,6 +134,12 @@ impl From<BlockReplayError> for Error {
 impl From<InconsistentFork> for Error {
     fn from(e: InconsistentFork) -> Error {
         Error::InconsistentFork(e)
+    }
+}
+
+impl From<EpochCacheError> for Error {
+    fn from(e: EpochCacheError) -> Error {
+        Error::CacheBuildError(e)
     }
 }
 
