@@ -551,6 +551,14 @@ impl FinalizationAndCanonicity {
 }
 
 impl<T: BeaconChainTypes> BeaconChain<T> {
+    pub fn get_validator_index(&self, pubkey: &PublicKeyBytes) -> Result<Option<usize>, Error> {
+        Ok(self
+            .validator_pubkey_cache
+            .try_read_for(VALIDATOR_PUBKEY_CACHE_LOCK_TIMEOUT)
+            .ok_or(Error::ValidatorPubkeyCacheLockTimeout)?
+            .get_index(pubkey))
+    }
+
     /// Checks if a block is finalized.
     /// The finalization check is done with the block slot. The block root is used to verify that
     /// the finalized slot is in the canonical chain.

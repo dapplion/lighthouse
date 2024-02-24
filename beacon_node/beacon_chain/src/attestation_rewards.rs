@@ -86,7 +86,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .enumerate()
                 .collect()
         } else {
-            let validator_indices = Self::validators_ids_to_indices(&mut state, validators)?;
+            let validator_indices = self.validators_ids_to_indices(validators)?;
             get_attestation_deltas_subset(&state, &validator_statuses, &validator_indices, spec)?
         };
 
@@ -196,7 +196,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let validators = if validators.is_empty() {
             participation_cache.eligible_validator_indices().to_vec()
         } else {
-            Self::validators_ids_to_indices(&mut state, validators)?
+            self.validators_ids_to_indices(validators)?
         };
 
         for validator_index in &validators {
@@ -302,14 +302,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     }
 
     fn validators_ids_to_indices(
-        state: &mut BeaconState<T::EthSpec>,
+        &self,
         validators: Vec<ValidatorId>,
     ) -> Result<Vec<usize>, BeaconChainError> {
         let indices = validators
             .into_iter()
             .map(|validator| match validator {
-                ValidatorId::Index(i) => Ok(i as usize),
-                ValidatorId::PublicKey(pubkey) => state
+                ValidatorId::Index(i) => Ok::<usize, BeaconChainError>(i as usize),
+                ValidatorId::PublicKey(pubkey) => self
                     .get_validator_index(&pubkey)?
                     .ok_or(BeaconChainError::ValidatorPubkeyUnknown(pubkey)),
             })

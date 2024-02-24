@@ -71,16 +71,12 @@ pub fn validator_inclusion_data<T: BeaconChainTypes>(
 ) -> Result<Option<ValidatorInclusionData>, warp::Rejection> {
     let mut state = end_of_epoch_state(epoch, chain)?;
 
-    state
-        .update_pubkey_cache()
-        .map_err(warp_utils::reject::beacon_state_error)?;
-
     let validator_index = match validator_id {
         ValidatorId::Index(index) => *index as usize,
         ValidatorId::PublicKey(pubkey) => {
-            if let Some(index) = state
+            if let Some(index) = chain
                 .get_validator_index(pubkey)
-                .map_err(warp_utils::reject::beacon_state_error)?
+                .map_err(warp_utils::reject::beacon_chain_error)?
             {
                 index
             } else {

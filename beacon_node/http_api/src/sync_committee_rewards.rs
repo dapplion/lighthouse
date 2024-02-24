@@ -34,7 +34,7 @@ pub fn compute_sync_committee_rewards<T: BeaconChainTypes>(
                 .filter(|reward| {
                     validators.iter().any(|validator| match validator {
                         ValidatorId::Index(i) => reward.validator_index == *i,
-                        ValidatorId::PublicKey(pubkey) => match state.get_validator_index(pubkey) {
+                        ValidatorId::PublicKey(pubkey) => match chain.get_validator_index(pubkey) {
                             Ok(Some(i)) => reward.validator_index == i as u64,
                             _ => false,
                         },

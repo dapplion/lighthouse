@@ -7,7 +7,6 @@ use compare_fields_derive::CompareFields;
 use derivative::Derivative;
 use ethereum_hashing::hash;
 use int_to_bytes::{int_to_bytes4, int_to_bytes8};
-use pubkey_cache::PubkeyCache;
 use safe_arith::{ArithError, SafeArith};
 use serde::{Deserialize, Serialize};
 use ssz::{ssz_encode, Decode, DecodeError, Encode};
@@ -41,7 +40,6 @@ mod clone_config;
 mod exit_cache;
 mod iter;
 mod progressive_balances_cache;
-mod pubkey_cache;
 mod tests;
 mod tree_hash_cache;
 
@@ -341,12 +339,6 @@ where
     #[tree_hash(skip_hashing)]
     #[test_random(default)]
     #[derivative(Clone(clone_with = "clone_default"))]
-    pub pubkey_cache: PubkeyCache,
-    #[serde(skip_serializing, skip_deserializing)]
-    #[ssz(skip_serializing, skip_deserializing)]
-    #[tree_hash(skip_hashing)]
-    #[test_random(default)]
-    #[derivative(Clone(clone_with = "clone_default"))]
     pub exit_cache: ExitCache,
     #[serde(skip_serializing, skip_deserializing)]
     #[ssz(skip_serializing, skip_deserializing)]
@@ -417,7 +409,6 @@ impl<T: EthSpec> BeaconState<T> {
                 CommitteeCache::default(),
                 CommitteeCache::default(),
             ],
-            pubkey_cache: PubkeyCache::default(),
             exit_cache: ExitCache::default(),
             tree_hash_cache: <_>::default(),
         })
@@ -490,14 +481,6 @@ impl<T: EthSpec> BeaconState<T> {
             block_roots: self.block_roots().clone(),
             state_roots: self.state_roots().clone(),
         }
-    }
-
-    /// This method ensures the state's pubkey cache is fully up-to-date before checking if the validator
-    /// exists in the registry. If a validator pubkey exists in the validator registry, returns `Some(i)`,
-    /// otherwise returns `None`.
-    pub fn get_validator_index(&mut self, pubkey: &PublicKeyBytes) -> Result<Option<usize>, Error> {
-        self.update_pubkey_cache()?;
-        Ok(self.pubkey_cache().get(pubkey))
     }
 
     /// The epoch corresponding to `self.slot()`.
@@ -875,21 +858,6 @@ impl<T: EthSpec> BeaconState<T> {
                 epoch,
             })
         }
-    }
-
-    /// Get the validator indices of all validators from `sync_committee`.
-    pub fn get_sync_committee_indices(
-        &mut self,
-        sync_committee: &SyncCommittee<T>,
-    ) -> Result<Vec<usize>, Error> {
-        let mut indices = Vec::with_capacity(sync_committee.pubkeys.len());
-        for pubkey in sync_committee.pubkeys.iter() {
-            indices.push(
-                self.get_validator_index(pubkey)?
-                    .ok_or(Error::PubkeyCacheInconsistent)?,
-            )
-        }
-        Ok(indices)
     }
 
     /// Compute the sync committee indices for the next sync committee.
@@ -1475,7 +1443,6 @@ impl<T: EthSpec> BeaconState<T> {
     /// Build all caches (except the tree hash cache), if they need to be built.
     pub fn build_caches(&mut self, spec: &ChainSpec) -> Result<(), Error> {
         self.build_all_committee_caches(spec)?;
-        self.update_pubkey_cache()?;
         self.build_exit_cache(spec)?;
 
         Ok(())
@@ -1503,7 +1470,6 @@ impl<T: EthSpec> BeaconState<T> {
         self.drop_committee_cache(RelativeEpoch::Previous)?;
         self.drop_committee_cache(RelativeEpoch::Current)?;
         self.drop_committee_cache(RelativeEpoch::Next)?;
-        self.drop_pubkey_cache();
         self.drop_tree_hash_cache();
         self.drop_progressive_balances_cache();
         *self.exit_cache_mut() = ExitCache::default();
@@ -1675,33 +1641,6 @@ impl<T: EthSpec> BeaconState<T> {
         Ok(())
     }
 
-    /// Updates the pubkey cache, if required.
-    ///
-    /// Adds all `pubkeys` from the `validators` which are not already in the cache. Will
-    /// never re-add a pubkey.
-    pub fn update_pubkey_cache(&mut self) -> Result<(), Error> {
-        let mut pubkey_cache = mem::take(self.pubkey_cache_mut());
-        for (i, validator) in self
-            .validators()
-            .iter()
-            .enumerate()
-            .skip(pubkey_cache.len())
-        {
-            let success = pubkey_cache.insert(validator.pubkey, i);
-            if !success {
-                return Err(Error::PubkeyCacheInconsistent);
-            }
-        }
-        *self.pubkey_cache_mut() = pubkey_cache;
-
-        Ok(())
-    }
-
-    /// Completely drops the `pubkey_cache`, replacing it with a new, empty cache.
-    pub fn drop_pubkey_cache(&mut self) {
-        *self.pubkey_cache_mut() = PubkeyCache::default()
-    }
-
     /// Completely drops the `progressive_balances_cache` cache, replacing it with a new, empty cache.
     fn drop_progressive_balances_cache(&mut self) {
         *self.progressive_balances_cache_mut() = ProgressiveBalancesCache::default();
@@ -1769,9 +1708,6 @@ impl<T: EthSpec> BeaconState<T> {
         if config.committee_caches {
             *res.committee_caches_mut() = self.committee_caches().clone();
             *res.total_active_balance_mut() = *self.total_active_balance();
-        }
-        if config.pubkey_cache {
-            *res.pubkey_cache_mut() = self.pubkey_cache().clone();
         }
         if config.exit_cache {
             *res.exit_cache_mut() = self.exit_cache().clone();
