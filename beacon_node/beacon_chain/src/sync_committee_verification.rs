@@ -383,11 +383,11 @@ impl<T: BeaconChainTypes> VerifiedSyncContribution<T> {
             participant_pubkeys
                 .iter()
                 .map(|pubkey| {
-                    head_state
-                        .get_validator_index_readonly(pubkey)
-                        .ok_or(Error::UnknownValidatorPubkey(*pubkey))
+                    Ok(head_state
+                        .get_validator_index_readonly(pubkey)?
+                        .ok_or(Error::UnknownValidatorPubkey(*pubkey))?)
                 })
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, Error>>()?
         };
 
         // Ensure that all signatures are valid.

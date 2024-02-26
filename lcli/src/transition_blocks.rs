@@ -358,7 +358,7 @@ fn do_transition<T: EthSpec>(
         let state = pre_state.clone();
         let decompressor = move |pk_bytes| {
             // Map compressed pubkey to validator index.
-            let validator_index = state.get_validator_index_readonly(pk_bytes)?;
+            let validator_index = state.get_validator_index_readonly_unchecked(pk_bytes)?;
             // Map validator index to pubkey (respecting guard on unknown validators).
             get_pubkey(validator_index)
         };

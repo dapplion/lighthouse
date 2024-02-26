@@ -769,9 +769,9 @@ pub fn serve<T: BeaconChainTypes>(
                             &chain,
                             |state, execution_optimistic, finalized| {
                                 let index_opt = match &validator_id {
-                                    ValidatorId::PublicKey(pubkey) => {
-                                        state.get_validator_index_readonly(pubkey)
-                                    }
+                                    ValidatorId::PublicKey(pubkey) => state
+                                        .get_validator_index_readonly(pubkey)
+                                        .map_err(|e| warp_utils::reject::beacon_state_error(e))?,
                                     ValidatorId::Index(index) => Some(*index as usize),
                                 };
 
@@ -1040,14 +1040,14 @@ pub fn serve<T: BeaconChainTypes>(
                                     .pubkeys
                                     .iter()
                                     .map(|pubkey| {
-                                        state
-                                            .get_validator_index_readonly(pubkey)
+                                        Ok(state
+                                            .get_validator_index_readonly(pubkey)?
                                             .map(|index| index as u64)
                                             .ok_or(BeaconChainError::ValidatorPubkeyUnknown(
                                                 *pubkey,
-                                            ))
+                                            ))?)
                                     })
-                                    .collect::<Result<Vec<_>, _>>()
+                                    .collect::<Result<Vec<_>, BeaconChainError>>()
                                     .map_err(warp_utils::reject::beacon_chain_error)?;
 
                                 Ok((validators, execution_optimistic, finalized))
@@ -3583,7 +3583,9 @@ pub fn serve<T: BeaconChainTypes>(
                             .filter_map(|register_data| {
                                 head_snapshot
                                     .beacon_state
-                                    .get_validator_index_readonly(&register_data.message.pubkey)
+                                    .get_validator_index_readonly_unchecked(
+                                        &register_data.message.pubkey,
+                                    )
                                     .and_then(|validator_index| {
                                         let validator = head_snapshot
                                             .beacon_state

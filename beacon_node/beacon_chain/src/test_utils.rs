@@ -736,7 +736,16 @@ where
     }
 
     pub fn get_current_state(&self) -> BeaconState<E> {
-        self.chain.head_beacon_state_cloned()
+        self.chain
+            .head_snapshot()
+            .beacon_state
+            .clone_with(CloneConfig {
+                committee_caches: true,
+                pubkey_cache: true,
+                exit_cache: false,
+                tree_hash_cache: false,
+                progressive_balances_cache: false,
+            })
     }
 
     pub fn get_timestamp_at_slot(&self) -> u64 {
@@ -1193,6 +1202,7 @@ where
                     .map(|(subcommittee_position, pubkey)| {
                         let validator_index = state
                             .get_validator_index_readonly(pubkey)
+                            .expect("pubkey cache not updated")
                             .expect("should find validator index");
 
                         let sync_message = SyncCommitteeMessage::new::<E>(
@@ -1403,6 +1413,7 @@ where
                         .find_map(|pubkey| {
                             let validator_index = state
                                 .get_validator_index_readonly(pubkey)
+                                .expect("pubkey cache not updated")
                                 .expect("should find validator index");
 
                             let selection_proof = SyncSelectionProof::new::<E>(

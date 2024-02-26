@@ -1529,7 +1529,8 @@ mod release_tests {
         let (harness, _) = sync_contribution_test_state::<MainnetEthSpec>(1).await;
 
         let op_pool = OperationPool::<MainnetEthSpec>::new();
-        let state = harness.get_current_state();
+        let mut state = harness.get_current_state();
+        state.update_pubkey_cache().unwrap();
 
         let block_root = *state
             .get_block_root(state.slot() - Slot::new(1))
@@ -1589,7 +1590,8 @@ mod release_tests {
         let (harness, _) = sync_contribution_test_state::<MainnetEthSpec>(1).await;
 
         let op_pool = OperationPool::<MainnetEthSpec>::new();
-        let state = harness.get_current_state();
+        let mut state = harness.get_current_state();
+        state.update_pubkey_cache().unwrap();
         let block_root = *state
             .get_block_root(state.slot() - Slot::new(1))
             .ok()
@@ -1626,7 +1628,8 @@ mod release_tests {
         let (harness, _) = sync_contribution_test_state::<MainnetEthSpec>(1).await;
 
         let op_pool = OperationPool::<MainnetEthSpec>::new();
-        let state = harness.get_current_state();
+        let mut state = harness.get_current_state();
+        state.update_pubkey_cache().unwrap();
         let block_root = *state
             .get_block_root(state.slot() - Slot::new(1))
             .ok()
@@ -1706,7 +1709,8 @@ mod release_tests {
         let (harness, _) = sync_contribution_test_state::<MainnetEthSpec>(1).await;
 
         let op_pool = OperationPool::<MainnetEthSpec>::new();
-        let state = harness.get_current_state();
+        let mut state = harness.get_current_state();
+        state.update_pubkey_cache().unwrap();
         let block_root = *state
             .get_block_root(state.slot() - Slot::new(1))
             .ok()
