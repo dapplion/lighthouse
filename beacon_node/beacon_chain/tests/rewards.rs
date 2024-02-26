@@ -54,7 +54,7 @@ async fn test_sync_committee_rewards() {
 
     // Create and add sync committee message to op_pool
     let sync_contributions = harness.make_sync_contributions(
-        &harness.get_current_state(),
+        &mut harness.get_current_state(),
         latest_block_root,
         harness.get_current_slot(),
         RelativeSyncCommittee::Current,

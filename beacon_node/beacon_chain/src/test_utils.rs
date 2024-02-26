@@ -1172,7 +1172,7 @@ where
     /// A list of sync messages for the given state.
     pub fn make_sync_committee_messages(
         &self,
-        state: &BeaconState<E>,
+        state: &mut BeaconState<E>,
         head_block_root: Hash256,
         message_slot: Slot,
         relative_sync_committee: RelativeSyncCommittee,
@@ -1190,6 +1190,8 @@ where
         let fork = self
             .spec
             .fork_at_epoch(message_slot.epoch(E::slots_per_epoch()));
+
+        state.update_pubkey_cache().unwrap();
 
         sync_committee
             .pubkeys
@@ -1387,13 +1389,15 @@ where
 
     pub fn make_sync_contributions(
         &self,
-        state: &BeaconState<E>,
+        state: &mut BeaconState<E>,
         block_hash: Hash256,
         slot: Slot,
         relative_sync_committee: RelativeSyncCommittee,
     ) -> HarnessSyncContributions<E> {
         let sync_messages =
             self.make_sync_committee_messages(state, block_hash, slot, relative_sync_committee);
+
+        state.update_pubkey_cache().unwrap();
 
         let sync_contributions: Vec<Option<SignedContributionAndProof<E>>> = sync_messages
             .iter()
@@ -2008,7 +2012,7 @@ where
 
     pub fn sync_committee_sign_block(
         &self,
-        state: &BeaconState<E>,
+        state: &mut BeaconState<E>,
         block_hash: Hash256,
         slot: Slot,
         relative_sync_committee: RelativeSyncCommittee,
@@ -2043,14 +2047,14 @@ where
         validators: &[usize],
         sync_committee_strategy: SyncCommitteeStrategy,
     ) -> Result<(SignedBeaconBlockHash, BeaconState<E>), BlockError<E>> {
-        let (block_hash, block, state) = self.add_block_at_slot(slot, state).await?;
+        let (block_hash, block, mut state) = self.add_block_at_slot(slot, state).await?;
         self.attest_block(&state, state_root, block_hash, &block.0, validators);
 
         if sync_committee_strategy == SyncCommitteeStrategy::AllValidators
             && state.current_sync_committee().is_ok()
         {
             self.sync_committee_sign_block(
-                &state,
+                &mut state,
                 block_hash.into(),
                 slot,
                 if (slot + 1).epoch(E::slots_per_epoch())

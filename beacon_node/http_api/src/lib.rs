@@ -771,7 +771,7 @@ pub fn serve<T: BeaconChainTypes>(
                                 let index_opt = match &validator_id {
                                     ValidatorId::PublicKey(pubkey) => state
                                         .get_validator_index_readonly(pubkey)
-                                        .map_err(|e| warp_utils::reject::beacon_state_error(e))?,
+                                        .map_err(warp_utils::reject::beacon_state_error)?,
                                     ValidatorId::Index(index) => Some(*index as usize),
                                 };
 
@@ -1040,12 +1040,12 @@ pub fn serve<T: BeaconChainTypes>(
                                     .pubkeys
                                     .iter()
                                     .map(|pubkey| {
-                                        Ok(state
+                                        state
                                             .get_validator_index_readonly(pubkey)?
                                             .map(|index| index as u64)
                                             .ok_or(BeaconChainError::ValidatorPubkeyUnknown(
                                                 *pubkey,
-                                            ))?)
+                                            ))
                                     })
                                     .collect::<Result<Vec<_>, BeaconChainError>>()
                                     .map_err(warp_utils::reject::beacon_chain_error)?;
