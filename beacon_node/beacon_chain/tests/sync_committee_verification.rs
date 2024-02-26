@@ -140,11 +140,10 @@ fn get_non_aggregator(
         .enumerate()
         .find_map(|(subcommittee_index, subcommittee)| {
             subcommittee.iter().find_map(|pubkey| {
-                let validator_index = harness
-                    .chain
-                    .validator_index(pubkey)
-                    .expect("should get validator index")
-                    .expect("pubkey should exist in beacon chain");
+                let validator_index = state
+                    .get_validator_index_readonly(pubkey)
+                    .expect("pubkey cache not updated")
+                    .expect("should find validator index");
 
                 let selection_proof = SyncSelectionProof::new::<E>(
                     slot,
