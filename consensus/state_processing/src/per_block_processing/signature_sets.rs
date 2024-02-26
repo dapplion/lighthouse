@@ -553,7 +553,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn sync_committee_contribution_signature_set_from_pubkeys<'a, T, F>(
     get_pubkey: F,
-    pubkey_bytes: &[PublicKeyBytes],
+    indices: &[usize],
     signature: &'a AggregateSignature,
     epoch: Epoch,
     beacon_block_root: Hash256,
@@ -563,11 +563,11 @@ pub fn sync_committee_contribution_signature_set_from_pubkeys<'a, T, F>(
 ) -> Result<SignatureSet<'a>>
 where
     T: EthSpec,
-    F: Fn(&PublicKeyBytes) -> Option<Cow<'a, PublicKey>>,
+    F: Fn(usize) -> Option<Cow<'a, PublicKey>>,
 {
     let mut pubkeys = Vec::with_capacity(T::SyncSubcommitteeSize::to_usize());
-    for pubkey in pubkey_bytes {
-        pubkeys.push(get_pubkey(pubkey).ok_or(Error::ValidatorPubkeyUnknown(*pubkey))?);
+    for index in indices {
+        pubkeys.push(get_pubkey(*index).ok_or(Error::ValidatorUnknown(*index as u64))?);
     }
 
     let domain = spec.get_domain(epoch, Domain::SyncCommittee, fork, genesis_validators_root);

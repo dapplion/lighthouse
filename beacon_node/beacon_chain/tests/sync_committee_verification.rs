@@ -71,9 +71,9 @@ fn get_valid_sync_committee_message_for_block(
     message_index: usize,
     block_root: Hash256,
 ) -> (SyncCommitteeMessage, usize, SecretKey, SyncSubnetId) {
-    let head_state = harness.chain.head_beacon_state_cloned();
+    let mut head_state = harness.chain.head_beacon_state_cloned();
     let (signature, _) = harness
-        .make_sync_committee_messages(&head_state, block_root, slot, relative_sync_committee)
+        .make_sync_committee_messages(&mut head_state, block_root, slot, relative_sync_committee)
         .get(0)
         .expect("sync messages should exist")
         .get(message_index)
@@ -94,13 +94,14 @@ fn get_valid_sync_contribution(
     harness: &BeaconChainHarness<EphemeralHarnessType<E>>,
     relative_sync_committee: RelativeSyncCommittee,
 ) -> (SignedContributionAndProof<E>, usize, SecretKey) {
-    let head_state = harness.chain.head_beacon_state_cloned();
+    let mut head_state = harness.chain.head_beacon_state_cloned();
 
     let head_block_root = harness.chain.head_snapshot().beacon_block_root;
+    let head_state_slot = head_state.slot();
     let sync_contributions = harness.make_sync_contributions(
-        &head_state,
+        &mut head_state,
         head_block_root,
-        head_state.slot(),
+        head_state_slot,
         relative_sync_committee,
     );
 
@@ -140,11 +141,10 @@ fn get_non_aggregator(
         .enumerate()
         .find_map(|(subcommittee_index, subcommittee)| {
             subcommittee.iter().find_map(|pubkey| {
-                let validator_index = harness
-                    .chain
-                    .validator_index(pubkey)
-                    .expect("should get validator index")
-                    .expect("pubkey should exist in beacon chain");
+                let validator_index = state
+                    .get_validator_index_readonly(pubkey)
+                    .expect("pubkey cache not updated")
+                    .expect("should find validator index");
 
                 let selection_proof = SyncSelectionProof::new::<E>(
                     slot,

@@ -736,7 +736,16 @@ where
     }
 
     pub fn get_current_state(&self) -> BeaconState<E> {
-        self.chain.head_beacon_state_cloned()
+        self.chain
+            .head_snapshot()
+            .beacon_state
+            .clone_with(CloneConfig {
+                committee_caches: true,
+                pubkey_cache: true,
+                exit_cache: false,
+                tree_hash_cache: false,
+                progressive_balances_cache: false,
+            })
     }
 
     pub fn get_timestamp_at_slot(&self) -> u64 {
@@ -1163,7 +1172,7 @@ where
     /// A list of sync messages for the given state.
     pub fn make_sync_committee_messages(
         &self,
-        state: &BeaconState<E>,
+        state: &mut BeaconState<E>,
         head_block_root: Hash256,
         message_slot: Slot,
         relative_sync_committee: RelativeSyncCommittee,
@@ -1182,6 +1191,8 @@ where
             .spec
             .fork_at_epoch(message_slot.epoch(E::slots_per_epoch()));
 
+        state.update_pubkey_cache().unwrap();
+
         sync_committee
             .pubkeys
             .as_ref()
@@ -1191,11 +1202,10 @@ where
                     .iter()
                     .enumerate()
                     .map(|(subcommittee_position, pubkey)| {
-                        let validator_index = self
-                            .chain
-                            .validator_index(pubkey)
-                            .expect("should find validator index")
-                            .expect("pubkey should exist in the beacon chain");
+                        let validator_index = state
+                            .get_validator_index_readonly(pubkey)
+                            .expect("pubkey cache not updated")
+                            .expect("should find validator index");
 
                         let sync_message = SyncCommitteeMessage::new::<E>(
                             message_slot,
@@ -1379,13 +1389,15 @@ where
 
     pub fn make_sync_contributions(
         &self,
-        state: &BeaconState<E>,
+        state: &mut BeaconState<E>,
         block_hash: Hash256,
         slot: Slot,
         relative_sync_committee: RelativeSyncCommittee,
     ) -> HarnessSyncContributions<E> {
         let sync_messages =
             self.make_sync_committee_messages(state, block_hash, slot, relative_sync_committee);
+
+        state.update_pubkey_cache().unwrap();
 
         let sync_contributions: Vec<Option<SignedContributionAndProof<E>>> = sync_messages
             .iter()
@@ -1403,11 +1415,10 @@ where
                         .unwrap()
                         .iter()
                         .find_map(|pubkey| {
-                            let validator_index = self
-                                .chain
-                                .validator_index(pubkey)
-                                .expect("should find validator index")
-                                .expect("pubkey should exist in the beacon chain");
+                            let validator_index = state
+                                .get_validator_index_readonly(pubkey)
+                                .expect("pubkey cache not updated")
+                                .expect("should find validator index");
 
                             let selection_proof = SyncSelectionProof::new::<E>(
                                 slot,
@@ -2001,7 +2012,7 @@ where
 
     pub fn sync_committee_sign_block(
         &self,
-        state: &BeaconState<E>,
+        state: &mut BeaconState<E>,
         block_hash: Hash256,
         slot: Slot,
         relative_sync_committee: RelativeSyncCommittee,
@@ -2036,14 +2047,14 @@ where
         validators: &[usize],
         sync_committee_strategy: SyncCommitteeStrategy,
     ) -> Result<(SignedBeaconBlockHash, BeaconState<E>), BlockError<E>> {
-        let (block_hash, block, state) = self.add_block_at_slot(slot, state).await?;
+        let (block_hash, block, mut state) = self.add_block_at_slot(slot, state).await?;
         self.attest_block(&state, state_root, block_hash, &block.0, validators);
 
         if sync_committee_strategy == SyncCommitteeStrategy::AllValidators
             && state.current_sync_committee().is_ok()
         {
             self.sync_committee_sign_block(
-                &state,
+                &mut state,
                 block_hash.into(),
                 slot,
                 if (slot + 1).epoch(E::slots_per_epoch())

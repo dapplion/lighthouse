@@ -1,7 +1,6 @@
 use crate::errors::BeaconChainError;
 use crate::{BeaconChainTypes, BeaconStore};
 use ssz::{Decode, Encode};
-use std::collections::HashMap;
 use std::convert::TryInto;
 use std::marker::PhantomData;
 use store::{DBColumn, Error as StoreError, StoreItem, StoreOp};
@@ -17,7 +16,6 @@ use types::{BeaconState, Hash256, PublicKey, PublicKeyBytes};
 ///    Decompression is expensive when many keys are involved.
 pub struct ValidatorPubkeyCache<T: BeaconChainTypes> {
     pubkeys: Vec<PublicKey>,
-    indices: HashMap<PublicKeyBytes, usize>,
     pubkey_bytes: Vec<PublicKeyBytes>,
     _phantom: PhantomData<T>,
 }
@@ -32,7 +30,6 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
     ) -> Result<Self, BeaconChainError> {
         let mut cache = Self {
             pubkeys: vec![],
-            indices: HashMap::new(),
             pubkey_bytes: vec![],
             _phantom: PhantomData,
         };
@@ -46,7 +43,6 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
     /// Load the pubkey cache from the given on-disk database.
     pub fn load_from_store(store: BeaconStore<T>) -> Result<Self, BeaconChainError> {
         let mut pubkeys = vec![];
-        let mut indices = HashMap::new();
         let mut pubkey_bytes = vec![];
 
         for validator_index in 0.. {
@@ -57,7 +53,6 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
                     BeaconChainError::ValidatorPubkeyCacheError(format!("{:?}", e))
                 })?);
                 pubkey_bytes.push(pubkey);
-                indices.insert(pubkey, validator_index);
             } else {
                 break;
             }
@@ -65,7 +60,6 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
 
         Ok(ValidatorPubkeyCache {
             pubkeys,
-            indices,
             pubkey_bytes,
             _phantom: PhantomData,
         })
@@ -101,15 +95,10 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
     {
         self.pubkey_bytes.reserve(validator_keys.len());
         self.pubkeys.reserve(validator_keys.len());
-        self.indices.reserve(validator_keys.len());
 
         let mut store_ops = Vec::with_capacity(validator_keys.len());
         for pubkey in validator_keys {
             let i = self.pubkeys.len();
-
-            if self.indices.contains_key(&pubkey) {
-                return Err(BeaconChainError::DuplicateValidatorPublicKey);
-            }
 
             // Stage the new validator key for writing to disk.
             // It will be committed atomically when the block that introduced it is written to disk.
@@ -125,8 +114,6 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
                     .map_err(BeaconChainError::InvalidValidatorPubkeyBytes)?,
             );
             self.pubkey_bytes.push(pubkey);
-
-            self.indices.insert(pubkey, i);
         }
 
         Ok(store_ops)
@@ -137,29 +124,19 @@ impl<T: BeaconChainTypes> ValidatorPubkeyCache<T> {
         self.pubkeys.get(i)
     }
 
-    /// Get the `PublicKey` for a validator with `PublicKeyBytes`.
-    pub fn get_pubkey_from_pubkey_bytes(&self, pubkey: &PublicKeyBytes) -> Option<&PublicKey> {
-        self.get_index(pubkey).and_then(|index| self.get(index))
-    }
-
     /// Get the public key (in bytes form) for a validator with index `i`.
     pub fn get_pubkey_bytes(&self, i: usize) -> Option<&PublicKeyBytes> {
         self.pubkey_bytes.get(i)
     }
 
-    /// Get the index of a validator with `pubkey`.
-    pub fn get_index(&self, pubkey: &PublicKeyBytes) -> Option<usize> {
-        self.indices.get(pubkey).copied()
-    }
-
     /// Returns the number of validators in the cache.
     pub fn len(&self) -> usize {
-        self.indices.len()
+        self.pubkeys.len()
     }
 
     /// Returns `true` if there are no validators in the cache.
     pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
+        self.pubkeys.is_empty()
     }
 }
 
@@ -226,16 +203,6 @@ mod test {
             if i < validator_count {
                 let pubkey = cache.get(i).expect("pubkey should be present");
                 assert_eq!(pubkey, &keypairs[i].pk, "pubkey should match cache");
-
-                let pubkey_bytes: PublicKeyBytes = pubkey.clone().into();
-
-                assert_eq!(
-                    i,
-                    cache
-                        .get_index(&pubkey_bytes)
-                        .expect("should resolve index"),
-                    "index should match cache"
-                );
             } else {
                 assert_eq!(
                     cache.get(i),

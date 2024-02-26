@@ -1462,50 +1462,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         self.state_at_slot(self.slot()?, StateSkipConfig::WithStateRoots)
     }
 
-    /// Returns the validator index (if any) for the given public key.
-    ///
-    /// ## Notes
-    ///
-    /// This query uses the `validator_pubkey_cache` which contains _all_ validators ever seen,
-    /// even if those validators aren't included in the head state. It is important to remember
-    /// that just because a validator exists here, it doesn't necessarily exist in all
-    /// `BeaconStates`.
-    ///
-    /// ## Errors
-    ///
-    /// May return an error if acquiring a read-lock on the `validator_pubkey_cache` times out.
-    pub fn validator_index(&self, pubkey: &PublicKeyBytes) -> Result<Option<usize>, Error> {
-        let pubkey_cache = self
-            .validator_pubkey_cache
-            .try_read_for(VALIDATOR_PUBKEY_CACHE_LOCK_TIMEOUT)
-            .ok_or(Error::ValidatorPubkeyCacheLockTimeout)?;
-
-        Ok(pubkey_cache.get_index(pubkey))
-    }
-
-    /// Return the validator indices of all public keys fetched from an iterator.
-    ///
-    /// If any public key doesn't belong to a known validator then an error will be returned.
-    /// We could consider relaxing this by returning `Vec<Option<usize>>` in future.
-    pub fn validator_indices<'a>(
-        &self,
-        validator_pubkeys: impl Iterator<Item = &'a PublicKeyBytes>,
-    ) -> Result<Vec<u64>, Error> {
-        let pubkey_cache = self
-            .validator_pubkey_cache
-            .try_read_for(VALIDATOR_PUBKEY_CACHE_LOCK_TIMEOUT)
-            .ok_or(Error::ValidatorPubkeyCacheLockTimeout)?;
-
-        validator_pubkeys
-            .map(|pubkey| {
-                pubkey_cache
-                    .get_index(pubkey)
-                    .map(|id| id as u64)
-                    .ok_or(Error::ValidatorPubkeyUnknown(*pubkey))
-            })
-            .collect()
-    }
-
     /// Returns the validator pubkey (if any) for the given validator index.
     ///
     /// ## Notes

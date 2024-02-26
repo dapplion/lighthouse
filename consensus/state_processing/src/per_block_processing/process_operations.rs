@@ -419,6 +419,9 @@ pub fn process_deposit<T: EthSpec>(
         state.validators_mut().push(validator)?;
         state.balances_mut().push(deposit.data.amount)?;
 
+        // Register newly added key to the pubkey_cache
+        state.update_pubkey_cache()?;
+
         // Altair or later initializations.
         if let Ok(previous_epoch_participation) = state.previous_epoch_participation_mut() {
             previous_epoch_participation.push(ParticipationFlags::default())?;

@@ -25,7 +25,6 @@ mod sync_committees;
 mod task_spawner;
 pub mod test_utils;
 mod ui;
-mod validator;
 mod validator_inclusion;
 mod validators;
 mod version;
@@ -86,7 +85,6 @@ use types::{
     SignedContributionAndProof, SignedValidatorRegistrationData, SignedVoluntaryExit, Slot,
     SyncCommitteeMessage, SyncContributionData,
 };
-use validator::pubkey_to_validator_index;
 use version::{
     add_consensus_version_header, add_ssz_content_type_header,
     execution_optimistic_finalized_fork_versioned_response, inconsistent_fork_rejection,
@@ -771,14 +769,9 @@ pub fn serve<T: BeaconChainTypes>(
                             &chain,
                             |state, execution_optimistic, finalized| {
                                 let index_opt = match &validator_id {
-                                    ValidatorId::PublicKey(pubkey) => pubkey_to_validator_index(
-                                        &chain, state, pubkey,
-                                    )
-                                    .map_err(|e| {
-                                        warp_utils::reject::custom_not_found(format!(
-                                            "unable to access pubkey cache: {e:?}",
-                                        ))
-                                    })?,
+                                    ValidatorId::PublicKey(pubkey) => state
+                                        .get_validator_index_readonly(pubkey)
+                                        .map_err(warp_utils::reject::beacon_state_error)?,
                                     ValidatorId::Index(index) => Some(*index as usize),
                                 };
 
@@ -1017,41 +1010,49 @@ pub fn serve<T: BeaconChainTypes>(
              chain: Arc<BeaconChain<T>>,
              query: api_types::SyncCommitteesQuery| {
                 task_spawner.blocking_json_task(Priority::P1, move || {
-                    let (sync_committee, execution_optimistic, finalized) = state_id
+                    let (validators, execution_optimistic, finalized) = state_id
                         .map_state_and_execution_optimistic_and_finalized(
                             &chain,
                             |state, execution_optimistic, finalized| {
                                 let current_epoch = state.current_epoch();
                                 let epoch = query.epoch.unwrap_or(current_epoch);
-                                Ok((
-                                    state
-                                        .get_built_sync_committee(epoch, &chain.spec)
-                                        .cloned()
-                                        .map_err(|e| match e {
-                                            BeaconStateError::SyncCommitteeNotKnown { .. } => {
-                                                warp_utils::reject::custom_bad_request(format!(
-                                                    "state at epoch {} has no \
+                                let sync_committee = state
+                                    .get_built_sync_committee(epoch, &chain.spec)
+                                    .cloned()
+                                    .map_err(|e| match e {
+                                        BeaconStateError::SyncCommitteeNotKnown { .. } => {
+                                            warp_utils::reject::custom_bad_request(format!(
+                                                "state at epoch {} has no \
                                                      sync committee for epoch {}",
-                                                    current_epoch, epoch
-                                                ))
-                                            }
-                                            BeaconStateError::IncorrectStateVariant => {
-                                                warp_utils::reject::custom_bad_request(format!(
-                                                    "state at epoch {} is not activated for Altair",
-                                                    current_epoch,
-                                                ))
-                                            }
-                                            e => warp_utils::reject::beacon_state_error(e),
-                                        })?,
-                                    execution_optimistic,
-                                    finalized,
-                                ))
+                                                current_epoch, epoch
+                                            ))
+                                        }
+                                        BeaconStateError::IncorrectStateVariant => {
+                                            warp_utils::reject::custom_bad_request(format!(
+                                                "state at epoch {} is not activated for Altair",
+                                                current_epoch,
+                                            ))
+                                        }
+                                        e => warp_utils::reject::beacon_state_error(e),
+                                    })?;
+
+                                let validators = sync_committee
+                                    .pubkeys
+                                    .iter()
+                                    .map(|pubkey| {
+                                        state
+                                            .get_validator_index_readonly(pubkey)?
+                                            .map(|index| index as u64)
+                                            .ok_or(BeaconChainError::ValidatorPubkeyUnknown(
+                                                *pubkey,
+                                            ))
+                                    })
+                                    .collect::<Result<Vec<_>, BeaconChainError>>()
+                                    .map_err(warp_utils::reject::beacon_chain_error)?;
+
+                                Ok((validators, execution_optimistic, finalized))
                             },
                         )?;
-
-                    let validators = chain
-                        .validator_indices(sync_committee.pubkeys.iter())
-                        .map_err(warp_utils::reject::beacon_chain_error)?;
 
                     let validator_aggregates = validators
                         .chunks_exact(T::EthSpec::sync_subcommittee_size())
@@ -3580,10 +3581,11 @@ pub fn serve<T: BeaconChainTypes>(
                         ) = register_val_data
                             .into_iter()
                             .filter_map(|register_data| {
-                                chain
-                                    .validator_index(&register_data.message.pubkey)
-                                    .ok()
-                                    .flatten()
+                                head_snapshot
+                                    .beacon_state
+                                    .get_validator_index_readonly_unchecked(
+                                        &register_data.message.pubkey,
+                                    )
                                     .and_then(|validator_index| {
                                         let validator = head_snapshot
                                             .beacon_state

@@ -85,7 +85,7 @@ pub enum Error {
         index: CommitteeIndex,
     },
     ZeroSlotsPerEpoch,
-    PubkeyCacheInconsistent,
+    PubkeyCacheMissingKey(PublicKeyBytes),
     PubkeyCacheIncomplete {
         cache_len: usize,
         registry_len: usize,
@@ -497,7 +497,45 @@ impl<T: EthSpec> BeaconState<T> {
     /// otherwise returns `None`.
     pub fn get_validator_index(&mut self, pubkey: &PublicKeyBytes) -> Result<Option<usize>, Error> {
         self.update_pubkey_cache()?;
-        Ok(self.pubkey_cache().get(pubkey))
+        Ok(self.get_validator_index_readonly_unchecked(pubkey))
+    }
+
+    /// pubkey_cache may contain pubkeys from future blocks not yet known to this state. Ignore
+    /// pubkeys that resolve to indexes beyond the current validators list.
+    pub fn get_validator_index_readonly(
+        &self,
+        pubkey: &PublicKeyBytes,
+    ) -> Result<Option<usize>, Error> {
+        if self.pubkey_cache().len() < self.validators().len() {
+            return Err(Error::PubkeyCacheIncomplete {
+                cache_len: self.pubkey_cache().len(),
+                registry_len: self.validators().len(),
+            });
+        }
+
+        Ok(self.get_validator_index_readonly_unchecked(pubkey))
+    }
+
+    pub fn assert_pubkey_cache(&self) -> Result<(), Error> {
+        if self.pubkey_cache().len() < self.validators().len() {
+            return Err(Error::PubkeyCacheIncomplete {
+                cache_len: self.pubkey_cache().len(),
+                registry_len: self.validators().len(),
+            });
+        }
+        Ok(())
+    }
+
+    /// pubkey_cache may contain pubkeys from future blocks not yet known to this state. Ignore
+    /// pubkeys that resolve to indexes beyond the current validators list.
+    pub fn get_validator_index_readonly_unchecked(&self, pubkey: &PublicKeyBytes) -> Option<usize> {
+        self.pubkey_cache().get(pubkey).and_then(|index| {
+            if index < self.validators().len() {
+                Some(index)
+            } else {
+                None
+            }
+        })
     }
 
     /// The epoch corresponding to `self.slot()`.
@@ -886,7 +924,7 @@ impl<T: EthSpec> BeaconState<T> {
         for pubkey in sync_committee.pubkeys.iter() {
             indices.push(
                 self.get_validator_index(pubkey)?
-                    .ok_or(Error::PubkeyCacheInconsistent)?,
+                    .ok_or(Error::PubkeyCacheMissingKey(*pubkey))?,
             )
         }
         Ok(indices)
@@ -1677,8 +1715,7 @@ impl<T: EthSpec> BeaconState<T> {
 
     /// Updates the pubkey cache, if required.
     ///
-    /// Adds all `pubkeys` from the `validators` which are not already in the cache. Will
-    /// never re-add a pubkey.
+    /// Adds all `pubkeys` from the `validators`. May re-add the same pubkey
     pub fn update_pubkey_cache(&mut self) -> Result<(), Error> {
         let mut pubkey_cache = mem::take(self.pubkey_cache_mut());
         for (i, validator) in self
@@ -1687,10 +1724,8 @@ impl<T: EthSpec> BeaconState<T> {
             .enumerate()
             .skip(pubkey_cache.len())
         {
-            let success = pubkey_cache.insert(validator.pubkey, i);
-            if !success {
-                return Err(Error::PubkeyCacheInconsistent);
-            }
+            // Ok to read pubkeys before EIP-6110
+            pubkey_cache.insert(validator.pubkey, i);
         }
         *self.pubkey_cache_mut() = pubkey_cache;
 
@@ -1834,6 +1869,17 @@ impl<T: EthSpec> BeaconState<T> {
             self.next_sync_committee()?.clone()
         };
         Ok(sync_committee)
+    }
+
+    pub fn rebase_caches_on(&mut self, base: &Self) {
+        // Use pubkey cache from `base` if it contains superior information (likely if our cache is
+        // uninitialized).
+        let pubkey_cache = self.pubkey_cache_mut();
+        let base_pubkey_cache = base.pubkey_cache();
+        // Note: It's okay to clone a cache with pubkeys from future blocks.
+        if pubkey_cache.len() < base_pubkey_cache.len() {
+            *pubkey_cache = base_pubkey_cache.clone();
+        }
     }
 
     pub fn compute_merkle_proof(
