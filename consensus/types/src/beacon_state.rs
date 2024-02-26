@@ -500,6 +500,10 @@ impl<T: EthSpec> BeaconState<T> {
         Ok(self.pubkey_cache().get(pubkey))
     }
 
+    pub fn get_validator_index_readonly(&self, pubkey: &PublicKeyBytes) -> Option<usize> {
+        self.pubkey_cache().get(pubkey)
+    }
+
     /// The epoch corresponding to `self.slot()`.
     pub fn current_epoch(&self) -> Epoch {
         self.slot().epoch(T::slots_per_epoch())

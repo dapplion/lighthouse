@@ -1191,11 +1191,9 @@ where
                     .iter()
                     .enumerate()
                     .map(|(subcommittee_position, pubkey)| {
-                        let validator_index = self
-                            .chain
-                            .validator_index(pubkey)
-                            .expect("should find validator index")
-                            .expect("pubkey should exist in the beacon chain");
+                        let validator_index = state
+                            .get_validator_index_readonly(pubkey)
+                            .expect("should find validator index");
 
                         let sync_message = SyncCommitteeMessage::new::<E>(
                             message_slot,
@@ -1403,11 +1401,9 @@ where
                         .unwrap()
                         .iter()
                         .find_map(|pubkey| {
-                            let validator_index = self
-                                .chain
-                                .validator_index(pubkey)
-                                .expect("should find validator index")
-                                .expect("pubkey should exist in the beacon chain");
+                            let validator_index = state
+                                .get_validator_index_readonly(pubkey)
+                                .expect("should find validator index");
 
                             let selection_proof = SyncSelectionProof::new::<E>(
                                 slot,

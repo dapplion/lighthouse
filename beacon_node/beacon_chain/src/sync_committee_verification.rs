@@ -376,12 +376,22 @@ impl<T: BeaconChainTypes> VerifiedSyncContribution<T> {
             .filter_map(|(pubkey, bit)| bit.then_some(pubkey))
             .collect::<Vec<_>>();
 
+        let participant_indices = {
+            // TODO(lion): okay to get head state here?
+            let head_state = &chain.head_snapshot().beacon_state;
+
+            participant_pubkeys
+                .iter()
+                .map(|pubkey| {
+                    head_state
+                        .get_validator_index_readonly(pubkey)
+                        .ok_or(Error::UnknownValidatorPubkey(*pubkey))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
         // Ensure that all signatures are valid.
-        if !verify_signed_aggregate_signatures(
-            chain,
-            &signed_aggregate,
-            participant_pubkeys.as_slice(),
-        )? {
+        if !verify_signed_aggregate_signatures(chain, &signed_aggregate, &participant_indices)? {
             return Err(Error::InvalidSignature);
         }
 
@@ -617,7 +627,7 @@ pub fn verify_propagation_slot_range<S: SlotClock, U: SlotData>(
 pub fn verify_signed_aggregate_signatures<T: BeaconChainTypes>(
     chain: &BeaconChain<T>,
     signed_aggregate: &SignedContributionAndProof<T::EthSpec>,
-    participant_pubkeys: &[PublicKeyBytes],
+    participant_indexes: &[usize],
 ) -> Result<bool, Error> {
     let pubkey_cache = chain
         .validator_pubkey_cache
@@ -651,12 +661,8 @@ pub fn verify_signed_aggregate_signatures<T: BeaconChainTypes>(
         )
         .map_err(BeaconChainError::SignatureSetError)?,
         sync_committee_contribution_signature_set_from_pubkeys::<T::EthSpec, _>(
-            |validator_index| {
-                pubkey_cache
-                    .get_pubkey_from_pubkey_bytes(validator_index)
-                    .map(Cow::Borrowed)
-            },
-            participant_pubkeys,
+            |validator_index| pubkey_cache.get(validator_index).map(Cow::Borrowed),
+            participant_indexes,
             &signed_aggregate.message.contribution.signature,
             signed_aggregate
                 .message
@@ -683,13 +689,20 @@ pub fn verify_sync_committee_message<T: BeaconChainTypes>(
     let signature_setup_timer =
         metrics::start_timer(&metrics::SYNC_MESSAGE_PROCESSING_SIGNATURE_SETUP_TIMES);
 
+    let index = chain
+        .head_snapshot()
+        .beacon_state
+        .pubkey_cache()
+        .get(pubkey_bytes)
+        .ok_or(Error::UnknownValidatorPubkey(*pubkey_bytes))?;
+
     let pubkey_cache = chain
         .validator_pubkey_cache
         .try_read_for(VALIDATOR_PUBKEY_CACHE_LOCK_TIMEOUT)
         .ok_or(BeaconChainError::ValidatorPubkeyCacheLockTimeout)?;
 
     let pubkey = pubkey_cache
-        .get_pubkey_from_pubkey_bytes(pubkey_bytes)
+        .get(index)
         .map(Cow::Borrowed)
         .ok_or(Error::UnknownValidatorPubkey(*pubkey_bytes))?;
 
