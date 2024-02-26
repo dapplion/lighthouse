@@ -21,7 +21,7 @@ use crate::{
     get_key_for_col, ChunkWriter, DBColumn, DatabaseBlock, Error, ItemStore, KeyValueStoreOp,
     PartialBeaconState, StoreItem, StoreOp,
 };
-use itertools::process_results;
+use itertools::{process_results, Itertools};
 use leveldb::iterator::LevelDBIterator;
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
@@ -1115,10 +1115,12 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             epoch_boundary_state_root,
         }) = self.load_hot_state_summary(state_root)?
         {
-            let boundary_state =
+            let mut boundary_state =
                 get_full_state(&self.hot_db, &epoch_boundary_state_root, &self.spec)?.ok_or(
                     HotColdDBError::MissingEpochBoundaryState(epoch_boundary_state_root),
                 )?;
+
+            self.rebase_caches(&mut boundary_state);
 
             // Optimization to avoid even *thinking* about replaying blocks if we're already
             // on an epoch boundary.
@@ -1139,6 +1141,14 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             Ok(Some(state))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Rebase state pubkey_cache on some existing state to prevent re-populating the cache on the
+    /// first process_deposit call.
+    fn rebase_caches(&self, state: &mut BeaconState<E>) {
+        if let Ok((_, first_state)) = self.state_cache.lock().iter().exactly_one() {
+            state.rebase_caches_on(first_state);
         }
     }
 
@@ -1274,7 +1284,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         }
 
         // If low_state is still None, use load_restore_point_by_index to load the state.
-        let low_state = match low_state {
+        let mut low_state = match low_state {
             Some(state) => state,
             None => self.load_restore_point_by_index(low_restore_point_idx)?,
         };
@@ -1300,6 +1310,8 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             || Ok((high_restore_point, Hash256::zero())),
             &self.spec,
         )?;
+
+        self.rebase_caches(&mut low_state);
 
         let state = self.replay_blocks(
             low_state,

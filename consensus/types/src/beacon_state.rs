@@ -497,11 +497,19 @@ impl<T: EthSpec> BeaconState<T> {
     /// otherwise returns `None`.
     pub fn get_validator_index(&mut self, pubkey: &PublicKeyBytes) -> Result<Option<usize>, Error> {
         self.update_pubkey_cache()?;
-        Ok(self.pubkey_cache().get(pubkey))
+        Ok(self.get_validator_index_readonly(pubkey))
     }
 
+    /// pubkey_cache may contain pubkeys from future blocks not yet known to this state. Ignore
+    /// pubkeys that resolve to indexes beyond the current validators list.
     pub fn get_validator_index_readonly(&self, pubkey: &PublicKeyBytes) -> Option<usize> {
-        self.pubkey_cache().get(pubkey)
+        self.pubkey_cache().get(pubkey).and_then(|index| {
+            if index >= self.validators().len() {
+                Some(index)
+            } else {
+                None
+            }
+        })
     }
 
     /// The epoch corresponding to `self.slot()`.
@@ -1838,6 +1846,17 @@ impl<T: EthSpec> BeaconState<T> {
             self.next_sync_committee()?.clone()
         };
         Ok(sync_committee)
+    }
+
+    pub fn rebase_caches_on(&mut self, base: &Self) {
+        // Use pubkey cache from `base` if it contains superior information (likely if our cache is
+        // uninitialized).
+        let pubkey_cache = self.pubkey_cache_mut();
+        let base_pubkey_cache = base.pubkey_cache();
+        // Note: It's okay to clone a cache with pubkeys from future blocks.
+        if pubkey_cache.len() < base_pubkey_cache.len() {
+            *pubkey_cache = base_pubkey_cache.clone();
+        }
     }
 
     pub fn compute_merkle_proof(
