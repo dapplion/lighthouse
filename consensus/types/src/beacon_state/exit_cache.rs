@@ -3,9 +3,8 @@ use rpds::HashTrieMapSync as HashTrieMap;
 use safe_arith::SafeArith;
 
 /// Map from exit epoch to the number of validators with that exit epoch.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExitCache {
-    initialized: bool,
     exit_epoch_counts: HashTrieMap<Epoch, u64>,
 }
 

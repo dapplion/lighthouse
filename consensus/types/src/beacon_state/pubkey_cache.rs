@@ -3,7 +3,7 @@ use rpds::HashTrieMapSync as HashTrieMap;
 
 type ValidatorIndex = usize;
 
-#[derive(Debug, PartialEq, Clone, Default)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct PubkeyCache {
     /// Maintain the number of keys added to the map. It is not sufficient to just use the
     /// HashTrieMap len, as it does not increase when duplicate keys are added. Duplicate keys are
@@ -13,6 +13,17 @@ pub struct PubkeyCache {
 }
 
 impl PubkeyCache {
+    pub fn from_pubkeys(pubkeys: Vec<PublicKeyBytes>) -> Self {
+        let mut pubkey_cache = Self {
+            len: 0,
+            map: <_>::default(),
+        };
+        for (i, pubkey) in pubkeys.into_iter().enumerate() {
+            pubkey_cache.insert(pubkey, i);
+        }
+        pubkey_cache
+    }
+
     /// Returns the number of validator indices added to the map so far.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> ValidatorIndex {

@@ -13,13 +13,8 @@ use safe_arith::SafeArith;
 /// epochs. The cached values can be utilised by fork choice to calculate unrealized justification
 /// and finalization instead of converting epoch participation arrays to balances for each block we
 /// process.
-#[derive(Default, Debug, PartialEq, Arbitrary, Clone)]
-pub struct ProgressiveBalancesCache {
-    inner: Option<Inner>,
-}
-
 #[derive(Debug, PartialEq, Arbitrary, Clone)]
-struct Inner {
+pub struct ProgressiveBalancesCache {
     pub current_epoch: Epoch,
     pub previous_epoch_cache: EpochTotalBalances,
     pub current_epoch_cache: EpochTotalBalances,

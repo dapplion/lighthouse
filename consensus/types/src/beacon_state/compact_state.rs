@@ -47,15 +47,6 @@ macro_rules! full_to_compact {
             current_justified_checkpoint: $s.current_justified_checkpoint,
             finalized_checkpoint: $s.finalized_checkpoint,
 
-            // Caches.
-            total_active_balance: $s.total_active_balance.clone(),
-            committee_caches: $s.committee_caches.clone(),
-            progressive_balances_cache: $s.progressive_balances_cache.clone(),
-            pubkey_cache: $s.pubkey_cache.clone(),
-            exit_cache: $s.exit_cache.clone(),
-            slashings_cache: $s.slashings_cache.clone(),
-            epoch_cache: $s.epoch_cache.clone(),
-
             // Variant-specific fields
             $(
                 $extra_fields: $s.$extra_fields.clone()
@@ -109,15 +100,6 @@ macro_rules! compact_to_full {
             previous_justified_checkpoint: $inner.previous_justified_checkpoint,
             current_justified_checkpoint: $inner.current_justified_checkpoint,
             finalized_checkpoint: $inner.finalized_checkpoint,
-
-            // Caching
-            total_active_balance: $inner.total_active_balance,
-            committee_caches: $inner.committee_caches,
-            progressive_balances_cache: $inner.progressive_balances_cache,
-            pubkey_cache: $inner.pubkey_cache,
-            exit_cache: $inner.exit_cache,
-            slashings_cache: $inner.slashings_cache,
-            epoch_cache: $inner.epoch_cache,
 
             // Variant-specific fields
             $(

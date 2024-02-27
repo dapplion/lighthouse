@@ -8,9 +8,9 @@ use std::sync::Arc;
 /// to as the "decision block". This cache is very similar to the `BeaconProposerCache` in that
 /// beacon proposers are determined at exactly the same time as the values in this cache, so
 /// the keys for the two caches are identical.
-#[derive(Debug, PartialEq, Eq, Clone, Default, arbitrary::Arbitrary)]
+#[derive(Debug, PartialEq, Eq, Clone, arbitrary::Arbitrary)]
 pub struct EpochCache {
-    inner: Option<Arc<Inner>>,
+    inner: Arc<Inner>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, arbitrary::Arbitrary)]
@@ -45,7 +45,6 @@ pub enum EpochCacheError {
     InvalidSlot { slot: Slot },
     Arith(ArithError),
     BeaconState(BeaconStateError),
-    CacheNotInitialized,
 }
 
 impl From<BeaconStateError> for EpochCacheError {
@@ -69,13 +68,13 @@ impl EpochCache {
         spec: &ChainSpec,
     ) -> EpochCache {
         Self {
-            inner: Some(Arc::new(Inner {
+            inner: Arc::new(Inner {
                 key,
                 effective_balances,
                 base_rewards,
                 activation_queue,
                 effective_balance_increment: spec.effective_balance_increment,
-            })),
+            }),
         }
     }
 
@@ -84,10 +83,7 @@ impl EpochCache {
         current_epoch: Epoch,
         state_decision_root: Hash256,
     ) -> Result<(), EpochCacheError> {
-        let cache = self
-            .inner
-            .as_ref()
-            .ok_or(EpochCacheError::CacheNotInitialized)?;
+        let cache = self.inner.as_ref();
         if cache.key.epoch != current_epoch {
             return Err(EpochCacheError::IncorrectEpoch {
                 cache: cache.key.epoch,
@@ -107,7 +103,6 @@ impl EpochCache {
     pub fn get_effective_balance(&self, validator_index: usize) -> Result<u64, EpochCacheError> {
         self.inner
             .as_ref()
-            .ok_or(EpochCacheError::CacheNotInitialized)?
             .effective_balances
             .get(validator_index)
             .copied()
@@ -116,10 +111,7 @@ impl EpochCache {
 
     #[inline]
     pub fn get_base_reward(&self, validator_index: usize) -> Result<u64, EpochCacheError> {
-        let inner = self
-            .inner
-            .as_ref()
-            .ok_or(EpochCacheError::CacheNotInitialized)?;
+        let inner = self.inner.as_ref();
         let effective_balance = self.get_effective_balance(validator_index)?;
         let effective_balance_eth =
             effective_balance.safe_div(inner.effective_balance_increment)? as usize;
@@ -133,10 +125,7 @@ impl EpochCache {
     }
 
     pub fn activation_queue(&self) -> Result<&ActivationQueue, EpochCacheError> {
-        let inner = self
-            .inner
-            .as_ref()
-            .ok_or(EpochCacheError::CacheNotInitialized)?;
+        let inner = self.inner.as_ref();
         Ok(&inner.activation_queue)
     }
 }
