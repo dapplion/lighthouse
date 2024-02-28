@@ -94,6 +94,7 @@ impl<T: EthSpec> PendingComponents<T> {
             return Err(AvailabilityCheckError::Unexpected);
         };
         let num_blobs_expected = diet_executed_block.num_blobs_expected();
+        // TODO(das): blobs may be empty post PeerDAS but the blob can have commitments
         let Some(verified_blobs) = verified_blobs
             .into_iter()
             .cloned()
@@ -572,10 +573,20 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
         // Merge in the data columns.
         pending_components.merge_data_columns(fixed_data_columns);
 
-        write_lock.put_pending_components(block_root, pending_components, &self.overflow_store)?;
-
-        // TODO(das): Currently this does not change availability status and nor import yet.
-        Ok(Availability::MissingComponents(block_root))
+        if pending_components.is_available() {
+            // No need to hold the write lock anymore
+            drop(write_lock);
+            pending_components.make_available(|diet_block| {
+                self.state_cache.recover_pending_executed_block(diet_block)
+            })
+        } else {
+            write_lock.put_pending_components(
+                block_root,
+                pending_components,
+                &self.overflow_store,
+            )?;
+            Ok(Availability::MissingComponents(block_root))
+        }
     }
 
     pub fn put_kzg_verified_blobs<I: IntoIterator<Item = KzgVerifiedBlob<T::EthSpec>>>(
