@@ -54,6 +54,10 @@ pub trait AvailabilityView<E: EthSpec> {
         &mut self,
     ) -> &mut FixedVector<Option<Self::DataColumnType>, E::DataColumnCount>;
 
+    /// EIP-7594 config param to consider a block available if at least `samples_per_slot` are
+    /// available
+    fn samples_per_slot(&self) -> usize;
+
     /// Checks if a block exists in the cache.
     ///
     /// Returns:
@@ -100,6 +104,11 @@ pub trait AvailabilityView<E: EthSpec> {
     /// Returns the number of blobs that have been received and are stored in the cache.
     fn num_received_blobs(&self) -> usize {
         self.get_cached_blobs().iter().flatten().count()
+    }
+
+    /// Returns the number of blobs that have been received and are stored in the cache.
+    fn num_received_columns(&self) -> usize {
+        self.get_cached_data_columns().iter().flatten().count()
     }
 
     /// Inserts a block into the cache.
@@ -198,7 +207,9 @@ pub trait AvailabilityView<E: EthSpec> {
     /// of expected blobs.
     fn is_available(&self) -> bool {
         if let Some(num_expected_blobs) = self.num_expected_blobs() {
+            // Note: the first equality covers the case of no columns to sample post EIP-7594
             num_expected_blobs == self.num_received_blobs()
+                || self.num_received_columns() >= self.samples_per_slot()
         } else {
             false
         }
@@ -251,6 +262,11 @@ macro_rules! impl_availability_view {
                 &mut self,
             ) -> &mut FixedVector<Option<Self::DataColumnType>, E::DataColumnCount> {
                 &mut self.$data_column_field
+            }
+
+            fn samples_per_slot(&self) -> usize {
+                // TODO(das): make it a config param
+                16
             }
         }
     };
