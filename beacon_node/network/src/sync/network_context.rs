@@ -12,14 +12,16 @@ use crate::sync::manager::SingleLookupReqId;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes, EngineState};
 use fnv::FnvHashMap;
-use lighthouse_network::rpc::methods::{BlobsByRangeRequest, BlobsByRootRequest};
+use lighthouse_network::rpc::methods::{
+    BlobsByRangeRequest, BlobsByRootRequest, DataColumnsByRootRequest,
+};
 use lighthouse_network::rpc::{BlocksByRangeRequest, BlocksByRootRequest, GoodbyeReason};
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource, Request};
 use slog::{debug, trace, warn};
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use types::{BlobSidecar, EthSpec, SignedBeaconBlock};
+use types::{BlobSidecar, EthSpec, SignedBeaconBlock, Slot};
 
 pub struct BlocksAndBlobsByRangeResponse<T: EthSpec> {
     pub batch_id: BatchId,
@@ -84,6 +86,18 @@ impl<T: EthSpec> From<Option<Arc<BlobSidecar<T>>>> for BlockOrBlob<T> {
     }
 }
 
+pub struct PeersByCustody {}
+
+impl PeersByCustody {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    pub fn custodial_peers(&self, slot: Slot, column_id: u64) -> Vec<PeerId> {
+        todo!();
+    }
+}
+
 impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     pub fn new(
         network_send: mpsc::UnboundedSender<NetworkMessage<T::EthSpec>>,
@@ -107,6 +121,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub fn network_globals(&self) -> &NetworkGlobals<T::EthSpec> {
         &self.network_beacon_processor.network_globals
+    }
+
+    pub fn peers_by_custody(&self) -> PeersByCustody {
+        todo!();
     }
 
     /// Returns the Client type of the peer if known
@@ -503,6 +521,35 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 request_id,
             })?;
         }
+        Ok(())
+    }
+
+    pub fn data_column_lookup_request(
+        &self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        request: DataColumnsByRootRequest,
+        lookup_type: LookupType,
+    ) -> Result<(), &'static str> {
+        let sync_id = match lookup_type {
+            LookupType::Current => SyncRequestId::SingleBlob { id },
+            LookupType::Parent => SyncRequestId::ParentLookupBlob { id },
+        };
+        let request_id = RequestId::Sync(sync_id);
+
+        debug!(
+            self.log,
+            "Sending DataColumnsByRoot Request";
+            "request" => ?request,
+            "peer" => %peer_id,
+            "lookup_type" => ?lookup_type
+        );
+
+        self.send_network_msg(NetworkMessage::SendRequest {
+            peer_id,
+            request: Request::DataColumnsByRoot(request),
+            request_id,
+        })?;
         Ok(())
     }
 

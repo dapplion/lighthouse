@@ -1,4 +1,5 @@
 use super::child_components::ChildComponents;
+use super::overflow_lru_cache::{KzgVerifiedCustodyDataColumn, KzgVerifiedSampledDataColumn};
 use super::state_lru_cache::DietAvailabilityPendingExecutedBlock;
 use crate::blob_verification::KzgVerifiedBlob;
 use crate::block_verification_types::AsBlock;
@@ -9,7 +10,7 @@ use kzg::KzgCommitment;
 use ssz_types::FixedVector;
 use std::sync::Arc;
 use types::beacon_block_body::KzgCommitments;
-use types::{BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock};
+use types::{BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock, Slot};
 
 /// Defines an interface for managing data availability with two key invariants:
 ///
@@ -29,6 +30,8 @@ pub trait AvailabilityView<E: EthSpec> {
 
     /// The type representing a data column in the implementation.
     type DataColumnType: Clone;
+    type CustodyDataColumnType: Clone;
+    type SampledDataColumnType: Clone;
 
     /// Returns an immutable reference to the cached block.
     fn get_cached_block(&self) -> &Option<Self::BlockType>;
@@ -37,9 +40,13 @@ pub trait AvailabilityView<E: EthSpec> {
     fn get_cached_blobs(&self) -> &FixedVector<Option<Self::BlobType>, E::MaxBlobsPerBlock>;
 
     /// Returns an immutable reference to the fixed vector of cached data columns.
-    fn get_cached_data_columns(
+    fn get_cached_custody_data_columns(
         &self,
-    ) -> &FixedVector<Option<Self::DataColumnType>, E::DataColumnCount>;
+    ) -> &FixedVector<Option<Self::CustodyDataColumnType>, E::DataColumnCount>;
+
+    fn get_cached_sampled_data_columns(
+        &self,
+    ) -> &FixedVector<Option<Self::SampledDataColumnType>, E::DataColumnCount>;
 
     /// Returns a mutable reference to the cached block.
     fn get_cached_block_mut(&mut self) -> &mut Option<Self::BlockType>;
@@ -50,9 +57,13 @@ pub trait AvailabilityView<E: EthSpec> {
     ) -> &mut FixedVector<Option<Self::BlobType>, E::MaxBlobsPerBlock>;
 
     /// Returns a mutable reference to the fixed vector of cached data columns.
-    fn get_cached_data_columns_mut(
+    fn get_cached_custody_data_columns_mut(
         &mut self,
-    ) -> &mut FixedVector<Option<Self::DataColumnType>, E::DataColumnCount>;
+    ) -> &mut FixedVector<Option<Self::CustodyDataColumnType>, E::DataColumnCount>;
+
+    fn get_cached_sampled_data_columns_mut(
+        &mut self,
+    ) -> &mut FixedVector<Option<Self::SampledDataColumnType>, E::DataColumnCount>;
 
     /// EIP-7594 config param to consider a block available if at least `samples_per_slot` are
     /// available
@@ -84,8 +95,15 @@ pub trait AvailabilityView<E: EthSpec> {
     /// Returns:
     /// - `true` if a data column exists at the given index.
     /// - `false` otherwise.
-    fn data_column_exists(&self, data_colum_index: usize) -> bool {
-        self.get_cached_data_columns()
+    fn custody_data_column_exists(&self, data_colum_index: usize) -> bool {
+        self.get_cached_custody_data_columns()
+            .get(data_colum_index)
+            .map(|d| d.is_some())
+            .unwrap_or(false)
+    }
+
+    fn sampled_data_column_exists(&self, data_colum_index: usize) -> bool {
+        self.get_cached_sampled_data_columns()
             .get(data_colum_index)
             .map(|d| d.is_some())
             .unwrap_or(false)
@@ -107,8 +125,11 @@ pub trait AvailabilityView<E: EthSpec> {
     }
 
     /// Returns the number of blobs that have been received and are stored in the cache.
-    fn num_received_columns(&self) -> usize {
-        self.get_cached_data_columns().iter().flatten().count()
+    fn num_received_custody_columns(&self) -> usize {
+        self.get_cached_custody_data_columns()
+            .iter()
+            .flatten()
+            .count()
     }
 
     /// Inserts a block into the cache.
@@ -128,13 +149,26 @@ pub trait AvailabilityView<E: EthSpec> {
     /// Inserts a data column at a specific index in the cache.
     ///
     /// Existing data column at the index will be replaced.
-    fn insert_data_column_at_index(
+    fn insert_custody_data_column_at_index(
         &mut self,
         data_column_index: usize,
-        data_column: Self::DataColumnType,
+        data_column: Self::CustodyDataColumnType,
     ) {
         if let Some(b) = self
-            .get_cached_data_columns_mut()
+            .get_cached_custody_data_columns_mut()
+            .get_mut(data_column_index)
+        {
+            *b = Some(data_column);
+        }
+    }
+
+    fn insert_sampled_data_column_at_index(
+        &mut self,
+        data_column_index: usize,
+        data_column: Self::SampledDataColumnType,
+    ) {
+        if let Some(b) = self
+            .get_cached_sampled_data_columns_mut()
             .get_mut(data_column_index)
         {
             *b = Some(data_column);
@@ -148,15 +182,68 @@ pub trait AvailabilityView<E: EthSpec> {
     /// 2. The block exists and its commitments matches the data column's commitments.
     fn merge_data_columns(
         &mut self,
-        data_columns: FixedVector<Option<Self::DataColumnType>, E::DataColumnCount>,
+        custody_data_columns: FixedVector<Option<Self::DataColumnType>, E::DataColumnCount>,
     ) {
-        for (index, data_column) in data_columns.iter().cloned().enumerate() {
+        for (index, data_column) in custody_data_columns.iter().cloned().enumerate() {
             let Some(data_column) = data_column else {
                 continue;
             };
             // TODO(das): Add equivalent checks for data columns if necessary
-            if !self.data_column_exists(index) {
-                self.insert_data_column_at_index(index, data_column)
+            if self.is_custody_column(&data_column) {
+                if !self.custody_data_column_exists(index) {
+                    self.insert_custody_data_column_at_index(
+                        index,
+                        todo!("convert to custody column"),
+                    );
+                }
+            } else if self.is_sampled_column(&data_column) {
+                if !self.sampled_data_column_exists(index) {
+                    self.insert_sampled_data_column_at_index(
+                        index,
+                        todo!("convert to sample column"),
+                    );
+                }
+            } else {
+                todo!("return error, should not happen");
+            }
+        }
+    }
+
+    fn merge_custody_data_columns(
+        &mut self,
+        custody_data_columns: FixedVector<Option<Self::CustodyDataColumnType>, E::DataColumnCount>,
+    ) {
+        for (index, data_column) in custody_data_columns.iter().cloned().enumerate() {
+            let Some(data_column) = data_column else {
+                continue;
+            };
+            if !self.custody_data_column_exists(index) {
+                self.insert_custody_data_column_at_index(index, data_column);
+            }
+        }
+    }
+
+    fn is_custody_column(&self, column: &Self::DataColumnType) -> bool {
+        // TODO(das): check against node ID to derive the custody requirements at this epoch
+        todo!();
+    }
+
+    fn is_sampled_column(&self, column: &Self::DataColumnType) -> bool {
+        // Check against the randomly chosen set of column ids if this match
+        todo!();
+    }
+
+    fn merge_sampled_data_columns(
+        &mut self,
+        sampled_data_columns: FixedVector<Option<Self::SampledDataColumnType>, E::DataColumnCount>,
+    ) {
+        for (index, data_column) in sampled_data_columns.iter().cloned().enumerate() {
+            let Some(data_column) = data_column else {
+                continue;
+            };
+            // TODO(das): Add equivalent checks for data columns if necessary
+            if !self.sampled_data_column_exists(index) {
+                self.insert_sampled_data_column_at_index(index, data_column)
             }
         }
     }
@@ -209,7 +296,11 @@ pub trait AvailabilityView<E: EthSpec> {
         if let Some(num_expected_blobs) = self.num_expected_blobs() {
             // Note: the first equality covers the case of no columns to sample post EIP-7594
             num_expected_blobs == self.num_received_blobs()
-                || self.num_received_columns() >= self.samples_per_slot()
+            // TODO(das): should only consider the columns that are part of the random sample. If a
+            // custody columns happens to overlap with a randomly selected column to sample then it
+            // can be counted. To do this condition this struct will need to be aware of our
+            // randomly selected set of column_ids
+                || self.num_received_custody_columns() >= self.samples_per_slot()
         } else {
             false
         }
@@ -226,11 +317,13 @@ pub trait AvailabilityView<E: EthSpec> {
 /// - `$data_column_field`: The field name in the struct that holds the cached data columns.
 #[macro_export]
 macro_rules! impl_availability_view {
-    ($struct_name:ident, $block_type:ty, $blob_type:ty, $data_column_type:ty, $block_field:ident, $blob_field:ident, $data_column_field:ident) => {
+    ($struct_name:ident, $block_type:ty, $blob_type:ty, $data_column_type:ty, $custody_data_column_type:ty,  $sampled_data_column_type:ty, $block_field:ident, $blob_field:ident, $custody_data_column_field:ident, $sampled_data_column_field:ident) => {
         impl<E: EthSpec> AvailabilityView<E> for $struct_name<E> {
             type BlockType = $block_type;
             type BlobType = $blob_type;
             type DataColumnType = $data_column_type;
+            type CustodyDataColumnType = $custody_data_column_type;
+            type SampledDataColumnType = $sampled_data_column_type;
 
             fn get_cached_block(&self) -> &Option<Self::BlockType> {
                 &self.$block_field
@@ -242,10 +335,16 @@ macro_rules! impl_availability_view {
                 &self.$blob_field
             }
 
-            fn get_cached_data_columns(
+            fn get_cached_custody_data_columns(
                 &self,
-            ) -> &FixedVector<Option<Self::DataColumnType>, E::DataColumnCount> {
-                &self.$data_column_field
+            ) -> &FixedVector<Option<Self::CustodyDataColumnType>, E::DataColumnCount> {
+                &self.$custody_data_column_field
+            }
+
+            fn get_cached_sampled_data_columns(
+                &self,
+            ) -> &FixedVector<Option<Self::SampledDataColumnType>, E::DataColumnCount> {
+                &self.$sampled_data_column_field
             }
 
             fn get_cached_block_mut(&mut self) -> &mut Option<Self::BlockType> {
@@ -258,10 +357,16 @@ macro_rules! impl_availability_view {
                 &mut self.$blob_field
             }
 
-            fn get_cached_data_columns_mut(
+            fn get_cached_custody_data_columns_mut(
                 &mut self,
-            ) -> &mut FixedVector<Option<Self::DataColumnType>, E::DataColumnCount> {
-                &mut self.$data_column_field
+            ) -> &mut FixedVector<Option<Self::CustodyDataColumnType>, E::DataColumnCount> {
+                &mut self.$custody_data_column_field
+            }
+
+            fn get_cached_sampled_data_columns_mut(
+                &mut self,
+            ) -> &mut FixedVector<Option<Self::SampledDataColumnType>, E::DataColumnCount> {
+                &mut self.$sampled_data_column_field
             }
 
             fn samples_per_slot(&self) -> usize {
@@ -277,9 +382,12 @@ impl_availability_view!(
     Arc<SignedBeaconBlock<E>>,
     KzgCommitment,
     (),
+    (),
+    (),
     block,
     blob_commitments,
-    data_column_opts
+    data_columns,
+    data_columns
 );
 
 impl_availability_view!(
@@ -287,9 +395,12 @@ impl_availability_view!(
     DietAvailabilityPendingExecutedBlock<E>,
     KzgVerifiedBlob<E>,
     KzgVerifiedDataColumn<E>,
+    KzgVerifiedCustodyDataColumn<E>,
+    KzgVerifiedSampledDataColumn,
     executed_block,
     verified_blobs,
-    verified_data_columns
+    verified_custody_data_columns,
+    verified_sampled_data_columns
 );
 
 impl_availability_view!(
@@ -297,13 +408,17 @@ impl_availability_view!(
     Arc<SignedBeaconBlock<E>>,
     Arc<BlobSidecar<E>>,
     Arc<DataColumnSidecar<E>>,
+    Arc<DataColumnSidecar<E>>,
+    Arc<DataColumnSidecar<E>>,
     downloaded_block,
     downloaded_blobs,
-    downloaded_data_columns
+    downloaded_custody_data_columns,
+    downloaded_sampled_data_columns
 );
 
 pub trait GetCommitments<E: EthSpec> {
     fn get_commitments(&self) -> KzgCommitments<E>;
+    fn get_slot(&self) -> Slot;
 }
 
 pub trait GetCommitment<E: EthSpec> {
@@ -326,6 +441,10 @@ impl<E: EthSpec> GetCommitments<E> for DietAvailabilityPendingExecutedBlock<E> {
             .cloned()
             .unwrap_or_default()
     }
+
+    fn get_slot(&self) -> Slot {
+        self.as_block().message().slot()
+    }
 }
 
 impl<E: EthSpec> GetCommitment<E> for KzgVerifiedBlob<E> {
@@ -343,6 +462,10 @@ impl<E: EthSpec> GetCommitments<E> for Arc<SignedBeaconBlock<E>> {
             .ok()
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn get_slot(&self) -> Slot {
+        self.message().slot()
     }
 }
 

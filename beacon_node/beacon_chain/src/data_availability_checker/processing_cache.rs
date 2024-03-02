@@ -55,8 +55,8 @@ pub struct ProcessingComponents<E: EthSpec> {
     /// `AvailabilityView`'s trait definition for more details.
     pub blob_commitments: KzgCommitmentOpts<E>,
     // TODO(das): `KzgCommitments` are available in every data column sidecar, hence it may not be useful to store them
-    // again here and a `()` may be sufficient to indicate what we have.
-    pub data_column_opts: FixedVector<Option<()>, E::DataColumnCount>,
+    // again here and a `()` may be sufficient.
+    pub data_columns: FixedVector<Option<()>, E::DataColumnCount>,
 }
 
 impl<E: EthSpec> ProcessingComponents<E> {
@@ -65,7 +65,7 @@ impl<E: EthSpec> ProcessingComponents<E> {
             slot,
             block: None,
             blob_commitments: KzgCommitmentOpts::<E>::default(),
-            data_column_opts: FixedVector::default(),
+            data_columns: <_>::default(),
         }
     }
 }
@@ -78,7 +78,7 @@ impl<E: EthSpec> ProcessingComponents<E> {
             slot: Slot::new(0),
             block: None,
             blob_commitments: KzgCommitmentOpts::<E>::default(),
-            data_column_opts: FixedVector::default(),
+            data_columns: <_>::default(),
         }
     }
 }

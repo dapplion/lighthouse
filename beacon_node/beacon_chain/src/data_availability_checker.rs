@@ -15,6 +15,7 @@ pub use processing_cache::ProcessingComponents;
 use slasher::test_utils::E;
 use slog::{debug, error, Logger};
 use slot_clock::SlotClock;
+use ssz_types::FixedVector;
 use std::fmt;
 use std::fmt::Debug;
 use std::num::NonZeroUsize;
@@ -33,10 +34,16 @@ mod overflow_lru_cache;
 mod processing_cache;
 mod state_lru_cache;
 
-use crate::data_column_verification::{verify_kzg_for_data_column_list, GossipVerifiedDataColumn};
+use crate::data_column_verification::{
+    verify_kzg_for_data_column_list, GossipVerifiedDataColumn, KzgVerifiedDataColumn,
+};
 pub use error::{Error as AvailabilityCheckError, ErrorCategory as AvailabilityCheckErrorCategory};
-use types::data_column_sidecar::{DataColumnIdentifier, DataColumnSidecarList};
+use types::data_column_sidecar::{
+    DataColumnIdentifier, DataColumnSidecarList, FixedDataColumnSidecarList,
+};
 use types::non_zero_usize::new_non_zero_usize;
+
+use self::overflow_lru_cache::KzgVerifiedCustodyDataColumn;
 
 /// The LRU Cache stores `PendingComponents` which can store up to
 /// `MAX_BLOBS_PER_BLOCK = 6` blobs each. A `BlobSidecar` is 0.131256 MB. So
@@ -188,6 +195,63 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         }
     }
 
+    pub fn get_missing_data_column_ids<V: AvailabilityView<T::EthSpec>>(
+        &self,
+        block_root: Hash256,
+        availability_view: &V,
+    ) -> MissingDataColumns {
+        let Some(current_slot) = self.slot_clock.now_or_genesis() else {
+            error!(
+                self.log,
+                "Failed to read slot clock when checking for missing blob ids"
+            );
+            return MissingDataColumns::NotRequired;
+        };
+
+        if !self.da_check_required_for_epoch(current_slot.epoch(T::EthSpec::slots_per_epoch())) {
+            return MissingDataColumns::NotRequired;
+        }
+
+        // Compute ids for sampling
+        let mut sampling_ids = self
+            .compute_sampling_column_ids(block_root)
+            .into_iter()
+            .map(|index| BlobIdentifier {
+                block_root,
+                index: index as u64,
+            })
+            .collect::<Vec<_>>();
+
+        // Compute ids for custody
+        match availability_view.get_cached_block() {
+            Some(cached_block) => {
+                sampling_ids.extend_from_slice(
+                    &self
+                        .compute_custody_column_ids(cached_block.get_slot())
+                        .into_iter()
+                        .map(|index| BlobIdentifier {
+                            block_root,
+                            index: index as u64,
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                MissingDataColumns::KnownMissing(sampling_ids)
+            }
+            // TODO(das): without knowledge of the block's slot you can't know your custody
+            // requirements. When syncing a block via single block lookup, you need to fetch the
+            // block first, then fetch your custody columns
+            None => MissingDataColumns::KnownMissingIncomplete(sampling_ids),
+        }
+    }
+
+    fn compute_sampling_column_ids(&self, block_root: Hash256) -> Vec<usize> {
+        todo!("Use local randomness to derive this block's sample column ids")
+    }
+
+    fn compute_custody_column_ids(&self, slot: Slot) -> Vec<usize> {
+        todo!("Use local node ID and custody parameter to compute column ids for this slot");
+    }
+
     /// Get a blob from the availability cache.
     pub fn get_blob(
         &self,
@@ -228,6 +292,29 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
 
         self.availability_cache
             .put_kzg_verified_blobs(block_root, verified_blobs)
+    }
+
+    pub fn put_rpc_data_columns(
+        &self,
+        block_root: Hash256,
+        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
+    ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
+        let Some(kzg) = self.kzg.as_ref() else {
+            return Err(AvailabilityCheckError::KzgNotInitialized);
+        };
+
+        // TODO(das): batch verify data columns
+        let verified_data_columns = data_columns
+            .into_iter()
+            .flatten()
+            .map(|data_column| {
+                KzgVerifiedDataColumn::new(data_column.clone(), kzg)
+                    .map_err(AvailabilityCheckError::Kzg)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        self.availability_cache
+            .put_kzg_verified_data_columns(block_root, verified_data_columns)
     }
 
     /// Check if we've cached other blobs for this block. If it completes a set and we also
@@ -287,7 +374,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                         block_root,
                         block,
                         blobs: None,
-                        data_columns: None,
+                        custody_data_columns: None,
                     }))
                 }
             }
@@ -315,7 +402,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                     block_root,
                     block,
                     blobs: verified_blobs,
-                    data_columns: verified_data_column,
+                    custody_data_columns: verified_data_column,
                 }))
             }
         }
@@ -361,7 +448,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                             block_root,
                             block,
                             blobs: None,
-                            data_columns: None,
+                            custody_data_columns: None,
                         }))
                     }
                 }
@@ -377,7 +464,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                         block_root,
                         block,
                         blobs: verified_blobs,
-                        data_columns: verified_data_columns,
+                        custody_data_columns: verified_data_columns,
                     }))
                 }
             }
@@ -442,6 +529,27 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
             .entry(block_root)
             .or_insert_with(|| ProcessingComponents::new(slot))
             .merge_blobs(commitments);
+    }
+
+    pub fn notify_rpc_data_columns(
+        &self,
+        slot: Slot,
+        block_root: Hash256,
+        data_columns: &FixedDataColumnSidecarList<T::EthSpec>,
+    ) {
+        let mut seen_columns =
+            FixedVector::<Option<()>, <T::EthSpec as EthSpec>::DataColumnCount>::default();
+
+        for data_column in data_columns.iter().flatten() {
+            if let Some(seen_column) = seen_columns.get_mut(data_column.index as usize) {
+                *seen_column = Some(());
+            }
+        }
+        self.processing_cache
+            .write()
+            .entry(block_root)
+            .or_insert_with(|| ProcessingComponents::new(slot))
+            .merge_custody_data_columns(seen_columns);
     }
 
     /// Clears the block and all blobs from the processing cache for a give root if they exist.
@@ -604,7 +712,7 @@ pub struct AvailableBlock<E: EthSpec> {
     block_root: Hash256,
     block: Arc<SignedBeaconBlock<E>>,
     blobs: Option<BlobSidecarList<E>>,
-    data_columns: Option<DataColumnSidecarList<E>>,
+    custody_data_columns: Option<DataColumnSidecarList<E>>,
 }
 
 impl<E: EthSpec> AvailableBlock<E> {
@@ -612,13 +720,13 @@ impl<E: EthSpec> AvailableBlock<E> {
         block_root: Hash256,
         block: Arc<SignedBeaconBlock<E>>,
         blobs: Option<BlobSidecarList<E>>,
-        data_columns: Option<DataColumnSidecarList<E>>,
+        custody_data_columns: Option<DataColumnSidecarList<E>>,
     ) -> Self {
         Self {
             block_root,
             block,
             blobs,
-            data_columns,
+            custody_data_columns,
         }
     }
 
@@ -633,8 +741,8 @@ impl<E: EthSpec> AvailableBlock<E> {
         self.blobs.as_ref()
     }
 
-    pub fn data_columns(&self) -> Option<&DataColumnSidecarList<E>> {
-        self.data_columns.as_ref()
+    pub fn custody_data_columns(&self) -> Option<&DataColumnSidecarList<E>> {
+        self.custody_data_columns.as_ref()
     }
 
     #[allow(clippy::type_complexity)]
@@ -650,9 +758,9 @@ impl<E: EthSpec> AvailableBlock<E> {
             block_root,
             block,
             blobs,
-            data_columns,
+            custody_data_columns,
         } = self;
-        (block_root, block, blobs, data_columns)
+        (block_root, block, blobs, custody_data_columns)
     }
 }
 
@@ -732,6 +840,35 @@ impl Into<Vec<BlobIdentifier>> for MissingBlobs {
             MissingBlobs::KnownMissing(v) => v,
             MissingBlobs::PossibleMissing(v) => v,
             MissingBlobs::BlobsNotRequired => vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum MissingDataColumns {
+    /// We know for certain we must fetch this column ids
+    KnownMissing(Vec<BlobIdentifier>),
+    /// We don't know yet the full list of column ids to fetch
+    KnownMissingIncomplete(Vec<BlobIdentifier>),
+    /// Not required.
+    NotRequired,
+}
+
+impl MissingDataColumns {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            MissingDataColumns::KnownMissing(v) => v.is_empty(),
+            MissingDataColumns::KnownMissingIncomplete(_) => false,
+            MissingDataColumns::NotRequired => true,
+        }
+    }
+
+    pub fn indices(&self) -> Vec<u64> {
+        match self {
+            MissingDataColumns::KnownMissing(v) | MissingDataColumns::KnownMissingIncomplete(v) => {
+                v.iter().map(|id| id.index).collect()
+            }
+            MissingDataColumns::NotRequired => vec![],
         }
     }
 }

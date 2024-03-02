@@ -1,10 +1,10 @@
 use super::PeerId;
 use crate::sync::block_lookups::common::{Lookup, RequestState};
 use crate::sync::block_lookups::Id;
-use crate::sync::network_context::SyncNetworkContext;
+use crate::sync::network_context::{PeersByCustody, SyncNetworkContext};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_availability_checker::{
-    AvailabilityCheckError, DataAvailabilityChecker, MissingBlobs,
+    AvailabilityCheckError, DataAvailabilityChecker, MissingBlobs, MissingDataColumns,
 };
 use beacon_chain::data_availability_checker::{AvailabilityView, ChildComponents};
 use beacon_chain::BeaconChainTypes;
@@ -17,7 +17,8 @@ use std::sync::Arc;
 use store::Hash256;
 use strum::IntoStaticStr;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::EthSpec;
+use types::data_column_sidecar::DataColumnIdentifier;
+use types::{DataColumnSidecar, EthSpec};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
@@ -52,6 +53,7 @@ pub struct SingleBlockLookup<L: Lookup, T: BeaconChainTypes> {
     pub id: Id,
     pub block_request_state: BlockRequestState<L>,
     pub blob_request_state: BlobRequestState<L, T::EthSpec>,
+    pub columns_request_state: ColumnsRequestState<L, T::EthSpec>,
     pub da_checker: Arc<DataAvailabilityChecker<T>>,
     /// Only necessary for requests triggered by an `UnknownBlockParent` or `UnknownBlockParent`
     /// because any blocks or blobs without parents won't hit the data availability cache.
@@ -64,13 +66,25 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         child_components: Option<ChildComponents<T::EthSpec>>,
         peers: &[PeerId],
         da_checker: Arc<DataAvailabilityChecker<T>>,
+        peer_by_custody: PeersByCustody,
         id: Id,
     ) -> Self {
         let is_deneb = da_checker.is_deneb();
+        let missing_column_ids = missing_data_column_ids(
+            requested_block_root,
+            child_components.as_ref(),
+            da_checker.clone(),
+        );
+
         Self {
             id,
             block_request_state: BlockRequestState::new(requested_block_root, peers),
             blob_request_state: BlobRequestState::new(requested_block_root, peers, is_deneb),
+            columns_request_state: ColumnsRequestState::new(
+                requested_block_root,
+                missing_column_ids,
+                peer_by_custody,
+            ),
             da_checker,
             child_components,
         }
@@ -116,6 +130,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
     ) -> Result<(), LookupRequestError> {
         let block_already_downloaded = self.block_already_downloaded();
         let blobs_already_downloaded = self.blobs_already_downloaded();
+        let columns_already_downloaded = self.columns_already_downloaded();
 
         if !block_already_downloaded {
             self.block_request_state
@@ -124,6 +139,12 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         if !blobs_already_downloaded {
             self.blob_request_state
                 .build_request_and_send(self.id, cx)?;
+        }
+        if !columns_already_downloaded {
+            for item in self.columns_request_state.requests.iter_mut() {
+                // TODO(das) do not send repeated requests
+                item.build_request_and_send(self.id, cx)?;
+            }
         }
         Ok(())
     }
@@ -140,7 +161,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
                 return CachedChild::DownloadIncomplete;
             };
 
-            if !self.missing_blob_ids().is_empty() {
+            if !self.missing_blob_ids().is_empty() || !self.missing_data_column_ids().is_empty() {
                 return CachedChild::DownloadIncomplete;
             }
 
@@ -179,13 +200,15 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
                 block_root: _,
                 downloaded_block,
                 downloaded_blobs,
-                downloaded_data_columns,
+                downloaded_custody_data_columns,
+                downloaded_sampled_data_columns,
             } = components;
             if let Some(block) = downloaded_block {
                 existing_components.merge_block(block);
             }
             existing_components.merge_blobs(downloaded_blobs);
-            existing_components.merge_data_columns(downloaded_data_columns);
+            existing_components.merge_custody_data_columns(downloaded_custody_data_columns);
+            existing_components.merge_sampled_data_columns(downloaded_sampled_data_columns);
         } else {
             self.child_components = Some(components);
         }
@@ -268,6 +291,16 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         self.blob_request_state.requested_ids = self.missing_blob_ids();
     }
 
+    pub(crate) fn columns_already_downloaded(&mut self) -> bool {
+        self.update_columns_request();
+        // TODO(das) request_ids is not actually used now
+        self.columns_request_state.request_ids.is_empty()
+    }
+
+    pub fn update_columns_request(&mut self) {
+        self.columns_request_state.request_ids = self.missing_data_column_ids();
+    }
+
     /// If `child_components` is `Some`, we know block components won't hit the data
     /// availability cache, so we don't check its processing cache unless `child_components`
     /// is `None`.
@@ -286,7 +319,15 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         }
     }
 
-    /// Penalizes a blob peer if it should have blobs but didn't return them to us.     
+    pub(crate) fn missing_data_column_ids(&self) -> MissingDataColumns {
+        missing_data_column_ids(
+            self.block_root(),
+            self.child_components.as_ref(),
+            self.da_checker.clone(),
+        )
+    }
+
+    /// Penalizes a blob peer if it should have blobs but didn't return them to us.
     pub fn penalize_blob_peer(&mut self, cx: &SyncNetworkContext<T>) {
         if let Ok(blob_peer) = self.blob_request_state.state.processing_peer() {
             cx.report_peer(
@@ -318,6 +359,19 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
     }
 }
 
+fn missing_data_column_ids<T: BeaconChainTypes>(
+    block_root: Hash256,
+    child_components: Option<&ChildComponents<T::EthSpec>>,
+    da_checker: Arc<DataAvailabilityChecker<T>>,
+) -> MissingDataColumns {
+    if let Some(components) = child_components {
+        da_checker.get_missing_data_column_ids(block_root, components)
+    } else {
+        // TODO(das): same code as for missing_blob_ids?
+        todo!()
+    }
+}
+
 /// The state of the blob request component of a `SingleBlockLookup`.
 pub struct BlobRequestState<L: Lookup, T: EthSpec> {
     /// The latest picture of which blobs still need to be requested. This includes information
@@ -337,6 +391,57 @@ impl<L: Lookup, E: EthSpec> BlobRequestState<L, E> {
             requested_ids: default_ids,
             blob_download_queue: <_>::default(),
             state: SingleLookupRequestState::new(peer_source),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+pub struct ColumnsRequestState<L: Lookup, E: EthSpec> {
+    pub request_ids: MissingDataColumns,
+    pub requests: Vec<ColumnRequestState<L, E>>,
+}
+
+impl<L: Lookup, E: EthSpec> ColumnsRequestState<L, E> {
+    pub fn new(
+        block_root: Hash256,
+        request_ids: MissingDataColumns,
+        peers_by_custody: PeersByCustody,
+    ) -> Self {
+        let slot = todo!();
+        let requests = request_ids
+            .indices()
+            .iter()
+            .map(|index| {
+                ColumnRequestState::new(
+                    DataColumnIdentifier {
+                        block_root,
+                        index: *index,
+                    },
+                    &peers_by_custody.custodial_peers(slot, *index),
+                )
+            })
+            .collect::<Vec<_>>();
+        Self {
+            request_ids,
+            requests,
+        }
+    }
+}
+
+/// The state of the blob request component of a `SingleBlockLookup`.
+pub struct ColumnRequestState<L: Lookup, E: EthSpec> {
+    pub request_id: DataColumnIdentifier,
+    pub state: SingleLookupRequestState,
+    pub pending_chunk: Option<Arc<DataColumnSidecar<E>>>,
+    _phantom: PhantomData<L>,
+}
+
+impl<L: Lookup, E: EthSpec> ColumnRequestState<L, E> {
+    pub fn new(request_id: DataColumnIdentifier, peer_source: &[PeerId]) -> Self {
+        Self {
+            request_id,
+            state: SingleLookupRequestState::new(peer_source),
+            pending_chunk: None,
             _phantom: PhantomData,
         }
     }
@@ -588,6 +693,7 @@ mod tests {
             None,
             &[peer_id],
             da_checker,
+            PeersByCustody::new(),
             1,
         );
         <BlockRequestState<TestLookup1> as RequestState<TestLookup1, T>>::build_request(
@@ -631,6 +737,7 @@ mod tests {
             None,
             &[peer_id],
             da_checker,
+            PeersByCustody::new(),
             1,
         );
         for _ in 1..TestLookup2::MAX_ATTEMPTS {

@@ -7,8 +7,11 @@ use crate::metrics;
 use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::sync::block_lookups::common::LookupType;
 use crate::sync::block_lookups::parent_lookup::{ParentLookup, RequestError};
-use crate::sync::block_lookups::single_block_lookup::{CachedChild, LookupRequestError};
+pub use crate::sync::block_lookups::single_block_lookup::{
+    CachedChild, ColumnRequestState, ColumnsRequestState, LookupRequestError,
+};
 use crate::sync::manager::{Id, SingleLookupReqId};
+use crate::sync::network_context::PeersByCustody;
 use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
 pub use beacon_chain::data_availability_checker::ChildComponents;
 use beacon_chain::data_availability_checker::{
@@ -32,6 +35,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use store::Hash256;
 use types::blob_sidecar::FixedBlobSidecarList;
+use types::data_column_sidecar::FixedDataColumnSidecarList;
 use types::Slot;
 
 pub mod common;
@@ -185,6 +189,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             child_components,
             peers,
             self.da_checker.clone(),
+            PeersByCustody::new(),
             cx.next_id(),
         );
 
@@ -1279,6 +1284,44 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             }
             None => {
                 trace!(self.log, "Dropping blobs ready for processing. Beacon processor not available"; "block_root" => %block_root);
+                Err(LookupRequestError::SendFailed(
+                    "beacon processor unavailable",
+                ))
+            }
+        }
+    }
+
+    fn send_data_columns_for_processing(
+        &self,
+        block_root: Hash256,
+        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
+        duration: Duration,
+        process_type: BlockProcessType,
+        cx: &SyncNetworkContext<T>,
+    ) -> Result<(), LookupRequestError> {
+        match cx.beacon_processor_if_enabled() {
+            Some(beacon_processor) => {
+                trace!(self.log, "Sending data columns for processing"; "block" => ?block_root, "process_type" => ?process_type);
+                if let Err(e) = beacon_processor.send_rpc_data_columns(
+                    block_root,
+                    data_columns,
+                    duration,
+                    process_type,
+                ) {
+                    error!(
+                        self.log,
+                        "Failed to send sync data columns to processor";
+                        "error" => ?e
+                    );
+                    Err(LookupRequestError::SendFailed(
+                        "beacon processor send failure",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            None => {
+                trace!(self.log, "Dropping data columns ready for processing. Beacon processor not available"; "block_root" => %block_root);
                 Err(LookupRequestError::SendFailed(
                     "beacon processor unavailable",
                 ))

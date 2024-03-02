@@ -29,7 +29,7 @@ use store::MemoryStore;
 use task_executor::test_utils::TestRuntime;
 use task_executor::TaskExecutor;
 use tokio::sync::mpsc::{self, error::TrySendError};
-use types::*;
+use types::{data_column_sidecar::FixedDataColumnSidecarList, *};
 
 pub use sync_methods::ChainSegmentProcessId;
 use types::blob_sidecar::FixedBlobSidecarList;
@@ -473,6 +473,29 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         let process_fn = self.clone().generate_rpc_blobs_process_fn(
             block_root,
             blobs,
+            seen_timestamp,
+            process_type,
+        );
+        self.try_send(BeaconWorkEvent {
+            drop_during_sync: false,
+            work: Work::RpcBlobs { process_fn },
+        })
+    }
+
+    pub fn send_rpc_data_columns(
+        self: &Arc<Self>,
+        block_root: Hash256,
+        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
+        seen_timestamp: Duration,
+        process_type: BlockProcessType,
+    ) -> Result<(), Error<T::EthSpec>> {
+        let count = data_columns.iter().filter(|b| b.is_some()).count();
+        if count == 0 {
+            return Ok(());
+        }
+        let process_fn = self.clone().generate_rpc_data_columns_process_fn(
+            block_root,
+            data_columns,
             seen_timestamp,
             process_type,
         );

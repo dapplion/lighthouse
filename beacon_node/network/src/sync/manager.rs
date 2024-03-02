@@ -34,7 +34,7 @@
 //! search for the block and subsequently search for parents if needed.
 
 use super::backfill_sync::{BackFillSync, ProcessResult, SyncStart};
-use super::block_lookups::BlockLookups;
+use super::block_lookups::{BlockLookups, ColumnRequestState, ColumnsRequestState};
 use super::network_context::{BlockOrBlob, SyncNetworkContext};
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
@@ -64,7 +64,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::{BlobSidecar, EthSpec, Hash256, SignedBeaconBlock, Slot};
+use types::{BlobSidecar, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 /// The number of slots ahead of us that is allowed before requesting a long-range (batch)  Sync
 /// from a peer. If a peer is within this tolerance (forwards or backwards), it is treated as a
@@ -90,6 +90,8 @@ pub enum RequestId {
     SingleBlock { id: SingleLookupReqId },
     /// Request searching for a set of blobs given a hash.
     SingleBlob { id: SingleLookupReqId },
+    /// Request sampling a data column of a block
+    SingleDataColumn { id: SingleLookupReqId },
     /// Request searching for a block's parent. The id is the chain, share with the corresponding
     /// blob id.
     ParentLookup { id: SingleLookupReqId },
@@ -128,6 +130,13 @@ pub enum SyncMessage<T: EthSpec> {
         seen_timestamp: Duration,
     },
 
+    RpcDataColumn {
+        request_id: RequestId,
+        peer_id: PeerId,
+        data_column: Option<Arc<DataColumnSidecar<T>>>,
+        seen_timestamp: Duration,
+    },
+
     /// A block with an unknown parent has been received.
     UnknownParentBlock(PeerId, RpcBlock<T>, Hash256),
 
@@ -137,6 +146,9 @@ pub enum SyncMessage<T: EthSpec> {
     /// A peer has sent an attestation that references a block that is unknown. This triggers the
     /// manager to attempt to find the block matching the unknown hash.
     UnknownBlockHashFromAttestation(PeerId, Hash256),
+
+    /// Trigger sampling for a block's data columns
+    SampleDataColumns(Hash256, Slot),
 
     /// A peer has disconnected.
     Disconnect(PeerId),
@@ -313,6 +325,15 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             RequestId::SingleBlob { id } => {
                 self.block_lookups
                     .single_block_lookup_failed::<BlobRequestState<Current, T::EthSpec>>(
+                        id,
+                        &peer_id,
+                        &self.network,
+                        error,
+                    );
+            }
+            RequestId::SingleDataColumn { id } => {
+                self.block_lookups
+                    .single_block_lookup_failed::<ColumnRequestState<Current, T::EthSpec>>(
                         id,
                         &peer_id,
                         &self.network,
@@ -617,6 +638,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 blob_sidecar,
                 seen_timestamp,
             } => self.rpc_blob_received(request_id, peer_id, blob_sidecar, seen_timestamp),
+            SyncMessage::RpcDataColumn {
+                request_id,
+                peer_id,
+                data_column,
+                seen_timestamp,
+            } => self.rpc_data_column_received(request_id, peer_id, data_column, seen_timestamp),
             SyncMessage::UnknownParentBlock(peer_id, block, block_root) => {
                 let block_slot = block.slot();
                 let parent_root = block.parent_root();
@@ -652,6 +679,23 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 if self.synced_and_connected(&peer_id) {
                     self.block_lookups
                         .search_block(block_hash, &[peer_id], &mut self.network);
+                }
+            }
+            SyncMessage::SampleDataColumns(block_hash, slot) => {
+                // Retrieve peers on samples
+                let synced = self.synced();
+                let connected_peers = {
+                    let peers_guard = self.network_globals().peers.read();
+                    peers_guard
+                        .connected_peers()
+                        .map(|(peerid, _)| *peerid)
+                        .collect::<Vec<_>>()
+                };
+
+                // If we are not synced, ignore this block.
+                if synced && !connected_peers.is_empty() {
+                    self.block_lookups
+                        .search_block(block_hash, &[], &mut self.network);
                 }
             }
             SyncMessage::Disconnect(peer_id) => {
@@ -844,6 +888,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             RequestId::SingleBlob { .. } => {
                 crit!(self.log, "Block received during blob request"; "peer_id" => %peer_id  );
             }
+            RequestId::SingleDataColumn { .. } => {
+                crit!(self.log, "Block received during data column request"; "peer_id" => %peer_id  );
+            }
             RequestId::ParentLookup { id } => self
                 .block_lookups
                 .parent_lookup_response::<BlockRequestState<Parent>>(
@@ -933,6 +980,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         &self.network,
                     )
             }
+            RequestId::SingleDataColumn { .. } => {
+                crit!(self.log, "Single blob received during data column request"; "peer_id" => %peer_id  );
+            }
 
             RequestId::ParentLookup { id: _ } => {
                 crit!(self.log, "Single blob received during parent block request"; "peer_id" => %peer_id  );
@@ -965,6 +1015,36 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             }
             RequestId::RangeBlockAndBlobs { id } => {
                 self.range_block_and_blobs_response(id, peer_id, blob.into())
+            }
+        }
+    }
+
+    fn rpc_data_column_received(
+        &mut self,
+        request_id: RequestId,
+        peer_id: PeerId,
+        data_column: Option<Arc<DataColumnSidecar<T::EthSpec>>>,
+        seen_timestamp: Duration,
+    ) {
+        match request_id {
+            RequestId::SingleDataColumn { id } => {
+                if let Some(blob) = data_column.as_ref() {
+                    debug!(self.log,
+                        "Peer returned data_column for single lookup";
+                        "peer_id" => %peer_id,
+                    );
+                }
+                self.block_lookups
+                    .single_lookup_response::<ColumnRequestState<Current, T::EthSpec>>(
+                        id,
+                        peer_id,
+                        data_column,
+                        seen_timestamp,
+                        &self.network,
+                    )
+            }
+            _ => {
+                crit!(self.log, "Single data column received during non data column request"; "peer_id" => %peer_id  );
             }
         }
     }

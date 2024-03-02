@@ -14,7 +14,8 @@ pub struct ChildComponents<E: EthSpec> {
     pub block_root: Hash256,
     pub downloaded_block: Option<Arc<SignedBeaconBlock<E>>>,
     pub downloaded_blobs: FixedBlobSidecarList<E>,
-    pub downloaded_data_columns: FixedDataColumnSidecarList<E>,
+    pub downloaded_custody_data_columns: FixedDataColumnSidecarList<E>,
+    pub downloaded_sampled_data_columns: FixedDataColumnSidecarList<E>,
 }
 
 impl<E: EthSpec> From<RpcBlock<E>> for ChildComponents<E> {
@@ -36,14 +37,15 @@ impl<E: EthSpec> ChildComponents<E> {
             block_root,
             downloaded_block: None,
             downloaded_blobs: <_>::default(),
-            downloaded_data_columns: <_>::default(),
+            downloaded_custody_data_columns: <_>::default(),
+            downloaded_sampled_data_columns: <_>::default(),
         }
     }
     pub fn new(
         block_root: Hash256,
         block: Option<Arc<SignedBeaconBlock<E>>>,
         blobs: Option<FixedBlobSidecarList<E>>,
-        data_columns: Option<FixedDataColumnSidecarList<E>>,
+        custody_data_columns: Option<FixedDataColumnSidecarList<E>>,
     ) -> Self {
         let mut cache = Self::empty(block_root);
         if let Some(block) = block {
@@ -52,8 +54,8 @@ impl<E: EthSpec> ChildComponents<E> {
         if let Some(blobs) = blobs {
             cache.merge_blobs(blobs);
         }
-        if let Some(data_columns) = data_columns {
-            cache.merge_data_columns(data_columns);
+        if let Some(custody_data_columns) = custody_data_columns {
+            cache.merge_custody_data_columns(custody_data_columns);
         }
         cache
     }

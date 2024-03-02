@@ -68,6 +68,7 @@ impl<T: BeaconChainTypes> ParentLookup<T> {
             Some(ChildComponents::empty(block_root)),
             &[peer_id],
             da_checker,
+            cx.peers_by_custody(),
             cx.next_id(),
         );
 
