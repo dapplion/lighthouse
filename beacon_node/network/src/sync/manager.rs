@@ -322,7 +322,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         &peer_id,
                         &self.network,
                         error,
-                    );
+                    )
+                    .expect("🦜");
             }
             RequestId::SingleBlob { id } => {
                 self.block_lookups
@@ -332,7 +333,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         &peer_id,
                         &self.network,
                         error,
-                    );
+                    )
+                    .expect("🦜");
             }
             RequestId::SingleDataColumn { id, index } => {
                 self.block_lookups
@@ -342,7 +344,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         &peer_id,
                         &self.network,
                         error,
-                    );
+                    )
+                    .expect("🦜");
             }
             RequestId::ParentLookup { id } => {
                 self.block_lookups
@@ -352,7 +355,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         peer_id,
                         &self.network,
                         error,
-                    );
+                    )
+                    .expect("🦜");
             }
             RequestId::ParentLookupBlob { id } => {
                 self.block_lookups
@@ -362,7 +366,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         peer_id,
                         &self.network,
                         error,
-                    );
+                    )
+                    .expect("🦜");
             }
             RequestId::BackFillBlocks { id } => {
                 if let Some(batch_id) = self
@@ -724,7 +729,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         &mut self.network,
                         (),
                     )
-                    .unwrap(),
+                    .expect("🦜"),
                 BlockProcessType::SingleBlob { id } => self
                     .block_lookups
                     .single_block_component_processed::<BlobRequestState<Current, T::EthSpec>>(
@@ -733,7 +738,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         &mut self.network,
                         (),
                     )
-                    .unwrap(),
+                    .expect("🦜"),
                 BlockProcessType::SingleDataColumn { id, index } => self
                     .block_lookups
                     .single_block_component_processed::<ColumnRequestState<Current, T::EthSpec>>(
@@ -742,7 +747,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         &mut self.network,
                         index,
                     )
-                    .unwrap(),
+                    .expect("🦜"),
                 BlockProcessType::ParentLookup { chain_hash } => self
                     .block_lookups
                     .parent_block_processed(chain_hash, result, &mut self.network),

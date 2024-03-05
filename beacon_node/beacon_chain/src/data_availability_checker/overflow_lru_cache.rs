@@ -47,7 +47,7 @@ use std::num::NonZeroUsize;
 use std::{collections::HashSet, sync::Arc};
 use types::blob_sidecar::BlobIdentifier;
 use types::data_column_sidecar::DataColumnIdentifier;
-use types::{BlobSidecar, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256, Slot};
+use types::{BlobSidecar, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256};
 
 /// This represents the components of a partially available block
 ///
@@ -57,22 +57,20 @@ use types::{BlobSidecar, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256, 
 pub struct PendingComponents<T: EthSpec> {
     pub block_root: Hash256,
     pub verified_blobs: FixedVector<Option<KzgVerifiedBlob<T>>, T::MaxBlobsPerBlock>,
-    pub verified_custody_data_columns:
-        FixedVector<Option<KzgVerifiedCustodyDataColumn<T>>, T::DataColumnCount>,
-    pub verified_sampled_data_columns:
-        FixedVector<Option<KzgVerifiedSampledDataColumn>, T::DataColumnCount>,
+    // TODO(das) after KZG verifying sample columns we don't need to keep them around anymore. As a
+    // memory optimization we can drop the data of sampled columns, and keep the data for custody
+    // columns only. Introduce a new type:
+    // ```
+    // #[derive(Encode, Decode, Clone)]
+    // pub struct KzgVerifiedSampledDataColumn<T: EthSpec> {
+    //     pub index: u64,
+    //     pub slot: Slot,
+    //     pub data: Option<KzgVerifiedDataColumn<T>>,
+    // }
+    // ```
+    // and convert to it based on this `PendingComponents` custody assignments
+    pub verified_data_columns: FixedVector<Option<KzgVerifiedDataColumn<T>>, T::DataColumnCount>,
     pub executed_block: Option<DietAvailabilityPendingExecutedBlock<T>>,
-}
-
-#[derive(Encode, Decode, Clone)]
-pub struct KzgVerifiedCustodyDataColumn<T: EthSpec> {
-    pub inner: KzgVerifiedDataColumn<T>,
-}
-
-#[derive(Encode, Decode, Clone)]
-pub struct KzgVerifiedSampledDataColumn {
-    pub index: u64,
-    pub slot: Slot,
 }
 
 impl<T: EthSpec> PendingComponents<T> {
@@ -80,8 +78,7 @@ impl<T: EthSpec> PendingComponents<T> {
         Self {
             block_root,
             verified_blobs: <_>::default(),
-            verified_custody_data_columns: <_>::default(),
-            verified_sampled_data_columns: <_>::default(),
+            verified_data_columns: <_>::default(),
             executed_block: None,
         }
     }
@@ -101,9 +98,8 @@ impl<T: EthSpec> PendingComponents<T> {
         let Self {
             block_root,
             verified_blobs,
-            verified_custody_data_columns,
+            verified_data_columns,
             executed_block,
-            ..
         } = self;
 
         let Some(diet_executed_block) = executed_block else {
@@ -123,10 +119,10 @@ impl<T: EthSpec> PendingComponents<T> {
         let verified_blobs = VariableList::new(verified_blobs)?;
 
         // TODO(das) Add check later - we don't expect data columns to be available until we transition to PeerDAS.
-        let verified_data_columns = verified_custody_data_columns
+        let verified_data_columns = verified_data_columns
             .into_iter()
             .cloned()
-            .map(|d| d.map(|d| d.inner.to_data_column()))
+            .map(|d| d.map(|d| d.to_data_column()))
             .take(T::number_of_columns())
             .collect::<Option<Vec<_>>>()
             .map(Into::into);
@@ -165,28 +161,14 @@ impl<T: EthSpec> PendingComponents<T> {
                         });
                     }
                 }
-                for maybe_data_column in self.verified_custody_data_columns.iter() {
+                for maybe_data_column in self.verified_data_columns.iter() {
                     if maybe_data_column.is_some() {
-                        return maybe_data_column.as_ref().map(
-                            |kzg_verified_custody_data_column| {
-                                kzg_verified_custody_data_column
-                                    .inner
-                                    .as_data_column()
-                                    .slot()
-                                    .epoch(T::slots_per_epoch())
-                            },
-                        );
-                    }
-                }
-                for maybe_data_column in self.verified_sampled_data_columns.iter() {
-                    if maybe_data_column.is_some() {
-                        return maybe_data_column.as_ref().map(
-                            |kzg_verified_sampled_data_column| {
-                                kzg_verified_sampled_data_column
-                                    .slot
-                                    .epoch(T::slots_per_epoch())
-                            },
-                        );
+                        return maybe_data_column.as_ref().map(|kzg_verified_data_column| {
+                            kzg_verified_data_column
+                                .as_data_column()
+                                .slot()
+                                .epoch(T::slots_per_epoch())
+                        });
                     }
                 }
                 None
@@ -200,8 +182,7 @@ impl<T: EthSpec> PendingComponents<T> {
 enum OverflowKey {
     Block(Hash256),
     Blob(Hash256, u8),
-    CustodyDataColumn(Hash256, u8),
-    SampledDataColumn(Hash256, u8),
+    DataColumn(Hash256, u8),
 }
 
 impl OverflowKey {
@@ -218,7 +199,7 @@ impl OverflowKey {
         Ok(Self::Blob(blob_id.block_root, blob_id.index as u8))
     }
 
-    pub fn from_custody_data_column_id<E: EthSpec>(
+    pub fn from_data_column_id<E: EthSpec>(
         data_column_id: DataColumnIdentifier,
     ) -> Result<Self, AvailabilityCheckError> {
         if data_column_id.index >= E::number_of_columns() as u64
@@ -228,23 +209,7 @@ impl OverflowKey {
                 data_column_id.index,
             ));
         }
-        Ok(Self::CustodyDataColumn(
-            data_column_id.block_root,
-            data_column_id.index as u8,
-        ))
-    }
-
-    pub fn from_sampled_data_column_id<E: EthSpec>(
-        data_column_id: DataColumnIdentifier,
-    ) -> Result<Self, AvailabilityCheckError> {
-        if data_column_id.index >= E::number_of_columns() as u64
-            || data_column_id.index > u8::MAX as u64
-        {
-            return Err(AvailabilityCheckError::DataColumnIndexInvalid(
-                data_column_id.index,
-            ));
-        }
-        Ok(Self::SampledDataColumn(
+        Ok(Self::DataColumn(
             data_column_id.block_root,
             data_column_id.index as u8,
         ))
@@ -253,9 +218,7 @@ impl OverflowKey {
     pub fn root(&self) -> &Hash256 {
         match self {
             Self::Block(root) => root,
-            Self::Blob(root, _)
-            | Self::CustodyDataColumn(root, _)
-            | Self::SampledDataColumn(root, _) => root,
+            Self::Blob(root, _) | Self::DataColumn(root, _) => root,
         }
     }
 }
@@ -295,32 +258,14 @@ impl<T: BeaconChainTypes> OverflowStore<T> {
                 .put_bytes(col.as_str(), &key.as_ssz_bytes(), &blob.as_ssz_bytes())?
         }
 
-        for data_column in Vec::from(pending_components.verified_custody_data_columns)
+        for data_column in Vec::from(pending_components.verified_data_columns)
             .into_iter()
             .flatten()
         {
-            let key =
-                OverflowKey::from_custody_data_column_id::<T::EthSpec>(DataColumnIdentifier {
-                    block_root,
-                    index: data_column.inner.data_column_index(),
-                })?;
-
-            self.0.hot_db.put_bytes(
-                col.as_str(),
-                &key.as_ssz_bytes(),
-                &data_column.as_ssz_bytes(),
-            )?
-        }
-
-        for data_column in Vec::from(pending_components.verified_sampled_data_columns)
-            .into_iter()
-            .flatten()
-        {
-            let key =
-                OverflowKey::from_sampled_data_column_id::<T::EthSpec>(DataColumnIdentifier {
-                    block_root,
-                    index: data_column.index,
-                })?;
+            let key = OverflowKey::from_data_column_id::<T::EthSpec>(DataColumnIdentifier {
+                block_root,
+                index: data_column.data_column_index(),
+            })?;
 
             self.0.hot_db.put_bytes(
                 col.as_str(),
@@ -362,23 +307,13 @@ impl<T: BeaconChainTypes> OverflowStore<T> {
                         .ok_or(AvailabilityCheckError::BlobIndexInvalid(index as u64))? =
                         Some(KzgVerifiedBlob::from_ssz_bytes(value_bytes.as_slice())?);
                 }
-                OverflowKey::CustodyDataColumn(_, index) => {
+                OverflowKey::DataColumn(_, index) => {
                     *maybe_pending_components
                         .get_or_insert_with(|| PendingComponents::empty(block_root))
-                        .verified_custody_data_columns
-                        .get_mut(index as usize)
-                        .ok_or(AvailabilityCheckError::DataColumnIndexInvalid(index as u64))? =
-                        Some(KzgVerifiedCustodyDataColumn {
-                            inner: KzgVerifiedDataColumn::from_ssz_bytes(value_bytes.as_slice())?,
-                        });
-                }
-                OverflowKey::SampledDataColumn(_, index) => {
-                    *maybe_pending_components
-                        .get_or_insert_with(|| PendingComponents::empty(block_root))
-                        .verified_sampled_data_columns
+                        .verified_data_columns
                         .get_mut(index as usize)
                         .ok_or(AvailabilityCheckError::DataColumnIndexInvalid(index as u64))? = Some(
-                        KzgVerifiedSampledDataColumn::from_ssz_bytes(value_bytes.as_slice())?,
+                        KzgVerifiedDataColumn::from_ssz_bytes(value_bytes.as_slice())?,
                     )
                 }
             }
@@ -417,7 +352,7 @@ impl<T: BeaconChainTypes> OverflowStore<T> {
         &self,
         data_column_id: &DataColumnIdentifier,
     ) -> Result<Option<Arc<DataColumnSidecar<T::EthSpec>>>, AvailabilityCheckError> {
-        let key = OverflowKey::from_custody_data_column_id::<T::EthSpec>(*data_column_id)?;
+        let key = OverflowKey::from_data_column_id::<T::EthSpec>(*data_column_id)?;
 
         self.0
             .hot_db
@@ -491,13 +426,13 @@ impl<T: BeaconChainTypes> Critical<T> {
     ) -> Result<Option<Arc<DataColumnSidecar<T::EthSpec>>>, AvailabilityCheckError> {
         if let Some(pending_components) = self.in_memory.peek(&data_column_id.block_root) {
             Ok(pending_components
-                .verified_custody_data_columns
+                .verified_data_columns
                 .get(data_column_id.index as usize)
                 .ok_or(AvailabilityCheckError::DataColumnIndexInvalid(
                     data_column_id.index,
                 ))?
                 .as_ref()
-                .map(|data_column| data_column.inner.clone_data_column()))
+                .map(|data_column| data_column.clone_data_column()))
         } else {
             Ok(None)
         }
@@ -900,18 +835,13 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
                                 .slot()
                                 .epoch(T::EthSpec::slots_per_epoch())
                         }
-                        OverflowKey::CustodyDataColumn(_, _) => {
+                        OverflowKey::DataColumn(_, _) => {
                             KzgVerifiedDataColumn::<T::EthSpec>::from_ssz_bytes(
                                 value_bytes.as_slice(),
                             )?
                             .as_data_column()
                             .slot()
                             .epoch(T::EthSpec::slots_per_epoch())
-                        }
-                        OverflowKey::SampledDataColumn(_, _) => {
-                            KzgVerifiedSampledDataColumn::from_ssz_bytes(value_bytes.as_slice())?
-                                .slot
-                                .epoch(T::EthSpec::slots_per_epoch())
                         }
                     };
                     current_block_data = Some(BlockData {
@@ -966,8 +896,7 @@ impl ssz::Encode for OverflowKey {
                 block_hash.ssz_append(buf);
                 buf.push(*index + 1)
             }
-            OverflowKey::CustodyDataColumn(block_hash, index)
-            | OverflowKey::SampledDataColumn(block_hash, index) => {
+            OverflowKey::DataColumn(block_hash, index) => {
                 block_hash.ssz_append(buf);
                 buf.push(*index + 1)
             }
@@ -982,9 +911,7 @@ impl ssz::Encode for OverflowKey {
         match self {
             Self::Block(root) => root.ssz_bytes_len() + 1,
             Self::Blob(root, _) => root.ssz_bytes_len() + 1,
-            Self::CustodyDataColumn(root, _) | Self::SampledDataColumn(root, _) => {
-                root.ssz_bytes_len() + 1
-            }
+            Self::DataColumn(root, _) => root.ssz_bytes_len() + 1,
         }
     }
 }

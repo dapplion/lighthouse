@@ -43,8 +43,6 @@ use types::data_column_sidecar::{
 };
 use types::non_zero_usize::new_non_zero_usize;
 
-use self::overflow_lru_cache::KzgVerifiedCustodyDataColumn;
-
 /// The LRU Cache stores `PendingComponents` which can store up to
 /// `MAX_BLOBS_PER_BLOCK = 6` blobs each. A `BlobSidecar` is 0.131256 MB. So
 /// the maximum size of a `PendingComponents` is ~ 0.787536 MB. Setting this
@@ -549,7 +547,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
             .write()
             .entry(block_root)
             .or_insert_with(|| ProcessingComponents::new(slot))
-            .merge_custody_data_columns(seen_columns);
+            .merge_data_columns(seen_columns);
     }
 
     /// Clears the block and all blobs from the processing cache for a give root if they exist.
