@@ -91,7 +91,7 @@ pub enum RequestId {
     /// Request searching for a set of blobs given a hash.
     SingleBlob { id: SingleLookupReqId },
     /// Request sampling a data column of a block
-    SingleDataColumn { id: SingleLookupReqId },
+    SingleDataColumn { id: SingleLookupReqId, index: u64 },
     /// Request searching for a block's parent. The id is the chain, share with the corresponding
     /// blob id.
     ParentLookup { id: SingleLookupReqId },
@@ -178,6 +178,7 @@ pub enum SyncMessage<T: EthSpec> {
 pub enum BlockProcessType {
     SingleBlock { id: Id },
     SingleBlob { id: Id },
+    SingleDataColumn { id: Id, index: u64 },
     ParentLookup { chain_hash: Hash256 },
 }
 
@@ -317,6 +318,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.block_lookups
                     .single_block_lookup_failed::<BlockRequestState<Current>>(
                         id,
+                        (),
                         &peer_id,
                         &self.network,
                         error,
@@ -326,15 +328,17 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.block_lookups
                     .single_block_lookup_failed::<BlobRequestState<Current, T::EthSpec>>(
                         id,
+                        (),
                         &peer_id,
                         &self.network,
                         error,
                     );
             }
-            RequestId::SingleDataColumn { id } => {
+            RequestId::SingleDataColumn { id, index } => {
                 self.block_lookups
                     .single_block_lookup_failed::<ColumnRequestState<Current, T::EthSpec>>(
                         id,
+                        index,
                         &peer_id,
                         &self.network,
                         error,
@@ -344,6 +348,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.block_lookups
                     .parent_lookup_failed::<BlockRequestState<Parent>>(
                         id,
+                        (),
                         peer_id,
                         &self.network,
                         error,
@@ -353,6 +358,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.block_lookups
                     .parent_lookup_failed::<BlobRequestState<Parent, T::EthSpec>>(
                         id,
+                        (),
                         peer_id,
                         &self.network,
                         error,
@@ -716,14 +722,27 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         id,
                         result,
                         &mut self.network,
-                    ),
+                        (),
+                    )
+                    .unwrap(),
                 BlockProcessType::SingleBlob { id } => self
                     .block_lookups
                     .single_block_component_processed::<BlobRequestState<Current, T::EthSpec>>(
                         id,
                         result,
                         &mut self.network,
-                    ),
+                        (),
+                    )
+                    .unwrap(),
+                BlockProcessType::SingleDataColumn { id, index } => self
+                    .block_lookups
+                    .single_block_component_processed::<ColumnRequestState<Current, T::EthSpec>>(
+                        id,
+                        result,
+                        &mut self.network,
+                        index,
+                    )
+                    .unwrap(),
                 BlockProcessType::ParentLookup { chain_hash } => self
                     .block_lookups
                     .parent_block_processed(chain_hash, result, &mut self.network),
@@ -880,6 +899,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 .block_lookups
                 .single_lookup_response::<BlockRequestState<Current>>(
                     id,
+                    (),
                     peer_id,
                     block,
                     seen_timestamp,
@@ -895,6 +915,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 .block_lookups
                 .parent_lookup_response::<BlockRequestState<Parent>>(
                     id,
+                    (),
                     peer_id,
                     block,
                     seen_timestamp,
@@ -974,6 +995,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.block_lookups
                     .single_lookup_response::<BlobRequestState<Current, T::EthSpec>>(
                         id,
+                        (),
                         peer_id,
                         blob,
                         seen_timestamp,
@@ -998,6 +1020,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.block_lookups
                     .parent_lookup_response::<BlobRequestState<Parent, T::EthSpec>>(
                         id,
+                        (),
                         peer_id,
                         blob,
                         seen_timestamp,
@@ -1027,7 +1050,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         seen_timestamp: Duration,
     ) {
         match request_id {
-            RequestId::SingleDataColumn { id } => {
+            RequestId::SingleDataColumn { id, index } => {
                 if let Some(blob) = data_column.as_ref() {
                     debug!(self.log,
                         "Peer returned data_column for single lookup";
@@ -1037,6 +1060,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.block_lookups
                     .single_lookup_response::<ColumnRequestState<Current, T::EthSpec>>(
                         id,
+                        index,
                         peer_id,
                         data_column,
                         seen_timestamp,

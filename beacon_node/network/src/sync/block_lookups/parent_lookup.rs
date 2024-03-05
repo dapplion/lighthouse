@@ -40,6 +40,7 @@ pub enum ParentVerifyError {
     ExtraBlobsReturned,
     InvalidIndex(u64),
     PreviousFailure { parent_root: Hash256 },
+    UnknownRequest,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -53,6 +54,7 @@ pub enum RequestError {
         cannot_process: bool,
     },
     NoPeers,
+    UnknownRequest,
 }
 
 impl<T: BeaconChainTypes> ParentLookup<T> {
@@ -190,9 +192,11 @@ impl<T: BeaconChainTypes> ParentLookup<T> {
         &mut self,
         block: Option<R::ResponseType>,
         failed_chains: &mut lru_cache::LRUTimeCache<Hash256>,
+        request_id: R::RequestIdType,
     ) -> Result<Option<R::VerifiedResponseType>, ParentVerifyError> {
         let expected_block_root = self.current_parent_request.block_root();
-        let request_state = R::request_state_mut(&mut self.current_parent_request);
+        let request_state = R::request_state_mut(&mut self.current_parent_request, request_id)
+            .map_err(|_| ParentVerifyError::UnknownRequest)?;
         let root_and_verified = request_state.verify_response(expected_block_root, block)?;
 
         // check if the parent of this block isn't in the failed cache. If it is, this chain should
@@ -260,6 +264,7 @@ impl From<LookupRequestError> for RequestError {
             }
             E::NoPeers => RequestError::NoPeers,
             E::SendFailed(msg) => RequestError::SendFailed(msg),
+            E::UnknownRequest => RequestError::UnknownRequest,
         }
     }
 }
@@ -287,6 +292,7 @@ impl RequestError {
             }
             RequestError::TooManyAttempts { cannot_process: _ } => "too_many_downloading_attempts",
             RequestError::NoPeers => "no_peers",
+            RequestError::UnknownRequest => "unknown_request",
         }
     }
 }
