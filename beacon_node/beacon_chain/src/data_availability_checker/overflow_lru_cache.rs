@@ -28,6 +28,7 @@
 //! the cache when they are accessed.
 
 use super::state_lru_cache::{DietAvailabilityPendingExecutedBlock, StateLRUCache};
+use super::NodeIdRaw;
 use crate::beacon_chain::BeaconStore;
 use crate::blob_verification::KzgVerifiedBlob;
 use crate::block_verification_types::{
@@ -71,15 +72,17 @@ pub struct PendingComponents<T: EthSpec> {
     // and convert to it based on this `PendingComponents` custody assignments
     pub verified_data_columns: FixedVector<Option<KzgVerifiedDataColumn<T>>, T::DataColumnCount>,
     pub executed_block: Option<DietAvailabilityPendingExecutedBlock<T>>,
+    pub node_id: NodeIdRaw,
 }
 
 impl<T: EthSpec> PendingComponents<T> {
-    pub fn empty(block_root: Hash256) -> Self {
+    pub fn empty(block_root: Hash256, node_id: NodeIdRaw) -> Self {
         Self {
             block_root,
             verified_blobs: <_>::default(),
             verified_data_columns: <_>::default(),
             executed_block: None,
+            node_id,
         }
     }
 
@@ -226,7 +229,7 @@ impl OverflowKey {
 /// A wrapper around BeaconStore<T> that implements various
 /// methods used for saving and retrieving blocks / blobs
 /// from the store (for organization)
-struct OverflowStore<T: BeaconChainTypes>(BeaconStore<T>);
+struct OverflowStore<T: BeaconChainTypes>(BeaconStore<T>, NodeIdRaw);
 
 impl<T: BeaconChainTypes> OverflowStore<T> {
     /// Store pending components in the database
@@ -293,7 +296,7 @@ impl<T: BeaconChainTypes> OverflowStore<T> {
             match OverflowKey::from_ssz_bytes(&key_bytes)? {
                 OverflowKey::Block(_) => {
                     maybe_pending_components
-                        .get_or_insert_with(|| PendingComponents::empty(block_root))
+                        .get_or_insert_with(|| PendingComponents::empty(block_root, self.1))
                         .executed_block =
                         Some(DietAvailabilityPendingExecutedBlock::from_ssz_bytes(
                             value_bytes.as_slice(),
@@ -301,7 +304,7 @@ impl<T: BeaconChainTypes> OverflowStore<T> {
                 }
                 OverflowKey::Blob(_, index) => {
                     *maybe_pending_components
-                        .get_or_insert_with(|| PendingComponents::empty(block_root))
+                        .get_or_insert_with(|| PendingComponents::empty(block_root, self.1))
                         .verified_blobs
                         .get_mut(index as usize)
                         .ok_or(AvailabilityCheckError::BlobIndexInvalid(index as u64))? =
@@ -309,7 +312,7 @@ impl<T: BeaconChainTypes> OverflowStore<T> {
                 }
                 OverflowKey::DataColumn(_, index) => {
                     *maybe_pending_components
-                        .get_or_insert_with(|| PendingComponents::empty(block_root))
+                        .get_or_insert_with(|| PendingComponents::empty(block_root, self.1))
                         .verified_data_columns
                         .get_mut(index as usize)
                         .ok_or(AvailabilityCheckError::DataColumnIndexInvalid(index as u64))? = Some(
@@ -505,6 +508,8 @@ pub struct OverflowLRUCache<T: BeaconChainTypes> {
     maintenance_lock: Mutex<()>,
     /// The capacity of the LRU cache
     capacity: NonZeroUsize,
+
+    node_id: NodeIdRaw,
 }
 
 impl<T: BeaconChainTypes> OverflowLRUCache<T> {
@@ -512,6 +517,7 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
         capacity: NonZeroUsize,
         beacon_store: BeaconStore<T>,
         spec: ChainSpec,
+        node_id: NodeIdRaw,
     ) -> Result<Self, AvailabilityCheckError> {
         let overflow_store = OverflowStore(beacon_store.clone());
         let mut critical = Critical::new(capacity);
@@ -522,6 +528,7 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
             state_cache: StateLRUCache::new(beacon_store, spec),
             maintenance_lock: Mutex::new(()),
             capacity,
+            node_id,
         })
     }
 

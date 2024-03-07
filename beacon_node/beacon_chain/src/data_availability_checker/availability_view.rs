@@ -99,30 +99,12 @@ pub trait AvailabilityView<E: EthSpec> {
         self.get_cached_blobs().iter().flatten().count()
     }
 
-    /// Inserts a block into the cache.
-    fn insert_block(&mut self, block: Self::BlockType) {
-        *self.get_cached_block_mut() = Some(block)
-    }
-
     /// Inserts a blob at a specific index in the cache.
     ///
     /// Existing blob at the index will be replaced.
     fn insert_blob_at_index(&mut self, blob_index: usize, blob: Self::BlobType) {
         if let Some(b) = self.get_cached_blobs_mut().get_mut(blob_index) {
             *b = Some(blob);
-        }
-    }
-
-    fn insert_data_column_at_index(
-        &mut self,
-        data_column_index: usize,
-        data_column: Self::DataColumnType,
-    ) {
-        if let Some(b) = self
-            .get_cached_data_columns_mut()
-            .get_mut(data_column_index)
-        {
-            *b = Some(data_column);
         }
     }
 
@@ -141,7 +123,9 @@ pub trait AvailabilityView<E: EthSpec> {
             };
             // TODO(das): Add equivalent checks for data columns if necessary
             if !self.data_column_exists(index) {
-                self.insert_data_column_at_index(index, data_column);
+                if let Some(b) = self.get_cached_data_columns_mut().get_mut(index) {
+                    *b = Some(data_column);
+                }
             }
         }
     }
@@ -181,7 +165,7 @@ pub trait AvailabilityView<E: EthSpec> {
     ///
     /// Blobs that don't match the new block's commitments are evicted.
     fn merge_block(&mut self, block: Self::BlockType) {
-        self.insert_block(block);
+        *self.get_cached_block_mut() = Some(block);
         let reinsert = std::mem::take(self.get_cached_blobs_mut());
         self.merge_blobs(reinsert);
     }
@@ -204,8 +188,22 @@ pub trait AvailabilityView<E: EthSpec> {
         // custody columns happens to overlap with a randomly selected column to sample then it
         // can be counted. To do this condition this struct will need to be aware of our
         // randomly selected set of column_ids
-        todo!();
+        if let Some(block) = self.get_cached_block() {
+            // let slot = block.get_slot();
+            sample_requirements(block.get_slot())
+                .iter()
+                .all(|index| self.data_column_exists(*index))
+        } else {
+            false
+        }
     }
+
+    // Return which columns are required for availability for both custody and sampling
+    // fn column_requirements(&self) -> &[usize];
+}
+
+fn sample_requirements(slot: Slot) -> Vec<usize> {
+    todo!()
 }
 
 /// Implements the `AvailabilityView` trait for a given struct.

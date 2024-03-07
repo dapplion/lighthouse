@@ -638,6 +638,8 @@ mod tests {
         ChainSpec, EthSpec, MinimalEthSpec as E, SignedBeaconBlock, Slot,
     };
 
+    const NODE_ID: [u8; 32] = [0; 32];
+
     fn rand_block() -> SignedBeaconBlock<E> {
         let mut rng = XorShiftRng::from_seed([42; 16]);
         SignedBeaconBlock::from_block(
@@ -684,8 +686,15 @@ mod tests {
             HotColdDB::open_ephemeral(StoreConfig::default(), ChainSpec::minimal(), log.clone())
                 .expect("store");
         let da_checker = Arc::new(
-            DataAvailabilityChecker::new(slot_clock, None, store.into(), &log, spec.clone())
-                .expect("data availability checker"),
+            DataAvailabilityChecker::new(
+                slot_clock,
+                None,
+                store.into(),
+                &log,
+                spec.clone(),
+                NODE_ID,
+            )
+            .expect("data availability checker"),
         );
         let mut sl = SingleBlockLookup::<TestLookup1, T>::new(
             block.canonical_root(),
@@ -727,8 +736,15 @@ mod tests {
                 .expect("store");
 
         let da_checker = Arc::new(
-            DataAvailabilityChecker::new(slot_clock, None, store.into(), &log, spec.clone())
-                .expect("data availability checker"),
+            DataAvailabilityChecker::new(
+                slot_clock,
+                None,
+                store.into(),
+                &log,
+                spec.clone(),
+                NODE_ID,
+            )
+            .expect("data availability checker"),
         );
 
         let mut sl = SingleBlockLookup::<TestLookup2, T>::new(

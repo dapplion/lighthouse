@@ -43,6 +43,8 @@ use types::data_column_sidecar::{
 };
 use types::non_zero_usize::new_non_zero_usize;
 
+type NodeIdRaw = [u8; 32];
+
 /// The LRU Cache stores `PendingComponents` which can store up to
 /// `MAX_BLOBS_PER_BLOCK = 6` blobs each. A `BlobSidecar` is 0.131256 MB. So
 /// the maximum size of a `PendingComponents` is ~ 0.787536 MB. Setting this
@@ -64,6 +66,7 @@ pub struct DataAvailabilityChecker<T: BeaconChainTypes> {
     kzg: Option<Arc<Kzg>>,
     log: Logger,
     spec: ChainSpec,
+    node_id: NodeIdRaw,
 }
 
 /// This type is returned after adding a block / blob to the `DataAvailabilityChecker`.
@@ -94,6 +97,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         store: BeaconStore<T>,
         log: &Logger,
         spec: ChainSpec,
+        node_id: NodeIdRaw,
     ) -> Result<Self, AvailabilityCheckError> {
         let overflow_cache = OverflowLRUCache::new(OVERFLOW_LRU_CAPACITY, store, spec.clone())?;
         Ok(Self {
@@ -103,6 +107,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
             log: log.clone(),
             kzg,
             spec,
+            node_id,
         })
     }
 
