@@ -539,6 +539,19 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
             Err(e) => return Err(SignatureNotChecked(&signed_aggregate.message.aggregate, e)),
         };
 
+        let relevant_epoch = signed_aggregate.message.epoch().saturating_sub(1u64);
+        let aggregator = signed_aggregate.message.aggregator_index as usize;
+
+        chain
+            .effective_balances_cache
+            .load_epoch(chain, relevant_epoch)
+            .map_err(|e| {
+                SignatureNotChecked(
+                    &signed_aggregate.message.aggregate,
+                    Error::BeaconChainError(e),
+                )
+            })?;
+
         let indexed_attestation =
             match map_attestation_committee(chain, attestation, |(committee, _)| {
                 // Note: this clones the signature which is known to be a relatively slow operation.
@@ -547,8 +560,28 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
                 let selection_proof =
                     SelectionProof::from(signed_aggregate.message.selection_proof.clone());
 
+                let factor = if chain
+                    .spec
+                    .fork_name_at_slot::<T::EthSpec>(signed_aggregate.message.aggregate.data.slot)
+                    >= ForkName::Deneb
+                {
+                    let total_committee_balance = chain
+                        .effective_balances_cache
+                        .get_committee_balance::<T::EthSpec>(&committee)
+                        .map_err(|e| Error::BeaconChainError(e))?;
+                    let aggregator_balance = chain
+                        .effective_balances_cache
+                        .get_effective_balance(relevant_epoch, aggregator)
+                        .map_err(|e| Error::BeaconChainError(e))?;
+
+                    // TODO: is it just standard integer division?
+                    (total_committee_balance / aggregator_balance) as usize
+                } else {
+                    committee.committee.len()
+                };
+
                 if !selection_proof
-                    .is_aggregator(committee.committee.len(), &chain.spec)
+                    .is_aggregator(factor, &chain.spec)
                     .map_err(|e| Error::BeaconChainError(e.into()))?
                 {
                     return Err(Error::InvalidSelectionProof { aggregator_index });
