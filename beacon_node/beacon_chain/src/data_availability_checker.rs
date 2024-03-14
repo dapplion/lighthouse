@@ -99,7 +99,8 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         spec: ChainSpec,
         node_id: NodeIdRaw,
     ) -> Result<Self, AvailabilityCheckError> {
-        let overflow_cache = OverflowLRUCache::new(OVERFLOW_LRU_CAPACITY, store, spec.clone())?;
+        let overflow_cache =
+            OverflowLRUCache::new(OVERFLOW_LRU_CAPACITY, store, spec.clone(), node_id)?;
         Ok(Self {
             processing_cache: <_>::default(),
             availability_cache: Arc::new(overflow_cache),

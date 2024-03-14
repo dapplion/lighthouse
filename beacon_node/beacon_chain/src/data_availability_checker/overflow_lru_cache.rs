@@ -103,6 +103,7 @@ impl<T: EthSpec> PendingComponents<T> {
             verified_blobs,
             verified_data_columns,
             executed_block,
+            ..
         } = self;
 
         let Some(diet_executed_block) = executed_block else {
@@ -519,7 +520,7 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
         spec: ChainSpec,
         node_id: NodeIdRaw,
     ) -> Result<Self, AvailabilityCheckError> {
-        let overflow_store = OverflowStore(beacon_store.clone());
+        let overflow_store = OverflowStore(beacon_store.clone(), node_id);
         let mut critical = Critical::new(capacity);
         critical.reload_store_keys(&overflow_store)?;
         Ok(Self {
@@ -586,7 +587,7 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
         // Grab existing entry or create a new entry.
         let mut pending_components = write_lock
             .pop_pending_components(block_root, &self.overflow_store)?
-            .unwrap_or_else(|| PendingComponents::empty(block_root));
+            .unwrap_or_else(|| PendingComponents::empty(block_root, self.node_id));
 
         // Merge in the data columns.
         pending_components.merge_data_columns(fixed_data_columns);
@@ -625,7 +626,7 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
         // Grab existing entry or create a new entry.
         let mut pending_components = write_lock
             .pop_pending_components(block_root, &self.overflow_store)?
-            .unwrap_or_else(|| PendingComponents::empty(block_root));
+            .unwrap_or_else(|| PendingComponents::empty(block_root, self.node_id));
 
         // Merge in the blobs.
         pending_components.merge_blobs(fixed_blobs);
@@ -663,7 +664,7 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
         // Grab existing entry or create a new entry.
         let mut pending_components = write_lock
             .pop_pending_components(block_root, &self.overflow_store)?
-            .unwrap_or_else(|| PendingComponents::empty(block_root));
+            .unwrap_or_else(|| PendingComponents::empty(block_root, self.node_id));
 
         // Merge in the block.
         pending_components.merge_block(diet_executed_block);

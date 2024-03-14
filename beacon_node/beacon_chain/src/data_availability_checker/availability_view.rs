@@ -1,5 +1,6 @@
 use super::child_components::ChildComponents;
 use super::state_lru_cache::DietAvailabilityPendingExecutedBlock;
+use super::NodeIdRaw;
 use crate::blob_verification::KzgVerifiedBlob;
 use crate::block_verification_types::AsBlock;
 use crate::data_availability_checker::overflow_lru_cache::PendingComponents;
@@ -9,7 +10,7 @@ use kzg::KzgCommitment;
 use ssz_types::FixedVector;
 use std::sync::Arc;
 use types::beacon_block_body::KzgCommitments;
-use types::{BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock, Slot};
+use types::{BlobSidecar, DataColumnSidecar, DataColumnSubnetId, EthSpec, SignedBeaconBlock, Slot};
 
 /// Defines an interface for managing data availability with two key invariants:
 ///
@@ -77,9 +78,9 @@ pub trait AvailabilityView<E: EthSpec> {
             .unwrap_or(false)
     }
 
-    fn data_column_exists(&self, data_colum_index: usize) -> bool {
+    fn data_column_exists(&self, data_colum_index: DataColumnSubnetId) -> bool {
         self.get_cached_data_columns()
-            .get(data_colum_index)
+            .get(data_colum_index.as_usize())
             .map(|d| d.is_some())
             .unwrap_or(false)
     }
@@ -122,7 +123,7 @@ pub trait AvailabilityView<E: EthSpec> {
                 continue;
             };
             // TODO(das): Add equivalent checks for data columns if necessary
-            if !self.data_column_exists(index) {
+            if !self.data_column_exists((index as u64).into()) {
                 if let Some(b) = self.get_cached_data_columns_mut().get_mut(index) {
                     *b = Some(data_column);
                 }
@@ -192,6 +193,7 @@ pub trait AvailabilityView<E: EthSpec> {
             // let slot = block.get_slot();
             sample_requirements(block.get_slot())
                 .iter()
+                .chain(custody_requirements::<E>(self.node_id, self.custody_requirement).iter())
                 .all(|index| self.data_column_exists(*index))
         } else {
             false
@@ -202,8 +204,16 @@ pub trait AvailabilityView<E: EthSpec> {
     // fn column_requirements(&self) -> &[usize];
 }
 
-fn sample_requirements(slot: Slot) -> Vec<usize> {
+fn sample_requirements(slot: Slot) -> Vec<DataColumnSubnetId> {
     todo!()
+}
+
+fn custody_requirements<E: EthSpec>(
+    node_id: NodeIdRaw,
+    custody_requirement: u64,
+) -> Vec<DataColumnSubnetId> {
+    DataColumnSubnetId::compute_subnets_for_data_column::<E>(node_id.into(), custody_requirement)
+        .collect()
 }
 
 /// Implements the `AvailabilityView` trait for a given struct.
