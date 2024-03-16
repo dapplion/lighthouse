@@ -57,6 +57,8 @@ pub struct ProcessingComponents<E: EthSpec> {
     // TODO(das): `KzgCommitments` are available in every data column sidecar, hence it may not be useful to store them
     // again here and a `()` may be sufficient.
     pub data_columns: FixedVector<Option<()>, E::DataColumnCount>,
+    pub node_id: [u8; 32],
+    pub custody_requirement: u64,
 }
 
 impl<E: EthSpec> ProcessingComponents<E> {
@@ -66,6 +68,8 @@ impl<E: EthSpec> ProcessingComponents<E> {
             block: None,
             blob_commitments: KzgCommitmentOpts::<E>::default(),
             data_columns: <_>::default(),
+            node_id: todo!(),
+            custody_requirement: todo!(),
         }
     }
 }
@@ -79,6 +83,8 @@ impl<E: EthSpec> ProcessingComponents<E> {
             block: None,
             blob_commitments: KzgCommitmentOpts::<E>::default(),
             data_columns: <_>::default(),
+            node_id: todo!(),
+            custody_requirement: todo!(),
         }
     }
 }

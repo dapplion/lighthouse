@@ -144,7 +144,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         if !columns_already_downloaded {
             for item in self.columns_request_state.requests.iter_mut() {
                 // TODO(das) do not send repeated requests
-                item.build_request_and_send(self.id, cx)?;
+                // item.build_request_and_send(self.id, cx)?;
             }
         }
         Ok(())
@@ -202,6 +202,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
                 downloaded_block,
                 downloaded_blobs,
                 downloaded_data_columns,
+                ..
             } = components;
             if let Some(block) = downloaded_block {
                 existing_components.merge_block(block);

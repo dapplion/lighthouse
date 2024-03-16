@@ -2,7 +2,7 @@
 //! channel and stores a global RPC ID to perform requests.
 
 use super::block_sidecar_coupling::BlocksAndBlobsRequestInfo;
-use super::manager::{Id, RequestId as SyncRequestId};
+use super::manager::{Id, RequestId as SyncRequestId, SampleReqId};
 use super::range_sync::{BatchId, ByRangeRequestType, ChainId};
 use crate::network_beacon_processor::NetworkBeaconProcessor;
 use crate::service::{NetworkMessage, RequestId};
@@ -21,7 +21,7 @@ use slog::{debug, trace, warn};
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use types::{BlobSidecar, EthSpec, SignedBeaconBlock, Slot};
+use types::{BlobSidecar, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 pub struct BlocksAndBlobsByRangeResponse<T: EthSpec> {
     pub batch_id: BatchId,
@@ -526,23 +526,17 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub fn data_column_lookup_request(
         &self,
-        id: SingleLookupReqId,
+        id: SampleReqId,
         peer_id: PeerId,
         request: DataColumnsByRootRequest,
-        lookup_type: LookupType,
     ) -> Result<(), &'static str> {
-        let sync_id = match lookup_type {
-            LookupType::Current => SyncRequestId::SingleBlob { id },
-            LookupType::Parent => SyncRequestId::ParentLookupBlob { id },
-        };
-        let request_id = RequestId::Sync(sync_id);
+        let request_id = RequestId::Sync(SyncRequestId::SingleBlockSample { id });
 
         debug!(
             self.log,
             "Sending DataColumnsByRoot Request";
             "request" => ?request,
             "peer" => %peer_id,
-            "lookup_type" => ?lookup_type
         );
 
         self.send_network_msg(NetworkMessage::SendRequest {
@@ -551,6 +545,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_id,
         })?;
         Ok(())
+    }
+
+    pub fn sampling_request(&self, id: SingleLookupReqId, block_root: Hash256, slot: Slot) {
+        self.beacon_processor().sampling_request(block_root, slot);
     }
 
     pub fn is_execution_engine_online(&self) -> bool {

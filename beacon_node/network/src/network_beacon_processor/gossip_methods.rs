@@ -1263,6 +1263,12 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         let block = verified_block.block.block_cloned();
         let block_root = verified_block.block_root;
 
+        // Send request for sampling
+        self.send_sync_message(SyncMessage::SampleBlock {
+            block_root,
+            slot: block.message().slot(),
+        });
+
         let result = self
             .chain
             .process_block_with_early_caching(block_root, verified_block, NotifyExecutionLayer::Yes)

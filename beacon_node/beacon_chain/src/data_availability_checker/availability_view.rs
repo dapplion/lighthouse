@@ -193,12 +193,14 @@ pub trait AvailabilityView<E: EthSpec> {
             // let slot = block.get_slot();
             sample_requirements(block.get_slot())
                 .iter()
-                .chain(custody_requirements::<E>(self.node_id, self.custody_requirement).iter())
+                .chain(self.custody_requirements().iter())
                 .all(|index| self.data_column_exists(*index))
         } else {
             false
         }
     }
+
+    fn custody_requirements(&self) -> Vec<DataColumnSubnetId>;
 
     // Return which columns are required for availability for both custody and sampling
     // fn column_requirements(&self) -> &[usize];
@@ -206,14 +208,6 @@ pub trait AvailabilityView<E: EthSpec> {
 
 fn sample_requirements(slot: Slot) -> Vec<DataColumnSubnetId> {
     todo!()
-}
-
-fn custody_requirements<E: EthSpec>(
-    node_id: NodeIdRaw,
-    custody_requirement: u64,
-) -> Vec<DataColumnSubnetId> {
-    DataColumnSubnetId::compute_subnets_for_data_column::<E>(node_id.into(), custody_requirement)
-        .collect()
 }
 
 /// Implements the `AvailabilityView` trait for a given struct.
@@ -226,7 +220,7 @@ fn custody_requirements<E: EthSpec>(
 /// - `$data_column_field`: The field name in the struct that holds the cached data columns.
 #[macro_export]
 macro_rules! impl_availability_view {
-    ($struct_name:ident, $block_type:ty, $blob_type:ty, $data_column_type:ty, $block_field:ident, $blob_field:ident, $data_column_field:ident) => {
+    ($struct_name:ident, $block_type:ty, $blob_type:ty, $data_column_type:ty, $block_field:ident, $blob_field:ident, $data_column_field:ident, $node_id_field:ident, $custody_requirement_field:ident,) => {
         impl<E: EthSpec> AvailabilityView<E> for $struct_name<E> {
             type BlockType = $block_type;
             type BlobType = $blob_type;
@@ -268,6 +262,14 @@ macro_rules! impl_availability_view {
                 // TODO(das): make it a config param
                 16
             }
+
+            fn custody_requirements(&self) -> Vec<DataColumnSubnetId> {
+                DataColumnSubnetId::compute_subnets_for_data_column::<E>(
+                    self.$node_id_field.into(),
+                    self.$custody_requirement_field,
+                )
+                .collect()
+            }
         }
     };
 }
@@ -279,7 +281,9 @@ impl_availability_view!(
     (),
     block,
     blob_commitments,
-    data_columns
+    data_columns,
+    node_id,
+    custody_requirement,
 );
 
 impl_availability_view!(
@@ -289,7 +293,9 @@ impl_availability_view!(
     KzgVerifiedDataColumn<E>,
     executed_block,
     verified_blobs,
-    verified_data_columns
+    verified_data_columns,
+    node_id,
+    custody_requirement,
 );
 
 impl_availability_view!(
@@ -299,7 +305,9 @@ impl_availability_view!(
     Arc<DataColumnSidecar<E>>,
     downloaded_block,
     downloaded_blobs,
-    downloaded_data_columns
+    downloaded_data_columns,
+    node_id,
+    custody_requirement,
 );
 
 pub trait GetCommitments<E: EthSpec> {

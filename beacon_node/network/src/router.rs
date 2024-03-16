@@ -506,6 +506,7 @@ impl<T: BeaconChainTypes> Router<T> {
                 SyncId::SingleBlock { .. }
                 | SyncId::SingleBlob { .. }
                 | SyncId::SingleDataColumn { .. }
+                | SyncId::SingleBlockSample { .. }
                 | SyncId::ParentLookup { .. }
                 | SyncId::ParentLookupBlob { .. } => {
                     crit!(self.log, "Block lookups do not request BBRange requests"; "peer_id" => %peer_id);
@@ -584,7 +585,7 @@ impl<T: BeaconChainTypes> Router<T> {
                     crit!(self.log, "Blob response to block by roots request"; "peer_id" => %peer_id);
                     return;
                 }
-                SyncId::SingleDataColumn { .. } => {
+                SyncId::SingleDataColumn { .. } | SyncId::SingleBlockSample { .. } => {
                     crit!(self.log, "Data column response to block by roots request"; "peer_id" => %peer_id);
                     return;
                 }
@@ -622,7 +623,7 @@ impl<T: BeaconChainTypes> Router<T> {
                     crit!(self.log, "Block response to blobs by roots request"; "peer_id" => %peer_id);
                     return;
                 }
-                SyncId::SingleDataColumn { .. } => {
+                SyncId::SingleDataColumn { .. } | SyncId::SingleBlockSample { .. } => {
                     crit!(self.log, "Data column response to blobs by roots request"; "peer_id" => %peer_id);
                     return;
                 }

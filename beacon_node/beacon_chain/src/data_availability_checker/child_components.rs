@@ -15,6 +15,8 @@ pub struct ChildComponents<E: EthSpec> {
     pub downloaded_block: Option<Arc<SignedBeaconBlock<E>>>,
     pub downloaded_blobs: FixedBlobSidecarList<E>,
     pub downloaded_data_columns: FixedDataColumnSidecarList<E>,
+    pub node_id: [u8; 32],
+    pub custody_requirement: u64,
 }
 
 impl<E: EthSpec> From<RpcBlock<E>> for ChildComponents<E> {
@@ -37,6 +39,8 @@ impl<E: EthSpec> ChildComponents<E> {
             downloaded_block: None,
             downloaded_blobs: <_>::default(),
             downloaded_data_columns: <_>::default(),
+            node_id: todo!(),
+            custody_requirement: todo!(),
         }
     }
     pub fn new(

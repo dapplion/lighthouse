@@ -23,7 +23,9 @@ use crate::chain_config::ChainConfig;
 use crate::data_availability_checker::{
     Availability, AvailabilityCheckError, AvailableBlock, DataAvailabilityChecker,
 };
-use crate::data_column_verification::{GossipDataColumnError, GossipVerifiedDataColumn};
+use crate::data_column_verification::{
+    GossipDataColumnError, GossipVerifiedDataColumn, KzgVerifiedDataColumn,
+};
 use crate::early_attester_cache::EarlyAttesterCache;
 use crate::errors::{BeaconChainError as Error, BlockProductionError};
 use crate::eth1_chain::{Eth1Chain, Eth1ChainBackend};
@@ -3019,6 +3021,35 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .check_rpc_data_column_availability_and_import(slot, block_root, data_columns)
             .await;
         self.remove_notified(&block_root, r)
+    }
+
+    pub async fn process_rpc_data_column(
+        self: &Arc<Self>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
+    ) -> Result<AvailabilityProcessingStatus, BlockError<T::EthSpec>> {
+        // If this block has already been imported to forkchoice it must have been available, so
+        // we don't need to process its blobs again.
+        if self
+            .canonical_head
+            .fork_choice_read_lock()
+            .contains_block(&data_column.block_root())
+        {
+            return Err(BlockError::BlockIsAlreadyKnown);
+        }
+
+        let Some(kzg) = self.kzg.as_ref() else {
+            return Err(BlockError::AvailabilityCheck(
+                AvailabilityCheckError::KzgNotInitialized,
+            ));
+        };
+
+        KzgVerifiedDataColumn::new(data_column.clone(), kzg)
+            .map_err(|e| BlockError::AvailabilityCheck(AvailabilityCheckError::Kzg(e)))?;
+
+        // NOTE: Availability status not consumed
+        Ok(AvailabilityProcessingStatus::Imported(
+            data_column.block_root(),
+        ))
     }
 
     /// Remove any block components from the *processing cache* if we no longer require them. If the

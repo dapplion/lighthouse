@@ -1,5 +1,6 @@
 use crate::metrics;
 use crate::network_beacon_processor::{NetworkBeaconProcessor, FUTURE_SLOT_TOLERANCE};
+use crate::sync::manager::SampleReqId;
 use crate::sync::BatchProcessResult;
 use crate::sync::{
     manager::{BlockProcessType, SyncMessage},
@@ -25,7 +26,7 @@ use tokio::sync::mpsc;
 use types::beacon_block_body::format_kzg_commitments;
 use types::blob_sidecar::FixedBlobSidecarList;
 use types::data_column_sidecar::FixedDataColumnSidecarList;
-use types::{Epoch, Hash256};
+use types::{DataColumnSidecar, Epoch, Hash256};
 
 /// Id associated to a batch processing request, either a sync batch or a parent lookup.
 #[derive(Clone, Debug, PartialEq)]
@@ -306,13 +307,27 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     pub fn generate_rpc_data_columns_process_fn(
         self: Arc<Self>,
         block_root: Hash256,
-        blobs: FixedDataColumnSidecarList<T::EthSpec>,
+        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
         seen_timestamp: Duration,
         process_type: BlockProcessType,
     ) -> AsyncFn {
         let process_fn = async move {
             self.clone()
-                .process_rpc_data_columns(block_root, blobs, seen_timestamp, process_type)
+                .process_rpc_data_columns(block_root, data_columns, seen_timestamp, process_type)
+                .await;
+        };
+        Box::pin(process_fn)
+    }
+
+    pub fn generate_rpc_data_column_process_fn(
+        self: Arc<Self>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
+        seen_timestamp: Duration,
+        id: SampleReqId,
+    ) -> AsyncFn {
+        let process_fn = async move {
+            self.clone()
+                .process_rpc_data_column(data_column, seen_timestamp, id)
                 .await;
         };
         Box::pin(process_fn)
@@ -342,6 +357,23 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         // Sync handles these results
         self.send_sync_message(SyncMessage::BlockComponentProcessed {
             process_type,
+            result: result.into(),
+        });
+    }
+
+    pub async fn process_rpc_data_column(
+        self: Arc<NetworkBeaconProcessor<T>>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
+        _seen_timestamp: Duration,
+        id: SampleReqId,
+    ) {
+        // TODO(das): log and metrics
+
+        let result = self.chain.process_rpc_data_column(data_column).await;
+
+        // Sync handles these results
+        self.send_sync_message(SyncMessage::SampleProcessed {
+            id,
             result: result.into(),
         });
     }

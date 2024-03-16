@@ -72,7 +72,8 @@ pub struct PendingComponents<T: EthSpec> {
     // and convert to it based on this `PendingComponents` custody assignments
     pub verified_data_columns: FixedVector<Option<KzgVerifiedDataColumn<T>>, T::DataColumnCount>,
     pub executed_block: Option<DietAvailabilityPendingExecutedBlock<T>>,
-    pub node_id: NodeIdRaw,
+    pub node_id: [u8; 32],
+    pub custody_requirement: u64,
 }
 
 impl<T: EthSpec> PendingComponents<T> {
@@ -83,6 +84,7 @@ impl<T: EthSpec> PendingComponents<T> {
             verified_data_columns: <_>::default(),
             executed_block: None,
             node_id,
+            custody_requirement: todo!(),
         }
     }
 
@@ -518,9 +520,8 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
         capacity: NonZeroUsize,
         beacon_store: BeaconStore<T>,
         spec: ChainSpec,
-        node_id: NodeIdRaw,
     ) -> Result<Self, AvailabilityCheckError> {
-        let overflow_store = OverflowStore(beacon_store.clone(), node_id);
+        let overflow_store = OverflowStore(beacon_store.clone(), todo!());
         let mut critical = Critical::new(capacity);
         critical.reload_store_keys(&overflow_store)?;
         Ok(Self {
@@ -529,7 +530,7 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
             state_cache: StateLRUCache::new(beacon_store, spec),
             maintenance_lock: Mutex::new(()),
             capacity,
-            node_id,
+            node_id: todo!(),
         })
     }
 

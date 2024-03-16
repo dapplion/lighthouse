@@ -8,6 +8,7 @@ pub mod manager;
 mod network_context;
 mod peer_sync_info;
 mod range_sync;
+mod sampling;
 
 pub use manager::{BatchProcessResult, SyncMessage};
 pub use range_sync::{BatchOperationOutcome, ChainId};
