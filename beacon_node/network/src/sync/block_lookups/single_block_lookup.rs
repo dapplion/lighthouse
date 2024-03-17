@@ -309,6 +309,15 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         if let Some(components) = self.child_components.as_ref() {
             self.da_checker.get_missing_blob_ids(block_root, components)
         } else {
+            // TODO(lion): This check is incomplete. The processing cache only reflects blobs that
+            // are starting to be processed (work event started) and are half way through the
+            // `process_gossip_blob` routine. Is the complexity of the processing cache justified
+            // for the rare case a block or blob is downloaded from multiple sources? Gossipsub
+            // dedups double downloads. Block lookups already track the state of block and blobs
+            // being downloaded. This feature seems only useful in the rare case a block lookup is
+            // triggered during a gossip block is in the middle of being processed.
+            // If that is the usecase, why is this processing-deduplication cache tied to the
+            // availability view?
             let Some(processing_availability_view) =
                 self.da_checker.get_processing_components(block_root)
             else {
