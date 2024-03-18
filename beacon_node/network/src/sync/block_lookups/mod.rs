@@ -8,7 +8,7 @@ use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::sync::block_lookups::common::LookupType;
 use crate::sync::block_lookups::parent_lookup::{ParentLookup, RequestError};
 pub use crate::sync::block_lookups::single_block_lookup::{
-    CachedChild, ColumnRequestState, ColumnsRequestState, LookupRequestError,
+    CachedChild, ColumnRequestState, LookupRequestError,
 };
 use crate::sync::manager::{Id, SingleLookupReqId};
 use crate::sync::network_context::PeersByCustody;
@@ -36,7 +36,7 @@ use std::time::Duration;
 use store::Hash256;
 use types::blob_sidecar::FixedBlobSidecarList;
 use types::data_column_sidecar::FixedDataColumnSidecarList;
-use types::Slot;
+use types::{DataColumnSidecar, EthSpec, Slot};
 
 pub mod common;
 mod parent_lookup;
@@ -259,7 +259,8 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     ) -> Option<SingleBlockLookup<Current, T>> {
         let mut lookup = self.single_block_lookups.remove(&lookup_id.id)?;
 
-        let request_state = R::request_state_mut(&mut lookup, request_id).ok()?;
+        // TODO: okay to propagate None if request id is unknown?
+        let request_state = R::request_state_mut(&mut lookup, request_id)?;
         if lookup_id.req_counter != request_state.get_state().req_counter {
             // We don't want to drop the lookup, just ignore the old response.
             self.single_block_lookups.insert(lookup_id.id, lookup);
@@ -346,7 +347,8 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         let response_type = R::response_type();
         let log = self.log.clone();
         let expected_block_root = lookup.block_root();
-        let request_state = R::request_state_mut(&mut lookup, request_id)?;
+        let request_state = R::request_state_mut(&mut lookup, request_id)
+            .ok_or(LookupRequestError::UnknownRequest)?;
 
         match request_state.verify_response(expected_block_root, response) {
             Ok(Some(verified_response)) => {
@@ -391,7 +393,8 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         let id = lookup.id;
         let block_root = lookup.block_root();
 
-        R::request_state_mut(lookup, request_id)?
+        R::request_state_mut(lookup, request_id)
+            .ok_or(LookupRequestError::UnknownRequest)?
             .get_state_mut()
             .component_downloaded = true;
 
@@ -469,8 +472,8 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             return None;
         };
 
-        if R::request_state_mut(&mut parent_lookup.current_parent_request, request_id)
-            .ok()?
+        // TODO: Should just return None if request retrieval fails?
+        if R::request_state_mut(&mut parent_lookup.current_parent_request, request_id)?
             .get_state()
             .req_counter
             != id.req_counter
@@ -684,7 +687,8 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             );
             return Ok(());
         };
-        R::request_state_mut(&mut parent_lookup.current_parent_request, request_id)?
+        R::request_state_mut(&mut parent_lookup.current_parent_request, request_id)
+            .ok_or(LookupRequestError::UnknownRequest)?
             .register_failure_downloading();
         trace!(self.log, "Parent lookup block request failed"; &parent_lookup, "error" => msg);
 
@@ -714,7 +718,11 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             return Ok(());
         };
         let block_root = lookup.block_root();
-        let request_state = R::request_state_mut(&mut lookup, request_id)?;
+        let Some(request_state) = R::request_state_mut(&mut lookup, request_id) else {
+            // TODO: Can this case happen? Should downscore peers
+            todo!("unknwon request id")
+        };
+
         let response_type = R::response_type();
         trace!(log,
             "Single lookup failed";
@@ -750,16 +758,18 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         result: BlockProcessingResult<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
         request_id: R::RequestIdType,
-    ) -> Result<(), LookupRequestError> {
+    ) {
         let Some(mut lookup) = self.single_block_lookups.remove(&target_id) else {
-            return Ok(());
+            return;
         };
 
         let root = lookup.block_root();
-        let request_state = R::request_state_mut(&mut lookup, request_id)?;
+        let Some(request_state) = R::request_state_mut(&mut lookup, request_id) else {
+            todo!("downscore peer for unknown request?");
+        };
 
         let Ok(peer_id) = request_state.get_state().processing_peer() else {
-            return Ok(());
+            return;
         };
         debug!(
             self.log,
@@ -809,8 +819,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 }
             }
         };
-
-        Ok(())
     }
 
     /// Handles a `MissingComponents` block processing error. Handles peer scoring and retries.
@@ -824,7 +832,10 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         lookup: &mut SingleBlockLookup<Current, T>,
         request_id: R::RequestIdType,
     ) -> Result<(), LookupRequestError> {
-        let request_state = R::request_state_mut(lookup, request_id)?;
+        let Some(request_state) = R::request_state_mut(lookup, request_id) else {
+            // Should never happen, and the processing request is done internally
+            return Err(LookupRequestError::UnknownRequest);
+        };
 
         request_state.get_state_mut().component_processed = true;
         if lookup.both_components_processed() {
@@ -1327,10 +1338,10 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         }
     }
 
-    fn send_data_columns_for_processing(
+    fn send_data_column_for_processing(
         &self,
         block_root: Hash256,
-        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
         duration: Duration,
         process_type: BlockProcessType,
         cx: &SyncNetworkContext<T>,
@@ -1338,12 +1349,9 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         match cx.beacon_processor_if_enabled() {
             Some(beacon_processor) => {
                 trace!(self.log, "Sending data columns for processing"; "block" => ?block_root, "process_type" => ?process_type);
-                if let Err(e) = beacon_processor.send_rpc_data_columns(
-                    block_root,
-                    data_columns,
-                    duration,
-                    process_type,
-                ) {
+                if let Err(e) =
+                    beacon_processor.send_rpc_data_column(data_column, duration, process_type)
+                {
                     error!(
                         self.log,
                         "Failed to send sync data columns to processor";
@@ -1395,4 +1403,10 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn drop_parent_chain_requests(&mut self) -> usize {
         self.parent_lookups.drain(..).len()
     }
+}
+
+pub fn to_data_columns_list<E: EthSpec>(
+    data_column: &DataColumnSidecar<E>,
+) -> FixedDataColumnSidecarList<E> {
+    todo!()
 }

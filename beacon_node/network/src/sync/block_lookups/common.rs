@@ -5,19 +5,22 @@ use crate::sync::block_lookups::single_block_lookup::{
 use crate::sync::block_lookups::{
     BlobRequestState, BlockLookups, BlockRequestState, PeerId, SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS,
 };
-use crate::sync::manager::{BlockProcessType, Id, SingleLookupReqId};
+use crate::sync::manager::{BlockProcessType, Id, SampleReqId, SingleLookupReqId};
 use crate::sync::network_context::SyncNetworkContext;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_availability_checker::ChildComponents;
 use beacon_chain::{get_block_root, BeaconChainTypes};
-use lighthouse_network::rpc::methods::BlobsByRootRequest;
+use lighthouse_network::rpc::methods::{BlobsByRootRequest, DataColumnsByRootRequest};
 use lighthouse_network::rpc::BlocksByRootRequest;
 use rand::prelude::IteratorRandom;
 use std::ops::IndexMut;
 use std::sync::Arc;
 use std::time::Duration;
 use types::blob_sidecar::{BlobIdentifier, FixedBlobSidecarList};
-use types::{BlobSidecar, ChainSpec, EthSpec, Hash256, SignedBeaconBlock};
+use types::data_column_sidecar::{ColumnIndex, DataColumnIdentifier};
+use types::{BlobSidecar, ChainSpec, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock};
+
+use super::{to_data_columns_list, ColumnRequestState};
 
 #[derive(Debug, Copy, Clone)]
 pub enum ResponseType {
@@ -247,7 +250,7 @@ pub trait RequestState<L: Lookup, T: BeaconChainTypes> {
     fn request_state_mut(
         request: &mut SingleBlockLookup<L, T>,
         request_id: Self::RequestIdType,
-    ) -> Result<&mut Self, LookupRequestError>;
+    ) -> Option<&mut Self>;
 
     /// A getter for a reference to the `SingleLookupRequestState` associated with this trait.
     fn get_state(&self) -> &SingleLookupRequestState;
@@ -349,8 +352,8 @@ impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for BlockRequestState<L>
     fn request_state_mut(
         request: &mut SingleBlockLookup<L, T>,
         _: Self::RequestIdType,
-    ) -> Result<&mut Self, LookupRequestError> {
-        Ok(&mut request.block_request_state)
+    ) -> Option<&mut Self> {
+        Some(&mut request.block_request_state)
     }
     fn get_state(&self) -> &SingleLookupRequestState {
         &self.state
@@ -391,24 +394,27 @@ impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for BlobRequestState<L, 
         match blob {
             Some(blob) => {
                 let received_id = blob.id();
-                if !self.requested_ids.contains(&received_id) {
-                    self.state.register_failure_downloading();
-                    return Err(LookupVerifyError::UnrequestedBlobId);
-                }
+                let blob_index = blob.index;
+                let r = if !self.requested_ids.contains(&received_id) {
+                    Err(LookupVerifyError::UnrequestedBlobId)
+                } else if !blob.verify_blob_sidecar_inclusion_proof().unwrap_or(false) {
+                    Err(LookupVerifyError::InvalidInclusionProof)
+                } else if blob.block_root() != expected_block_root {
+                    Err(LookupVerifyError::UnrequestedHeader)
+                } else if blob_index >= T::EthSpec::max_blobs_per_block() as u64 {
+                    Err(LookupVerifyError::InvalidIndex(blob.index))
+                } else {
+                    Ok(())
+                };
 
-                blob.verify_blob_sidecar_inclusion_proof()
-                    .map_err(|_| LookupVerifyError::InvalidInclusionProof)?;
-                if blob.block_root() != expected_block_root {
-                    return Err(LookupVerifyError::UnrequestedHeader);
+                if let Err(e) = r {
+                    self.state.register_failure_downloading();
+                    return Err(e);
                 }
 
                 // State should remain downloading until we receive the stream terminator.
                 self.requested_ids.remove(&received_id);
-                let blob_index = blob.index;
 
-                if blob_index >= T::EthSpec::max_blobs_per_block() as u64 {
-                    return Err(LookupVerifyError::InvalidIndex(blob.index));
-                }
                 *self.blob_download_queue.index_mut(blob_index as usize) = Some(blob);
                 Ok(None)
             }
@@ -466,8 +472,125 @@ impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for BlobRequestState<L, 
     fn request_state_mut(
         request: &mut SingleBlockLookup<L, T>,
         _: Self::RequestIdType,
-    ) -> Result<&mut Self, LookupRequestError> {
-        Ok(&mut request.blob_request_state)
+    ) -> Option<&mut Self> {
+        Some(&mut request.blob_request_state)
+    }
+    fn get_state(&self) -> &SingleLookupRequestState {
+        &self.state
+    }
+    fn get_state_mut(&mut self) -> &mut SingleLookupRequestState {
+        &mut self.state
+    }
+}
+
+impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for ColumnRequestState<L, T::EthSpec> {
+    type RequestType = DataColumnsByRootRequest;
+    type ResponseType = Arc<DataColumnSidecar<T::EthSpec>>;
+    type VerifiedResponseType = Arc<DataColumnSidecar<T::EthSpec>>;
+    type ReconstructedResponseType = Arc<DataColumnSidecar<T::EthSpec>>;
+    type RequestIdType = ColumnIndex;
+
+    fn new_request(&self, spec: &ChainSpec) -> Self::RequestType {
+        let id_vec: Vec<DataColumnIdentifier> = vec![self.requested_id.clone()];
+        DataColumnsByRootRequest::new(id_vec, spec)
+    }
+
+    fn make_request(
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        request: Self::RequestType,
+        cx: &SyncNetworkContext<T>,
+    ) -> Result<(), LookupRequestError> {
+        cx.data_column_lookup_request(
+            SampleReqId {
+                id: id.id,
+                // TODO: Should track a single column_index or multiple
+                column_index: request.data_column_ids.to_vec().first().unwrap().index,
+            },
+            peer_id,
+            request,
+        )
+        .map_err(LookupRequestError::SendFailed)
+    }
+
+    fn verify_response_inner(
+        &mut self,
+        expected_block_root: Hash256,
+        data_column: Option<Self::ResponseType>,
+        peer_id: PeerId,
+    ) -> Result<Option<Self::VerifiedResponseType>, LookupVerifyError> {
+        match data_column {
+            Some(data_column) => {
+                let received_id = data_column.id();
+                let r = {
+                    if self.requested_id != received_id {
+                        Err(LookupVerifyError::UnrequestedBlobId)
+                    } else if !data_column.verify_inclusion_proof().unwrap_or(false) {
+                        Err(LookupVerifyError::InvalidInclusionProof)
+                    } else if data_column.block_root() != expected_block_root {
+                        Err(LookupVerifyError::UnrequestedHeader)
+                    } else {
+                        Ok(Some(data_column))
+                    }
+                };
+
+                if r.is_ok() {
+                    self.state.state = State::Processing { peer_id };
+                } else {
+                    self.state.register_failure_downloading();
+                }
+                r
+            }
+            None => Err(LookupVerifyError::NoBlockReturned),
+        }
+    }
+
+    fn get_parent_root(verified_response: &Arc<DataColumnSidecar<T::EthSpec>>) -> Option<Hash256> {
+        Some(verified_response.signed_block_header.message.parent_root)
+    }
+
+    fn add_to_child_components(
+        verified_response: Arc<DataColumnSidecar<T::EthSpec>>,
+        components: &mut ChildComponents<T::EthSpec>,
+    ) {
+        todo!()
+        // components.merge_blobs(verified_response);
+    }
+
+    fn verified_to_reconstructed(
+        _block_root: Hash256,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
+    ) -> Arc<DataColumnSidecar<T::EthSpec>> {
+        data_column
+    }
+
+    fn send_reconstructed_for_processing(
+        id: Id,
+        _: Self::RequestIdType,
+        bl: &BlockLookups<T>,
+        block_root: Hash256,
+        verified: Arc<DataColumnSidecar<T::EthSpec>>,
+        duration: Duration,
+        cx: &SyncNetworkContext<T>,
+    ) -> Result<(), LookupRequestError> {
+        let index = verified.index;
+        bl.send_data_column_for_processing(
+            block_root,
+            verified,
+            duration,
+            BlockProcessType::SingleDataColumn { id, index },
+            cx,
+        )
+    }
+
+    fn response_type() -> ResponseType {
+        ResponseType::Blob
+    }
+    fn request_state_mut(
+        request: &mut SingleBlockLookup<L, T>,
+        id: Self::RequestIdType,
+    ) -> Option<&mut Self> {
+        request.columns_request_state.get_mut(id as usize)
     }
     fn get_state(&self) -> &SingleLookupRequestState {
         &self.state

@@ -157,9 +157,14 @@ impl<T: BeaconChainTypes> Sampling<T> {
                     "block" => ?block_root,
                     "id" => ?id
                 );
-                if let Err(e) =
-                    beacon_processor.send_rpc_data_column(data_column, seen_timestamp, id)
-                {
+                if let Err(e) = beacon_processor.send_rpc_data_column(
+                    data_column,
+                    seen_timestamp,
+                    BlockProcessType::SingleDataColumn {
+                        id: id.id,
+                        index: id.column_index,
+                    },
+                ) {
                     error!(
                         self.log,
                         "Failed to send sync data columns to processor";

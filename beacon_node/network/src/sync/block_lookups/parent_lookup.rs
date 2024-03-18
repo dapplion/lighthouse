@@ -198,7 +198,7 @@ impl<T: BeaconChainTypes> ParentLookup<T> {
     ) -> Result<Option<R::VerifiedResponseType>, ParentVerifyError> {
         let expected_block_root = self.current_parent_request.block_root();
         let request_state = R::request_state_mut(&mut self.current_parent_request, request_id)
-            .map_err(|_| ParentVerifyError::UnknownRequest)?;
+            .ok_or(ParentVerifyError::UnknownRequest)?;
         let root_and_verified = request_state.verify_response(expected_block_root, block)?;
 
         // check if the parent of this block isn't in the failed cache. If it is, this chain should

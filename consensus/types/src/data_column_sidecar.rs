@@ -6,6 +6,7 @@ use crate::{
 use bls::Signature;
 use derivative::Derivative;
 use kzg::{KzgCommitment, KzgProof};
+use merkle_proof::MerkleTreeError;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use safe_arith::ArithError;
@@ -150,6 +151,10 @@ impl<T: EthSpec> DataColumnSidecar<T> {
 
     pub fn block_root(&self) -> Hash256 {
         self.signed_block_header.message.tree_hash_root()
+    }
+
+    pub fn verify_inclusion_proof(&self) -> Result<bool, MerkleTreeError> {
+        todo!();
     }
 
     pub fn min_size() -> usize {

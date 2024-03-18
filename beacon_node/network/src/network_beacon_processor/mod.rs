@@ -504,7 +504,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         );
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
-            work: Work::RpcBlobs { process_fn },
+            work: Work::RpcDataColumns { process_fn },
         })
     }
 
@@ -512,11 +512,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self: &Arc<Self>,
         data_column: Arc<DataColumnSidecar<T::EthSpec>>,
         seen_timestamp: Duration,
-        id: SampleReqId,
+        process_type: BlockProcessType,
     ) -> Result<(), Error<T::EthSpec>> {
-        let process_fn =
-            self.clone()
-                .generate_rpc_data_column_process_fn(data_column, seen_timestamp, id);
+        let process_fn = self.clone().generate_rpc_data_column_process_fn(
+            data_column,
+            seen_timestamp,
+            process_type,
+        );
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
             work: Work::RpcDataColumns { process_fn },

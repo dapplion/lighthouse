@@ -323,11 +323,11 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self: Arc<Self>,
         data_column: Arc<DataColumnSidecar<T::EthSpec>>,
         seen_timestamp: Duration,
-        id: SampleReqId,
+        process_type: BlockProcessType,
     ) -> AsyncFn {
         let process_fn = async move {
             self.clone()
-                .process_rpc_data_column(data_column, seen_timestamp, id)
+                .process_rpc_data_column(data_column, seen_timestamp, process_type)
                 .await;
         };
         Box::pin(process_fn)
@@ -365,15 +365,15 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self: Arc<NetworkBeaconProcessor<T>>,
         data_column: Arc<DataColumnSidecar<T::EthSpec>>,
         _seen_timestamp: Duration,
-        id: SampleReqId,
+        process_type: BlockProcessType,
     ) {
         // TODO(das): log and metrics
 
         let result = self.chain.process_rpc_data_column(data_column).await;
 
         // Sync handles these results
-        self.send_sync_message(SyncMessage::SampleProcessed {
-            id,
+        self.send_sync_message(SyncMessage::BlockComponentProcessed {
+            process_type,
             result: result.into(),
         });
     }

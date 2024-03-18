@@ -46,10 +46,8 @@ use ssz_types::{FixedVector, VariableList};
 use std::num::NonZeroUsize;
 use std::{collections::HashSet, sync::Arc};
 use types::blob_sidecar::BlobIdentifier;
-use types::data_column_sidecar::DataColumnIdentifier;
-use types::{
-    BlobSidecar, ChainSpec, DataColumnSidecar, DataColumnSubnetId, Epoch, EthSpec, Hash256, Slot,
-};
+use types::data_column_sidecar::{ColumnIndex, DataColumnIdentifier};
+use types::{BlobSidecar, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256, Slot};
 
 /// This represents the components of a partially available block
 ///
@@ -208,7 +206,7 @@ impl<T: EthSpec> PendingComponents<T> {
             // let slot = block.get_slot();
             sample_requirements(block.as_block().message().slot())
                 .iter()
-                .chain(self.custody_requirements().iter())
+                .chain(custody_requirements(self.node_id, self.custody_requirement).iter())
                 .all(|index| self.data_column_exists(*index))
         } else {
             false
@@ -218,14 +216,6 @@ impl<T: EthSpec> PendingComponents<T> {
     fn samples_per_slot(&self) -> usize {
         // TODO(das): make it a config param
         16
-    }
-
-    fn custody_requirements(&self) -> Vec<DataColumnSubnetId> {
-        DataColumnSubnetId::compute_subnets_for_data_column::<T>(
-            self.node_id.into(),
-            self.custody_requirement,
-        )
-        .collect()
     }
 
     pub fn empty(block_root: Hash256, node_id: NodeIdRaw) -> Self {
@@ -333,7 +323,11 @@ impl<T: EthSpec> PendingComponents<T> {
     }
 }
 
-fn sample_requirements(slot: Slot) -> Vec<DataColumnSubnetId> {
+fn sample_requirements(slot: Slot) -> Vec<ColumnIndex> {
+    todo!()
+}
+
+fn custody_requirements(node_id: [u8; 32], custody_requirement: u64) -> Vec<ColumnIndex> {
     todo!()
 }
 

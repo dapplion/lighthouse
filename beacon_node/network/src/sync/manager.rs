@@ -34,7 +34,7 @@
 //! search for the block and subsequently search for parents if needed.
 
 use super::backfill_sync::{BackFillSync, ProcessResult, SyncStart};
-use super::block_lookups::{BlockLookups, ColumnRequestState, ColumnsRequestState};
+use super::block_lookups::{BlockLookups, ColumnRequestState};
 use super::network_context::{BlockOrBlob, SyncNetworkContext};
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
@@ -65,7 +65,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::data_column_sidecar::ColumnIndex;
+use types::data_column_sidecar::{ColumnIndex, DataColumnIdentifier};
 use types::{BlobSidecar, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 /// The number of slots ahead of us that is allowed before requesting a long-range (batch)  Sync
@@ -182,12 +182,6 @@ pub enum SyncMessage<T: EthSpec> {
         result: BlockProcessingResult<T>,
     },
 
-    /// Sample processed, not imported just KZG validated
-    SampleProcessed {
-        id: SampleReqId,
-        result: BlockProcessingResult<T>,
-    },
-
     /// Request sync to perform PeerDAS 1D sampling of the block's data
     SampleBlock { block_root: Hash256, slot: Slot },
 }
@@ -197,7 +191,7 @@ pub enum SyncMessage<T: EthSpec> {
 pub enum BlockProcessType {
     SingleBlock { id: Id },
     SingleBlob { id: Id },
-    SingleDataColumn { id: Id, index: u64 },
+    SingleDataColumn { id: Id, index: ColumnIndex },
     ParentLookup { chain_hash: Hash256 },
 }
 
@@ -748,8 +742,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         result,
                         &mut self.network,
                         (),
-                    )
-                    .expect("🦜"),
+                    ),
                 BlockProcessType::SingleBlob { id } => self
                     .block_lookups
                     .single_block_component_processed::<BlobRequestState<Current, T::EthSpec>>(
@@ -757,11 +750,18 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         result,
                         &mut self.network,
                         (),
-                    )
-                    .expect("🦜"),
-                BlockProcessType::SingleDataColumn { id, index } => {
-                    todo!("handle columns from custody requirements");
-                }
+                    ),
+                BlockProcessType::SingleDataColumn { id, index } => self
+                    .block_lookups
+                    .single_block_component_processed::<ColumnRequestState<
+                    Current,
+                    T::EthSpec,
+                >>(
+                    id,
+                    result,
+                    &mut self.network,
+                    index,
+                ),
                 BlockProcessType::ParentLookup { chain_hash } => self
                     .block_lookups
                     .parent_block_processed(chain_hash, result, &mut self.network),
@@ -808,10 +808,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         error!(self.log, "Error handling sample block request"; "error" => ?error);
                     }
                 }
-            }
-            SyncMessage::SampleProcessed { id, result } => {
-                self.sampling
-                    .handle_data_column_processed(id, result, &mut self.network);
             }
         }
     }
