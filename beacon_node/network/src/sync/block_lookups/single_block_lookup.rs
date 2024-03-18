@@ -4,9 +4,9 @@ use crate::sync::block_lookups::Id;
 use crate::sync::network_context::{PeersByCustody, SyncNetworkContext};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_availability_checker::{
-    AvailabilityCheckError, DataAvailabilityChecker, MissingBlobs, MissingDataColumns,
+    AvailabilityCheckError, ChildComponents, DataAvailabilityChecker, MissingBlobs,
+    MissingDataColumns,
 };
-use beacon_chain::data_availability_checker::{AvailabilityView, ChildComponents};
 use beacon_chain::BeaconChainTypes;
 use lighthouse_network::PeerAction;
 use slog::{trace, Logger};
@@ -33,6 +33,8 @@ pub enum LookupVerifyError {
     NoBlockReturned,
     ExtraBlocksReturned,
     UnrequestedBlobId,
+    InvalidInclusionProof,
+    UnrequestedHeader,
     ExtraBlobsReturned,
     NotEnoughBlobsReturned,
     InvalidIndex(u64),
@@ -272,7 +274,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
     /// Returns `true` if the block has already been downloaded.
     pub(crate) fn block_already_downloaded(&self) -> bool {
         if let Some(components) = self.child_components.as_ref() {
-            components.block_exists()
+            components.downloaded_block.is_some()
         } else {
             self.da_checker.has_block(&self.block_root())
         }
@@ -307,7 +309,11 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
     pub(crate) fn missing_blob_ids(&self) -> MissingBlobs {
         let block_root = self.block_root();
         if let Some(components) = self.child_components.as_ref() {
-            self.da_checker.get_missing_blob_ids(block_root, components)
+            self.da_checker.get_missing_blob_ids(
+                block_root,
+                &components.downloaded_block,
+                &components.downloaded_blobs,
+            )
         } else {
             // TODO(lion): This check is incomplete. The processing cache only reflects blobs that
             // are starting to be processed (work event started) and are half way through the
@@ -318,13 +324,15 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
             // triggered during a gossip block is in the middle of being processed.
             // If that is the usecase, why is this processing-deduplication cache tied to the
             // availability view?
-            let Some(processing_availability_view) =
-                self.da_checker.get_processing_components(block_root)
+            let Some(processing_components) = self.da_checker.get_processing_components(block_root)
             else {
                 return MissingBlobs::new_without_block(block_root, self.da_checker.is_deneb());
             };
-            self.da_checker
-                .get_missing_blob_ids(block_root, &processing_availability_view)
+            self.da_checker.get_missing_blob_ids(
+                block_root,
+                &processing_components.block,
+                &processing_components.blob_commitments,
+            )
         }
     }
 
@@ -374,7 +382,7 @@ fn missing_data_column_ids<T: BeaconChainTypes>(
     da_checker: Arc<DataAvailabilityChecker<T>>,
 ) -> MissingDataColumns {
     if let Some(components) = child_components {
-        da_checker.get_missing_data_column_ids(block_root, components)
+        da_checker.get_missing_data_column_ids(block_root, &components.downloaded_block)
     } else {
         // TODO(das): same code as for missing_blob_ids?
         todo!()

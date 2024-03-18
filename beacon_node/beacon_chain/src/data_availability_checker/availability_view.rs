@@ -298,18 +298,6 @@ impl_availability_view!(
     custody_requirement,
 );
 
-impl_availability_view!(
-    ChildComponents,
-    Arc<SignedBeaconBlock<E>>,
-    Arc<BlobSidecar<E>>,
-    Arc<DataColumnSidecar<E>>,
-    downloaded_block,
-    downloaded_blobs,
-    downloaded_data_columns,
-    node_id,
-    custody_requirement,
-);
-
 pub trait GetCommitments<E: EthSpec> {
     fn get_commitments(&self) -> KzgCommitments<E>;
     fn get_slot(&self) -> Slot;
@@ -498,23 +486,6 @@ pub mod tests {
         (block.into(), blobs, invalid_blobs)
     }
 
-    type ChildComponentsSetup<E> = (
-        Arc<SignedBeaconBlock<E>>,
-        FixedVector<Option<Arc<BlobSidecar<E>>>, <E as EthSpec>::MaxBlobsPerBlock>,
-        FixedVector<Option<Arc<BlobSidecar<E>>>, <E as EthSpec>::MaxBlobsPerBlock>,
-    );
-
-    pub fn setup_child_components(
-        block: SignedBeaconBlock<E>,
-        valid_blobs: FixedVector<Option<Arc<BlobSidecar<E>>>, <E as EthSpec>::MaxBlobsPerBlock>,
-        invalid_blobs: FixedVector<Option<Arc<BlobSidecar<E>>>, <E as EthSpec>::MaxBlobsPerBlock>,
-    ) -> ChildComponentsSetup<E> {
-        let blobs = FixedVector::from(valid_blobs.into_iter().cloned().collect::<Vec<_>>());
-        let invalid_blobs =
-            FixedVector::from(invalid_blobs.into_iter().cloned().collect::<Vec<_>>());
-        (Arc::new(block), blobs, invalid_blobs)
-    }
-
     pub fn assert_cache_consistent<V: AvailabilityView<E>>(cache: V) {
         if let Some(cached_block) = cache.get_cached_block() {
             let cached_block_commitments = cached_block.get_commitments();
@@ -646,12 +617,5 @@ pub mod tests {
         executed_block,
         verified_blobs,
         setup_pending_components
-    );
-    generate_tests!(
-        child_component_tests,
-        ChildComponents::<E>,
-        downloaded_block,
-        downloaded_blobs,
-        setup_child_components
     );
 }

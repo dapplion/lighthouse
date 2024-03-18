@@ -1,10 +1,9 @@
 use crate::block_verification_types::RpcBlock;
-use crate::data_availability_checker::AvailabilityView;
 use bls::Hash256;
 use std::sync::Arc;
 use types::blob_sidecar::FixedBlobSidecarList;
 use types::data_column_sidecar::FixedDataColumnSidecarList;
-use types::{EthSpec, SignedBeaconBlock};
+use types::{BlobSidecar, EthSpec, SignedBeaconBlock};
 
 /// For requests triggered by an `UnknownBlockParent` or `UnknownBlobParent`, this struct
 /// is used to cache components as they are sent to the network service. We can't use the
@@ -60,6 +59,33 @@ impl<E: EthSpec> ChildComponents<E> {
             cache.merge_data_columns(data_columns);
         }
         cache
+    }
+
+    pub fn merge_block(&mut self, block: Arc<SignedBeaconBlock<E>>) {
+        self.downloaded_block = Some(block);
+    }
+
+    pub fn merge_blob(&mut self, blob: Arc<BlobSidecar<E>>) {
+        if let Some(blob_ref) = self.downloaded_blobs.get_mut(blob.index as usize) {
+            *blob_ref = Some(blob);
+        }
+    }
+
+    pub fn merge_blobs(&mut self, blobs: FixedBlobSidecarList<E>) {
+        for blob in blobs.iter().flatten() {
+            self.merge_blob(blob.clone());
+        }
+    }
+
+    pub fn merge_data_columns(&mut self, data_columns: FixedDataColumnSidecarList<E>) {
+        for data_column in data_columns.iter().flatten() {
+            if let Some(r) = self
+                .downloaded_data_columns
+                .get_mut(data_column.index as usize)
+            {
+                *r = Some(data_column.clone());
+            }
+        }
     }
 
     pub fn clear_blobs(&mut self) {

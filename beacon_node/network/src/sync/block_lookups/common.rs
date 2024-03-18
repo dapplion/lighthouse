@@ -388,7 +388,7 @@ impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for BlobRequestState<L, 
 
     fn verify_response_inner(
         &mut self,
-        _expected_block_root: Hash256,
+        expected_block_root: Hash256,
         blob: Option<Self::ResponseType>,
         peer_id: PeerId,
     ) -> Result<Option<FixedBlobSidecarList<T::EthSpec>>, LookupVerifyError> {
@@ -397,18 +397,24 @@ impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for BlobRequestState<L, 
                 let received_id = blob.id();
                 if !self.requested_ids.contains(&received_id) {
                     self.state.register_failure_downloading();
-                    Err(LookupVerifyError::UnrequestedBlobId)
-                } else {
-                    // State should remain downloading until we receive the stream terminator.
-                    self.requested_ids.remove(&received_id);
-                    let blob_index = blob.index;
-
-                    if blob_index >= T::EthSpec::max_blobs_per_block() as u64 {
-                        return Err(LookupVerifyError::InvalidIndex(blob.index));
-                    }
-                    *self.blob_download_queue.index_mut(blob_index as usize) = Some(blob);
-                    Ok(None)
+                    return Err(LookupVerifyError::UnrequestedBlobId);
                 }
+
+                blob.verify_blob_sidecar_inclusion_proof()
+                    .map_err(|_| LookupVerifyError::InvalidInclusionProof)?;
+                if blob.block_root() != expected_block_root {
+                    return Err(LookupVerifyError::UnrequestedHeader);
+                }
+
+                // State should remain downloading until we receive the stream terminator.
+                self.requested_ids.remove(&received_id);
+                let blob_index = blob.index;
+
+                if blob_index >= T::EthSpec::max_blobs_per_block() as u64 {
+                    return Err(LookupVerifyError::InvalidIndex(blob.index));
+                }
+                *self.blob_download_queue.index_mut(blob_index as usize) = Some(blob);
+                Ok(None)
             }
             None => {
                 self.state.state = State::Processing { peer_id };
