@@ -519,7 +519,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 .generate_rpc_data_column_process_fn(data_column, seen_timestamp, id);
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
-            work: Work::RpcBlobs { process_fn },
+            work: Work::RpcDataColumns { process_fn },
         })
     }
 

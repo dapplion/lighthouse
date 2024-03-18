@@ -2,9 +2,6 @@ use crate::blob_verification::{verify_kzg_for_blob_list, GossipVerifiedBlob, Kzg
 use crate::block_verification_types::{
     AvailabilityPendingExecutedBlock, AvailableExecutedBlock, RpcBlock,
 };
-pub use crate::data_availability_checker::availability_view::{
-    AvailabilityView, GetCommitment, GetCommitments,
-};
 pub use crate::data_availability_checker::child_components::ChildComponents;
 use crate::data_availability_checker::overflow_lru_cache::OverflowLRUCache;
 use crate::{BeaconChain, BeaconChainTypes, BeaconStore};
@@ -23,7 +20,6 @@ use types::{
     BlobSidecarList, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256, SignedBeaconBlock, Slot,
 };
 
-mod availability_view;
 mod child_components;
 mod error;
 mod overflow_lru_cache;
@@ -145,7 +141,13 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
 
         if self.da_check_required_for_epoch(current_epoch) {
             if let (Some(block), Some(blobs)) = (block, blobs) {
-                let block_commitments = block.get_commitments();
+                let block_commitments = block
+                    .message()
+                    .body()
+                    .blob_kzg_commitments()
+                    .ok()
+                    .cloned()
+                    .unwrap_or_default();
 
                 let num_blobs_expected = block_commitments.len();
                 let mut blob_ids = Vec::with_capacity(num_blobs_expected);
@@ -205,7 +207,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
             Some(cached_block) => {
                 sampling_ids.extend_from_slice(
                     &self
-                        .compute_custody_column_ids(cached_block.get_slot())
+                        .compute_custody_column_ids(cached_block.slot())
                         .into_iter()
                         .map(|index| BlobIdentifier {
                             block_root,

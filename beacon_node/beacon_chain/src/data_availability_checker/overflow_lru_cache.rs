@@ -34,7 +34,6 @@ use crate::blob_verification::KzgVerifiedBlob;
 use crate::block_verification_types::{
     AvailabilityPendingExecutedBlock, AvailableBlock, AvailableExecutedBlock,
 };
-use crate::data_availability_checker::availability_view::AvailabilityView;
 use crate::data_availability_checker::{Availability, AvailabilityCheckError};
 use crate::data_column_verification::KzgVerifiedDataColumn;
 use crate::store::{DBColumn, KeyValueStore};
@@ -48,7 +47,9 @@ use std::num::NonZeroUsize;
 use std::{collections::HashSet, sync::Arc};
 use types::blob_sidecar::BlobIdentifier;
 use types::data_column_sidecar::DataColumnIdentifier;
-use types::{BlobSidecar, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256};
+use types::{
+    BlobSidecar, ChainSpec, DataColumnSidecar, DataColumnSubnetId, Epoch, EthSpec, Hash256, Slot,
+};
 
 /// This represents the components of a partially available block
 ///
@@ -77,6 +78,156 @@ pub struct PendingComponents<T: EthSpec> {
 }
 
 impl<T: EthSpec> PendingComponents<T> {
+    /// Checks if a block exists in the cache.
+    ///
+    /// Returns:
+    /// - `true` if a block exists.
+    /// - `false` otherwise.
+    fn block_exists(&self) -> bool {
+        self.executed_block.is_some()
+    }
+
+    /// Checks if a blob exists at the given index in the cache.
+    ///
+    /// Returns:
+    /// - `true` if a blob exists at the given index.
+    /// - `false` otherwise.
+    fn blob_exists(&self, blob_index: usize) -> bool {
+        self.verified_blobs
+            .get(blob_index)
+            .map(|b| b.is_some())
+            .unwrap_or(false)
+    }
+
+    fn data_column_exists(&self, data_colum_index: DataColumnSubnetId) -> bool {
+        self.verified_data_columns
+            .get(data_colum_index.as_usize())
+            .map(|d| d.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Returns the number of blobs that are expected to be present. Returns `None` if we don't have a
+    /// block.
+    ///
+    /// This corresponds to the number of commitments that are present in a block.
+    fn num_expected_blobs(&self) -> Option<usize> {
+        self.executed_block.as_ref().map(|b| {
+            b.as_block()
+                .message()
+                .body()
+                .blob_kzg_commitments()
+                .cloned()
+                .unwrap_or_default()
+                .len()
+        })
+    }
+
+    /// Returns the number of blobs that have been received and are stored in the cache.
+    fn num_received_blobs(&self) -> usize {
+        self.verified_blobs.iter().flatten().count()
+    }
+
+    /// Inserts a blob at a specific index in the cache.
+    ///
+    /// Existing blob at the index will be replaced.
+    fn insert_blob_at_index(&mut self, blob_index: usize, blob: KzgVerifiedBlob<T>) {
+        if let Some(b) = self.verified_blobs.get_mut(blob_index) {
+            *b = Some(blob);
+        }
+    }
+
+    /// Merges a given set of data columns into the cache.
+    ///
+    /// Data columns are only inserted if:
+    /// 1. The data column entry at the index is empty and no block exists.
+    /// 2. The block exists and its commitments matches the data column's commitments.
+    fn merge_data_columns(
+        &mut self,
+        custody_data_columns: FixedVector<Option<KzgVerifiedDataColumn<T>>, T::DataColumnCount>,
+    ) {
+        for (index, data_column) in custody_data_columns.iter().cloned().enumerate() {
+            let Some(data_column) = data_column else {
+                continue;
+            };
+            // TODO(das): Add equivalent checks for data columns if necessary
+            if !self.data_column_exists((index as u64).into()) {
+                if let Some(b) = self.verified_data_columns.get_mut(index) {
+                    *b = Some(data_column);
+                }
+            }
+        }
+    }
+
+    /// Merges a given set of blobs into the cache.
+    ///
+    /// Blobs are only inserted if:
+    /// 1. The blob entry at the index is empty and no block exists.
+    /// 2. The block exists and its commitment matches the blob's commitment.
+    fn merge_blobs(&mut self, blobs: FixedVector<Option<KzgVerifiedBlob<T>>, T::MaxBlobsPerBlock>) {
+        for (index, blob) in blobs.iter().cloned().enumerate() {
+            let Some(blob) = blob else { continue };
+            self.merge_single_blob(index, blob);
+        }
+    }
+
+    /// Merges a single blob into the cache.
+    ///
+    /// Blobs are only inserted if:
+    /// 1. The blob entry at the index is empty and no block exists, or
+    /// 2. The block exists and its commitment matches the blob's commitment.
+    fn merge_single_blob(&mut self, index: usize, blob: KzgVerifiedBlob<T>) {
+        self.insert_blob_at_index(index, blob)
+    }
+
+    /// Inserts a new block and revalidates the existing blobs against it.
+    ///
+    /// Blobs that don't match the new block's commitments are evicted.
+    fn merge_block(&mut self, block: DietAvailabilityPendingExecutedBlock<T>) {
+        self.executed_block = Some(block);
+    }
+
+    /// Checks if the block and all of its expected blobs are available in the cache.
+    ///
+    /// Returns `true` if both the block exists and the number of received blobs matches the number
+    /// of expected blobs.
+    fn is_available(&self) -> bool {
+        if let Some(num_expected_blobs) = self.num_expected_blobs() {
+            // Note: the first equality covers the case of no columns to sample post EIP-7594
+            num_expected_blobs == self.num_received_blobs() || self.is_available_das()
+        } else {
+            false
+        }
+    }
+
+    fn is_available_das(&self) -> bool {
+        // TODO(das): should only consider the columns that are part of the random sample. If a
+        // custody columns happens to overlap with a randomly selected column to sample then it
+        // can be counted. To do this condition this struct will need to be aware of our
+        // randomly selected set of column_ids
+        if let Some(block) = &self.executed_block {
+            // let slot = block.get_slot();
+            sample_requirements(block.as_block().message().slot())
+                .iter()
+                .chain(self.custody_requirements().iter())
+                .all(|index| self.data_column_exists(*index))
+        } else {
+            false
+        }
+    }
+
+    fn samples_per_slot(&self) -> usize {
+        // TODO(das): make it a config param
+        16
+    }
+
+    fn custody_requirements(&self) -> Vec<DataColumnSubnetId> {
+        DataColumnSubnetId::compute_subnets_for_data_column::<T>(
+            self.node_id.into(),
+            self.custody_requirement,
+        )
+        .collect()
+    }
+
     pub fn empty(block_root: Hash256, node_id: NodeIdRaw) -> Self {
         Self {
             block_root,
@@ -180,6 +331,10 @@ impl<T: EthSpec> PendingComponents<T> {
                 None
             })
     }
+}
+
+fn sample_requirements(slot: Slot) -> Vec<DataColumnSubnetId> {
+    todo!()
 }
 
 /// Blocks and blobs are stored in the database sequentially so that it's

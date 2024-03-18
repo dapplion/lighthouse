@@ -8,20 +8,16 @@ use crate::sync::block_lookups::{
 use crate::sync::manager::{BlockProcessType, Id, SingleLookupReqId};
 use crate::sync::network_context::SyncNetworkContext;
 use beacon_chain::block_verification_types::RpcBlock;
-use beacon_chain::data_availability_checker::{AvailabilityView, ChildComponents};
+use beacon_chain::data_availability_checker::ChildComponents;
 use beacon_chain::{get_block_root, BeaconChainTypes};
-use lighthouse_network::rpc::methods::{BlobsByRootRequest, DataColumnsByRootRequest};
+use lighthouse_network::rpc::methods::BlobsByRootRequest;
 use lighthouse_network::rpc::BlocksByRootRequest;
 use rand::prelude::IteratorRandom;
-use ssz_types::FixedVector;
 use std::ops::IndexMut;
 use std::sync::Arc;
 use std::time::Duration;
 use types::blob_sidecar::{BlobIdentifier, FixedBlobSidecarList};
-use types::data_column_sidecar::{DataColumnIdentifier, FixedDataColumnSidecarList};
-use types::{BlobSidecar, ChainSpec, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock};
-
-use super::single_block_lookup::{ColumnRequestState, ColumnsRequestState};
+use types::{BlobSidecar, ChainSpec, EthSpec, Hash256, SignedBeaconBlock};
 
 #[derive(Debug, Copy, Clone)]
 pub enum ResponseType {
