@@ -312,7 +312,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
             self.da_checker.get_missing_blob_ids(
                 block_root,
                 &components.downloaded_block,
-                &components.downloaded_blobs,
+                &Some(components.downloaded_blobs.clone()),
             )
         } else {
             // TODO(lion): This check is incomplete. The processing cache only reflects blobs that
@@ -324,15 +324,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
             // triggered during a gossip block is in the middle of being processed.
             // If that is the usecase, why is this processing-deduplication cache tied to the
             // availability view?
-            let Some(processing_components) = self.da_checker.get_processing_components(block_root)
-            else {
-                return MissingBlobs::new_without_block(block_root, self.da_checker.is_deneb());
-            };
-            self.da_checker.get_missing_blob_ids(
-                block_root,
-                &processing_components.block,
-                &processing_components.blob_commitments,
-            )
+            self.da_checker.get_missing_blob_ids_with(block_root)
         }
     }
 

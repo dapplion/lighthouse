@@ -410,8 +410,10 @@ impl<T: BeaconChainTypes> BeaconBlockStreamer<T> {
     fn check_caches(&self, root: Hash256) -> Option<Arc<SignedBeaconBlock<T::EthSpec>>> {
         if self.check_caches == CheckCaches::Yes {
             self.beacon_chain
-                .data_availability_checker
-                .get_block(&root)
+                .reqresp_pre_import_cache
+                .read()
+                .get(&root)
+                .map(|block| block.clone())
                 .or(self.beacon_chain.early_attester_cache.get_block(root))
         } else {
             None

@@ -1,16 +1,13 @@
-use super::child_components::ChildComponents;
 use super::state_lru_cache::DietAvailabilityPendingExecutedBlock;
-use super::NodeIdRaw;
 use crate::blob_verification::KzgVerifiedBlob;
 use crate::block_verification_types::AsBlock;
 use crate::data_availability_checker::overflow_lru_cache::PendingComponents;
-use crate::data_availability_checker::ProcessingComponents;
 use crate::data_column_verification::KzgVerifiedDataColumn;
 use kzg::KzgCommitment;
 use ssz_types::FixedVector;
 use std::sync::Arc;
 use types::beacon_block_body::KzgCommitments;
-use types::{BlobSidecar, DataColumnSidecar, DataColumnSubnetId, EthSpec, SignedBeaconBlock, Slot};
+use types::{BlobSidecar, DataColumnSubnetId, EthSpec, SignedBeaconBlock, Slot};
 
 /// Defines an interface for managing data availability with two key invariants:
 ///
@@ -273,18 +270,6 @@ macro_rules! impl_availability_view {
         }
     };
 }
-
-impl_availability_view!(
-    ProcessingComponents,
-    Arc<SignedBeaconBlock<E>>,
-    KzgCommitment,
-    (),
-    block,
-    blob_commitments,
-    data_columns,
-    node_id,
-    custody_requirement,
-);
 
 impl_availability_view!(
     PendingComponents,
@@ -604,13 +589,6 @@ pub mod tests {
         };
     }
 
-    generate_tests!(
-        processing_components_tests,
-        ProcessingComponents::<E>,
-        kzg_commitments,
-        processing_blobs,
-        setup_processing_components
-    );
     generate_tests!(
         pending_components_tests,
         PendingComponents<E>,
