@@ -29,12 +29,17 @@ use crate::data_column_verification::{
     verify_kzg_for_data_column_list, GossipVerifiedDataColumn, KzgVerifiedDataColumn,
 };
 pub use error::{Error as AvailabilityCheckError, ErrorCategory as AvailabilityCheckErrorCategory};
-use types::data_column_sidecar::{
-    DataColumnIdentifier, DataColumnSidecarList, FixedDataColumnSidecarList,
-};
+use types::data_column_sidecar::{DataColumnIdentifier, DataColumnSidecarList};
 use types::non_zero_usize::new_non_zero_usize;
 
-type NodeIdRaw = [u8; 32];
+#[derive(Clone, Copy)]
+pub struct NodeIdRaw(pub [u8; 32]);
+
+impl From<[u8; 32]> for NodeIdRaw {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+}
 
 /// The LRU Cache stores `PendingComponents` which can store up to
 /// `MAX_BLOBS_PER_BLOCK = 6` blobs each. A `BlobSidecar` is 0.131256 MB. So
@@ -88,8 +93,15 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         log: &Logger,
         spec: ChainSpec,
         node_id: NodeIdRaw,
+        custody_requirement: u64,
     ) -> Result<Self, AvailabilityCheckError> {
-        let overflow_cache = OverflowLRUCache::new(OVERFLOW_LRU_CAPACITY, store, spec.clone())?;
+        let overflow_cache = OverflowLRUCache::new(
+            OVERFLOW_LRU_CAPACITY,
+            store,
+            spec.clone(),
+            node_id,
+            custody_requirement,
+        )?;
         Ok(Self {
             availability_cache: Arc::new(overflow_cache),
             slot_clock,
@@ -266,27 +278,21 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
             .put_kzg_verified_blobs(block_root, verified_blobs)
     }
 
-    pub fn put_rpc_data_columns(
+    pub fn put_rpc_data_column(
         &self,
         block_root: Hash256,
-        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
         let Some(kzg) = self.kzg.as_ref() else {
             return Err(AvailabilityCheckError::KzgNotInitialized);
         };
 
         // TODO(das): batch verify data columns
-        let verified_data_columns = data_columns
-            .into_iter()
-            .flatten()
-            .map(|data_column| {
-                KzgVerifiedDataColumn::new(data_column.clone(), kzg)
-                    .map_err(AvailabilityCheckError::Kzg)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let verified_data_column = KzgVerifiedDataColumn::new(data_column.clone(), kzg)
+            .map_err(AvailabilityCheckError::Kzg)?;
 
         self.availability_cache
-            .put_kzg_verified_data_columns(block_root, verified_data_columns)
+            .put_kzg_verified_data_column(block_root, verified_data_column)
     }
 
     /// Check if we've cached other blobs for this block. If it completes a set and we also
@@ -311,9 +317,9 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         &self,
         gossip_data_column: GossipVerifiedDataColumn<T>,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
-        self.availability_cache.put_kzg_verified_data_columns(
+        self.availability_cache.put_kzg_verified_data_column(
             gossip_data_column.block_root(),
-            vec![gossip_data_column.into_inner()],
+            gossip_data_column.into_inner(),
         )
     }
 

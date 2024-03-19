@@ -2,7 +2,7 @@ use crate::beacon_chain::{
     CanonicalHead, LightClientProducerEvent, BEACON_CHAIN_DB_KEY, ETH1_CACHE_DB_KEY, OP_POOL_DB_KEY,
 };
 use crate::beacon_proposer_cache::BeaconProposerCache;
-use crate::data_availability_checker::DataAvailabilityChecker;
+use crate::data_availability_checker::{DataAvailabilityChecker, NodeIdRaw};
 use crate::eth1_chain::{CachingEth1Backend, SszEth1};
 use crate::eth1_finalization_cache::Eth1FinalizationCache;
 use crate::fork_choice_signal::ForkChoiceSignalTx;
@@ -104,6 +104,7 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     trusted_setup: Option<TrustedSetup>,
     task_executor: Option<TaskExecutor>,
     validator_monitor_config: Option<ValidatorMonitorConfig>,
+    node_id: Option<NodeIdRaw>,
 }
 
 impl<TSlotClock, TEth1Backend, TEthSpec, THotStore, TColdStore>
@@ -145,6 +146,7 @@ where
             trusted_setup: None,
             task_executor: None,
             validator_monitor_config: None,
+            node_id: None,
         }
     }
 
@@ -687,6 +689,11 @@ where
         self
     }
 
+    pub fn node_id(mut self, node_id: NodeIdRaw) -> Self {
+        self.node_id = Some(node_id);
+        self
+    }
+
     /// Consumes `self`, returning a `BeaconChain` if all required parameters have been supplied.
     ///
     /// An error will be returned at runtime if all required parameters have not been configured.
@@ -880,6 +887,7 @@ where
         let head_for_snapshot_cache = head_snapshot.clone();
         let canonical_head = CanonicalHead::new(fork_choice, Arc::new(head_snapshot));
         let shuffling_cache_size = self.chain_config.shuffling_cache_size;
+        let custody_requirement = self.chain_config.custody_requirement;
 
         // Calculate the weak subjectivity point in which to backfill blocks to.
         let genesis_backfill_slot = if self.chain_config.genesis_backfill {
@@ -989,7 +997,8 @@ where
                     store,
                     &log,
                     self.spec,
-                    todo!(),
+                    self.node_id.ok_or("Cannot build without a node ID")?,
+                    custody_requirement,
                 )
                 .map_err(|e| format!("Error initializing DataAvailabiltyChecker: {:?}", e))?,
             ),

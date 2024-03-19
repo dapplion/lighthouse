@@ -23,9 +23,7 @@ use crate::chain_config::ChainConfig;
 use crate::data_availability_checker::{
     Availability, AvailabilityCheckError, AvailableBlock, DataAvailabilityChecker,
 };
-use crate::data_column_verification::{
-    GossipDataColumnError, GossipVerifiedDataColumn, KzgVerifiedDataColumn,
-};
+use crate::data_column_verification::{GossipDataColumnError, GossipVerifiedDataColumn};
 use crate::early_attester_cache::EarlyAttesterCache;
 use crate::errors::{BeaconChainError as Error, BlockProductionError};
 use crate::eth1_chain::{Eth1Chain, Eth1ChainBackend};
@@ -2998,12 +2996,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         self.remove_notified(&block_root, r)
     }
 
-    pub async fn process_rpc_data_columns(
+    pub async fn process_rpc_data_column(
         self: &Arc<Self>,
-        slot: Slot,
-        block_root: Hash256,
-        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
     ) -> Result<AvailabilityProcessingStatus, BlockError<T::EthSpec>> {
+        let block_root = data_column.block_root();
+
         // If this block has already been imported to forkchoice it must have been available, so
         // we don't need to process its blobs again.
         if self
@@ -3017,38 +3015,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // TODO(das) emit data_column SEE event
 
         let r = self
-            .check_rpc_data_column_availability_and_import(slot, block_root, data_columns)
+            .check_rpc_data_column_availability_and_import(data_column)
             .await;
         self.remove_notified(&block_root, r)
-    }
-
-    pub async fn process_rpc_data_column(
-        self: &Arc<Self>,
-        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
-    ) -> Result<AvailabilityProcessingStatus, BlockError<T::EthSpec>> {
-        // If this block has already been imported to forkchoice it must have been available, so
-        // we don't need to process its blobs again.
-        if self
-            .canonical_head
-            .fork_choice_read_lock()
-            .contains_block(&data_column.block_root())
-        {
-            return Err(BlockError::BlockIsAlreadyKnown);
-        }
-
-        let Some(kzg) = self.kzg.as_ref() else {
-            return Err(BlockError::AvailabilityCheck(
-                AvailabilityCheckError::KzgNotInitialized,
-            ));
-        };
-
-        KzgVerifiedDataColumn::new(data_column.clone(), kzg)
-            .map_err(|e| BlockError::AvailabilityCheck(AvailabilityCheckError::Kzg(e)))?;
-
-        // NOTE: Availability status not consumed
-        Ok(AvailabilityProcessingStatus::Imported(
-            data_column.block_root(),
-        ))
     }
 
     /// Remove any block components from the *processing cache* if we no longer require them. If the
@@ -3346,36 +3315,33 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
     async fn check_rpc_data_column_availability_and_import(
         self: &Arc<Self>,
-        slot: Slot,
-        block_root: Hash256,
-        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
     ) -> Result<AvailabilityProcessingStatus, BlockError<T::EthSpec>> {
+        let block_root = data_column.block_root();
+        let slot = data_column.slot();
+
         // Need to scope this to ensure the lock is dropped before calling `process_availability`
         // Even an explicit drop is not enough to convince the borrow checker.
         {
             let mut slashable_cache = self.observed_slashable.write();
-            for header in data_columns
-                .into_iter()
-                .filter_map(|b| b.as_ref().map(|b| b.signed_block_header.clone()))
-                .unique()
-            {
-                if verify_header_signature::<T, BlockError<T::EthSpec>>(self, &header).is_ok() {
-                    slashable_cache
-                        .observe_slashable(
-                            header.message.slot,
-                            header.message.proposer_index,
-                            block_root,
-                        )
-                        .map_err(|e| BlockError::BeaconChainError(e.into()))?;
-                    if let Some(slasher) = self.slasher.as_ref() {
-                        slasher.accept_block_header(header);
-                    }
+            let header = &data_column.signed_block_header;
+            if verify_header_signature::<T, BlockError<T::EthSpec>>(self, &header).is_ok() {
+                slashable_cache
+                    .observe_slashable(
+                        header.message.slot,
+                        header.message.proposer_index,
+                        block_root,
+                    )
+                    .map_err(|e| BlockError::BeaconChainError(e.into()))?;
+                if let Some(slasher) = self.slasher.as_ref() {
+                    slasher.accept_block_header(header.clone());
                 }
             }
         }
+
         let availability = self
             .data_availability_checker
-            .put_rpc_data_columns(block_root, data_columns)?;
+            .put_rpc_data_column(block_root, data_column)?;
 
         self.process_availability(slot, availability).await
     }

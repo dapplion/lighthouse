@@ -304,21 +304,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         });
     }
 
-    pub fn generate_rpc_data_columns_process_fn(
-        self: Arc<Self>,
-        block_root: Hash256,
-        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
-        seen_timestamp: Duration,
-        process_type: BlockProcessType,
-    ) -> AsyncFn {
-        let process_fn = async move {
-            self.clone()
-                .process_rpc_data_columns(block_root, data_columns, seen_timestamp, process_type)
-                .await;
-        };
-        Box::pin(process_fn)
-    }
-
     pub fn generate_rpc_data_column_process_fn(
         self: Arc<Self>,
         data_column: Arc<DataColumnSidecar<T::EthSpec>>,
@@ -331,34 +316,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 .await;
         };
         Box::pin(process_fn)
-    }
-
-    pub async fn process_rpc_data_columns(
-        self: Arc<NetworkBeaconProcessor<T>>,
-        block_root: Hash256,
-        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
-        _seen_timestamp: Duration,
-        process_type: BlockProcessType,
-    ) {
-        let Some(slot) = data_columns
-            .iter()
-            .find_map(|blob| blob.as_ref().map(|blob| blob.slot()))
-        else {
-            return;
-        };
-
-        // TODO(das): log and metrics
-
-        let result = self
-            .chain
-            .process_rpc_data_columns(slot, block_root, data_columns)
-            .await;
-
-        // Sync handles these results
-        self.send_sync_message(SyncMessage::BlockComponentProcessed {
-            process_type,
-            result: result.into(),
-        });
     }
 
     pub async fn process_rpc_data_column(

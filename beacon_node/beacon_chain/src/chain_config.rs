@@ -85,6 +85,8 @@ pub struct ChainConfig {
     pub epochs_per_migration: u64,
     /// When set to true Light client server computes and caches state proofs for serving updates
     pub enable_light_client_server: bool,
+    /// Columns to custody for PeerDAS, minimum 2
+    pub custody_requirement: u64,
 }
 
 impl Default for ChainConfig {
@@ -117,6 +119,7 @@ impl Default for ChainConfig {
             progressive_balances_mode: ProgressiveBalancesMode::Fast,
             epochs_per_migration: crate::migrate::DEFAULT_EPOCHS_PER_MIGRATION,
             enable_light_client_server: false,
+            custody_requirement: 2,
         }
     }
 }

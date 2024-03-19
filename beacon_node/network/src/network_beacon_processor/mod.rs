@@ -485,29 +485,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         })
     }
 
-    pub fn send_rpc_data_columns(
-        self: &Arc<Self>,
-        block_root: Hash256,
-        data_columns: FixedDataColumnSidecarList<T::EthSpec>,
-        seen_timestamp: Duration,
-        process_type: BlockProcessType,
-    ) -> Result<(), Error<T::EthSpec>> {
-        let count = data_columns.iter().filter(|b| b.is_some()).count();
-        if count == 0 {
-            return Ok(());
-        }
-        let process_fn = self.clone().generate_rpc_data_columns_process_fn(
-            block_root,
-            data_columns,
-            seen_timestamp,
-            process_type,
-        );
-        self.try_send(BeaconWorkEvent {
-            drop_during_sync: false,
-            work: Work::RpcDataColumns { process_fn },
-        })
-    }
-
     pub fn send_rpc_data_column(
         self: &Arc<Self>,
         data_column: Arc<DataColumnSidecar<T::EthSpec>>,
