@@ -154,7 +154,8 @@ impl<T: EthSpec> DataColumnSidecar<T> {
     }
 
     pub fn verify_inclusion_proof(&self) -> Result<bool, MerkleTreeError> {
-        todo!();
+        // TODO(das): Verify proof
+        Ok(true)
     }
 
     pub fn min_size() -> usize {
@@ -220,8 +221,6 @@ impl From<SszError> for DataColumnSidecarError {
 
 pub type DataColumnSidecarList<T> =
     VariableList<Arc<DataColumnSidecar<T>>, <T as EthSpec>::DataColumnCount>;
-pub type FixedDataColumnSidecarList<T> =
-    FixedVector<Option<Arc<DataColumnSidecar<T>>>, <T as EthSpec>::DataColumnCount>;
 
 #[cfg(test)]
 mod test {

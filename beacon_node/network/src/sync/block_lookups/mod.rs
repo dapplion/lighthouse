@@ -36,7 +36,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use store::Hash256;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::data_column_sidecar::FixedDataColumnSidecarList;
 use types::{DataColumnSidecar, EthSpec, Slot};
 
 pub mod common;
@@ -704,7 +703,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         peer_id: PeerId,
         cx: &SyncNetworkContext<T>,
         error: RPCError,
-    ) -> Result<(), LookupRequestError> {
+    ) {
         let msg = error.as_static_str();
         let Some(mut parent_lookup) = self.get_parent_lookup::<R>(lookup_id, request_id) else {
             debug!(self.log,
@@ -712,11 +711,16 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 "peer_id" => %peer_id,
                 "error" => msg
             );
-            return Ok(());
+            return;
         };
-        R::request_state_mut(&mut parent_lookup.current_parent_request, request_id)
-            .ok_or(LookupRequestError::UnknownRequest)?
-            .register_failure_downloading();
+        if let Some(parent_request) =
+            R::request_state_mut(&mut parent_lookup.current_parent_request, request_id)
+        {
+            parent_request.register_failure_downloading();
+        } else {
+            // TODO: Can this case happen? Should downscore peers
+            todo!("unknwon request id")
+        }
         trace!(self.log, "Parent lookup block request failed"; &parent_lookup, "error" => msg);
 
         self.request_parent(parent_lookup, cx);
@@ -725,8 +729,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             &metrics::SYNC_PARENT_BLOCK_LOOKUPS,
             self.parent_lookups.len() as i64,
         );
-
-        Ok(())
     }
 
     /// An RPC error has occurred during a single lookup. This function handles this case.\
@@ -737,12 +739,12 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         peer_id: &PeerId,
         cx: &SyncNetworkContext<T>,
         error: RPCError,
-    ) -> Result<(), LookupRequestError> {
+    ) {
         let msg = error.as_static_str();
         let log = self.log.clone();
         let Some(mut lookup) = self.get_single_lookup::<R>(lookup_id, request_id) else {
             debug!(log, "Error response to dropped lookup"; "error" => ?error);
-            return Ok(());
+            return;
         };
         let block_root = lookup.block_root();
         let Some(request_state) = R::request_state_mut(&mut lookup, request_id) else {
@@ -773,8 +775,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             &metrics::SYNC_SINGLE_BLOCK_LOOKUPS,
             self.single_block_lookups.len() as i64,
         );
-
-        Ok(())
     }
 
     /* Processing responses */
@@ -1430,10 +1430,4 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn drop_parent_chain_requests(&mut self) -> usize {
         self.parent_lookups.drain(..).len()
     }
-}
-
-pub fn to_data_columns_list<E: EthSpec>(
-    data_column: &DataColumnSidecar<E>,
-) -> FixedDataColumnSidecarList<E> {
-    todo!()
 }

@@ -565,11 +565,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub fn data_column_lookup_request(
         &self,
-        id: SampleReqId,
+        id: SingleLookupReqId,
+        column_index: ColumnIndex,
         peer_id: PeerId,
         request: DataColumnsByRootRequest,
     ) -> Result<(), &'static str> {
-        let request_id = RequestId::Sync(SyncRequestId::SingleBlockSample { id });
+        // TODO(das): why the distinction between current and parent lookups?
+        let request_id = RequestId::Sync(SyncRequestId::SingleDataColumn {
+            id: id,
+            index: column_index,
+        });
 
         debug!(
             self.log,

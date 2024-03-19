@@ -21,7 +21,7 @@ use types::data_column_sidecar::{ColumnIndex, DataColumnIdentifier};
 use types::{BlobSidecar, ChainSpec, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock};
 
 use super::single_block_lookup::ColumnsRequestState;
-use super::{to_data_columns_list, ColumnRequestState};
+use super::ColumnRequestState;
 
 #[derive(Debug, Copy, Clone)]
 pub enum ResponseType {
@@ -503,11 +503,9 @@ impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for ColumnRequestState<L
         cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
         cx.data_column_lookup_request(
-            SampleReqId {
-                id: id.id,
-                // TODO: Should track a single column_index or multiple
-                column_index: request.data_column_ids.to_vec().first().unwrap().index,
-            },
+            id,
+            // TODO: Should track a single column_index or multiple
+            request.data_column_ids.to_vec().first().unwrap().index,
             peer_id,
             request,
         )

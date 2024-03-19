@@ -5,12 +5,12 @@ use crate::sync::network_context::{PeersByCustody, SyncNetworkContext};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_availability_checker::{
     compute_custody_requirements, compute_sample_requirements, AvailabilityCheckError,
-    ChildComponents, CustodyConfig, DataAvailabilityChecker, MissingBlobs, MissingDataColumns,
+    ChildComponents, DataAvailabilityChecker, MissingBlobs, MissingDataColumns,
 };
 use beacon_chain::BeaconChainTypes;
 use lighthouse_network::PeerAction;
 use slog::{trace, Logger};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;

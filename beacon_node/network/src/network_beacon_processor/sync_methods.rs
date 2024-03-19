@@ -25,7 +25,6 @@ use store::KzgCommitment;
 use tokio::sync::mpsc;
 use types::beacon_block_body::format_kzg_commitments;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::data_column_sidecar::FixedDataColumnSidecarList;
 use types::{DataColumnSidecar, Epoch, Hash256};
 
 /// Id associated to a batch processing request, either a sync batch or a parent lookup.

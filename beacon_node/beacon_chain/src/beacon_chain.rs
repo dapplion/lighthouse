@@ -123,7 +123,7 @@ use tokio_stream::Stream;
 use tree_hash::TreeHash;
 use types::beacon_state::CloneConfig;
 use types::blob_sidecar::{BlobSidecarList, FixedBlobSidecarList};
-use types::data_column_sidecar::{DataColumnSidecarList, FixedDataColumnSidecarList};
+use types::data_column_sidecar::DataColumnSidecarList;
 use types::payload::BlockProductionVersion;
 use types::*;
 

@@ -32,7 +32,7 @@ use store::MemoryStore;
 use task_executor::test_utils::TestRuntime;
 use task_executor::TaskExecutor;
 use tokio::sync::mpsc::{self, error::TrySendError};
-use types::{data_column_sidecar::FixedDataColumnSidecarList, *};
+use types::*;
 
 pub use sync_methods::ChainSegmentProcessId;
 use types::blob_sidecar::FixedBlobSidecarList;
