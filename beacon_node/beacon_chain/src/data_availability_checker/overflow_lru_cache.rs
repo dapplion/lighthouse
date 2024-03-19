@@ -28,7 +28,7 @@
 //! the cache when they are accessed.
 
 use super::state_lru_cache::{DietAvailabilityPendingExecutedBlock, StateLRUCache};
-use super::NodeIdRaw;
+use super::{CustodyConfig, NodeIdRaw};
 use crate::beacon_chain::BeaconStore;
 use crate::blob_verification::KzgVerifiedBlob;
 use crate::block_verification_types::{
@@ -74,6 +74,12 @@ pub struct PendingComponents<T: EthSpec> {
 }
 
 impl<T: EthSpec> PendingComponents<T> {
+    fn block_slot(&self) -> Option<Slot> {
+        self.executed_block
+            .as_ref()
+            .map(|b| b.as_block().message().slot())
+    }
+
     /// Checks if a block exists in the cache.
     ///
     /// Returns:
@@ -271,11 +277,14 @@ impl<T: EthSpec> PendingComponents<T> {
     }
 }
 
-fn sample_requirements(slot: Slot) -> Vec<ColumnIndex> {
+pub fn compute_sample_requirements(slot: Slot) -> Vec<ColumnIndex> {
     todo!()
 }
 
-fn custody_requirements(node_id: NodeIdRaw, custody_requirement: u64) -> Vec<ColumnIndex> {
+pub fn compute_custody_requirements(
+    slot: Slot,
+    custody_config: &CustodyConfig,
+) -> Vec<ColumnIndex> {
     todo!()
 }
 
@@ -486,6 +495,10 @@ impl<T: BeaconChainTypes> Critical<T> {
         Ok(())
     }
 
+    pub fn block_slot(&self, block_root: &Hash256) -> Option<Slot> {
+        self.in_memory.peek(block_root).and_then(|b| b.block_slot())
+    }
+
     /// Returns true if the block root is known, without altering the LRU ordering
     pub fn has_block(&self, block_root: &Hash256) -> bool {
         self.in_memory.peek(block_root).is_some() || self.store_keys.get(block_root).is_some()
@@ -600,8 +613,7 @@ pub struct OverflowLRUCache<T: BeaconChainTypes> {
     /// The capacity of the LRU cache
     capacity: NonZeroUsize,
 
-    node_id: NodeIdRaw,
-    custody_requirement: u64,
+    custody_config: CustodyConfig,
     spec: ChainSpec,
 }
 
@@ -610,8 +622,7 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
         capacity: NonZeroUsize,
         beacon_store: BeaconStore<T>,
         spec: ChainSpec,
-        node_id: NodeIdRaw,
-        custody_requirement: u64,
+        custody_config: CustodyConfig,
     ) -> Result<Self, AvailabilityCheckError> {
         let overflow_store = OverflowStore(beacon_store.clone());
         let mut critical = Critical::new(capacity);
@@ -623,9 +634,16 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
             maintenance_lock: Mutex::new(()),
             capacity,
             spec,
-            node_id,
-            custody_requirement,
+            custody_config,
         })
+    }
+
+    pub fn get_custody_config(&self) -> &CustodyConfig {
+        &self.custody_config
+    }
+
+    pub fn block_slot(&self, block_root: &Hash256) -> Option<Slot> {
+        self.critical.read().block_slot(block_root)
     }
 
     /// Returns true if the block root is known, without altering the LRU ordering
@@ -813,6 +831,11 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
         Ok(())
     }
 
+    /// Return this node's custody column requirements at `slot`
+    pub fn custody_columns_at_slot(&self, slot: Slot) -> Vec<ColumnIndex> {
+        compute_custody_requirements(slot, &self.custody_config)
+    }
+
     fn is_available(&self, pending_components: &PendingComponents<T::EthSpec>) -> bool {
         let Some(block) = &pending_components.executed_block else {
             return false;
@@ -827,9 +850,10 @@ impl<T: BeaconChainTypes> OverflowLRUCache<T> {
 
         if is_post_peerdas {
             // PeerDAS data availability
-            sample_requirements(block.slot())
+            // TODO: Should reject blobs?
+            compute_sample_requirements(block.slot())
                 .iter()
-                .chain(custody_requirements(self.node_id, self.custody_requirement).iter())
+                .chain(compute_custody_requirements(block.slot(), &self.custody_config).iter())
                 // TODO: This is O(n^2) complexity check, optimize
                 .all(|index| pending_components.data_column_exists(*index))
         } else {

@@ -10,17 +10,22 @@ use crate::status::ToStatusMessage;
 use crate::sync::block_lookups::common::LookupType;
 use crate::sync::manager::SingleLookupReqId;
 use beacon_chain::block_verification_types::RpcBlock;
+use beacon_chain::data_availability_checker::{compute_custody_requirements, CustodyConfig};
 use beacon_chain::{BeaconChain, BeaconChainTypes, EngineState};
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{
     BlobsByRangeRequest, BlobsByRootRequest, DataColumnsByRootRequest,
 };
 use lighthouse_network::rpc::{BlocksByRangeRequest, BlocksByRootRequest, GoodbyeReason};
-use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource, Request};
+use lighthouse_network::{
+    Client, NetworkGlobals, PeerAction, PeerId, PeerInfo, ReportSource, Request,
+};
 use slog::{debug, trace, warn};
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use types::data_column_sidecar::ColumnIndex;
 use types::{BlobSidecar, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 pub struct BlocksAndBlobsByRangeResponse<T: EthSpec> {
@@ -98,6 +103,12 @@ impl PeersByCustody {
     }
 }
 
+fn custody_config_from_peer_info<E: EthSpec>(peer_info: &PeerInfo<E>) -> Option<CustodyConfig> {
+    peer_info
+        .node_id()
+        .map(|node_id| CustodyConfig::new(node_id.into(), peer_info.custody_requirements()))
+}
+
 impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     pub fn new(
         network_send: mpsc::UnboundedSender<NetworkMessage<T::EthSpec>>,
@@ -125,6 +136,34 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub fn peers_by_custody(&self) -> PeersByCustody {
         todo!();
+    }
+
+    pub fn get_custody_config_of_peer(&self, peer_id: &PeerId) -> Option<CustodyConfig> {
+        self.network_globals()
+            .peers
+            .read()
+            .peer_info(peer_id)
+            .and_then(|peer_info| custody_config_from_peer_info(peer_info))
+    }
+
+    pub fn peers_by_custody_at_slot(&self, slot: Slot) -> HashMap<ColumnIndex, Vec<PeerId>> {
+        let mut peers_by_custody = HashMap::<ColumnIndex, Vec<PeerId>>::new();
+
+        for (peer_id, peer_info) in self.network_globals().peers.read().peers() {
+            // Custody config returns None if the ENR of the peer is unknown. However we should
+            // always know the peer's Node ID
+            // TODO: Retrieve custody config from Node ID
+            if let Some(custody_config) = custody_config_from_peer_info(peer_info) {
+                for column_index in compute_custody_requirements(slot, &custody_config) {
+                    peers_by_custody
+                        .entry(column_index)
+                        .or_default()
+                        .push(*peer_id);
+                }
+            }
+        }
+
+        peers_by_custody
     }
 
     /// Returns the Client type of the peer if known

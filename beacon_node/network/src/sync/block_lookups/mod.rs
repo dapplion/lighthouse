@@ -15,7 +15,8 @@ use crate::sync::network_context::PeersByCustody;
 use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
 pub use beacon_chain::data_availability_checker::ChildComponents;
 use beacon_chain::data_availability_checker::{
-    AvailabilityCheckErrorCategory, DataAvailabilityChecker,
+    compute_custody_requirements, AvailabilityCheckErrorCategory, CustodyConfig,
+    DataAvailabilityChecker, NodeIdRaw,
 };
 use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::{AvailabilityProcessingStatus, BeaconChainTypes, BlockError};
@@ -80,6 +81,32 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         }
     }
 
+    /// Add a column custodial peer to all search requests that maybe need to fetch from this peer.
+    pub fn add_custody_peer(
+        &mut self,
+        peer_id: &PeerId,
+        peer_custody_config: &CustodyConfig,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        for (_, lookup) in self.single_block_lookups.iter_mut() {
+            if let Some(slot) = lookup.block_slot() {
+                let peer_custody_columns = compute_custody_requirements(slot, peer_custody_config);
+                lookup.add_custody_peer(peer_id, &peer_custody_columns);
+
+                // When a peer is added, potentially some request will have peers and can be
+                // attempted again.
+                // TODO: Only request for lookups that added relevant peers
+                if let Err(e) = lookup.request_all_components(cx) {
+                    // TODO: What to in case of error? Drop request?
+                    debug!(self.log,
+                        "Failed to request block and blobs after adding custody peer";
+                        "error" => ?e
+                    );
+                }
+            }
+        }
+    }
+
     /* Lookup requests */
 
     /// Creates a lookup for the block with the given `block_root` and immediately triggers it.
@@ -115,7 +142,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         cx: &SyncNetworkContext<T>,
     ) {
         let block_root = single_block_lookup.block_root();
-        match single_block_lookup.request_block_and_blobs(cx) {
+        match single_block_lookup.request_all_components(cx) {
             Ok(()) => self.add_single_lookup(single_block_lookup),
             Err(e) => {
                 debug!(self.log, "Single block lookup failed";
@@ -375,7 +402,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 cx.report_peer(peer_id, PeerAction::LowToleranceError, msg);
 
                 request_state.register_failure_downloading();
-                lookup.request_block_and_blobs(cx)?;
+                lookup.request_all_components(cx)?;
             }
         }
         Ok(lookup)
@@ -431,7 +458,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                         .state
                         .register_failure_downloading();
                 }
-                lookup.request_block_and_blobs(cx)?;
+                lookup.request_all_components(cx)?;
             }
             CachedChild::NotRequired => R::send_reconstructed_for_processing(
                 id,
@@ -448,7 +475,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                     "block_root" => ?block_root
                 );
                 lookup.handle_consistency_failure(cx);
-                lookup.request_block_and_blobs(cx)?;
+                lookup.request_all_components(cx)?;
             }
         }
         Ok(())
@@ -733,7 +760,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         );
         let id = lookup_id.id;
         request_state.register_failure_downloading();
-        if let Err(e) = lookup.request_block_and_blobs(cx) {
+        if let Err(e) = lookup.request_all_components(cx) {
             debug!(self.log,
                 "Single lookup retry failed";
                 "error" => ?e,
@@ -846,7 +873,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 .blob_request_state
                 .state
                 .register_failure_processing();
-            lookup.request_block_and_blobs(cx)?;
+            lookup.request_all_components(cx)?;
         }
         Ok(())
     }
@@ -876,7 +903,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 let slot = block.slot();
                 let parent_root = block.parent_root();
                 lookup.add_child_components(block.into());
-                lookup.request_block_and_blobs(cx)?;
+                lookup.request_all_components(cx)?;
                 self.search_parent(slot, root, parent_root, peer_id, cx);
             }
             ref e @ BlockError::ExecutionPayloadError(ref epe) if !epe.penalize_peer() => {
@@ -901,12 +928,12 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                         .blob_request_state
                         .state
                         .register_failure_downloading();
-                    lookup.request_block_and_blobs(cx)?
+                    lookup.request_all_components(cx)?
                 }
                 AvailabilityCheckErrorCategory::Malicious => {
                     warn!(self.log, "Availability check failure"; "root" => %root, "peer_id" => %peer_id, "error" => ?e);
                     lookup.handle_availability_check_failure(cx);
-                    lookup.request_block_and_blobs(cx)?
+                    lookup.request_all_components(cx)?
                 }
             },
             other => {
@@ -923,7 +950,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                         .block_request_state
                         .state
                         .register_failure_processing();
-                    lookup.request_block_and_blobs(cx)?
+                    lookup.request_all_components(cx)?
                 }
             }
         }
@@ -995,7 +1022,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                     .register_failure_processing();
                 match parent_lookup
                     .current_parent_request
-                    .request_block_and_blobs(cx)
+                    .request_all_components(cx)
                 {
                     Ok(()) => self.parent_lookups.push(parent_lookup),
                     Err(e) => self.handle_parent_request_error(&mut parent_lookup, cx, e.into()),
@@ -1107,7 +1134,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                         "chain_hash" => ?chain_hash
                     );
                     child_lookup.handle_consistency_failure(cx);
-                    if let Err(e) = child_lookup.request_block_and_blobs(cx) {
+                    if let Err(e) = child_lookup.request_all_components(cx) {
                         debug!(self.log,
                             "Failed to request block and blobs, dropping lookup";
                             "error" => ?e
@@ -1233,7 +1260,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                             "error" => ?e
                         );
                         lookup.handle_consistency_failure(cx);
-                        if let Err(e) = lookup.request_block_and_blobs(cx) {
+                        if let Err(e) = lookup.request_all_components(cx) {
                             debug!(self.log,
                                 "Failed to request block and blobs, dropping lookup";
                                 "error" => ?e

@@ -157,9 +157,6 @@ pub enum SyncMessage<T: EthSpec> {
     /// manager to attempt to find the block matching the unknown hash.
     UnknownBlockHashFromAttestation(PeerId, Hash256),
 
-    /// Trigger sampling for a block's data columns
-    SampleDataColumns(Hash256, Slot),
-
     /// A peer has disconnected.
     Disconnect(PeerId),
 
@@ -324,6 +321,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         }
 
         self.update_sync_state();
+    }
+
+    fn add_custody_peer(&mut self, peer_id: &PeerId) {
+        if let Some(custody_config) = self.network.get_custody_config_of_peer(peer_id) {
+            self.block_lookups
+                .add_custody_peer(peer_id, &custody_config, &mut self.network)
+        }
     }
 
     /// Handles RPC errors related to requests that were emitted from the sync manager.
@@ -648,6 +652,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         match sync_message {
             SyncMessage::AddPeer(peer_id, info) => {
                 self.add_peer(peer_id, info);
+                self.add_custody_peer(&peer_id);
             }
             SyncMessage::RpcBlock {
                 request_id,
@@ -704,23 +709,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 if self.synced_and_connected(&peer_id) {
                     self.block_lookups
                         .search_block(block_hash, &[peer_id], &mut self.network);
-                }
-            }
-            SyncMessage::SampleDataColumns(block_hash, slot) => {
-                // Retrieve peers on samples
-                let synced = self.synced();
-                let connected_peers = {
-                    let peers_guard = self.network_globals().peers.read();
-                    peers_guard
-                        .connected_peers()
-                        .map(|(peerid, _)| *peerid)
-                        .collect::<Vec<_>>()
-                };
-
-                // If we are not synced, ignore this block.
-                if synced && !connected_peers.is_empty() {
-                    self.block_lookups
-                        .search_block(block_hash, &[], &mut self.network);
                 }
             }
             SyncMessage::Disconnect(peer_id) => {
@@ -795,19 +783,14 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     .block_lookups
                     .parent_chain_processed(chain_hash, result, &self.network),
             },
-            SyncMessage::SampleBlock { block_root, slot } => {
-                match self
-                    .sampling
-                    .add_request(block_root, slot, &mut self.network)
-                {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        debug!(self.log, "Ignoring duplicated sampling request"; "block_root" => ?block_root);
-                    }
-                    Err(error) => {
-                        error!(self.log, "Error handling sample block request"; "error" => ?error);
-                    }
-                }
+            SyncMessage::SampleBlock { block_root, .. } => {
+                // search block will attempt to fetch missing samples from the block, plus fetch
+                // missing custody columns.
+                // Note: we pass no peers to the lookup, because the block is already downloaded,
+                // and the rest of components will be fetched from other peers.
+                // TODO: Use the slot to start sampling already
+                self.block_lookups
+                    .search_block(block_root, &vec![], &mut self.network);
             }
         }
     }

@@ -20,6 +20,7 @@ use types::blob_sidecar::{BlobIdentifier, FixedBlobSidecarList};
 use types::data_column_sidecar::{ColumnIndex, DataColumnIdentifier};
 use types::{BlobSidecar, ChainSpec, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock};
 
+use super::single_block_lookup::ColumnsRequestState;
 use super::{to_data_columns_list, ColumnRequestState};
 
 #[derive(Debug, Copy, Clone)]
@@ -590,7 +591,10 @@ impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for ColumnRequestState<L
         request: &mut SingleBlockLookup<L, T>,
         id: Self::RequestIdType,
     ) -> Option<&mut Self> {
-        request.columns_request_state.get_mut(id as usize)
+        match &mut request.columns_request_state {
+            ColumnsRequestState::UnknownSlot => None,
+            ColumnsRequestState::KnownSlot { requests, .. } => requests.get_mut(id as usize),
+        }
     }
     fn get_state(&self) -> &SingleLookupRequestState {
         &self.state

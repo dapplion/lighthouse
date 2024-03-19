@@ -4,6 +4,9 @@ use crate::block_verification_types::{
 };
 pub use crate::data_availability_checker::child_components::ChildComponents;
 use crate::data_availability_checker::overflow_lru_cache::OverflowLRUCache;
+pub use crate::data_availability_checker::overflow_lru_cache::{
+    compute_custody_requirements, compute_sample_requirements,
+};
 use crate::{BeaconChain, BeaconChainTypes, BeaconStore};
 use kzg::Kzg;
 use slasher::test_utils::E;
@@ -29,11 +32,25 @@ use crate::data_column_verification::{
     verify_kzg_for_data_column_list, GossipVerifiedDataColumn, KzgVerifiedDataColumn,
 };
 pub use error::{Error as AvailabilityCheckError, ErrorCategory as AvailabilityCheckErrorCategory};
-use types::data_column_sidecar::{DataColumnIdentifier, DataColumnSidecarList};
+use types::data_column_sidecar::{ColumnIndex, DataColumnIdentifier, DataColumnSidecarList};
 use types::non_zero_usize::new_non_zero_usize;
 
 #[derive(Clone, Copy)]
 pub struct NodeIdRaw(pub [u8; 32]);
+
+pub struct CustodyConfig {
+    node_id: NodeIdRaw,
+    custody_requirement: u64,
+}
+
+impl CustodyConfig {
+    pub fn new(node_id: NodeIdRaw, custody_requirement: u64) -> Self {
+        Self {
+            node_id,
+            custody_requirement,
+        }
+    }
+}
 
 impl From<[u8; 32]> for NodeIdRaw {
     fn from(value: [u8; 32]) -> Self {
@@ -61,7 +78,6 @@ pub struct DataAvailabilityChecker<T: BeaconChainTypes> {
     kzg: Option<Arc<Kzg>>,
     log: Logger,
     spec: ChainSpec,
-    node_id: NodeIdRaw,
 }
 
 /// This type is returned after adding a block / blob to the `DataAvailabilityChecker`.
@@ -92,24 +108,32 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         store: BeaconStore<T>,
         log: &Logger,
         spec: ChainSpec,
-        node_id: NodeIdRaw,
-        custody_requirement: u64,
+        custody_config: CustodyConfig,
     ) -> Result<Self, AvailabilityCheckError> {
-        let overflow_cache = OverflowLRUCache::new(
-            OVERFLOW_LRU_CAPACITY,
-            store,
-            spec.clone(),
-            node_id,
-            custody_requirement,
-        )?;
+        let overflow_cache =
+            OverflowLRUCache::new(OVERFLOW_LRU_CAPACITY, store, spec.clone(), custody_config)?;
         Ok(Self {
             availability_cache: Arc::new(overflow_cache),
             slot_clock,
             log: log.clone(),
             kzg,
             spec,
-            node_id,
         })
+    }
+
+    pub fn get_custody_config(&self) -> &CustodyConfig {
+        self.availability_cache.get_custody_config()
+    }
+
+    /// Return this node's custody column requirements at `slot`
+    pub fn custody_columns_at_slot(&self, slot: Slot) -> Vec<ColumnIndex> {
+        self.availability_cache.custody_columns_at_slot(slot)
+    }
+
+    /// Checks if the block root is currenlty in the availability cache awaiting processing because
+    /// of missing components.
+    pub fn block_slot(&self, block_root: &Hash256) -> Option<Slot> {
+        self.availability_cache.block_slot(block_root)
     }
 
     /// Checks if the block root is currenlty in the availability cache awaiting processing because

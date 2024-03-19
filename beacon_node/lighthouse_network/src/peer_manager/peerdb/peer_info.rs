@@ -3,6 +3,7 @@ use super::score::{PeerAction, Score, ScoreState};
 use super::sync_status::SyncStatus;
 use crate::discovery::Eth2Enr;
 use crate::{rpc::MetaData, types::Subnet};
+use discv5::enr::NodeId;
 use discv5::Enr;
 use libp2p::core::multiaddr::{Multiaddr, Protocol};
 use serde::{
@@ -73,6 +74,15 @@ impl<TSpec: EthSpec> Default for PeerInfo<TSpec> {
 }
 
 impl<T: EthSpec> PeerInfo<T> {
+    pub fn node_id(&self) -> Option<[u8; 32]> {
+        self.enr().as_ref().map(|enr| enr.node_id().raw())
+    }
+
+    pub fn custody_requirements(&self) -> u64 {
+        // TODO: read from ENR
+        2
+    }
+
     /// Return a PeerInfo struct for a trusted peer.
     pub fn trusted_peer_info() -> Self {
         PeerInfo {

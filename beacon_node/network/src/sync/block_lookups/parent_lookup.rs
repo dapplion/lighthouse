@@ -101,7 +101,7 @@ impl<T: BeaconChainTypes> ParentLookup<T> {
         }
 
         self.current_parent_request
-            .request_block_and_blobs(cx)
+            .request_all_components(cx)
             .map_err(Into::into)
     }
 
