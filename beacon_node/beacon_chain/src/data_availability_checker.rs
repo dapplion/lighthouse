@@ -211,63 +211,6 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         }
     }
 
-    pub fn get_missing_data_column_ids(
-        &self,
-        block_root: Hash256,
-        block: &Option<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) -> MissingDataColumns {
-        let Some(current_slot) = self.slot_clock.now_or_genesis() else {
-            error!(
-                self.log,
-                "Failed to read slot clock when checking for missing blob ids"
-            );
-            return MissingDataColumns::NotRequired;
-        };
-
-        if !self.da_check_required_for_epoch(current_slot.epoch(T::EthSpec::slots_per_epoch())) {
-            return MissingDataColumns::NotRequired;
-        }
-
-        // Compute ids for sampling
-        let mut sampling_ids = self
-            .compute_sampling_column_ids(block_root)
-            .into_iter()
-            .map(|index| BlobIdentifier {
-                block_root,
-                index: index as u64,
-            })
-            .collect::<Vec<_>>();
-
-        // Compute ids for custody
-        match block {
-            Some(cached_block) => {
-                sampling_ids.extend_from_slice(
-                    &self
-                        .compute_custody_column_ids(cached_block.slot())
-                        .into_iter()
-                        .map(|index| BlobIdentifier {
-                            block_root,
-                            index: index as u64,
-                        })
-                        .collect::<Vec<_>>(),
-                );
-                MissingDataColumns::KnownMissing(sampling_ids)
-            }
-            // TODO(das): without knowledge of the block's slot you can't know your custody
-            // requirements. When syncing a block via single block lookup, you need to fetch the
-            // block first, then fetch your custody columns
-            None => MissingDataColumns::KnownMissingIncomplete(sampling_ids),
-        }
-    }
-
-    fn compute_sampling_column_ids(&self, block_root: Hash256) -> Vec<usize> {
-        todo!("Use local randomness to derive this block's sample column ids")
-    }
-
-    fn compute_custody_column_ids(&self, slot: Slot) -> Vec<usize> {
-        todo!("Use local node ID and custody parameter to compute column ids for this slot");
-    }
-
     /// Get a blob from the availability cache.
     pub fn get_blob(
         &self,

@@ -11,12 +11,11 @@ pub use crate::sync::block_lookups::single_block_lookup::{
     CachedChild, ColumnRequestState, LookupRequestError,
 };
 use crate::sync::manager::{Id, SingleLookupReqId};
-use crate::sync::network_context::PeersByCustody;
 use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
 pub use beacon_chain::data_availability_checker::ChildComponents;
 use beacon_chain::data_availability_checker::{
     compute_custody_requirements, AvailabilityCheckErrorCategory, CustodyConfig,
-    DataAvailabilityChecker, NodeIdRaw,
+    DataAvailabilityChecker,
 };
 use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::{AvailabilityProcessingStatus, BeaconChainTypes, BlockError};
@@ -36,7 +35,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use store::Hash256;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::{DataColumnSidecar, EthSpec, Slot};
+use types::{DataColumnSidecar, Slot};
 
 pub mod common;
 mod parent_lookup;
@@ -215,7 +214,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             child_components,
             peers,
             self.da_checker.clone(),
-            PeersByCustody::new(),
             cx.next_id(),
         );
 

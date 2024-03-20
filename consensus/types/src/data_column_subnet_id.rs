@@ -1,5 +1,5 @@
 //! Identifies each data column subnet by an integer identifier.
-use crate::{ChainSpec, EthSpec};
+use crate::EthSpec;
 use ethereum_types::U256;
 use safe_arith::{ArithError, SafeArith};
 use serde::{Deserialize, Serialize};

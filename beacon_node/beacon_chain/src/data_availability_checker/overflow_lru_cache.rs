@@ -28,7 +28,7 @@
 //! the cache when they are accessed.
 
 use super::state_lru_cache::{DietAvailabilityPendingExecutedBlock, StateLRUCache};
-use super::{CustodyConfig, NodeIdRaw};
+use super::CustodyConfig;
 use crate::beacon_chain::BeaconStore;
 use crate::blob_verification::KzgVerifiedBlob;
 use crate::block_verification_types::{
@@ -47,7 +47,7 @@ use std::num::NonZeroUsize;
 use std::{collections::HashSet, sync::Arc};
 use types::blob_sidecar::BlobIdentifier;
 use types::data_column_sidecar::{ColumnIndex, DataColumnIdentifier};
-use types::{BlobSidecar, ChainSpec, DataColumnSidecar, Epoch, EthSpec, ForkName, Hash256, Slot};
+use types::{BlobSidecar, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256, Slot};
 
 /// This represents the components of a partially available block
 ///
@@ -80,48 +80,11 @@ impl<T: EthSpec> PendingComponents<T> {
             .map(|b| b.as_block().message().slot())
     }
 
-    /// Checks if a block exists in the cache.
-    ///
-    /// Returns:
-    /// - `true` if a block exists.
-    /// - `false` otherwise.
-    fn block_exists(&self) -> bool {
-        self.executed_block.is_some()
-    }
-
-    /// Checks if a blob exists at the given index in the cache.
-    ///
-    /// Returns:
-    /// - `true` if a blob exists at the given index.
-    /// - `false` otherwise.
-    fn blob_exists(&self, blob_index: usize) -> bool {
-        self.verified_blobs
-            .get(blob_index)
-            .map(|b| b.is_some())
-            .unwrap_or(false)
-    }
-
     fn data_column_exists(&self, data_colum_index: ColumnIndex) -> bool {
         self.verified_data_columns
             .iter()
             .find(|c| c.data_column_index() == data_colum_index)
             .is_some()
-    }
-
-    /// Returns the number of blobs that are expected to be present. Returns `None` if we don't have a
-    /// block.
-    ///
-    /// This corresponds to the number of commitments that are present in a block.
-    fn num_expected_blobs(&self) -> Option<usize> {
-        self.executed_block.as_ref().map(|b| {
-            b.as_block()
-                .message()
-                .body()
-                .blob_kzg_commitments()
-                .cloned()
-                .unwrap_or_default()
-                .len()
-        })
     }
 
     /// Returns the number of blobs that have been received and are stored in the cache.

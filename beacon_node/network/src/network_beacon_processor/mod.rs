@@ -502,16 +502,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         })
     }
 
-    pub fn sampling_completed(self: &Arc<Self>, block_root: Hash256) {
-        todo!("send work event to process sampling result");
-
-        // Sync handles these results
-        // self.send_sync_message(SyncMessage::SampleProcessed {
-        //     id,
-        //     result: result.into(),
-        // });
-    }
-
     /// Create a new work event to import `blocks` as a beacon chain segment.
     pub fn send_chain_segment(
         self: &Arc<Self>,

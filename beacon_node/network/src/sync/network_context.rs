@@ -91,18 +91,6 @@ impl<T: EthSpec> From<Option<Arc<BlobSidecar<T>>>> for BlockOrBlob<T> {
     }
 }
 
-pub struct PeersByCustody {}
-
-impl PeersByCustody {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    pub fn custodial_peers(&self, slot: Slot, column_id: u64) -> Vec<PeerId> {
-        todo!();
-    }
-}
-
 fn custody_config_from_peer_info<E: EthSpec>(peer_info: &PeerInfo<E>) -> Option<CustodyConfig> {
     peer_info
         .node_id()
@@ -132,10 +120,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub fn network_globals(&self) -> &NetworkGlobals<T::EthSpec> {
         &self.network_beacon_processor.network_globals
-    }
-
-    pub fn peers_by_custody(&self) -> PeersByCustody {
-        todo!();
     }
 
     pub fn get_custody_config_of_peer(&self, peer_id: &PeerId) -> Option<CustodyConfig> {

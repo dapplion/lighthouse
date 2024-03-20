@@ -1,7 +1,7 @@
 use super::PeerId;
 use crate::sync::block_lookups::common::{Lookup, RequestState};
 use crate::sync::block_lookups::Id;
-use crate::sync::network_context::{PeersByCustody, SyncNetworkContext};
+use crate::sync::network_context::SyncNetworkContext;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_availability_checker::{
     compute_custody_requirements, compute_sample_requirements, AvailabilityCheckError,
@@ -70,30 +70,9 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         child_components: Option<ChildComponents<T::EthSpec>>,
         peers: &[PeerId],
         da_checker: Arc<DataAvailabilityChecker<T>>,
-        peer_by_custody: PeersByCustody,
         id: Id,
     ) -> Self {
         let is_deneb = da_checker.is_deneb();
-        let missing_column_ids = missing_data_column_ids(
-            requested_block_root,
-            child_components.as_ref(),
-            da_checker.clone(),
-        );
-
-        let columns_request_state = missing_column_ids
-            .indices()
-            .iter()
-            .map(|index| {
-                ColumnRequestState::<L, T::EthSpec>::new(
-                    DataColumnIdentifier {
-                        block_root: requested_block_root,
-                        index: *index,
-                    },
-                    // Initially no peers slot unknown
-                    &vec![],
-                )
-            })
-            .collect::<Vec<_>>();
 
         Self {
             id,
@@ -227,9 +206,15 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
                 return CachedChild::DownloadIncomplete;
             };
 
-            if !self.missing_blob_ids().is_empty() || !self.missing_data_column_ids().is_empty() {
+            if !self.missing_blob_ids().is_empty() {
                 return CachedChild::DownloadIncomplete;
             }
+
+            // TODO(das): consider column custody and sampling. I don't want to duplicate logic, and
+            // it's odd that child component download has different paths than regular lookups. I
+            // feels like this can be simplified by unifying both paths. The whole child block
+            // business is regular download that should be delayed for processing until latter when
+            // all parents are known.
 
             match RpcBlock::new_from_fixed(
                 self.block_request_state.requested_block_root,
@@ -380,11 +365,6 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         self.blob_request_state.requested_ids = self.missing_blob_ids();
     }
 
-    pub(crate) fn columns_already_downloaded(&mut self) -> bool {
-        // TODO(das) request_ids is not actually used now
-        todo!("deduplicate requests properly");
-    }
-
     /// If `child_components` is `Some`, we know block components won't hit the data
     /// availability cache, so we don't check its processing cache unless `child_components`
     /// is `None`.
@@ -408,14 +388,6 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
             // availability view?
             self.da_checker.get_missing_blob_ids_with(block_root)
         }
-    }
-
-    pub(crate) fn missing_data_column_ids(&self) -> MissingDataColumns {
-        missing_data_column_ids(
-            self.block_root(),
-            self.child_components.as_ref(),
-            self.da_checker.clone(),
-        )
     }
 
     /// Penalizes a blob peer if it should have blobs but didn't return them to us.
@@ -457,19 +429,6 @@ pub enum ColumnsRequestState<L: Lookup, E: EthSpec> {
         sample_columns: Vec<ColumnIndex>,
         requests: Vec<ColumnRequestState<L, E>>,
     },
-}
-
-fn missing_data_column_ids<T: BeaconChainTypes>(
-    block_root: Hash256,
-    child_components: Option<&ChildComponents<T::EthSpec>>,
-    da_checker: Arc<DataAvailabilityChecker<T>>,
-) -> MissingDataColumns {
-    if let Some(components) = child_components {
-        da_checker.get_missing_data_column_ids(block_root, &components.downloaded_block)
-    } else {
-        // TODO(das): same code as for missing_blob_ids?
-        todo!()
-    }
 }
 
 /// The state of the blob request component of a `SingleBlockLookup`.
@@ -759,15 +718,8 @@ mod tests {
             HotColdDB::open_ephemeral(StoreConfig::default(), ChainSpec::minimal(), log.clone())
                 .expect("store");
         let da_checker = Arc::new(
-            DataAvailabilityChecker::new(
-                slot_clock,
-                None,
-                store.into(),
-                &log,
-                spec.clone(),
-                NODE_ID,
-            )
-            .expect("data availability checker"),
+            DataAvailabilityChecker::new(slot_clock, None, store.into(), &log, spec.clone())
+                .expect("data availability checker"),
         );
         let mut sl = SingleBlockLookup::<TestLookup1, T>::new(
             block.canonical_root(),
@@ -809,15 +761,8 @@ mod tests {
                 .expect("store");
 
         let da_checker = Arc::new(
-            DataAvailabilityChecker::new(
-                slot_clock,
-                None,
-                store.into(),
-                &log,
-                spec.clone(),
-                NODE_ID,
-            )
-            .expect("data availability checker"),
+            DataAvailabilityChecker::new(slot_clock, None, store.into(), &log, spec.clone())
+                .expect("data availability checker"),
         );
 
         let mut sl = SingleBlockLookup::<TestLookup2, T>::new(
@@ -825,7 +770,6 @@ mod tests {
             None,
             &[peer_id],
             da_checker,
-            PeersByCustody::new(),
             1,
         );
         for _ in 1..TestLookup2::MAX_ATTEMPTS {
