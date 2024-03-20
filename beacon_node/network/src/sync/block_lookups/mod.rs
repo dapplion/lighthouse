@@ -36,7 +36,7 @@ use types::Slot;
 
 pub mod common;
 mod parent_lookup;
-mod single_block_lookup;
+pub mod single_block_lookup;
 #[cfg(test)]
 mod tests;
 

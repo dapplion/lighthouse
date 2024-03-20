@@ -1,23 +1,30 @@
 use super::PeerId;
 use crate::sync::block_lookups::common::{Lookup, RequestState};
 use crate::sync::block_lookups::Id;
-use crate::sync::network_context::SyncNetworkContext;
-use beacon_chain::block_verification_types::RpcBlock;
+use crate::sync::manager::BlockProcessingResult;
+use crate::sync::network_context::{SyncNetworkContext, SyncNetworkContextAsync};
+use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
 use beacon_chain::data_availability_checker::{
     AvailabilityCheckError, DataAvailabilityChecker, MissingBlobs,
 };
 use beacon_chain::data_availability_checker::{AvailabilityView, ChildComponents};
-use beacon_chain::BeaconChainTypes;
+use beacon_chain::{AvailabilityProcessingStatus, BeaconChainTypes, BlockError};
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
+use futures::{Future, FutureExt};
 use lighthouse_network::PeerAction;
 use slog::{trace, Logger};
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use store::Hash256;
 use strum::IntoStaticStr;
+use tokio::sync::{mpsc, oneshot};
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::EthSpec;
+use types::{EthSpec, SignedBeaconBlock};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
@@ -284,7 +291,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         }
     }
 
-    /// Penalizes a blob peer if it should have blobs but didn't return them to us.     
+    /// Penalizes a blob peer if it should have blobs but didn't return them to us.
     pub fn penalize_blob_peer(&mut self, cx: &SyncNetworkContext<T>) {
         if let Ok(blob_peer) = self.blob_request_state.state.processing_peer() {
             cx.report_peer(
@@ -326,6 +333,197 @@ pub struct BlobRequestState<L: Lookup, T: EthSpec> {
     pub blob_download_queue: FixedBlobSidecarList<T>,
     pub state: SingleLookupRequestState,
     _phantom: PhantomData<L>,
+}
+
+type DownloadBlockResult<E> = Result<RpcBlock<E>, String>;
+
+type DownloadComponentResult<E> = Result<RpcBlock<E>, String>;
+
+struct DownloadRequest<E: EthSpec> {
+    block_root: Hash256,
+    state: DownloadState<E>,
+}
+
+impl<E: EthSpec> DownloadRequest<E> {
+    fn new(block_root: Hash256) -> Self {
+        Self {
+            block_root,
+            state: DownloadState::AwaitingDownload,
+        }
+    }
+}
+
+enum DownloadState<E: EthSpec> {
+    AwaitingDownload,
+    Downloading(oneshot::Receiver<DownloadBlockResult<E>>),
+    DownloadingComponents(
+        SignedBeaconBlock<E>,
+        oneshot::Receiver<DownloadComponentResult<E>>,
+    ),
+    AwaitingProcessing(RpcBlock<E>),
+    Processing(oneshot::Receiver<BlockProcessingResult<E>>),
+    Processed,
+    Failed,
+}
+
+pub enum SyncMessage<E: EthSpec> {
+    UnknownParentRoot(Hash256, RpcBlock<E>),
+    UnknownRoot(Hash256),
+}
+
+pub struct LookupManager<T: BeaconChainTypes> {
+    active_requests: DownloadRequest<T::EthSpec>,
+    tasks: FuturesUnordered<Pin<Box<dyn Future<Output = ProgressDownloadResult<T::EthSpec>>>>>,
+    network: SyncNetworkContextAsync<T>,
+}
+
+impl<T: BeaconChainTypes> LookupManager<T> {
+    pub fn new() -> Self {
+        todo!()
+    }
+
+    pub async fn run_lookup_manager(
+        &mut self,
+        mut sync_message_rx: mpsc::Receiver<SyncMessage<T::EthSpec>>,
+    ) {
+        loop {
+            tokio::select! {
+                Some(message) = sync_message_rx.recv() => {
+                    // For each new task, add it to the FuturesUnordered stream
+                    self.handle_sync_message(message);
+                },
+                Some(result) = self.tasks.next() => {
+                    self.handle_download_result(result);
+                },
+                // Optionally, include other conditions here, such as timeouts or shutdown signals.
+                else => break, // Break or handle the case when all tasks are done, and no new tasks are incoming.
+            }
+        }
+    }
+
+    fn handle_sync_message(&mut self, message: SyncMessage<T::EthSpec>) {
+        match message {
+            SyncMessage::UnknownRoot(block_root) => self.tasks.push(Box::pin(progress_download(
+                DownloadRequest::<T::EthSpec>::new(block_root),
+            ))),
+            SyncMessage::UnknownParentRoot(block_root, block) => {}
+        }
+    }
+
+    fn handle_download_result(&mut self, result: ProgressDownloadResult<T::EthSpec>) {
+        match result {
+            ProgressDownloadResult::Completed => {}
+            ProgressDownloadResult::UnknownParent(block) => {}
+        }
+    }
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        todo!()
+    }
+}
+
+enum ProgressDownloadResult<E: EthSpec> {
+    UnknownParent(RpcBlock<E>),
+    Completed,
+}
+
+async fn progress_download<E: EthSpec>(
+    mut request: DownloadRequest<E>,
+) -> ProgressDownloadResult<E> {
+    loop {
+        request.state = match request.state {
+            DownloadState::AwaitingDownload => {
+                let (tx, rx) = oneshot::channel();
+                download_block_cb(request.block_root, tx);
+                DownloadState::Downloading(rx)
+            }
+
+            // TODO: How to handle blob and sampling at once?
+            DownloadState::Downloading(rx) => match rx.await.expect("failed to receive") {
+                Ok(block) => DownloadState::AwaitingProcessing(block),
+                Err(_) => {
+                    penalize_peers();
+                    DownloadState::AwaitingDownload
+                }
+            },
+
+            DownloadState::DownloadingComponents(block, rx) => {
+                todo!();
+            }
+
+            DownloadState::AwaitingProcessing(block) => {
+                if parent_unknown() {
+                    DownloadState::AwaitingProcessing(block)
+                } else {
+                    let (tx, rx) = oneshot::channel();
+                    send_block_for_processing_cb(block, tx);
+                    DownloadState::Processing(rx)
+                }
+            }
+
+            DownloadState::Processing(rx) => match rx.await.expect("failed to receive") {
+                BlockProcessingResult::Ok(result) => match result {
+                    AvailabilityProcessingStatus::Imported(_) => DownloadState::Processed,
+                    AvailabilityProcessingStatus::MissingComponents(_, _) => {
+                        // Should not send for processing until all components are downloaded?
+                        // Consider as internal error
+                        DownloadState::Failed
+                    }
+                },
+                BlockProcessingResult::Err(e) => match e {
+                    // Internal error, discard
+                    BlockError::BeaconChainError(_) => DownloadState::Failed,
+                    // Hold for processing latter
+                    BlockError::ParentUnknown(block) => {
+                        return ProgressDownloadResult::UnknownParent(block)
+                    }
+                    // Actual invalidity error, penalize
+                    _ => {
+                        penalize_peers();
+                        DownloadState::AwaitingDownload
+                    }
+                },
+                BlockProcessingResult::Ignored => DownloadState::Processed,
+            },
+
+            DownloadState::Failed => return ProgressDownloadResult::Completed,
+            DownloadState::Processed => return ProgressDownloadResult::Completed,
+        }
+    }
+}
+
+fn penalize_peers() {
+    todo!()
+}
+
+fn trigger_parent_search(parent_root: Hash256) {
+    todo!()
+}
+
+fn parent_unknown() -> bool {
+    todo!()
+}
+
+fn download_block_cb<E: EthSpec>(
+    block_root: Hash256,
+    result_tx: oneshot::Sender<DownloadBlockResult<E>>,
+) {
+    todo!()
+}
+
+fn send_block_for_processing_cb<E: EthSpec>(
+    block: RpcBlock<E>,
+    result_tx: oneshot::Sender<BlockProcessingResult<E>>,
+) {
+    todo!()
+}
+
+async fn download_block<E: EthSpec>(block_root: Hash256) -> DownloadBlockResult<E> {
+    todo!()
+}
+
+async fn send_block_for_processing<E: EthSpec>(block: RpcBlock<E>) -> BlockProcessingResult<E> {
+    todo!()
 }
 
 impl<L: Lookup, E: EthSpec> BlobRequestState<L, E> {

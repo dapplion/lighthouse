@@ -13,8 +13,9 @@ use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes, EngineState};
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{BlobsByRangeRequest, BlobsByRootRequest};
-use lighthouse_network::rpc::{BlocksByRangeRequest, BlocksByRootRequest, GoodbyeReason};
+use lighthouse_network::rpc::{BlocksByRangeRequest, BlocksByRootRequest, GoodbyeReason, RPCError};
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource, Request};
+use parking_lot::Mutex;
 use slog::{debug, trace, warn};
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
@@ -64,6 +65,96 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
 
     /// Logger for the `SyncNetworkContext`.
     pub log: slog::Logger,
+}
+
+pub type BlockLookupMsg<E> = Result<Arc<SignedBeaconBlock<E>>, RPCError>;
+
+pub struct SyncNetworkContextAsync<T: BeaconChainTypes> {
+    /// The network channel to relay messages to the Network service.
+    network_send: mpsc::UnboundedSender<NetworkMessage<T::EthSpec>>,
+    /// Track block by root requests
+    block_lookups_by_tx: Arc<Mutex<FnvHashMap<Id, mpsc::Sender<BlockLookupMsg<T::EthSpec>>>>>,
+    request_id: Arc<Mutex<Id>>,
+
+    pub log: slog::Logger,
+}
+
+impl<T: BeaconChainTypes> SyncNetworkContextAsync<T> {
+    pub fn new(
+        network_send: mpsc::UnboundedSender<NetworkMessage<T::EthSpec>>,
+        log: slog::Logger,
+    ) -> Self {
+        Self {
+            network_send,
+            block_lookups_by_tx: <_>::default(),
+            request_id: <_>::default(),
+            log,
+        }
+    }
+
+    pub async fn block_lookup_request(
+        &self,
+        peer_id: PeerId,
+        request: BlocksByRootRequest,
+    ) -> Result<Arc<SignedBeaconBlock<T::EthSpec>>, String> {
+        let id = self.next_id().await;
+        let (tx, mut rx) = mpsc::channel(16); // Bound by buffered requests
+        self.block_lookups_by_tx.lock().insert(id, tx);
+
+        self.send_network_msg(NetworkMessage::SendRequest {
+            peer_id,
+            request: Request::BlocksByRoot(request),
+            request_id: RequestId::Sync(SyncRequestId::BlockLookupTx { id }),
+        })
+        .unwrap();
+
+        let r = loop {
+            match rx.recv().await {
+                Some(Ok(block)) => break Ok(block),
+                Some(Err(e)) => break Err(e.to_string()),
+                None => break Err("stream closed to early".to_string()),
+            }
+        };
+
+        self.block_lookups_by_tx.lock().remove(&id);
+        r
+    }
+
+    pub fn on_rpc_block(&self, id: Id, block: Option<Arc<SignedBeaconBlock<T::EthSpec>>>) {
+        let Some(block) = block else {
+            // Drop sender to signal the receiver stream is terminated
+            self.block_lookups_by_tx.lock().remove(&id);
+            return;
+        };
+
+        if let Some(tx) = self.block_lookups_by_tx.lock().get_mut(&id) {
+            tx.try_send(Ok(block)).expect("todo handle send error");
+        } else {
+            // Unknown request
+        }
+    }
+
+    pub fn on_rpc_error(&self, id: Id, error: RPCError) {
+        if let Some(tx) = self.block_lookups_by_tx.lock().get_mut(&id) {
+            tx.try_send(Err(error)).expect("todo handle send error");
+        } else {
+            // Unknown request
+        }
+    }
+
+    async fn next_id(&self) -> Id {
+        let mut id = self.request_id.lock();
+        *id += 1;
+        *id
+    }
+
+    /// Sends an arbitrary network message.
+    fn send_network_msg(&self, msg: NetworkMessage<T::EthSpec>) -> Result<(), &'static str> {
+        self.network_send.send(msg).map_err(|_| {
+            debug!(self.log, "Could not send message to the network service");
+            "Network channel send Failed"
+        })
+    }
 }
 
 /// Small enumeration to make dealing with block and blob requests easier.

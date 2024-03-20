@@ -34,8 +34,9 @@
 //! search for the block and subsequently search for parents if needed.
 
 use super::backfill_sync::{BackFillSync, ProcessResult, SyncStart};
+use super::block_lookups::single_block_lookup::LookupManager;
 use super::block_lookups::BlockLookups;
-use super::network_context::{BlockOrBlob, SyncNetworkContext};
+use super::network_context::{BlockOrBlob, SyncNetworkContext, SyncNetworkContextAsync};
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
 use crate::network_beacon_processor::{ChainSegmentProcessId, NetworkBeaconProcessor};
@@ -104,6 +105,8 @@ pub enum RequestId {
     RangeBlocks { id: Id },
     /// Range request that is composed by both a block range request and a blob range request.
     RangeBlockAndBlobs { id: Id },
+    /// Block lookup request handled by transaction
+    BlockLookupTx { id: Id },
 }
 
 #[derive(Debug)]
@@ -204,6 +207,7 @@ pub struct SyncManager<T: BeaconChainTypes> {
 
     /// A network context to contact the network service.
     network: SyncNetworkContext<T>,
+    network_async: SyncNetworkContextAsync<T>,
 
     /// The object handling long-range batch load-balanced syncing.
     range_sync: RangeSync<T>,
@@ -239,11 +243,12 @@ pub fn spawn<T: BeaconChainTypes>(
         chain: beacon_chain.clone(),
         input_channel: sync_recv,
         network: SyncNetworkContext::new(
-            network_send,
+            network_send.clone(),
             beacon_processor.clone(),
             beacon_chain.clone(),
             log.clone(),
         ),
+        network_async: SyncNetworkContextAsync::new(network_send, log.clone()),
         range_sync: RangeSync::new(beacon_chain.clone(), log.clone()),
         backfill_sync: BackFillSync::new(beacon_chain.clone(), network_globals, log.clone()),
         block_lookups: BlockLookups::new(
@@ -395,6 +400,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     );
                     self.update_sync_state()
                 }
+            }
+            RequestId::BlockLookupTx { id } => {
+                self.network_async.on_rpc_error(id, error);
             }
         }
     }
@@ -584,6 +592,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 .into();
             futures::stream::iter(ee_responsiveness_watch.await).flatten()
         };
+
+        let mut lookup_manager = LookupManager::<T>::new();
+        lookup_manager.run_lookup_manager(todo!()).await;
 
         // process any inbound messages
         loop {
@@ -902,6 +913,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             RequestId::RangeBlockAndBlobs { id } => {
                 self.range_block_and_blobs_response(id, peer_id, block.into())
             }
+            RequestId::BlockLookupTx { id } => self.network_async.on_rpc_block(id, block),
         }
     }
 
@@ -966,6 +978,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             RequestId::RangeBlockAndBlobs { id } => {
                 self.range_block_and_blobs_response(id, peer_id, blob.into())
             }
+            RequestId::BlockLookupTx { .. } => todo!(),
         }
     }
 
