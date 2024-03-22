@@ -2,29 +2,24 @@ use super::PeerId;
 use crate::sync::block_lookups::common::{Lookup, RequestState};
 use crate::sync::block_lookups::Id;
 use crate::sync::manager::BlockProcessingResult;
-use crate::sync::network_context::{SyncNetworkContext, SyncNetworkContextAsync};
-use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
+use crate::sync::network_context::SyncNetworkContext;
+use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_availability_checker::{
     AvailabilityCheckError, DataAvailabilityChecker, MissingBlobs,
 };
 use beacon_chain::data_availability_checker::{AvailabilityView, ChildComponents};
 use beacon_chain::{AvailabilityProcessingStatus, BeaconChainTypes, BlockError};
-use futures::stream::FuturesUnordered;
-use futures::stream::StreamExt;
-use futures::{Future, FutureExt};
+use lighthouse_network::rpc::RPCError;
 use lighthouse_network::PeerAction;
 use slog::{trace, Logger};
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use store::Hash256;
 use strum::IntoStaticStr;
-use tokio::sync::{mpsc, oneshot};
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::{EthSpec, SignedBeaconBlock};
+use types::EthSpec;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
@@ -335,197 +330,6 @@ pub struct BlobRequestState<L: Lookup, T: EthSpec> {
     _phantom: PhantomData<L>,
 }
 
-type DownloadBlockResult<E> = Result<RpcBlock<E>, String>;
-
-type DownloadComponentResult<E> = Result<RpcBlock<E>, String>;
-
-struct DownloadRequest<E: EthSpec> {
-    block_root: Hash256,
-    state: DownloadState<E>,
-}
-
-impl<E: EthSpec> DownloadRequest<E> {
-    fn new(block_root: Hash256) -> Self {
-        Self {
-            block_root,
-            state: DownloadState::AwaitingDownload,
-        }
-    }
-}
-
-enum DownloadState<E: EthSpec> {
-    AwaitingDownload,
-    Downloading(oneshot::Receiver<DownloadBlockResult<E>>),
-    DownloadingComponents(
-        SignedBeaconBlock<E>,
-        oneshot::Receiver<DownloadComponentResult<E>>,
-    ),
-    AwaitingProcessing(RpcBlock<E>),
-    Processing(oneshot::Receiver<BlockProcessingResult<E>>),
-    Processed,
-    Failed,
-}
-
-pub enum SyncMessage<E: EthSpec> {
-    UnknownParentRoot(Hash256, RpcBlock<E>),
-    UnknownRoot(Hash256),
-}
-
-pub struct LookupManager<T: BeaconChainTypes> {
-    active_requests: DownloadRequest<T::EthSpec>,
-    tasks: FuturesUnordered<Pin<Box<dyn Future<Output = ProgressDownloadResult<T::EthSpec>>>>>,
-    network: SyncNetworkContextAsync<T>,
-}
-
-impl<T: BeaconChainTypes> LookupManager<T> {
-    pub fn new() -> Self {
-        todo!()
-    }
-
-    pub async fn run_lookup_manager(
-        &mut self,
-        mut sync_message_rx: mpsc::Receiver<SyncMessage<T::EthSpec>>,
-    ) {
-        loop {
-            tokio::select! {
-                Some(message) = sync_message_rx.recv() => {
-                    // For each new task, add it to the FuturesUnordered stream
-                    self.handle_sync_message(message);
-                },
-                Some(result) = self.tasks.next() => {
-                    self.handle_download_result(result);
-                },
-                // Optionally, include other conditions here, such as timeouts or shutdown signals.
-                else => break, // Break or handle the case when all tasks are done, and no new tasks are incoming.
-            }
-        }
-    }
-
-    fn handle_sync_message(&mut self, message: SyncMessage<T::EthSpec>) {
-        match message {
-            SyncMessage::UnknownRoot(block_root) => self.tasks.push(Box::pin(progress_download(
-                DownloadRequest::<T::EthSpec>::new(block_root),
-            ))),
-            SyncMessage::UnknownParentRoot(block_root, block) => {}
-        }
-    }
-
-    fn handle_download_result(&mut self, result: ProgressDownloadResult<T::EthSpec>) {
-        match result {
-            ProgressDownloadResult::Completed => {}
-            ProgressDownloadResult::UnknownParent(block) => {}
-        }
-    }
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        todo!()
-    }
-}
-
-enum ProgressDownloadResult<E: EthSpec> {
-    UnknownParent(RpcBlock<E>),
-    Completed,
-}
-
-async fn progress_download<E: EthSpec>(
-    mut request: DownloadRequest<E>,
-) -> ProgressDownloadResult<E> {
-    loop {
-        request.state = match request.state {
-            DownloadState::AwaitingDownload => {
-                let (tx, rx) = oneshot::channel();
-                download_block_cb(request.block_root, tx);
-                DownloadState::Downloading(rx)
-            }
-
-            // TODO: How to handle blob and sampling at once?
-            DownloadState::Downloading(rx) => match rx.await.expect("failed to receive") {
-                Ok(block) => DownloadState::AwaitingProcessing(block),
-                Err(_) => {
-                    penalize_peers();
-                    DownloadState::AwaitingDownload
-                }
-            },
-
-            DownloadState::DownloadingComponents(block, rx) => {
-                todo!();
-            }
-
-            DownloadState::AwaitingProcessing(block) => {
-                if parent_unknown() {
-                    DownloadState::AwaitingProcessing(block)
-                } else {
-                    let (tx, rx) = oneshot::channel();
-                    send_block_for_processing_cb(block, tx);
-                    DownloadState::Processing(rx)
-                }
-            }
-
-            DownloadState::Processing(rx) => match rx.await.expect("failed to receive") {
-                BlockProcessingResult::Ok(result) => match result {
-                    AvailabilityProcessingStatus::Imported(_) => DownloadState::Processed,
-                    AvailabilityProcessingStatus::MissingComponents(_, _) => {
-                        // Should not send for processing until all components are downloaded?
-                        // Consider as internal error
-                        DownloadState::Failed
-                    }
-                },
-                BlockProcessingResult::Err(e) => match e {
-                    // Internal error, discard
-                    BlockError::BeaconChainError(_) => DownloadState::Failed,
-                    // Hold for processing latter
-                    BlockError::ParentUnknown(block) => {
-                        return ProgressDownloadResult::UnknownParent(block)
-                    }
-                    // Actual invalidity error, penalize
-                    _ => {
-                        penalize_peers();
-                        DownloadState::AwaitingDownload
-                    }
-                },
-                BlockProcessingResult::Ignored => DownloadState::Processed,
-            },
-
-            DownloadState::Failed => return ProgressDownloadResult::Completed,
-            DownloadState::Processed => return ProgressDownloadResult::Completed,
-        }
-    }
-}
-
-fn penalize_peers() {
-    todo!()
-}
-
-fn trigger_parent_search(parent_root: Hash256) {
-    todo!()
-}
-
-fn parent_unknown() -> bool {
-    todo!()
-}
-
-fn download_block_cb<E: EthSpec>(
-    block_root: Hash256,
-    result_tx: oneshot::Sender<DownloadBlockResult<E>>,
-) {
-    todo!()
-}
-
-fn send_block_for_processing_cb<E: EthSpec>(
-    block: RpcBlock<E>,
-    result_tx: oneshot::Sender<BlockProcessingResult<E>>,
-) {
-    todo!()
-}
-
-async fn download_block<E: EthSpec>(block_root: Hash256) -> DownloadBlockResult<E> {
-    todo!()
-}
-
-async fn send_block_for_processing<E: EthSpec>(block: RpcBlock<E>) -> BlockProcessingResult<E> {
-    todo!()
-}
-
 impl<L: Lookup, E: EthSpec> BlobRequestState<L, E> {
     pub fn new(block_root: Hash256, peer_source: &[PeerId], is_deneb: bool) -> Self {
         let default_ids = MissingBlobs::new_without_block(block_root, is_deneb);
@@ -571,6 +375,114 @@ pub enum CachedChild<E: EthSpec> {
     /// There was an error during consistency checks between block and blobs.
     Err(AvailabilityCheckError),
 }
+
+struct Request<T> {
+    status: Status<T>,
+    download_failures: u64,
+    processing_failures: u64,
+    network: Network,
+}
+
+struct Network {}
+
+impl Network {
+    fn penalize_peer(&self, peer_id: PeerId) {
+        todo!()
+    }
+}
+
+enum Status<T> {
+    AwaitingDownload,
+    Downloading(PeerId),
+    AwaitingProcessing(PeerId, T),
+    Processing(PeerId, T),
+    Done,
+    Poisoned,
+}
+
+impl<T> Status<T> {
+    /// Helper function for poisoning a state.
+    pub fn poison(&mut self) -> Self {
+        std::mem::replace(self, Self::Poisoned)
+    }
+}
+
+enum StatusError {
+    UnexpectedStatus,
+    ParentUnknown,
+    Failed,
+}
+
+impl<T> Request<T> {
+    fn on_download_result(&mut self, result: Result<T, RPCError>) -> Result<(), StatusError> {
+        self.status = match self.status.poison() {
+            Status::Downloading(peer_id) => match result {
+                // TODO: Verify response:
+                // - Check we did not receive more blocks than expected
+                // - Check that block root matches, and request ids match
+                // - If wrong response, penalize and retry
+                // - Do not send to processing if we know the parent is unknown
+                Ok(result) => Status::AwaitingProcessing(peer_id, result),
+                Err(e) => {
+                    self.penalize_peer(peer_id);
+                    self.download_failures += 1;
+                    if self.download_failures > 5 {
+                        return Err(StatusError::Failed);
+                    } else {
+                        // TODO: Trigger download of everything
+                        Status::AwaitingDownload
+                    }
+                }
+            },
+
+            _ => return Err(StatusError::UnexpectedStatus),
+        };
+
+        Ok(())
+    }
+
+    fn on_processing_result<E: EthSpec>(
+        &mut self,
+        result: BlockProcessingResult<E>,
+    ) -> Result<(), StatusError> {
+        self.status = match self.status.poison() {
+            Status::Processing(peer_id, value) => match result {
+                BlockProcessingResult::Ok(status) => match status {
+                    AvailabilityProcessingStatus::Imported(root) => Status::Done,
+                    AvailabilityProcessingStatus::MissingComponents(_, _) => todo!(), // Imported
+                },
+                BlockProcessingResult::Ignored => Status::Done,
+                BlockProcessingResult::Err(e) => match e {
+                    BlockError::ParentUnknown(block) => return Err(StatusError::ParentUnknown),
+                    _ => {
+                        // Assume all errors are the peer's fault
+                        self.penalize_peer(peer_id);
+                        // Count one retry
+                        Status::AwaitingDownload
+                    }
+                },
+            },
+            _ => return Err(StatusError::UnexpectedStatus),
+        };
+
+        Ok(())
+    }
+
+    fn progress(&mut self) -> Result<(), StatusError> {
+        match self.status.poison() {
+            Status::AwaitingDownload => todo!("send to download"),
+            Status::Downloading(a) => Status::Downloading(a),
+            Status::AwaitingProcessing(a, b) => Status::AwaitingProcessing(a, b),
+            Status::Processing(a, b) => Status::Processing(a, b),
+            Status::Done => {}
+        }
+    }
+
+    fn penalize_peer(&self, peer_id: PeerId) {
+        todo!()
+    }
+}
+
 /// Object representing the state of a single block or blob lookup request.
 #[derive(PartialEq, Eq, Debug)]
 pub struct SingleLookupRequestState {
