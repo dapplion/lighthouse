@@ -94,9 +94,9 @@ use std::fmt::Debug;
 use std::fs;
 use std::io::Write;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use store::{Error as DBError, HotStateSummary, KeyValueStore, StoreOp};
-use task_executor::JoinHandle;
 use tree_hash::TreeHash;
 use types::{
     BeaconBlockRef, BeaconState, BeaconStateError, ChainSpec, CloneConfig, Epoch, EthSpec,

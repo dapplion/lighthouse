@@ -63,20 +63,19 @@ impl BuilderHttpClient {
         &self.user_agent
     }
 
-    async fn get_with_timeout<T: DeserializeOwned, U: IntoUrl>(
+    fn get_with_timeout<T: DeserializeOwned, U: IntoUrl>(
         &self,
         url: U,
         timeout: Duration,
     ) -> Result<T, Error> {
-        self.get_response_with_timeout(url, Some(timeout))
-            .await?
-            .json()
-            .await
-            .map_err(Into::into)
+        todo!();
+        // self.get_response_with_timeout(url, Some(timeout))?
+        //    .json()
+        //    .map_err(Into::into)
     }
 
     /// Perform a HTTP GET request, returning the `Response` for further processing.
-    async fn get_response_with_timeout<U: IntoUrl>(
+    fn get_response_with_timeout<U: IntoUrl>(
         &self,
         url: U,
         timeout: Option<Duration>,
@@ -85,12 +84,13 @@ impl BuilderHttpClient {
         if let Some(timeout) = timeout {
             builder = builder.timeout(timeout);
         }
-        let response = builder.send().await.map_err(Error::from)?;
-        ok_or_error(response).await
+        todo!();
+        // let response = builder.send().await.map_err(Error::from)?;
+        // ok_or_error(response).await
     }
 
     /// Generic POST function supporting arbitrary responses and timeouts.
-    async fn post_generic<T: Serialize, U: IntoUrl>(
+    fn post_generic<T: Serialize, U: IntoUrl>(
         &self,
         url: U,
         body: &T,
@@ -100,11 +100,12 @@ impl BuilderHttpClient {
         if let Some(timeout) = timeout {
             builder = builder.timeout(timeout);
         }
-        let response = builder.json(body).send().await?;
-        ok_or_error(response).await
+        todo!();
+        // let response = builder.json(body).send().await?;
+        // ok_or_error(response).await
     }
 
-    async fn post_with_raw_response<T: Serialize, U: IntoUrl>(
+    fn post_with_raw_response<T: Serialize, U: IntoUrl>(
         &self,
         url: U,
         body: &T,
@@ -114,8 +115,9 @@ impl BuilderHttpClient {
         if let Some(timeout) = timeout {
             builder = builder.timeout(timeout);
         }
-        let response = builder.json(body).send().await.map_err(Error::from)?;
-        ok_or_error(response).await
+        todo!();
+        // let response = builder.json(body).send().await.map_err(Error::from)?;
+        // ok_or_error(response).await
     }
 
     /// `POST /eth/v1/builder/validators`
@@ -132,13 +134,12 @@ impl BuilderHttpClient {
             .push("builder")
             .push("validators");
 
-        self.post_generic(path, &validator, Some(self.timeouts.post_validators))
-            .await?;
+        self.post_generic(path, &validator, Some(self.timeouts.post_validators))?;
         Ok(())
     }
 
     /// `POST /eth/v1/builder/blinded_blocks`
-    pub async fn post_builder_blinded_blocks<E: EthSpec>(
+    pub fn post_builder_blinded_blocks<E: EthSpec>(
         &self,
         blinded_block: &SignedBlindedBeaconBlock<E>,
     ) -> Result<ForkVersionedResponse<FullPayloadContents<E>>, Error> {
@@ -151,19 +152,18 @@ impl BuilderHttpClient {
             .push("builder")
             .push("blinded_blocks");
 
-        Ok(self
-            .post_with_raw_response(
-                path,
-                &blinded_block,
-                Some(self.timeouts.post_blinded_blocks),
-            )
-            .await?
-            .json()
-            .await?)
+        todo!();
+        // Ok(self
+        //     .post_with_raw_response(
+        //        path,
+        //        &blinded_block,
+        //        Some(self.timeouts.post_blinded_blocks),
+        //    )?
+        //    .json()?)
     }
 
     /// `GET /eth/v1/builder/header`
-    pub async fn get_builder_header<E: EthSpec>(
+    pub fn get_builder_header<E: EthSpec>(
         &self,
         slot: Slot,
         parent_hash: ExecutionBlockHash,
@@ -181,7 +181,7 @@ impl BuilderHttpClient {
             .push(format!("{parent_hash:?}").as_str())
             .push(pubkey.as_hex_string().as_str());
 
-        let resp = self.get_with_timeout(path, self.timeouts.get_header).await;
+        let resp = self.get_with_timeout(path, self.timeouts.get_header);
 
         if matches!(resp, Err(Error::StatusCode(StatusCode::NO_CONTENT))) {
             Ok(None)
@@ -191,7 +191,7 @@ impl BuilderHttpClient {
     }
 
     /// `GET /eth/v1/builder/status`
-    pub async fn get_builder_status<E: EthSpec>(&self) -> Result<(), Error> {
+    pub fn get_builder_status<E: EthSpec>(&self) -> Result<(), Error> {
         let mut path = self.server.full.clone();
 
         path.path_segments_mut()
@@ -202,6 +202,5 @@ impl BuilderHttpClient {
             .push("status");
 
         self.get_with_timeout(path, self.timeouts.get_builder_status)
-            .await
     }
 }

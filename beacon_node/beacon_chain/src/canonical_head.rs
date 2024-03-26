@@ -474,9 +474,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Execute the fork choice algorithm and enthrone the result as the canonical head.
     ///
     /// This method replaces the old `BeaconChain::fork_choice` method.
-    pub async fn recompute_head_at_current_slot(self: &Arc<Self>) {
+    pub fn recompute_head_at_current_slot(self: &Arc<Self>) {
         match self.slot() {
-            Ok(current_slot) => self.recompute_head_at_slot(current_slot).await,
+            Ok(current_slot) => self.recompute_head_at_slot(current_slot),
             Err(e) => error!(
                 self.log,
                 "No slot when recomputing head";
@@ -497,18 +497,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// such a case it's critical that the `BeaconChain` keeps importing blocks so that the
     /// situation can be rectified. We avoid returning an error here so that calling functions
     /// can't abort block import because an error is returned here.
-    pub async fn recompute_head_at_slot(self: &Arc<Self>, current_slot: Slot) {
+    pub fn recompute_head_at_slot(self: &Arc<Self>, current_slot: Slot) {
         metrics::inc_counter(&metrics::FORK_CHOICE_REQUESTS);
         let _timer = metrics::start_timer(&metrics::FORK_CHOICE_TIMES);
 
         let chain = self.clone();
-        match self
-            .spawn_blocking_handle(
-                move || chain.recompute_head_at_slot_internal(current_slot),
-                "recompute_head_internal",
-            )
-            .await
-        {
+        match chain.recompute_head_at_slot_internal(current_slot) {
             // Fork choice returned successfully and did not need to update the EL.
             Ok(Ok(None)) => (),
             // Fork choice returned successfully and needed to update the EL. It has returned a
@@ -1210,14 +1204,11 @@ fn spawn_execution_layer_updates<T: BeaconChainTypes>(
                     return;
                 }
 
-                if let Err(e) = chain
-                    .update_execution_engine_forkchoice(
-                        current_slot,
-                        forkchoice_update_params,
-                        OverrideForkchoiceUpdate::Yes,
-                    )
-                    .await
-                {
+                if let Err(e) = chain.update_execution_engine_forkchoice(
+                    current_slot,
+                    forkchoice_update_params,
+                    OverrideForkchoiceUpdate::Yes,
+                ) {
                     crit!(
                         chain.log,
                         "Failed to update execution head";
@@ -1233,7 +1224,7 @@ fn spawn_execution_layer_updates<T: BeaconChainTypes>(
                 //
                 // This seems OK. It's not a significant waste of EL<>CL bandwidth or resources, as far as I
                 // know.
-                if let Err(e) = chain.prepare_beacon_proposer(current_slot).await {
+                if let Err(e) = chain.prepare_beacon_proposer(current_slot) {
                     crit!(
                         chain.log,
                         "Failed to prepare proposers after fork choice";

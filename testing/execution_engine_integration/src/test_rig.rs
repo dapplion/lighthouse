@@ -178,9 +178,9 @@ impl<E: GenericExecutionEngine> TestRig<E> {
         for pair in [&self.ee_a, &self.ee_b] {
             loop {
                 // Run the routine to check for online nodes.
-                pair.execution_layer.watchdog_task().await;
+                pair.execution_layer.watchdog_task();
 
-                if pair.execution_layer.is_synced().await {
+                if pair.execution_layer.is_synced() {
                     break;
                 } else if start_instant + EXECUTION_ENGINE_START_TIMEOUT > Instant::now() {
                     sleep(Duration::from_millis(500)).await;
@@ -216,7 +216,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
             .ee_a
             .execution_layer
             .get_terminal_pow_block_hash(&self.spec, timestamp_now())
-            .await
             .unwrap()
             .unwrap();
 
@@ -225,7 +224,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
             self.ee_b
                 .execution_layer
                 .get_terminal_pow_block_hash(&self.spec, timestamp_now())
-                .await
                 .unwrap()
                 .unwrap()
         );
@@ -266,22 +264,18 @@ impl<E: GenericExecutionEngine> TestRig<E> {
 
         // To save sending proposer preparation data, just set the fee recipient
         // to the fee recipient configured for EE A.
-        let prepared = self
-            .ee_a
-            .execution_layer
-            .insert_proposer(
-                Slot::new(1), // Insert proposer for the next slot
-                head_root,
-                proposer_index,
-                PayloadAttributes::new(
-                    timestamp,
-                    prev_randao,
-                    Address::repeat_byte(42),
-                    Some(vec![]),
-                    None,
-                ),
-            )
-            .await;
+        let prepared = self.ee_a.execution_layer.insert_proposer(
+            Slot::new(1), // Insert proposer for the next slot
+            head_root,
+            proposer_index,
+            PayloadAttributes::new(
+                timestamp,
+                prev_randao,
+                Address::repeat_byte(42),
+                Some(vec![]),
+                None,
+            ),
+        );
 
         assert!(!prepared, "Inserting proposer for the first time");
 
@@ -296,7 +290,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
                 Slot::new(0),
                 Hash256::zero(),
             )
-            .await
             .unwrap();
 
         assert_eq!(prepare, PayloadStatus::Valid);
@@ -315,8 +308,7 @@ impl<E: GenericExecutionEngine> TestRig<E> {
         let suggested_fee_recipient = self
             .ee_a
             .execution_layer
-            .get_suggested_fee_recipient(proposer_index)
-            .await;
+            .get_suggested_fee_recipient(proposer_index);
         let payload_attributes = PayloadAttributes::new(
             timestamp,
             prev_randao,
@@ -337,7 +329,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
                 None,
                 BlockProductionVersion::FullV2,
             )
-            .await
             .unwrap();
 
         let valid_payload = match block_proposal_content_type {
@@ -367,7 +358,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
                 slot,
                 head_block_root,
             )
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Syncing);
 
@@ -382,7 +372,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
             .ee_a
             .execution_layer
             .notify_new_payload(valid_payload.to_ref().try_into().unwrap())
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Valid);
         check_payload_reconstruction(&self.ee_a, &valid_payload).await;
@@ -408,7 +397,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
                 slot,
                 head_block_root,
             )
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Valid);
 
@@ -436,7 +424,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
             .ee_a
             .execution_layer
             .notify_new_payload(invalid_payload.to_ref().try_into().unwrap())
-            .await
             .unwrap();
         assert!(matches!(
             status,
@@ -467,8 +454,7 @@ impl<E: GenericExecutionEngine> TestRig<E> {
         let suggested_fee_recipient = self
             .ee_a
             .execution_layer
-            .get_suggested_fee_recipient(proposer_index)
-            .await;
+            .get_suggested_fee_recipient(proposer_index);
         let payload_attributes = PayloadAttributes::new(
             timestamp,
             prev_randao,
@@ -489,7 +475,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
                 None,
                 BlockProductionVersion::FullV2,
             )
-            .await
             .unwrap();
 
         let second_payload = match block_proposal_content_type {
@@ -508,7 +493,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
             .ee_a
             .execution_layer
             .notify_new_payload(second_payload.to_ref().try_into().unwrap())
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Valid);
         check_payload_reconstruction(&self.ee_a, &second_payload).await;
@@ -532,10 +516,12 @@ impl<E: GenericExecutionEngine> TestRig<E> {
         let slot = Slot::new(42);
         let head_block_root = Hash256::repeat_byte(100);
         let validator_index = 0;
-        self.ee_a
-            .execution_layer
-            .insert_proposer(slot, head_block_root, validator_index, payload_attributes)
-            .await;
+        self.ee_a.execution_layer.insert_proposer(
+            slot,
+            head_block_root,
+            validator_index,
+            payload_attributes,
+        );
         let status = self
             .ee_a
             .execution_layer
@@ -546,7 +532,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
                 slot,
                 head_block_root,
             )
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Valid);
 
@@ -560,7 +545,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
             .ee_b
             .execution_layer
             .notify_new_payload(second_payload.to_ref().try_into().unwrap())
-            .await
             .unwrap();
         assert!(matches!(status, PayloadStatus::Syncing));
 
@@ -583,7 +567,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
                 slot,
                 head_block_root,
             )
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Syncing);
 
@@ -598,7 +581,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
             .ee_b
             .execution_layer
             .notify_new_payload(valid_payload.to_ref().try_into().unwrap())
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Valid);
         check_payload_reconstruction(&self.ee_b, &valid_payload).await;
@@ -612,7 +594,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
             .ee_b
             .execution_layer
             .notify_new_payload(second_payload.to_ref().try_into().unwrap())
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Valid);
         check_payload_reconstruction(&self.ee_b, &second_payload).await;
@@ -636,7 +617,6 @@ impl<E: GenericExecutionEngine> TestRig<E> {
                 slot,
                 head_block_root,
             )
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Valid);
     }
@@ -653,16 +633,11 @@ async fn check_payload_reconstruction<E: GenericExecutionEngine>(
     let reconstructed = ee
         .execution_layer
         .get_payload_by_hash_legacy(payload.block_hash(), payload.fork_name())
-        .await
         .unwrap()
         .unwrap();
     assert_eq!(reconstructed, *payload);
     // also check via payload bodies method
-    let capabilities = ee
-        .execution_layer
-        .get_engine_capabilities(None)
-        .await
-        .unwrap();
+    let capabilities = ee.execution_layer.get_engine_capabilities(None).unwrap();
 
     assert!(
         // if the engine doesn't have these capabilities, we need to update the client in our tests
@@ -673,7 +648,6 @@ async fn check_payload_reconstruction<E: GenericExecutionEngine>(
     let mut bodies = ee
         .execution_layer
         .get_payload_bodies_by_hash(vec![payload.block_hash()])
-        .await
         .unwrap();
     assert_eq!(bodies.len(), 1);
     let body = bodies.pop().unwrap().unwrap();

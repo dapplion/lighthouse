@@ -498,10 +498,12 @@ pub fn serve<E: EthSpec>(
                     }
                 };
 
-                builder
-                    .el
-                    .insert_proposer(slot, head_block_root, val_index, payload_attributes.clone())
-                    .await;
+                builder.el.insert_proposer(
+                    slot,
+                    head_block_root,
+                    val_index,
+                    payload_attributes.clone(),
+                );
 
                 let forkchoice_update_params = ForkchoiceUpdateParameters {
                     head_root: Hash256::zero(),
@@ -518,7 +520,6 @@ pub fn serve<E: EthSpec>(
                         forkchoice_update_params,
                         fork,
                     )
-                    .await
                     .map_err(|_| reject("couldn't get payload"))?;
 
                 let mut message = match payload_response_type {

@@ -106,8 +106,7 @@ impl<T: EthSpec> MockExecutionLayer<T> {
         let slot = Slot::new(0);
         let validator_index = 0;
         self.el
-            .insert_proposer(slot, head_block_root, validator_index, payload_attributes)
-            .await;
+            .insert_proposer(slot, head_block_root, validator_index, payload_attributes);
 
         self.el
             .notify_forkchoice_updated(
@@ -117,7 +116,6 @@ impl<T: EthSpec> MockExecutionLayer<T> {
                 slot,
                 head_block_root,
             )
-            .await
             .unwrap();
 
         let validator_index = 0;
@@ -126,7 +124,7 @@ impl<T: EthSpec> MockExecutionLayer<T> {
             slot,
             chain_health: ChainHealth::Healthy,
         };
-        let suggested_fee_recipient = self.el.get_suggested_fee_recipient(validator_index).await;
+        let suggested_fee_recipient = self.el.get_suggested_fee_recipient(validator_index);
         let payload_attributes =
             PayloadAttributes::new(timestamp, prev_randao, suggested_fee_recipient, None, None);
 
@@ -142,7 +140,6 @@ impl<T: EthSpec> MockExecutionLayer<T> {
                 None,
                 BlockProductionVersion::FullV2,
             )
-            .await
             .unwrap();
 
         let payload: ExecutionPayload<T> = match block_proposal_content_type {
@@ -166,7 +163,7 @@ impl<T: EthSpec> MockExecutionLayer<T> {
             slot,
             chain_health: ChainHealth::Healthy,
         };
-        let suggested_fee_recipient = self.el.get_suggested_fee_recipient(validator_index).await;
+        let suggested_fee_recipient = self.el.get_suggested_fee_recipient(validator_index);
         let payload_attributes =
             PayloadAttributes::new(timestamp, prev_randao, suggested_fee_recipient, None, None);
 
@@ -182,7 +179,6 @@ impl<T: EthSpec> MockExecutionLayer<T> {
                 None,
                 BlockProductionVersion::BlindedV2,
             )
-            .await
             .unwrap();
 
         match block_proposal_content_type {
@@ -245,7 +241,6 @@ impl<T: EthSpec> MockExecutionLayer<T> {
         let status = self
             .el
             .notify_new_payload(payload.to_ref().try_into().unwrap())
-            .await
             .unwrap();
         assert_eq!(status, PayloadStatus::Valid);
 
@@ -260,7 +255,6 @@ impl<T: EthSpec> MockExecutionLayer<T> {
                 slot,
                 head_block_root,
             )
-            .await
             .unwrap();
 
         let head_execution_block = {

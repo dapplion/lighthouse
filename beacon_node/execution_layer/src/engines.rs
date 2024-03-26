@@ -6,13 +6,14 @@ use crate::engine_api::{
 };
 use crate::HttpJsonRpc;
 use lru::LruCache;
+use parking_lot::{Mutex, RwLock};
 use slog::{debug, error, info, warn, Logger};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use task_executor::TaskExecutor;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::watch;
 use tokio_stream::wrappers::WatchStream;
 use types::non_zero_usize::new_non_zero_usize;
 use types::ExecutionBlockHash;
@@ -147,23 +148,22 @@ impl Engine {
     /// Gives access to a channel containing the last engine state.
     ///
     /// This can be called several times.
-    pub async fn watch_state(&self) -> WatchStream<EngineState> {
-        self.state.read().await.watch()
+    pub fn watch_state(&self) -> WatchStream<EngineState> {
+        self.state.read().watch()
     }
 
-    pub async fn get_payload_id(
+    pub fn get_payload_id(
         &self,
         head_block_hash: &ExecutionBlockHash,
         payload_attributes: &PayloadAttributes,
     ) -> Option<PayloadId> {
         self.payload_id_cache
             .lock()
-            .await
             .get(&PayloadIdCacheKey::new(head_block_hash, payload_attributes))
             .cloned()
     }
 
-    pub async fn notify_forkchoice_updated(
+    pub fn notify_forkchoice_updated(
         &self,
         forkchoice_state: ForkchoiceState,
         payload_attributes: Option<PayloadAttributes>,
@@ -171,14 +171,13 @@ impl Engine {
     ) -> Result<ForkchoiceUpdatedResponse, EngineApiError> {
         let response = self
             .api
-            .forkchoice_updated(forkchoice_state, payload_attributes.clone())
-            .await?;
+            .forkchoice_updated(forkchoice_state, payload_attributes.clone())?;
 
         if let Some(payload_id) = response.payload_id {
             if let Some(key) = payload_attributes
                 .map(|pa| PayloadIdCacheKey::new(&forkchoice_state.head_block_hash, &pa))
             {
-                self.payload_id_cache.lock().await.put(key, payload_id);
+                self.payload_id_cache.lock().put(key, payload_id);
             } else {
                 debug!(
                     log,
@@ -191,16 +190,16 @@ impl Engine {
         Ok(response)
     }
 
-    async fn get_latest_forkchoice_state(&self) -> Option<ForkchoiceState> {
-        *self.latest_forkchoice_state.read().await
+    fn get_latest_forkchoice_state(&self) -> Option<ForkchoiceState> {
+        *self.latest_forkchoice_state.read()
     }
 
-    pub async fn set_latest_forkchoice_state(&self, state: ForkchoiceState) {
-        *self.latest_forkchoice_state.write().await = Some(state);
+    pub fn set_latest_forkchoice_state(&self, state: ForkchoiceState) {
+        *self.latest_forkchoice_state.write() = Some(state);
     }
 
-    async fn send_latest_forkchoice_state(&self) {
-        let latest_forkchoice_state = self.get_latest_forkchoice_state().await;
+    fn send_latest_forkchoice_state(&self) {
+        let latest_forkchoice_state = self.get_latest_forkchoice_state();
 
         if let Some(forkchoice_state) = latest_forkchoice_state {
             if forkchoice_state.head_block_hash == ExecutionBlockHash::zero() {
@@ -220,7 +219,7 @@ impl Engine {
 
             // For simplicity, payload attributes are never included in this call. It may be
             // reasonable to include them in the future.
-            if let Err(e) = self.api.forkchoice_updated(forkchoice_state, None).await {
+            if let Err(e) = self.api.forkchoice_updated(forkchoice_state, None) {
                 debug!(
                     self.log,
                     "Failed to issue latest head to engine";
@@ -236,21 +235,21 @@ impl Engine {
     }
 
     /// Returns `true` if the engine has a "synced" status.
-    pub async fn is_synced(&self) -> bool {
-        **self.state.read().await == EngineStateInternal::Synced
+    pub fn is_synced(&self) -> bool {
+        **self.state.read() == EngineStateInternal::Synced
     }
 
     /// Returns `true` if the engine has a status other than synced or syncing.
-    pub async fn is_offline(&self) -> bool {
-        EngineState::from(**self.state.read().await) == EngineState::Offline
+    pub fn is_offline(&self) -> bool {
+        EngineState::from(**self.state.read()) == EngineState::Offline
     }
 
     /// Run the `EngineApi::upcheck` function if the node's last known state is not synced. This
     /// might be used to recover the node if offline.
-    pub async fn upcheck(&self) {
-        let (state, cache_action) = match self.api.upcheck().await {
+    pub fn upcheck(&self) {
+        let (state, cache_action) = match self.api.upcheck() {
             Ok(()) => {
-                let mut state = self.state.write().await;
+                let mut state = self.state.write();
                 if **state != EngineStateInternal::Synced {
                     info!(
                         self.log,
@@ -258,7 +257,7 @@ impl Engine {
                     );
 
                     // Send the node our latest forkchoice_state.
-                    self.send_latest_forkchoice_state().await;
+                    self.send_latest_forkchoice_state();
                 } else {
                     debug!(
                         self.log,
@@ -269,7 +268,7 @@ impl Engine {
                 (**state, CapabilitiesCacheAction::Update)
             }
             Err(EngineApiError::IsSyncing) => {
-                let mut state = self.state.write().await;
+                let mut state = self.state.write();
                 state.update(EngineStateInternal::Syncing);
                 (**state, CapabilitiesCacheAction::Update)
             }
@@ -280,7 +279,7 @@ impl Engine {
                     "error" => ?err,
                 );
 
-                let mut state = self.state.write().await;
+                let mut state = self.state.write();
                 state.update(EngineStateInternal::AuthFailed);
                 (**state, CapabilitiesCacheAction::Clear)
             }
@@ -291,7 +290,7 @@ impl Engine {
                     "error" => ?e,
                 );
 
-                let mut state = self.state.write().await;
+                let mut state = self.state.write();
                 state.update(EngineStateInternal::Offline);
                 // need to clear the engine capabilities cache if we detect the
                 // execution engine is offline as it is likely the engine is being
@@ -304,9 +303,8 @@ impl Engine {
         match cache_action {
             CapabilitiesCacheAction::None => {}
             CapabilitiesCacheAction::Update => {
-                if let Err(e) = self
-                    .get_engine_capabilities(Some(CACHED_ENGINE_CAPABILITIES_AGE_LIMIT))
-                    .await
+                if let Err(e) =
+                    self.get_engine_capabilities(Some(CACHED_ENGINE_CAPABILITIES_AGE_LIMIT))
                 {
                     warn!(self.log,
                         "Error during exchange capabilities";
@@ -314,7 +312,7 @@ impl Engine {
                     )
                 }
             }
-            CapabilitiesCacheAction::Clear => self.api.clear_exchange_capabilties_cache().await,
+            CapabilitiesCacheAction::Clear => self.api.clear_exchange_capabilties_cache(),
         }
 
         debug!(
@@ -333,11 +331,11 @@ impl Engine {
     ///
     /// Set `age_limit` to `None` to always return the cached result
     /// Set `age_limit` to `Some(Duration::ZERO)` to force fetching from EE
-    pub async fn get_engine_capabilities(
+    pub fn get_engine_capabilities(
         &self,
         age_limit: Option<Duration>,
     ) -> Result<EngineCapabilities, EngineApiError> {
-        self.api.get_engine_capabilities(age_limit).await
+        self.api.get_engine_capabilities(age_limit)
     }
 
     /// Run `func` on the node regardless of the node's current state.
@@ -346,25 +344,22 @@ impl Engine {
     ///
     /// This function takes locks on `self.state`, holding a conflicting lock might cause a
     /// deadlock.
-    pub async fn request<'a, F, G, H>(self: &'a Arc<Self>, func: F) -> Result<H, EngineError>
+    pub fn request<'a, F, H>(self: &'a Arc<Self>, func: F) -> Result<H, EngineError>
     where
-        F: FnOnce(&'a Engine) -> G,
-        G: Future<Output = Result<H, EngineApiError>>,
+        F: FnOnce(&'a Engine) -> Result<H, EngineApiError>,
     {
-        match func(self).await {
+        match func(self) {
             Ok(result) => {
                 // Take a clone *without* holding the read-lock since the `upcheck` function will
                 // take a write-lock.
-                let state: EngineStateInternal = **self.state.read().await;
+                let state: EngineStateInternal = **self.state.read();
 
                 // Keep an up to date engine state.
                 if state != EngineStateInternal::Synced {
                     // Spawn the upcheck in another task to avoid slowing down this request.
                     let inner_self = self.clone();
-                    self.executor.spawn(
-                        async move { inner_self.upcheck().await },
-                        "upcheck_after_success",
-                    );
+                    self.executor
+                        .spawn(async move { inner_self.upcheck() }, "upcheck_after_success");
                 }
 
                 Ok(result)
@@ -381,10 +376,8 @@ impl Engine {
                 //
                 // Spawn the upcheck in another task to avoid slowing down this request.
                 let inner_self = self.clone();
-                self.executor.spawn(
-                    async move { inner_self.upcheck().await },
-                    "upcheck_after_error",
-                );
+                self.executor
+                    .spawn(async move { inner_self.upcheck() }, "upcheck_after_error");
 
                 Err(EngineError::Api { error })
             }

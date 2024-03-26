@@ -25,7 +25,7 @@ use state_processing::per_block_processing::{
     is_merge_transition_complete, partially_verify_execution_payload,
 };
 use std::sync::Arc;
-use tokio::task::JoinHandle;
+use std::thread::JoinHandle;
 use tree_hash::TreeHash;
 use types::payload::BlockProductionVersion;
 use types::*;
