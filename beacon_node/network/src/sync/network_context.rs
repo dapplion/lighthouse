@@ -2,24 +2,26 @@
 //! channel and stores a global RPC ID to perform requests.
 
 use super::block_sidecar_coupling::BlocksAndBlobsRequestInfo;
-use super::manager::{Id, RequestId as SyncRequestId};
+use super::manager::{Id, RequestId as SyncRequestId, SingleLookupReqId2};
 use super::range_sync::{BatchId, ByRangeRequestType, ChainId};
 use crate::network_beacon_processor::NetworkBeaconProcessor;
 use crate::service::{NetworkMessage, RequestId};
 use crate::status::ToStatusMessage;
-use crate::sync::block_lookups::common::LookupType;
-use crate::sync::manager::SingleLookupReqId;
 use beacon_chain::block_verification_types::RpcBlock;
-use beacon_chain::{BeaconChain, BeaconChainTypes, EngineState};
+use beacon_chain::validator_monitor::timestamp_now;
+use beacon_chain::{get_block_root, BeaconChain, BeaconChainTypes, EngineState};
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{BlobsByRangeRequest, BlobsByRootRequest};
+use lighthouse_network::rpc::RPCError;
 use lighthouse_network::rpc::{BlocksByRangeRequest, BlocksByRootRequest, GoodbyeReason};
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource, Request};
 use slog::{debug, trace, warn};
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
-use types::{BlobSidecar, EthSpec, SignedBeaconBlock};
+use types::blob_sidecar::{BlobIdentifier, FixedBlobSidecarList};
+use types::{BlobSidecar, EthSpec, Hash256, SignedBeaconBlock};
 
 pub struct BlocksAndBlobsByRangeResponse<E: EthSpec> {
     pub batch_id: BatchId,
@@ -40,19 +42,6 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A sequential ID for all RPC requests.
     request_id: Id,
 
-    /// BlocksByRange requests made by the range syncing algorithm.
-    range_requests: FnvHashMap<Id, (ChainId, BatchId)>,
-
-    /// BlocksByRange requests made by backfill syncing.
-    backfill_requests: FnvHashMap<Id, BatchId>,
-
-    /// BlocksByRange requests paired with BlobsByRange requests made by the range.
-    range_blocks_and_blobs_requests: FnvHashMap<Id, BlocksAndBlobsByRangeRequest<T::EthSpec>>,
-
-    /// BlocksByRange requests paired with BlobsByRange requests made by the backfill sync.
-    backfill_blocks_and_blobs_requests:
-        FnvHashMap<Id, (BatchId, BlocksAndBlobsRequestInfo<T::EthSpec>)>,
-
     /// Whether the ee is online. If it's not, we don't allow access to the
     /// `beacon_processor_send`.
     execution_engine_state: EngineState,
@@ -60,28 +49,136 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// Sends work to the beacon processor via a channel.
     network_beacon_processor: Arc<NetworkBeaconProcessor<T>>,
 
+    blocks_by_root_requests: FnvHashMap<Id, ActiveBlocksByRootRequest>,
+    blocks_by_range_requests: FnvHashMap<Id, ActiveBlocksByRangeRequest<T::EthSpec>>,
+    blobs_by_root_requests: FnvHashMap<Id, ActiveBlobsByRootRequest<T::EthSpec>>,
+    blobs_by_range_requests: FnvHashMap<Id, ActiveBlobsByRangeRequest<T::EthSpec>>,
+
+    on_going_block_and_blobs_requests:
+        FnvHashMap<Id, (BBRId, BlocksAndBlobsRequestInfo<T::EthSpec>)>,
+
     pub chain: Arc<BeaconChain<T>>,
 
     /// Logger for the `SyncNetworkContext`.
     pub log: slog::Logger,
 }
 
+pub struct BlobsByRootSingleBlockRequest {
+    pub block_root: Hash256,
+    pub indexes: Vec<u64>,
+}
+
+struct ActiveBlocksByRootRequest {
+    request: Hash256,
+    sender_id: SingleLookupReqId2,
+    resolved: bool,
+}
+
+impl ActiveBlocksByRootRequest {
+    fn is_valid_response<E: EthSpec>(&self, block: &SignedBeaconBlock<E>) -> bool {
+        self.request != get_block_root(block)
+    }
+}
+
+struct ActiveBlocksByRangeRequest<E: EthSpec> {
+    request: BlocksByRangeRequest,
+    sender_id: BBRId,
+    blocks: Vec<Arc<SignedBeaconBlock<E>>>,
+}
+
+impl<E: EthSpec> ActiveBlocksByRangeRequest<E> {
+    fn add_response(&mut self, block: Arc<SignedBeaconBlock<E>>) -> Result<(), RPCError> {
+        if !self.request.in_range(block.slot()) {
+            return Err(RPCError::InvalidData("un-requested data".to_string()));
+        }
+        if self.blocks.iter().any(|b| b.slot() == block.slot()) {
+            return Err(RPCError::InvalidData("duplicated data".to_string()));
+        }
+        self.blocks.push(block);
+        Ok(())
+    }
+}
+
+struct ActiveBlobsByRootRequest<E: EthSpec> {
+    request: BlobsByRootSingleBlockRequest,
+    sender_id: SingleLookupReqId2,
+    blobs: Vec<Arc<BlobSidecar<E>>>,
+    resolved: bool,
+}
+
+impl<E: EthSpec> ActiveBlobsByRootRequest<E> {
+    fn add_response(&mut self, blob: Arc<BlobSidecar<E>>) -> Result<(), RPCError> {
+        if self.request.block_root != blob.block_root() {
+            return Err(RPCError::InvalidData("un-requested block root".to_string()));
+        }
+        if !blob.verify_blob_sidecar_inclusion_proof().unwrap_or(false) {
+            return Err(RPCError::InvalidData("invalid inclusion proof".to_string()));
+        }
+        if !self.request.indexes.contains(&blob.index) {
+            return Err(RPCError::InvalidData("un-requested blob index".to_string()));
+        }
+        if self.blobs.iter().any(|b| b.index == blob.index) {
+            return Err(RPCError::InvalidData("duplicated data".to_string()));
+        }
+        self.blobs.push(blob);
+        Ok(())
+    }
+}
+
+struct ActiveBlobsByRangeRequest<E: EthSpec> {
+    request: BlocksByRangeRequest,
+    sender_id: BBRId,
+    blobs: Vec<Arc<BlobSidecar<E>>>,
+}
+
+impl<E: EthSpec> ActiveBlobsByRangeRequest<E> {
+    fn add_response(&mut self, blob: Arc<BlobSidecar<E>>) -> Result<(), RPCError> {
+        if !self.request.in_range(blob.slot()) {
+            return Err(RPCError::InvalidData("un-requested data".to_string()));
+        }
+        if self
+            .blobs
+            .iter()
+            .any(|b| b.slot() == blob.slot() && b.index == blob.index)
+        {
+            return Err(RPCError::InvalidData("duplicated data".to_string()));
+        }
+        self.blobs.push(blob);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum BBRId {
+    BackfillSync {
+        batch_id: BatchId,
+    },
+    RangeSync {
+        chain_id: ChainId,
+        batch_id: BatchId,
+    },
+}
+
+#[derive(Debug)]
+pub enum RpcEvent<T> {
+    StreamTermination,
+    Response(T, Duration),
+    RPCError(RPCError),
+}
+
+impl<T> From<Option<T>> for RpcEvent<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::Response(value, timestamp_now()),
+            None => Self::StreamTermination,
+        }
+    }
+}
+
 /// Small enumeration to make dealing with block and blob requests easier.
 pub enum BlockOrBlob<E: EthSpec> {
-    Block(Option<Arc<SignedBeaconBlock<E>>>),
-    Blob(Option<Arc<BlobSidecar<E>>>),
-}
-
-impl<E: EthSpec> From<Option<Arc<SignedBeaconBlock<E>>>> for BlockOrBlob<E> {
-    fn from(block: Option<Arc<SignedBeaconBlock<E>>>) -> Self {
-        BlockOrBlob::Block(block)
-    }
-}
-
-impl<E: EthSpec> From<Option<Arc<BlobSidecar<E>>>> for BlockOrBlob<E> {
-    fn from(blob: Option<Arc<BlobSidecar<E>>>) -> Self {
-        BlockOrBlob::Blob(blob)
-    }
+    Block(Result<Vec<Arc<SignedBeaconBlock<E>>>, RPCError>),
+    Blob(Result<Vec<Arc<BlobSidecar<E>>>, RPCError>),
 }
 
 impl<T: BeaconChainTypes> SyncNetworkContext<T> {
@@ -95,11 +192,12 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             network_send,
             execution_engine_state: EngineState::Online, // always assume `Online` at the start
             request_id: 1,
-            range_requests: FnvHashMap::default(),
-            backfill_requests: FnvHashMap::default(),
-            range_blocks_and_blobs_requests: FnvHashMap::default(),
-            backfill_blocks_and_blobs_requests: FnvHashMap::default(),
             network_beacon_processor,
+            on_going_block_and_blobs_requests: <_>::default(),
+            blocks_by_root_requests: <_>::default(),
+            blocks_by_range_requests: <_>::default(),
+            blobs_by_root_requests: <_>::default(),
+            blobs_by_range_requests: <_>::default(),
             chain,
             log,
         }
@@ -143,367 +241,349 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         }
     }
 
-    /// A blocks by range request for the range sync algorithm.
-    pub fn blocks_by_range_request(
-        &mut self,
-        peer_id: PeerId,
-        batch_type: ByRangeRequestType,
-        request: BlocksByRangeRequest,
-        chain_id: ChainId,
-        batch_id: BatchId,
-    ) -> Result<Id, &'static str> {
-        match batch_type {
-            ByRangeRequestType::Blocks => {
-                trace!(
-                    self.log,
-                    "Sending BlocksByRange request";
-                    "method" => "BlocksByRange",
-                    "count" => request.count(),
-                    "peer" => %peer_id,
-                );
-                let request = Request::BlocksByRange(request);
-                let id = self.next_id();
-                let request_id = RequestId::Sync(SyncRequestId::RangeBlocks { id });
-                self.send_network_msg(NetworkMessage::SendRequest {
-                    peer_id,
-                    request,
-                    request_id,
-                })?;
-                self.range_requests.insert(id, (chain_id, batch_id));
-                Ok(id)
-            }
-            ByRangeRequestType::BlocksAndBlobs => {
-                debug!(
-                    self.log,
-                    "Sending BlocksByRange and BlobsByRange requests";
-                    "method" => "Mixed by range request",
-                    "count" => request.count(),
-                    "peer" => %peer_id,
-                );
-
-                // create the shared request id. This is fine since the rpc handles substream ids.
-                let id = self.next_id();
-                let request_id = RequestId::Sync(SyncRequestId::RangeBlockAndBlobs { id });
-
-                // Create the blob request based on the blob request.
-                let blobs_request = Request::BlobsByRange(BlobsByRangeRequest {
-                    start_slot: *request.start_slot(),
-                    count: *request.count(),
-                });
-                let blocks_request = Request::BlocksByRange(request);
-
-                // Send both requests. Make sure both can be sent.
-                self.send_network_msg(NetworkMessage::SendRequest {
-                    peer_id,
-                    request: blocks_request,
-                    request_id,
-                })?;
-                self.send_network_msg(NetworkMessage::SendRequest {
-                    peer_id,
-                    request: blobs_request,
-                    request_id,
-                })?;
-                let block_blob_info = BlocksAndBlobsRequestInfo::default();
-                self.range_blocks_and_blobs_requests.insert(
-                    id,
-                    BlocksAndBlobsByRangeRequest {
-                        chain_id,
-                        batch_id,
-                        block_blob_info,
-                    },
-                );
-                Ok(id)
-            }
-        }
-    }
-
-    /// A blocks by range request sent by the backfill sync algorithm
-    pub fn backfill_blocks_by_range_request(
-        &mut self,
-        peer_id: PeerId,
-        batch_type: ByRangeRequestType,
-        request: BlocksByRangeRequest,
-        batch_id: BatchId,
-    ) -> Result<Id, &'static str> {
-        match batch_type {
-            ByRangeRequestType::Blocks => {
-                trace!(
-                    self.log,
-                    "Sending backfill BlocksByRange request";
-                    "method" => "BlocksByRange",
-                    "count" => request.count(),
-                    "peer" => %peer_id,
-                );
-                let request = Request::BlocksByRange(request);
-                let id = self.next_id();
-                let request_id = RequestId::Sync(SyncRequestId::BackFillBlocks { id });
-                self.send_network_msg(NetworkMessage::SendRequest {
-                    peer_id,
-                    request,
-                    request_id,
-                })?;
-                self.backfill_requests.insert(id, batch_id);
-                Ok(id)
-            }
-            ByRangeRequestType::BlocksAndBlobs => {
-                debug!(
-                    self.log,
-                    "Sending backfill BlocksByRange and BlobsByRange requests";
-                    "method" => "Mixed by range request",
-                    "count" => request.count(),
-                    "peer" => %peer_id,
-                );
-
-                // create the shared request id. This is fine since the rpc handles substream ids.
-                let id = self.next_id();
-                let request_id = RequestId::Sync(SyncRequestId::BackFillBlockAndBlobs { id });
-
-                // Create the blob request based on the blob request.
-                let blobs_request = Request::BlobsByRange(BlobsByRangeRequest {
-                    start_slot: *request.start_slot(),
-                    count: *request.count(),
-                });
-                let blocks_request = Request::BlocksByRange(request);
-
-                // Send both requests. Make sure both can be sent.
-                self.send_network_msg(NetworkMessage::SendRequest {
-                    peer_id,
-                    request: blocks_request,
-                    request_id,
-                })?;
-                self.send_network_msg(NetworkMessage::SendRequest {
-                    peer_id,
-                    request: blobs_request,
-                    request_id,
-                })?;
-                let block_blob_info = BlocksAndBlobsRequestInfo::default();
-                self.backfill_blocks_and_blobs_requests
-                    .insert(id, (batch_id, block_blob_info));
-                Ok(id)
-            }
-        }
-    }
-
-    /// Response for a request that is only for blocks.
-    pub fn range_sync_block_only_response(
-        &mut self,
-        request_id: Id,
-        is_stream_terminator: bool,
-    ) -> Option<(ChainId, BatchId)> {
-        if is_stream_terminator {
-            self.range_requests.remove(&request_id)
-        } else {
-            self.range_requests.get(&request_id).copied()
-        }
-    }
-
     /// Received a blocks by range response for a request that couples blocks and blobs.
-    pub fn range_sync_block_and_blob_response(
+    pub fn on_block_and_blob_response(
         &mut self,
-        request_id: Id,
+        sender_id: BBRId,
         block_or_blob: BlockOrBlob<T::EthSpec>,
-    ) -> Option<(ChainId, BlocksAndBlobsByRangeResponse<T::EthSpec>)> {
-        match self.range_blocks_and_blobs_requests.entry(request_id) {
-            Entry::Occupied(mut entry) => {
-                let req = entry.get_mut();
-                let info = &mut req.block_blob_info;
-                match block_or_blob {
-                    BlockOrBlob::Block(maybe_block) => info.add_block_response(maybe_block),
-                    BlockOrBlob::Blob(maybe_sidecar) => info.add_sidecar_response(maybe_sidecar),
-                }
-                if info.is_finished() {
-                    // If the request is finished, dequeue everything
-                    let BlocksAndBlobsByRangeRequest {
-                        chain_id,
-                        batch_id,
-                        block_blob_info,
-                    } = entry.remove();
-                    Some((
-                        chain_id,
-                        BlocksAndBlobsByRangeResponse {
-                            batch_id,
-                            responses: block_blob_info.into_responses(),
-                        },
-                    ))
-                } else {
-                    None
-                }
-            }
-            Entry::Vacant(_) => None,
-        }
-    }
-
-    pub fn range_sync_request_failed(
-        &mut self,
-        request_id: Id,
-        batch_type: ByRangeRequestType,
-    ) -> Option<(ChainId, BatchId)> {
-        let req = match batch_type {
-            ByRangeRequestType::BlocksAndBlobs => self
-                .range_blocks_and_blobs_requests
-                .remove(&request_id)
-                .map(|req| (req.chain_id, req.batch_id)),
-            ByRangeRequestType::Blocks => self.range_requests.remove(&request_id),
+    ) -> Option<(BBRId, Result<Vec<RpcBlock<T::EthSpec>>, String>)> {
+        let Entry::Occupied(mut request) = self.on_going_block_and_blobs_requests.entry(todo!())
+        else {
+            return None;
         };
-        if let Some(req) = req {
-            debug!(
-                self.log,
-                "Range sync request failed";
-                "request_id" => request_id,
-                "batch_type" => ?batch_type,
-                "chain_id" => ?req.0,
-                "batch_id" => ?req.1
-            );
-            Some(req)
+
+        match block_or_blob {
+            BlockOrBlob::Block(blocks) => match blocks {
+                Ok(blocks) => request.get_mut().1.add_block_response(blocks),
+                Err(e) => {
+                    let (sender, _) = request.remove();
+                    return Some((sender, Err(e.to_string())));
+                }
+            },
+            BlockOrBlob::Blob(blobs) => match blobs {
+                Ok(blobs) => request.get_mut().1.add_sidecar_response(blobs),
+                Err(e) => {
+                    let (sender, _) = request.remove();
+                    return Some((sender, Err(e.to_string())));
+                }
+            },
+        }
+
+        if request.get().1.is_finished() {
+            // If the request is finished, dequeue everything
+            let (sender, info) = request.remove();
+            Some((sender, info.into_responses()))
         } else {
-            debug!(self.log, "Range sync request failed"; "request_id" => request_id, "batch_type" => ?batch_type);
             None
         }
     }
 
-    pub fn backfill_request_failed(
+    pub fn on_blocks_by_root_response(
         &mut self,
         request_id: Id,
-        batch_type: ByRangeRequestType,
-    ) -> Option<BatchId> {
-        let batch_id = match batch_type {
-            ByRangeRequestType::BlocksAndBlobs => self
-                .backfill_blocks_and_blobs_requests
-                .remove(&request_id)
-                .map(|(batch_id, _info)| batch_id),
-            ByRangeRequestType::Blocks => self.backfill_requests.remove(&request_id),
+        block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) -> Option<(
+        SingleLookupReqId2,
+        Result<(Arc<SignedBeaconBlock<T::EthSpec>>, Duration), RPCError>,
+    )> {
+        let Entry::Occupied(mut request) = self.blocks_by_root_requests.entry(request_id) else {
+            return None;
         };
-        if let Some(batch_id) = batch_id {
-            debug!(
-                self.log,
-                "Backfill sync request failed";
-                "request_id" => request_id,
-                "batch_type" => ?batch_type,
-                "batch_id" => ?batch_id
-            );
-            Some(batch_id)
-        } else {
-            debug!(self.log, "Backfill sync request failed"; "request_id" => request_id, "batch_type" => ?batch_type);
-            None
-        }
+
+        Some((
+            request.get().sender_id,
+            match block {
+                RpcEvent::Response(block, seen_timestamp) => {
+                    let request = request.get_mut();
+                    if request.resolved {
+                        Err(RPCError::InvalidData("too many responses".to_string()))
+                    } else if !request.is_valid_response(&block) {
+                        Err(RPCError::InvalidData("wrong block root".to_string()))
+                    } else {
+                        // Valid data, blocks by root expects a single response
+                        request.resolved = true;
+                        Ok((block, seen_timestamp))
+                    }
+                }
+                RpcEvent::StreamTermination => {
+                    // Stream terminator
+                    let request = request.remove();
+                    if request.resolved {
+                        return None;
+                    } else {
+                        Err(RPCError::InvalidData("no response returned".to_string()))
+                    }
+                }
+                RpcEvent::RPCError(e) => {
+                    request.remove();
+                    Err(e)
+                }
+            },
+        ))
     }
 
-    /// Response for a request that is only for blocks.
-    pub fn backfill_sync_only_blocks_response(
+    pub fn on_blobs_by_root_response(
         &mut self,
         request_id: Id,
-        is_stream_terminator: bool,
-    ) -> Option<BatchId> {
-        if is_stream_terminator {
-            self.backfill_requests.remove(&request_id)
-        } else {
-            self.backfill_requests.get(&request_id).copied()
-        }
+        blob: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
+    ) -> Option<(
+        SingleLookupReqId2,
+        Result<FixedBlobSidecarList<T::EthSpec>, RPCError>,
+    )> {
+        let Entry::Occupied(mut request) = self.blobs_by_root_requests.entry(request_id) else {
+            return None;
+        };
+
+        Some((
+            request.get().sender_id,
+            match blob {
+                RpcEvent::Response(blob, _) => {
+                    let request = request.get_mut();
+                    if request.resolved {
+                        Err(RPCError::InvalidData("too many responses".to_string()))
+                    } else if let Err(e) = request.add_response(blob) {
+                        Err(e)
+                    } else {
+                        return None;
+                    }
+                }
+                RpcEvent::StreamTermination => {
+                    // Stream terminator
+                    let request = request.remove();
+                    if request.resolved {
+                        return None;
+                    } else {
+                        // TODO: Should deal only with Vec<Arc<BlobSidecar>>
+                        to_fixed_blob_sidecar_list(request.blobs).map_err(RPCError::InvalidData)
+                    }
+                }
+                RpcEvent::RPCError(e) => {
+                    request.remove();
+                    Err(e)
+                }
+            },
+        ))
     }
 
-    /// Received a blocks by range or blobs by range response for a request that couples blocks '
-    /// and blobs.
-    pub fn backfill_sync_block_and_blob_response(
+    pub fn on_blocks_by_range_response(
         &mut self,
         request_id: Id,
-        block_or_blob: BlockOrBlob<T::EthSpec>,
-    ) -> Option<BlocksAndBlobsByRangeResponse<T::EthSpec>> {
-        match self.backfill_blocks_and_blobs_requests.entry(request_id) {
-            Entry::Occupied(mut entry) => {
-                let (_, info) = entry.get_mut();
-                match block_or_blob {
-                    BlockOrBlob::Block(maybe_block) => info.add_block_response(maybe_block),
-                    BlockOrBlob::Blob(maybe_sidecar) => info.add_sidecar_response(maybe_sidecar),
-                }
-                if info.is_finished() {
-                    // If the request is finished, dequeue everything
-                    let (batch_id, info) = entry.remove();
+        peer_id: PeerId,
+        block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) -> Option<(
+        BBRId,
+        Result<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>, RPCError>,
+    )> {
+        let Entry::Occupied(mut request) = self.blocks_by_range_requests.entry(request_id) else {
+            return None;
+        };
 
-                    let responses = info.into_responses();
-                    Some(BlocksAndBlobsByRangeResponse {
-                        batch_id,
-                        responses,
-                    })
-                } else {
-                    None
+        Some((
+            request.get().sender_id,
+            match block {
+                RpcEvent::Response(blob, seen_timestamp) => {
+                    let request = request.get_mut();
+                    if let Err(e) = request.add_response(blob) {
+                        Err(e)
+                    } else {
+                        // TODO: We could return early when we get `request.count` blocks, instead
+                        // of waiting for the stream terminator. Post deneb the logic to
+                        // pre-emptively consider a batch complete is more complicated, as we need
+                        // to wait for all blobs to arrive too. So we choose to not return early for
+                        // simplicity.
+                        return None;
+                    }
                 }
-            }
-            Entry::Vacant(_) => None,
-        }
+                RpcEvent::StreamTermination => {
+                    // Stream terminator
+                    let request = request.remove();
+                    Ok(request.blocks)
+                }
+                RpcEvent::RPCError(e) => {
+                    request.remove();
+                    Err(e)
+                }
+            },
+        ))
+    }
+
+    pub fn on_blobs_by_range_response(
+        &mut self,
+        request_id: Id,
+        peer_id: PeerId,
+        blob: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
+    ) -> Option<(BBRId, Result<Vec<Arc<BlobSidecar<T::EthSpec>>>, RPCError>)> {
+        let Entry::Occupied(mut request) = self.blobs_by_range_requests.entry(request_id) else {
+            return None;
+        };
+
+        Some((
+            request.get().sender_id,
+            match blob {
+                RpcEvent::Response(blob, seen_timestamp) => {
+                    let request = request.get_mut();
+                    if let Err(e) = request.add_response(blob) {
+                        Err(e)
+                    } else {
+                        return None;
+                    }
+                }
+                RpcEvent::StreamTermination => {
+                    // Stream terminator
+                    let request = request.remove();
+                    Ok(request.blobs)
+                }
+                RpcEvent::RPCError(e) => {
+                    request.remove();
+                    Err(e)
+                }
+            },
+        ))
     }
 
     pub fn block_lookup_request(
-        &self,
-        id: SingleLookupReqId,
+        &mut self,
+        sender_id: SingleLookupReqId2,
         peer_id: PeerId,
-        request: BlocksByRootRequest,
-        lookup_type: LookupType,
+        block_root: Hash256,
     ) -> Result<(), &'static str> {
-        let sync_id = match lookup_type {
-            LookupType::Current => SyncRequestId::SingleBlock { id },
-            LookupType::Parent => SyncRequestId::ParentLookup { id },
-        };
-        let request_id = RequestId::Sync(sync_id);
+        let id = self.next_id();
 
         debug!(
             self.log,
             "Sending BlocksByRoot Request";
             "method" => "BlocksByRoot",
-            "block_roots" => ?request.block_roots().to_vec(),
+            "block_root" => ?block_root,
             "peer" => %peer_id,
-            "lookup_type" => ?lookup_type
+            "sender" => ?sender_id,
         );
 
         self.send_network_msg(NetworkMessage::SendRequest {
             peer_id,
-            request: Request::BlocksByRoot(request),
-            request_id,
+            request: Request::BlocksByRoot(BlocksByRootRequest::new(
+                vec![block_root],
+                &self.chain.spec,
+            )),
+            request_id: RequestId::Sync(SyncRequestId::BlocksByRoot(id)),
         })?;
+
+        self.blocks_by_root_requests.insert(
+            id,
+            ActiveBlocksByRootRequest {
+                request: block_root,
+                sender_id,
+                resolved: false,
+            },
+        );
+
         Ok(())
     }
 
     pub fn blob_lookup_request(
-        &self,
-        id: SingleLookupReqId,
-        blob_peer_id: PeerId,
-        blob_request: BlobsByRootRequest,
-        lookup_type: LookupType,
+        &mut self,
+        sender_id: SingleLookupReqId2,
+        peer_id: PeerId,
+        request: BlobsByRootSingleBlockRequest,
     ) -> Result<(), &'static str> {
-        let sync_id = match lookup_type {
-            LookupType::Current => SyncRequestId::SingleBlob { id },
-            LookupType::Parent => SyncRequestId::ParentLookupBlob { id },
-        };
-        let request_id = RequestId::Sync(sync_id);
+        let id = self.next_id();
 
-        if let Some(block_root) = blob_request
-            .blob_ids
-            .as_slice()
-            .first()
-            .map(|id| id.block_root)
-        {
-            let indices = blob_request
-                .blob_ids
-                .as_slice()
-                .iter()
-                .map(|id| id.index)
-                .collect::<Vec<_>>();
-            debug!(
-                self.log,
-                "Sending BlobsByRoot Request";
-                "method" => "BlobsByRoot",
-                "block_root" => ?block_root,
-                "blob_indices" => ?indices,
-                "peer" => %blob_peer_id,
-                "lookup_type" => ?lookup_type
-            );
+        debug!(
+            self.log,
+            "Sending BlobsByRoot Request";
+            "method" => "BlobsByRoot",
+            "block_root" => ?request.block_root,
+            "blob_indices" => ?request.indexes,
+            "peer" => %peer_id,
+            "sender" => ?sender_id
+        );
 
-            self.send_network_msg(NetworkMessage::SendRequest {
-                peer_id: blob_peer_id,
-                request: Request::BlobsByRoot(blob_request),
-                request_id,
-            })?;
-        }
+        self.send_network_msg(NetworkMessage::SendRequest {
+            peer_id,
+            request: Request::BlobsByRoot(BlobsByRootRequest::new(
+                request
+                    .indexes
+                    .iter()
+                    .map(|index| BlobIdentifier {
+                        block_root: request.block_root,
+                        index: *index,
+                    })
+                    .collect(),
+                &self.chain.spec,
+            )),
+            request_id: RequestId::Sync(SyncRequestId::BlobsByRoot(id)),
+        })?;
+
+        self.blobs_by_root_requests.insert(
+            id,
+            ActiveBlobsByRootRequest {
+                request,
+                sender_id,
+                resolved: false,
+                blobs: vec![],
+            },
+        );
+
         Ok(())
+    }
+
+    /// A blocks by range request sent by the backfill sync algorithm
+    pub fn blocks_by_range_request(
+        &mut self,
+        peer_id: PeerId,
+        batch_type: ByRangeRequestType,
+        request: BlocksByRangeRequest,
+        sender_id: BBRId,
+    ) -> Result<Id, &'static str> {
+        trace!(
+            self.log,
+            "Sending backfill BlocksByRange request";
+            "method" => "BlocksByRange",
+            "count" => request.count(),
+            "peer" => %peer_id,
+        );
+
+        // TODO: Should BlocksByRange and BlobsByRange have different ids?
+        let id = self.next_id();
+
+        self.send_network_msg(NetworkMessage::SendRequest {
+            peer_id,
+            request: Request::BlocksByRange(request.clone()),
+            request_id: RequestId::Sync(SyncRequestId::BlocksByRange(id)),
+        })?;
+
+        self.blocks_by_range_requests.insert(
+            id,
+            ActiveBlocksByRangeRequest {
+                request: request.clone(),
+                sender_id,
+                blocks: vec![],
+            },
+        );
+
+        if let ByRangeRequestType::BlocksAndBlobs = batch_type {
+            self.send_network_msg(NetworkMessage::SendRequest {
+                peer_id,
+                request: Request::BlobsByRange(BlobsByRangeRequest {
+                    start_slot: *request.start_slot(),
+                    count: *request.count(),
+                }),
+                request_id: RequestId::Sync(SyncRequestId::BlobsByRange(id)),
+            })?;
+
+            self.blobs_by_range_requests.insert(
+                id,
+                ActiveBlobsByRangeRequest {
+                    request,
+                    sender_id,
+                    blobs: vec![],
+                },
+            );
+        }
+
+        self.on_going_block_and_blobs_requests
+            .insert(id, (sender_id, BlocksAndBlobsRequestInfo::default()));
+
+        Ok(id)
     }
 
     pub fn is_execution_engine_online(&self) -> bool {
@@ -597,22 +677,17 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             ByRangeRequestType::Blocks
         }
     }
+}
 
-    pub fn insert_range_blocks_and_blobs_request(
-        &mut self,
-        id: Id,
-        request: BlocksAndBlobsByRangeRequest<T::EthSpec>,
-    ) {
-        self.range_blocks_and_blobs_requests.insert(id, request);
+fn to_fixed_blob_sidecar_list<E: EthSpec>(
+    blobs: Vec<Arc<BlobSidecar<E>>>,
+) -> Result<FixedBlobSidecarList<E>, String> {
+    let mut fixed_list = FixedBlobSidecarList::default();
+    for blob in blobs.into_iter() {
+        let index = blob.index as usize;
+        *fixed_list
+            .get_mut(index)
+            .ok_or("invalid index".to_string())? = Some(blob)
     }
-
-    pub fn insert_backfill_blocks_and_blobs_requests(
-        &mut self,
-        id: Id,
-        batch_id: BatchId,
-        request: BlocksAndBlobsRequestInfo<T::EthSpec>,
-    ) {
-        self.backfill_blocks_and_blobs_requests
-            .insert(id, (batch_id, request));
-    }
+    Ok(fixed_list)
 }

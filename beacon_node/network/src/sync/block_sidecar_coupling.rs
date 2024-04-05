@@ -1,41 +1,32 @@
 use beacon_chain::block_verification_types::RpcBlock;
 use ssz_types::VariableList;
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 use types::{BlobSidecar, EthSpec, SignedBeaconBlock};
 
 #[derive(Debug, Default)]
 pub struct BlocksAndBlobsRequestInfo<E: EthSpec> {
     /// Blocks we have received awaiting for their corresponding sidecar.
-    accumulated_blocks: VecDeque<Arc<SignedBeaconBlock<E>>>,
+    accumulated_blocks: Option<Vec<Arc<SignedBeaconBlock<E>>>>,
     /// Sidecars we have received awaiting for their corresponding block.
-    accumulated_sidecars: VecDeque<Arc<BlobSidecar<E>>>,
-    /// Whether the individual RPC request for blocks is finished or not.
-    is_blocks_stream_terminated: bool,
-    /// Whether the individual RPC request for sidecars is finished or not.
-    is_sidecars_stream_terminated: bool,
+    accumulated_sidecars: Option<Vec<Arc<BlobSidecar<E>>>>,
 }
 
 impl<E: EthSpec> BlocksAndBlobsRequestInfo<E> {
-    pub fn add_block_response(&mut self, block_opt: Option<Arc<SignedBeaconBlock<E>>>) {
-        match block_opt {
-            Some(block) => self.accumulated_blocks.push_back(block),
-            None => self.is_blocks_stream_terminated = true,
-        }
+    pub fn add_block_response(&mut self, blocks: Vec<Arc<SignedBeaconBlock<E>>>) {
+        self.accumulated_blocks = Some(blocks);
     }
 
-    pub fn add_sidecar_response(&mut self, sidecar_opt: Option<Arc<BlobSidecar<E>>>) {
-        match sidecar_opt {
-            Some(sidecar) => self.accumulated_sidecars.push_back(sidecar),
-            None => self.is_sidecars_stream_terminated = true,
-        }
+    pub fn add_sidecar_response(&mut self, blobs: Vec<Arc<BlobSidecar<E>>>) {
+        self.accumulated_sidecars = Some(blobs);
     }
 
     pub fn into_responses(self) -> Result<Vec<RpcBlock<E>>, String> {
-        let BlocksAndBlobsRequestInfo {
-            accumulated_blocks,
-            accumulated_sidecars,
-            ..
-        } = self;
+        let accumulated_blocks = self
+            .accumulated_blocks
+            .ok_or("accumulated_blocks is none")?;
+        let accumulated_sidecars = self
+            .accumulated_sidecars
+            .ok_or("accumulated_sidecars is none")?;
 
         // There can't be more more blobs than blocks. i.e. sending any blob (empty
         // included) for a skipped slot is not permitted.
@@ -78,6 +69,6 @@ impl<E: EthSpec> BlocksAndBlobsRequestInfo<E> {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.is_blocks_stream_terminated && self.is_sidecars_stream_terminated
+        self.accumulated_blocks.is_some() && self.accumulated_sidecars.is_some()
     }
 }

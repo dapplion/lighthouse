@@ -9,7 +9,7 @@ use crate::error;
 use crate::network_beacon_processor::{InvalidBlockStorage, NetworkBeaconProcessor};
 use crate::service::{NetworkMessage, RequestId};
 use crate::status::status_message;
-use crate::sync::manager::RequestId as SyncId;
+use crate::sync::manager::{ReqRespResponse, RequestId as SyncId, RpcEvent};
 use crate::sync::SyncMessage;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use beacon_processor::{
@@ -440,10 +440,22 @@ impl<T: BeaconChainTypes> Router<T> {
     pub fn on_rpc_error(&mut self, peer_id: PeerId, request_id: RequestId, error: RPCError) {
         // Check if the failed RPC belongs to sync
         if let RequestId::Sync(request_id) = request_id {
-            self.send_to_sync(SyncMessage::RpcError {
+            self.send_to_sync(SyncMessage::RpcResponse {
                 peer_id,
-                request_id,
-                error,
+                response: match request_id {
+                    SyncId::BlocksByRoot(id) => {
+                        ReqRespResponse::BlocksByRoot(id, RpcEvent::RPCError(error))
+                    }
+                    SyncId::BlocksByRange(id) => {
+                        ReqRespResponse::BlocksByRange(id, RpcEvent::RPCError(error))
+                    }
+                    SyncId::BlobsByRoot(id) => {
+                        ReqRespResponse::BlobsByRoot(id, RpcEvent::RPCError(error))
+                    }
+                    SyncId::BlobsByRange(id) => {
+                        ReqRespResponse::BlobsByRange(id, RpcEvent::RPCError(error))
+                    }
+                },
             });
         }
     }
@@ -480,24 +492,9 @@ impl<T: BeaconChainTypes> Router<T> {
         request_id: RequestId,
         beacon_block: Option<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
-        let request_id = match request_id {
-            RequestId::Sync(sync_id) => match sync_id {
-                SyncId::SingleBlock { .. }
-                | SyncId::SingleBlob { .. }
-                | SyncId::ParentLookup { .. }
-                | SyncId::ParentLookupBlob { .. } => {
-                    crit!(self.log, "Block lookups do not request BBRange requests"; "peer_id" => %peer_id);
-                    return;
-                }
-                id @ (SyncId::BackFillBlocks { .. }
-                | SyncId::RangeBlocks { .. }
-                | SyncId::BackFillBlockAndBlobs { .. }
-                | SyncId::RangeBlockAndBlobs { .. }) => id,
-            },
-            RequestId::Router => {
-                crit!(self.log, "All BBRange requests belong to sync"; "peer_id" => %peer_id);
-                return;
-            }
+        let RequestId::Sync(SyncId::BlocksByRange(id)) = request_id else {
+            crit!(self.log, "Wrong request for BlockByRange response"; "id" => ?request_id);
+            return;
         };
 
         trace!(
@@ -506,11 +503,9 @@ impl<T: BeaconChainTypes> Router<T> {
             "peer" => %peer_id,
         );
 
-        self.send_to_sync(SyncMessage::RpcBlock {
+        self.send_to_sync(SyncMessage::RpcResponse {
             peer_id,
-            request_id,
-            beacon_block,
-            seen_timestamp: timestamp_now(),
+            response: ReqRespResponse::BlocksByRange(id, beacon_block.into()),
         });
     }
 
@@ -520,25 +515,21 @@ impl<T: BeaconChainTypes> Router<T> {
         request_id: RequestId,
         blob_sidecar: Option<Arc<BlobSidecar<T::EthSpec>>>,
     ) {
+        let RequestId::Sync(SyncId::BlobsByRange(id)) = request_id else {
+            crit!(self.log, "Wrong request for BlobsByRange response"; "id" => ?request_id);
+            return;
+        };
+
         trace!(
             self.log,
             "Received BlobsByRange Response";
             "peer" => %peer_id,
         );
 
-        if let RequestId::Sync(id) = request_id {
-            self.send_to_sync(SyncMessage::RpcBlob {
-                peer_id,
-                request_id: id,
-                blob_sidecar,
-                seen_timestamp: timestamp_now(),
-            });
-        } else {
-            crit!(
-                self.log,
-                "All blobs by range responses should belong to sync"
-            );
-        }
+        self.send_to_sync(SyncMessage::RpcResponse {
+            peer_id,
+            response: ReqRespResponse::BlobsByRange(id, blob_sidecar.into()),
+        });
     }
 
     /// Handle a `BlocksByRoot` response from the peer.
@@ -548,25 +539,9 @@ impl<T: BeaconChainTypes> Router<T> {
         request_id: RequestId,
         beacon_block: Option<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
-        let request_id = match request_id {
-            RequestId::Sync(sync_id) => match sync_id {
-                id @ (SyncId::SingleBlock { .. } | SyncId::ParentLookup { .. }) => id,
-                SyncId::BackFillBlocks { .. }
-                | SyncId::RangeBlocks { .. }
-                | SyncId::RangeBlockAndBlobs { .. }
-                | SyncId::BackFillBlockAndBlobs { .. } => {
-                    crit!(self.log, "Batch syncing do not request BBRoot requests"; "peer_id" => %peer_id);
-                    return;
-                }
-                SyncId::SingleBlob { .. } | SyncId::ParentLookupBlob { .. } => {
-                    crit!(self.log, "Blob response to block by roots request"; "peer_id" => %peer_id);
-                    return;
-                }
-            },
-            RequestId::Router => {
-                crit!(self.log, "All BBRoot requests belong to sync"; "peer_id" => %peer_id);
-                return;
-            }
+        let RequestId::Sync(SyncId::BlocksByRoot(id)) = request_id else {
+            crit!(self.log, "Wrong request for BlockByRoot response"; "id" => ?request_id);
+            return;
         };
 
         trace!(
@@ -574,11 +549,10 @@ impl<T: BeaconChainTypes> Router<T> {
             "Received BlocksByRoot Response";
             "peer" => %peer_id,
         );
-        self.send_to_sync(SyncMessage::RpcBlock {
+
+        self.send_to_sync(SyncMessage::RpcResponse {
             peer_id,
-            request_id,
-            beacon_block,
-            seen_timestamp: timestamp_now(),
+            response: ReqRespResponse::BlocksByRoot(id, beacon_block.into()),
         });
     }
 
@@ -589,25 +563,9 @@ impl<T: BeaconChainTypes> Router<T> {
         request_id: RequestId,
         blob_sidecar: Option<Arc<BlobSidecar<T::EthSpec>>>,
     ) {
-        let request_id = match request_id {
-            RequestId::Sync(sync_id) => match sync_id {
-                id @ (SyncId::SingleBlob { .. } | SyncId::ParentLookupBlob { .. }) => id,
-                SyncId::SingleBlock { .. } | SyncId::ParentLookup { .. } => {
-                    crit!(self.log, "Block response to blobs by roots request"; "peer_id" => %peer_id);
-                    return;
-                }
-                SyncId::BackFillBlocks { .. }
-                | SyncId::RangeBlocks { .. }
-                | SyncId::RangeBlockAndBlobs { .. }
-                | SyncId::BackFillBlockAndBlobs { .. } => {
-                    crit!(self.log, "Batch syncing does not request BBRoot requests"; "peer_id" => %peer_id);
-                    return;
-                }
-            },
-            RequestId::Router => {
-                crit!(self.log, "All BlobsByRoot requests belong to sync"; "peer_id" => %peer_id);
-                return;
-            }
+        let RequestId::Sync(SyncId::BlobsByRoot(id)) = request_id else {
+            crit!(self.log, "Wrong request for BlobsByRoot response"; "id" => ?request_id);
+            return;
         };
 
         trace!(
@@ -615,11 +573,10 @@ impl<T: BeaconChainTypes> Router<T> {
             "Received BlobsByRoot Response";
             "peer" => %peer_id,
         );
-        self.send_to_sync(SyncMessage::RpcBlob {
-            request_id,
+
+        self.send_to_sync(SyncMessage::RpcResponse {
             peer_id,
-            blob_sidecar,
-            seen_timestamp: timestamp_now(),
+            response: ReqRespResponse::BlobsByRoot(id, blob_sidecar.into()),
         });
     }
 

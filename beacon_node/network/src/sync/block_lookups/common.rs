@@ -5,8 +5,8 @@ use crate::sync::block_lookups::single_block_lookup::{
 use crate::sync::block_lookups::{
     BlobRequestState, BlockLookups, BlockRequestState, PeerId, SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS,
 };
-use crate::sync::manager::{BlockProcessType, Id, SingleLookupReqId};
-use crate::sync::network_context::SyncNetworkContext;
+use crate::sync::manager::{BlockProcessType, Id, SingleLookupReqId, SingleLookupReqId2};
+use crate::sync::network_context::{BlobsByRootSingleBlockRequest, SyncNetworkContext};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_availability_checker::{AvailabilityView, ChildComponents};
 use beacon_chain::{get_block_root, BeaconChainTypes};
@@ -25,7 +25,7 @@ pub enum ResponseType {
     Blob,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum LookupType {
     Current,
     Parent,
@@ -101,7 +101,7 @@ pub trait RequestState<L: Lookup, T: BeaconChainTypes> {
     fn build_request_and_send(
         &mut self,
         id: Id,
-        cx: &SyncNetworkContext<T>,
+        cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
         // Check if request is necessary.
         if !matches!(self.get_state().state, State::AwaitingDownload) {
@@ -159,7 +159,7 @@ pub trait RequestState<L: Lookup, T: BeaconChainTypes> {
         id: SingleLookupReqId,
         peer_id: PeerId,
         request: Self::RequestType,
-        cx: &SyncNetworkContext<T>,
+        cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError>;
 
     /* Response handling methods */
@@ -168,29 +168,21 @@ pub trait RequestState<L: Lookup, T: BeaconChainTypes> {
     fn verify_response(
         &mut self,
         expected_block_root: Hash256,
-        response: Option<Self::ResponseType>,
-    ) -> Result<Option<Self::VerifiedResponseType>, LookupVerifyError> {
+        response: Self::ResponseType,
+    ) -> Result<Self::VerifiedResponseType, LookupVerifyError> {
         let request_state = self.get_state_mut();
         match request_state.state {
             State::AwaitingDownload => {
-                request_state.register_failure_downloading();
-                Err(LookupVerifyError::ExtraBlocksReturned)
+                // TODO: Should never happen, internal error
+                Err(LookupVerifyError::InvalidLookupState)
             }
             State::Downloading { peer_id } => {
                 self.verify_response_inner(expected_block_root, response, peer_id)
             }
-            State::Processing { peer_id: _ } => match response {
-                Some(_) => {
-                    // We sent the block for processing and received an extra block.
-                    request_state.register_failure_downloading();
-                    Err(LookupVerifyError::ExtraBlocksReturned)
-                }
-                None => {
-                    // This is simply the stream termination and we are already processing the
-                    // block
-                    Ok(None)
-                }
-            },
+            State::Processing { peer_id: _ } => {
+                // TODO: Should never happen, internal error
+                Err(LookupVerifyError::InvalidLookupState)
+            }
         }
     }
 
@@ -198,9 +190,9 @@ pub trait RequestState<L: Lookup, T: BeaconChainTypes> {
     fn verify_response_inner(
         &mut self,
         expected_block_root: Hash256,
-        response: Option<Self::ResponseType>,
+        response: Self::ResponseType,
         peer_id: PeerId,
-    ) -> Result<Option<Self::VerifiedResponseType>, LookupVerifyError>;
+    ) -> Result<Self::VerifiedResponseType, LookupVerifyError>;
 
     /// A getter for the parent root of the response. Returns an `Option` because we won't know
     /// the blob parent if we don't end up getting any blobs in the response.
@@ -250,53 +242,39 @@ pub trait RequestState<L: Lookup, T: BeaconChainTypes> {
 }
 
 impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for BlockRequestState<L> {
-    type RequestType = BlocksByRootRequest;
+    type RequestType = Hash256;
     type ResponseType = Arc<SignedBeaconBlock<T::EthSpec>>;
     type VerifiedResponseType = Arc<SignedBeaconBlock<T::EthSpec>>;
     type ReconstructedResponseType = RpcBlock<T::EthSpec>;
 
-    fn new_request(&self, spec: &ChainSpec) -> BlocksByRootRequest {
-        BlocksByRootRequest::new(vec![self.requested_block_root], spec)
+    fn new_request(&self, spec: &ChainSpec) -> Self::RequestType {
+        self.requested_block_root
     }
 
     fn make_request(
         id: SingleLookupReqId,
         peer_id: PeerId,
         request: Self::RequestType,
-        cx: &SyncNetworkContext<T>,
+        cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
-        cx.block_lookup_request(id, peer_id, request, L::lookup_type())
-            .map_err(LookupRequestError::SendFailed)
+        cx.block_lookup_request(
+            SingleLookupReqId2 {
+                id,
+                lookup_type: L::lookup_type(),
+            },
+            peer_id,
+            request,
+        )
+        .map_err(LookupRequestError::SendFailed)
     }
 
     fn verify_response_inner(
         &mut self,
         expected_block_root: Hash256,
-        response: Option<Self::ResponseType>,
+        response: Self::ResponseType,
         peer_id: PeerId,
-    ) -> Result<Option<Arc<SignedBeaconBlock<T::EthSpec>>>, LookupVerifyError> {
-        match response {
-            Some(block) => {
-                // Compute the block root using this specific function so that we can get timing
-                // metrics.
-                let block_root = get_block_root(&block);
-                if block_root != expected_block_root {
-                    // return an error and drop the block
-                    // NOTE: we take this is as a download failure to prevent counting the
-                    // attempt as a chain failure, but simply a peer failure.
-                    self.state.register_failure_downloading();
-                    Err(LookupVerifyError::RootMismatch)
-                } else {
-                    // Return the block for processing.
-                    self.state.state = State::Processing { peer_id };
-                    Ok(Some(block))
-                }
-            }
-            None => {
-                self.state.register_failure_downloading();
-                Err(LookupVerifyError::NoBlockReturned)
-            }
-        }
+    ) -> Result<Arc<SignedBeaconBlock<T::EthSpec>>, LookupVerifyError> {
+        Ok(response)
     }
 
     fn get_parent_root(verified_response: &Arc<SignedBeaconBlock<T::EthSpec>>) -> Option<Hash256> {
@@ -349,56 +327,42 @@ impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for BlockRequestState<L>
 }
 
 impl<L: Lookup, T: BeaconChainTypes> RequestState<L, T> for BlobRequestState<L, T::EthSpec> {
-    type RequestType = BlobsByRootRequest;
-    type ResponseType = Arc<BlobSidecar<T::EthSpec>>;
+    type RequestType = BlobsByRootSingleBlockRequest;
+    type ResponseType = FixedBlobSidecarList<T::EthSpec>;
     type VerifiedResponseType = FixedBlobSidecarList<T::EthSpec>;
     type ReconstructedResponseType = FixedBlobSidecarList<T::EthSpec>;
 
-    fn new_request(&self, spec: &ChainSpec) -> BlobsByRootRequest {
-        let blob_id_vec: Vec<BlobIdentifier> = self.requested_ids.clone().into();
-        BlobsByRootRequest::new(blob_id_vec, spec)
+    fn new_request(&self, spec: &ChainSpec) -> Self::RequestType {
+        BlobsByRootSingleBlockRequest {
+            block_root: self.block_root,
+            indexes: self.requested_ids.indices(),
+        }
     }
 
     fn make_request(
         id: SingleLookupReqId,
         peer_id: PeerId,
         request: Self::RequestType,
-        cx: &SyncNetworkContext<T>,
+        cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
-        cx.blob_lookup_request(id, peer_id, request, L::lookup_type())
-            .map_err(LookupRequestError::SendFailed)
+        cx.blob_lookup_request(
+            SingleLookupReqId2 {
+                id,
+                lookup_type: L::lookup_type(),
+            },
+            peer_id,
+            request,
+        )
+        .map_err(LookupRequestError::SendFailed)
     }
 
     fn verify_response_inner(
         &mut self,
         _expected_block_root: Hash256,
-        blob: Option<Self::ResponseType>,
+        blobs: Self::ResponseType,
         peer_id: PeerId,
-    ) -> Result<Option<FixedBlobSidecarList<T::EthSpec>>, LookupVerifyError> {
-        match blob {
-            Some(blob) => {
-                let received_id = blob.id();
-                if !self.requested_ids.contains(&received_id) {
-                    self.state.register_failure_downloading();
-                    Err(LookupVerifyError::UnrequestedBlobId(received_id))
-                } else {
-                    // State should remain downloading until we receive the stream terminator.
-                    self.requested_ids.remove(&received_id);
-                    let blob_index = blob.index;
-
-                    if blob_index >= T::EthSpec::max_blobs_per_block() as u64 {
-                        return Err(LookupVerifyError::InvalidIndex(blob.index));
-                    }
-                    *self.blob_download_queue.index_mut(blob_index as usize) = Some(blob);
-                    Ok(None)
-                }
-            }
-            None => {
-                self.state.state = State::Processing { peer_id };
-                let blobs = std::mem::take(&mut self.blob_download_queue);
-                Ok(Some(blobs))
-            }
-        }
+    ) -> Result<FixedBlobSidecarList<T::EthSpec>, LookupVerifyError> {
+        Ok(blobs)
     }
 
     fn get_parent_root(verified_response: &FixedBlobSidecarList<T::EthSpec>) -> Option<Hash256> {

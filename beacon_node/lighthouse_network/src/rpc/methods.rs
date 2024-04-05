@@ -274,6 +274,11 @@ impl BlocksByRangeRequest {
     pub fn new_v1(start_slot: u64, count: u64) -> Self {
         Self::V1(BlocksByRangeRequestV1 { start_slot, count })
     }
+
+    pub fn in_range(&self, slot: Slot) -> bool {
+        let slot = slot.as_u64();
+        slot >= *self.start_slot() && slot < *self.start_slot() + *self.count()
+    }
 }
 
 /// Request a number of beacon blobs from a peer.

@@ -35,6 +35,7 @@ pub enum LookupVerifyError {
     ExtraBlobsReturned,
     NotEnoughBlobsReturned,
     InvalidIndex(u64),
+    InvalidLookupState,
 }
 
 #[derive(Debug, PartialEq, Eq, IntoStaticStr)]
@@ -112,7 +113,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
     /// downloading the block and/or blobs.
     pub fn request_block_and_blobs(
         &mut self,
-        cx: &SyncNetworkContext<T>,
+        cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
         let block_already_downloaded = self.block_already_downloaded();
         let blobs_already_downloaded = self.blobs_already_downloaded();
@@ -220,7 +221,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
     pub fn should_drop_lookup_on_disconnected_peer(
         &mut self,
         peer_id: &PeerId,
-        cx: &SyncNetworkContext<T>,
+        cx: &mut SyncNetworkContext<T>,
         log: &Logger,
     ) -> bool {
         let block_root = self.block_root();
@@ -286,7 +287,7 @@ impl<L: Lookup, T: BeaconChainTypes> SingleBlockLookup<L, T> {
         }
     }
 
-    /// Penalizes a blob peer if it should have blobs but didn't return them to us.     
+    /// Penalizes a blob peer if it should have blobs but didn't return them to us.
     pub fn penalize_blob_peer(&mut self, cx: &SyncNetworkContext<T>) {
         if let Ok(blob_peer) = self.blob_request_state.state.processing_peer() {
             cx.report_peer(
@@ -324,6 +325,7 @@ pub struct BlobRequestState<L: Lookup, E: EthSpec> {
     /// from both block/blobs downloaded in the network layer and any blocks/blobs that exist in
     /// the data availability checker.
     pub requested_ids: MissingBlobs,
+    pub block_root: Hash256,
     /// Where we store blobs until we receive the stream terminator.
     pub blob_download_queue: FixedBlobSidecarList<E>,
     pub state: SingleLookupRequestState,
@@ -335,6 +337,7 @@ impl<L: Lookup, E: EthSpec> BlobRequestState<L, E> {
         let default_ids = MissingBlobs::new_without_block(block_root, is_deneb);
         Self {
             requested_ids: default_ids,
+            block_root,
             blob_download_queue: <_>::default(),
             state: SingleLookupRequestState::new(peer_source),
             _phantom: PhantomData,

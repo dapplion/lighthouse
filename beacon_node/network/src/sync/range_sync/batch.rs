@@ -251,10 +251,9 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
     }
 
     /// Adds a block to a downloading batch.
-    pub fn add_block(&mut self, block: RpcBlock<E>) -> Result<(), WrongState> {
+    pub fn add_blocks(&mut self, blocks: Vec<RpcBlock<E>>) -> Result<(), WrongState> {
         match self.state.poison() {
-            BatchState::Downloading(peer, mut blocks, req_id) => {
-                blocks.push(block);
+            BatchState::Downloading(peer, _, req_id) => {
                 self.state = BatchState::Downloading(peer, blocks, req_id);
                 Ok(())
             }
