@@ -450,11 +450,9 @@ impl SingleLookupRequestState {
                 self.state = State::Processing { peer_id: *peer_id };
                 Ok(())
             }
-            other => {
-                return Err(format!(
-                    "request bad state, expected downloading got {other}"
-                ))
-            }
+            other => Err(format!(
+                "request bad state, expected downloading got {other}"
+            )),
         }
     }
 
