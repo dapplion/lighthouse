@@ -604,7 +604,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 // processed. Drop the request without extra penalty
             }
             RequestError::BadState(..) => {
-                // Internal error should never happen
+                warn!(self.log, "Failed to request parent";  "error" => e.as_static());
             }
         }
     }
