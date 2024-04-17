@@ -61,7 +61,10 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A sequential ID for all RPC requests.
     request_id: Id,
 
+    /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
     blocks_by_root_requests: FnvHashMap<SingleLookupReqId, ActiveBlocksByRootRequest>,
+
+    /// A mapping of active BlobsByRoot requests, including both current slot and parent lookups.
     blobs_by_root_requests: FnvHashMap<SingleLookupReqId, ActiveBlobsByRootRequest<T::EthSpec>>,
 
     /// BlocksByRange requests paired with BlobsByRange
