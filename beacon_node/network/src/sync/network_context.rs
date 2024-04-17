@@ -486,9 +486,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 match request.remove().terminate() {
                     // TODO: Should deal only with Vec<Arc<BlobSidecar>>
                     Some(blobs) => to_fixed_blob_sidecar_list(blobs)
-                        // TODO: a seen_timestamp for an array of blobs doesn't make much sense
-                        // since each is received at different times. Should we track first, last or
-                        // average?
                         .map(|blobs| (blobs, timestamp_now()))
                         .map_err(RPCError::InvalidData),
                     None => return None,
