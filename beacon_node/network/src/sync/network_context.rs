@@ -469,8 +469,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     Ok(block) => Ok((block, seen_timestamp)),
                     Err(e) => {
                         // The request must be dropped after receiving an error.
-                        // TODO: We could NOT drop the request here, and penalize the peer again if
-                        // sends multiple penalizable chunks after the first invalid.
                         request.remove();
                         Err(e.into())
                     }
@@ -498,7 +496,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         Some(match blob {
             RpcEvent::Response(blob, _) => match request.get_mut().add_response(blob) {
-                // TODO: Should deal only with Vec<Arc<BlobSidecar>>
                 Ok(Some(blobs)) => to_fixed_blob_sidecar_list(blobs)
                     .map(|blobs| (blobs, timestamp_now()))
                     .map_err(Into::into),
@@ -511,7 +508,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             RpcEvent::StreamTermination => {
                 // Stream terminator
                 match request.remove().terminate() {
-                    // TODO: Should deal only with Vec<Arc<BlobSidecar>>
                     Some(blobs) => to_fixed_blob_sidecar_list(blobs)
                         .map(|blobs| (blobs, timestamp_now()))
                         .map_err(Into::into),
@@ -528,13 +524,13 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
 fn to_fixed_blob_sidecar_list<E: EthSpec>(
     blobs: Vec<Arc<BlobSidecar<E>>>,
-) -> Result<FixedBlobSidecarList<E>, String> {
+) -> Result<FixedBlobSidecarList<E>, LookupVerifyError> {
     let mut fixed_list = FixedBlobSidecarList::default();
     for blob in blobs.into_iter() {
         let index = blob.index as usize;
         *fixed_list
             .get_mut(index)
-            .ok_or("invalid index".to_string())? = Some(blob)
+            .ok_or(LookupVerifyError::UnrequestedBlobIndex(index as u64))? = Some(blob)
     }
     Ok(fixed_list)
 }
