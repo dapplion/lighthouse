@@ -16,6 +16,7 @@ pub use client::{Client, ClientBuilder, ClientConfig, ClientGenesis};
 pub use config::{get_config, get_data_dir, get_slots_per_restore_point, set_network_config};
 use environment::RuntimeContext;
 pub use eth2_config::Eth2Config;
+use lighthouse_network::{load_private_key, node_id_from_keypair};
 use slasher::{DatabaseBackendOverride, Slasher};
 use slog::{info, warn};
 use std::ops::{Deref, DerefMut};
@@ -132,8 +133,12 @@ impl<E: EthSpec> ProductionBeaconNode<E> {
             builder
         };
 
+        // Read networking private key for PeerDAS custody
+        let enr_local_keypair = load_private_key(&client_config.network, &log);
+        let node_id = node_id_from_keypair(enr_local_keypair)?;
+
         let builder = builder
-            .beacon_chain_builder(client_genesis, client_config.clone())
+            .beacon_chain_builder(client_genesis, client_config.clone(), node_id)
             .await?;
         let builder = if client_config.sync_eth1_chain && !client_config.dummy_eth1_backend {
             info!(

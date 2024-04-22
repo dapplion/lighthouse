@@ -1297,6 +1297,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 self.chain.recompute_head_at_current_slot().await;
             }
             Ok(AvailabilityProcessingStatus::MissingComponents(slot, block_root)) => {
+                // Send request for sampling
+                // TODO: Could attach a property to `MissingComponents` to tell this code path
+                // when to not sample
+                self.send_sync_message(SyncMessage::SampleBlock {
+                    block_root: *block_root,
+                    slot: block.message().slot(),
+                });
+
                 trace!(
                     self.log,
                     "Processed block, waiting for other components";

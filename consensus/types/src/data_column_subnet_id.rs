@@ -1,5 +1,5 @@
 //! Identifies each data column subnet by an integer identifier.
-use crate::{ChainSpec, EthSpec};
+use crate::EthSpec;
 use ethereum_types::U256;
 use safe_arith::{ArithError, SafeArith};
 use serde::{Deserialize, Serialize};
@@ -43,16 +43,20 @@ impl DataColumnSubnetId {
         Ok(id.into())
     }
 
+    pub fn as_usize(&self) -> usize {
+        self.0 as usize
+    }
+
     #[allow(clippy::arithmetic_side_effects)]
     /// Compute required subnets to subscribe to given the node id.
     /// TODO(das): Add epoch param
     /// TODO(das): Add num of subnets (from ENR)
     pub fn compute_subnets_for_data_column<T: EthSpec>(
         node_id: U256,
-        spec: &ChainSpec,
+        custody_requirement: u64,
     ) -> impl Iterator<Item = DataColumnSubnetId> {
         let num_of_column_subnets = T::data_column_subnet_count() as u64;
-        (0..spec.custody_requirement)
+        (0..custody_requirement)
             .map(move |i| {
                 let node_offset = (node_id % U256::from(num_of_column_subnets)).as_u64();
                 node_offset.saturating_add(i) % num_of_column_subnets

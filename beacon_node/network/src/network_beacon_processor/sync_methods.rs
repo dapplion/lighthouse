@@ -1,5 +1,6 @@
 use crate::metrics;
 use crate::network_beacon_processor::{NetworkBeaconProcessor, FUTURE_SLOT_TOLERANCE};
+use crate::sync::manager::SampleReqId;
 use crate::sync::BatchProcessResult;
 use crate::sync::{
     manager::{BlockProcessType, SyncMessage},
@@ -24,7 +25,7 @@ use store::KzgCommitment;
 use tokio::sync::mpsc;
 use types::beacon_block_body::format_kzg_commitments;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::{Epoch, Hash256};
+use types::{DataColumnSidecar, Epoch, Hash256};
 
 /// Id associated to a batch processing request, either a sync batch or a parent lookup.
 #[derive(Clone, Debug, PartialEq)]
@@ -294,6 +295,37 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 );
             }
         }
+
+        // Sync handles these results
+        self.send_sync_message(SyncMessage::BlockComponentProcessed {
+            process_type,
+            result: result.into(),
+        });
+    }
+
+    pub fn generate_rpc_data_column_process_fn(
+        self: Arc<Self>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
+        seen_timestamp: Duration,
+        process_type: BlockProcessType,
+    ) -> AsyncFn {
+        let process_fn = async move {
+            self.clone()
+                .process_rpc_data_column(data_column, seen_timestamp, process_type)
+                .await;
+        };
+        Box::pin(process_fn)
+    }
+
+    pub async fn process_rpc_data_column(
+        self: Arc<NetworkBeaconProcessor<T>>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
+        _seen_timestamp: Duration,
+        process_type: BlockProcessType,
+    ) {
+        // TODO(das): log and metrics
+
+        let result = self.chain.process_rpc_data_column(data_column).await;
 
         // Sync handles these results
         self.send_sync_message(SyncMessage::BlockComponentProcessed {

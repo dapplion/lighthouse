@@ -1,6 +1,9 @@
 use crate::{
     service::NetworkMessage,
-    sync::{manager::BlockProcessType, SyncMessage},
+    sync::{
+        manager::{BlockProcessType, SampleReqId},
+        SyncMessage,
+    },
 };
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{
@@ -482,6 +485,23 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         })
     }
 
+    pub fn send_rpc_data_column(
+        self: &Arc<Self>,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
+        seen_timestamp: Duration,
+        process_type: BlockProcessType,
+    ) -> Result<(), Error<T::EthSpec>> {
+        let process_fn = self.clone().generate_rpc_data_column_process_fn(
+            data_column,
+            seen_timestamp,
+            process_type,
+        );
+        self.try_send(BeaconWorkEvent {
+            drop_during_sync: false,
+            work: Work::RpcDataColumns { process_fn },
+        })
+    }
+
     /// Create a new work event to import `blocks` as a beacon chain segment.
     pub fn send_chain_segment(
         self: &Arc<Self>,
@@ -652,6 +672,10 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             drop_during_sync: true,
             work: Work::LightClientBootstrapRequest(Box::new(process_fn)),
         })
+    }
+
+    pub fn sampling_request(&self, block_root: Hash256, slot: Slot) {
+        self.send_sync_message(SyncMessage::SampleBlock { block_root, slot })
     }
 
     /// Send a message to `sync_tx`.

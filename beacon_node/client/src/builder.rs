@@ -30,6 +30,7 @@ use eth2::{
 use execution_layer::ExecutionLayer;
 use futures::channel::mpsc::Receiver;
 use genesis::{interop_genesis_state, Eth1GenesisService, DEFAULT_ETH1_BLOCK_HASH};
+use lighthouse_network::NodeId;
 use lighthouse_network::{prometheus_client::registry::Registry, NetworkGlobals};
 use monitoring_api::{MonitoringHttpClient, ProcessType};
 use network::{NetworkConfig, NetworkSenders, NetworkService};
@@ -158,6 +159,7 @@ where
         mut self,
         client_genesis: ClientGenesis,
         config: ClientConfig,
+        node_id: NodeId,
     ) -> Result<Self, String> {
         let store = self.store.clone();
         let chain_spec = self.chain_spec.clone();
@@ -206,7 +208,8 @@ where
             .graffiti(graffiti)
             .event_handler(event_handler)
             .execution_layer(execution_layer)
-            .validator_monitor_config(config.validator_monitor.clone());
+            .validator_monitor_config(config.validator_monitor.clone())
+            .node_id(node_id.raw().into());
 
         let builder = if let Some(slasher) = self.slasher.clone() {
             builder.slasher(slasher)

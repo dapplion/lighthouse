@@ -757,7 +757,7 @@ impl<T: BeaconChainTypes> NetworkService<T> {
                     for column_subnet in
                         DataColumnSubnetId::compute_subnets_for_data_column::<T::EthSpec>(
                             self.network_globals.local_enr().node_id().raw().into(),
-                            &self.beacon_chain.spec,
+                            self.beacon_chain.spec.custody_requirement,
                         )
                     {
                         for fork_digest in self.required_gossip_fork_digests() {

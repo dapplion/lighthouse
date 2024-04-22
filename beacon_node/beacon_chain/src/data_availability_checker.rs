@@ -2,41 +2,61 @@ use crate::blob_verification::{verify_kzg_for_blob_list, GossipVerifiedBlob, Kzg
 use crate::block_verification_types::{
     AvailabilityPendingExecutedBlock, AvailableExecutedBlock, RpcBlock,
 };
-pub use crate::data_availability_checker::availability_view::{
-    AvailabilityView, GetCommitment, GetCommitments,
-};
 pub use crate::data_availability_checker::child_components::ChildComponents;
 use crate::data_availability_checker::overflow_lru_cache::OverflowLRUCache;
-use crate::data_availability_checker::processing_cache::ProcessingCache;
+pub use crate::data_availability_checker::overflow_lru_cache::{
+    compute_custody_requirements, compute_sample_requirements,
+};
 use crate::{BeaconChain, BeaconChainTypes, BeaconStore};
 use kzg::Kzg;
-use parking_lot::RwLock;
-pub use processing_cache::ProcessingComponents;
 use slasher::test_utils::E;
 use slog::{debug, error, Logger};
 use slot_clock::SlotClock;
+use ssz_types::FixedVector;
 use std::fmt;
 use std::fmt::Debug;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use task_executor::TaskExecutor;
-use types::beacon_block_body::KzgCommitmentOpts;
 use types::blob_sidecar::{BlobIdentifier, BlobSidecar, FixedBlobSidecarList};
 use types::{
     BlobSidecarList, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256, SignedBeaconBlock, Slot,
 };
 
-mod availability_view;
 mod child_components;
 mod error;
 mod overflow_lru_cache;
-mod processing_cache;
 mod state_lru_cache;
 
-use crate::data_column_verification::{verify_kzg_for_data_column_list, GossipVerifiedDataColumn};
+use crate::data_column_verification::{
+    verify_kzg_for_data_column_list, GossipVerifiedDataColumn, KzgVerifiedDataColumn,
+};
 pub use error::{Error as AvailabilityCheckError, ErrorCategory as AvailabilityCheckErrorCategory};
-use types::data_column_sidecar::{DataColumnIdentifier, DataColumnSidecarList};
+use types::data_column_sidecar::{ColumnIndex, DataColumnIdentifier, DataColumnSidecarList};
 use types::non_zero_usize::new_non_zero_usize;
+
+#[derive(Clone, Copy)]
+pub struct NodeIdRaw(pub [u8; 32]);
+
+pub struct CustodyConfig {
+    node_id: NodeIdRaw,
+    custody_requirement: u64,
+}
+
+impl CustodyConfig {
+    pub fn new(node_id: NodeIdRaw, custody_requirement: u64) -> Self {
+        Self {
+            node_id,
+            custody_requirement,
+        }
+    }
+}
+
+impl From<[u8; 32]> for NodeIdRaw {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+}
 
 /// The LRU Cache stores `PendingComponents` which can store up to
 /// `MAX_BLOBS_PER_BLOCK = 6` blobs each. A `BlobSidecar` is 0.131256 MB. So
@@ -53,7 +73,6 @@ pub const STATE_LRU_CAPACITY: usize = STATE_LRU_CAPACITY_NON_ZERO.get();
 /// `DataAvailabilityChecker` is responsible for KZG verification of block components as well as
 /// checking whether a "availability check" is required at all.
 pub struct DataAvailabilityChecker<T: BeaconChainTypes> {
-    processing_cache: RwLock<ProcessingCache<T::EthSpec>>,
     availability_cache: Arc<OverflowLRUCache<T>>,
     slot_clock: T::SlotClock,
     kzg: Option<Arc<Kzg>>,
@@ -89,10 +108,11 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         store: BeaconStore<T>,
         log: &Logger,
         spec: ChainSpec,
+        custody_config: CustodyConfig,
     ) -> Result<Self, AvailabilityCheckError> {
-        let overflow_cache = OverflowLRUCache::new(OVERFLOW_LRU_CAPACITY, store, spec.clone())?;
+        let overflow_cache =
+            OverflowLRUCache::new(OVERFLOW_LRU_CAPACITY, store, spec.clone(), custody_config)?;
         Ok(Self {
-            processing_cache: <_>::default(),
             availability_cache: Arc::new(overflow_cache),
             slot_clock,
             log: log.clone(),
@@ -101,27 +121,49 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         })
     }
 
-    /// Checks if the given block root is cached.
-    pub fn has_block(&self, block_root: &Hash256) -> bool {
-        self.processing_cache.read().has_block(block_root)
+    pub fn get_custody_config(&self) -> &CustodyConfig {
+        self.availability_cache.get_custody_config()
     }
 
-    /// Get the processing info for a block.
-    pub fn get_processing_components(
-        &self,
-        block_root: Hash256,
-    ) -> Option<ProcessingComponents<T::EthSpec>> {
-        self.processing_cache.read().get(&block_root).cloned()
+    /// Return this node's custody column requirements at `slot`
+    pub fn custody_columns_at_slot(&self, slot: Slot) -> Vec<ColumnIndex> {
+        self.availability_cache.custody_columns_at_slot(slot)
+    }
+
+    /// Checks if the block root is currenlty in the availability cache awaiting processing because
+    /// of missing components.
+    pub fn block_slot(&self, block_root: &Hash256) -> Option<Slot> {
+        self.availability_cache.block_slot(block_root)
+    }
+
+    /// Checks if the block root is currenlty in the availability cache awaiting processing because
+    /// of missing components.
+    pub fn has_block(&self, block_root: &Hash256) -> bool {
+        self.availability_cache.has_block(block_root)
+    }
+
+    pub fn get_missing_blob_ids_with(&self, block_root: Hash256) -> MissingBlobs {
+        self.availability_cache
+            .with_pending_components(&block_root, |pending_components| {
+                self.get_missing_blob_ids(
+                    block_root,
+                    &pending_components
+                        .and_then(|p| p.executed_block.clone())
+                        .map(|b| b.as_block_cloned()),
+                    &pending_components.map(|p| p.verified_blobs.clone()),
+                )
+            })
     }
 
     /// A `None` indicates blobs are not required.
     ///
     /// If there's no block, all possible ids will be returned that don't exist in the given blobs.
     /// If there no blobs, all possible ids will be returned.
-    pub fn get_missing_blob_ids<V: AvailabilityView<T::EthSpec>>(
+    pub fn get_missing_blob_ids<V>(
         &self,
         block_root: Hash256,
-        availability_view: &V,
+        block: &Option<Arc<SignedBeaconBlock<T::EthSpec>>>,
+        blobs: &Option<FixedVector<Option<V>, <T::EthSpec as EthSpec>::MaxBlobsPerBlock>>,
     ) -> MissingBlobs {
         let Some(current_slot) = self.slot_clock.now_or_genesis() else {
             error!(
@@ -134,54 +176,35 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         let current_epoch = current_slot.epoch(T::EthSpec::slots_per_epoch());
 
         if self.da_check_required_for_epoch(current_epoch) {
-            match availability_view.get_cached_block() {
-                Some(cached_block) => {
-                    let block_commitments = cached_block.get_commitments();
-                    let blob_commitments = availability_view.get_cached_blobs();
+            if let (Some(block), Some(blobs)) = (block, blobs) {
+                let block_commitments = block
+                    .message()
+                    .body()
+                    .blob_kzg_commitments()
+                    .ok()
+                    .cloned()
+                    .unwrap_or_default();
 
-                    let num_blobs_expected = block_commitments.len();
-                    let mut blob_ids = Vec::with_capacity(num_blobs_expected);
+                let num_blobs_expected = block_commitments.len();
+                let mut blob_ids = Vec::with_capacity(num_blobs_expected);
 
-                    // Zip here will always limit the number of iterations to the size of
-                    // `block_commitment` because `blob_commitments` will always be populated
-                    // with `Option` values up to `MAX_BLOBS_PER_BLOCK`.
-                    for (index, (block_commitment, blob_commitment_opt)) in block_commitments
-                        .into_iter()
-                        .zip(blob_commitments.iter())
-                        .enumerate()
-                    {
-                        // Always add a missing blob.
-                        let Some(blob_commitment) = blob_commitment_opt else {
-                            blob_ids.push(BlobIdentifier {
-                                block_root,
-                                index: index as u64,
-                            });
-                            continue;
-                        };
-
-                        let blob_commitment = *blob_commitment.get_commitment();
-
-                        // Check for consistency, but this shouldn't happen, an availability view
-                        // should guaruntee consistency.
-                        if blob_commitment != block_commitment {
-                            error!(self.log,
-                                "Inconsistent availability view";
-                                "block_root" => ?block_root,
-                                "block_commitment" => ?block_commitment,
-                                "blob_commitment" => ?blob_commitment,
-                                "index" => index
-                            );
-                            blob_ids.push(BlobIdentifier {
-                                block_root,
-                                index: index as u64,
-                            });
-                        }
-                    }
-                    MissingBlobs::KnownMissing(blob_ids)
+                // Zip here will always limit the number of iterations to the size of
+                // `block_commitment` because `blob_commitments` will always be populated
+                // with `Option` values up to `MAX_BLOBS_PER_BLOCK`.
+                for (index, (_, blob_commitment_opt)) in
+                    block_commitments.into_iter().zip(blobs.iter()).enumerate()
+                {
+                    // Always add a missing blob.
+                    if blob_commitment_opt.is_none() {
+                        blob_ids.push(BlobIdentifier {
+                            block_root,
+                            index: index as u64,
+                        });
+                    };
                 }
-                None => {
-                    MissingBlobs::PossibleMissing(BlobIdentifier::get_all_blob_ids::<E>(block_root))
-                }
+                MissingBlobs::KnownMissing(blob_ids)
+            } else {
+                MissingBlobs::PossibleMissing(BlobIdentifier::get_all_blob_ids::<E>(block_root))
             }
         } else {
             MissingBlobs::BlobsNotRequired
@@ -194,14 +217,6 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         blob_id: &BlobIdentifier,
     ) -> Result<Option<Arc<BlobSidecar<T::EthSpec>>>, AvailabilityCheckError> {
         self.availability_cache.peek_blob(blob_id)
-    }
-
-    /// Get a block from the availability cache. Includes any blocks we are currently processing.
-    pub fn get_block(&self, block_root: &Hash256) -> Option<Arc<SignedBeaconBlock<T::EthSpec>>> {
-        self.processing_cache
-            .read()
-            .get(block_root)
-            .and_then(|cached| cached.block.clone())
     }
 
     /// Get a data column from the availability cache.
@@ -230,6 +245,23 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
             .put_kzg_verified_blobs(block_root, verified_blobs)
     }
 
+    pub fn put_rpc_data_column(
+        &self,
+        block_root: Hash256,
+        data_column: Arc<DataColumnSidecar<T::EthSpec>>,
+    ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
+        let Some(kzg) = self.kzg.as_ref() else {
+            return Err(AvailabilityCheckError::KzgNotInitialized);
+        };
+
+        // TODO(das): batch verify data columns
+        let verified_data_column = KzgVerifiedDataColumn::new(data_column.clone(), kzg)
+            .map_err(AvailabilityCheckError::Kzg)?;
+
+        self.availability_cache
+            .put_kzg_verified_data_column(block_root, verified_data_column)
+    }
+
     /// Check if we've cached other blobs for this block. If it completes a set and we also
     /// have a block cached, return the `Availability` variant triggering block import.
     /// Otherwise cache the blob sidecar.
@@ -252,9 +284,9 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         &self,
         gossip_data_column: GossipVerifiedDataColumn<T>,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
-        self.availability_cache.put_kzg_verified_data_columns(
+        self.availability_cache.put_kzg_verified_data_column(
             gossip_data_column.block_root(),
-            vec![gossip_data_column.into_inner()],
+            gossip_data_column.into_inner(),
         )
     }
 
@@ -287,7 +319,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                         block_root,
                         block,
                         blobs: None,
-                        data_columns: None,
+                        custody_data_columns: None,
                     }))
                 }
             }
@@ -315,7 +347,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                     block_root,
                     block,
                     blobs: verified_blobs,
-                    data_columns: verified_data_column,
+                    custody_data_columns: verified_data_column,
                 }))
             }
         }
@@ -361,7 +393,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                             block_root,
                             block,
                             blobs: None,
-                            data_columns: None,
+                            custody_data_columns: None,
                         }))
                     }
                 }
@@ -377,7 +409,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                         block_root,
                         block,
                         blobs: verified_blobs,
-                        data_columns: verified_data_columns,
+                        custody_data_columns: verified_data_columns,
                     }))
                 }
             }
@@ -390,71 +422,6 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
     /// If the block's epoch is from prior to the data availability boundary, no blobs are required.
     fn blobs_required_for_block(&self, block: &SignedBeaconBlock<T::EthSpec>) -> bool {
         block.num_expected_blobs() > 0 && self.da_check_required_for_epoch(block.epoch())
-    }
-
-    /// Adds a block to the processing cache. This block's commitments are unverified but caching
-    /// them here is useful to avoid duplicate downloads of blocks, as well as understanding
-    /// our blob download requirements. We will also serve this over RPC.
-    pub fn notify_block(&self, block_root: Hash256, block: Arc<SignedBeaconBlock<T::EthSpec>>) {
-        let slot = block.slot();
-        self.processing_cache
-            .write()
-            .entry(block_root)
-            .or_insert_with(|| ProcessingComponents::new(slot))
-            .merge_block(block);
-    }
-
-    /// Add a single blob commitment to the processing cache. This commitment is unverified but caching
-    /// them here is useful to avoid duplicate downloads of blobs, as well as understanding
-    /// our block and blob download requirements.
-    pub fn notify_gossip_blob(
-        &self,
-        slot: Slot,
-        block_root: Hash256,
-        blob: &GossipVerifiedBlob<T>,
-    ) {
-        let index = blob.index();
-        let commitment = blob.kzg_commitment();
-        self.processing_cache
-            .write()
-            .entry(block_root)
-            .or_insert_with(|| ProcessingComponents::new(slot))
-            .merge_single_blob(index as usize, commitment);
-    }
-
-    /// Adds blob commitments to the processing cache. These commitments are unverified but caching
-    /// them here is useful to avoid duplicate downloads of blobs, as well as understanding
-    /// our block and blob download requirements.
-    pub fn notify_rpc_blobs(
-        &self,
-        slot: Slot,
-        block_root: Hash256,
-        blobs: &FixedBlobSidecarList<T::EthSpec>,
-    ) {
-        let mut commitments = KzgCommitmentOpts::<T::EthSpec>::default();
-        for blob in blobs.iter().flatten() {
-            if let Some(commitment) = commitments.get_mut(blob.index as usize) {
-                *commitment = Some(blob.kzg_commitment);
-            }
-        }
-        self.processing_cache
-            .write()
-            .entry(block_root)
-            .or_insert_with(|| ProcessingComponents::new(slot))
-            .merge_blobs(commitments);
-    }
-
-    /// Clears the block and all blobs from the processing cache for a give root if they exist.
-    pub fn remove_notified(&self, block_root: &Hash256) {
-        self.processing_cache.write().remove(block_root)
-    }
-
-    /// Gather all block roots for which we are not currently processing all components for the
-    /// given slot.
-    pub fn incomplete_processing_components(&self, slot: Slot) -> Vec<Hash256> {
-        self.processing_cache
-            .read()
-            .incomplete_processing_components(slot)
     }
 
     /// The epoch at which we require a data availability check in block processing.
@@ -498,7 +465,6 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
     /// Collects metrics from the data availability checker.
     pub fn metrics(&self) -> DataAvailabilityCheckerMetrics {
         DataAvailabilityCheckerMetrics {
-            processing_cache_size: self.processing_cache.read().len(),
             num_store_entries: self.availability_cache.num_store_entries(),
             state_cache_size: self.availability_cache.state_cache_size(),
             block_cache_size: self.availability_cache.block_cache_size(),
@@ -508,7 +474,6 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
 
 /// Helper struct to group data availability checker metrics.
 pub struct DataAvailabilityCheckerMetrics {
-    pub processing_cache_size: usize,
     pub num_store_entries: usize,
     pub state_cache_size: usize,
     pub block_cache_size: usize,
@@ -604,7 +569,7 @@ pub struct AvailableBlock<E: EthSpec> {
     block_root: Hash256,
     block: Arc<SignedBeaconBlock<E>>,
     blobs: Option<BlobSidecarList<E>>,
-    data_columns: Option<DataColumnSidecarList<E>>,
+    custody_data_columns: Option<DataColumnSidecarList<E>>,
 }
 
 impl<E: EthSpec> AvailableBlock<E> {
@@ -612,13 +577,13 @@ impl<E: EthSpec> AvailableBlock<E> {
         block_root: Hash256,
         block: Arc<SignedBeaconBlock<E>>,
         blobs: Option<BlobSidecarList<E>>,
-        data_columns: Option<DataColumnSidecarList<E>>,
+        custody_data_columns: Option<DataColumnSidecarList<E>>,
     ) -> Self {
         Self {
             block_root,
             block,
             blobs,
-            data_columns,
+            custody_data_columns,
         }
     }
 
@@ -633,8 +598,8 @@ impl<E: EthSpec> AvailableBlock<E> {
         self.blobs.as_ref()
     }
 
-    pub fn data_columns(&self) -> Option<&DataColumnSidecarList<E>> {
-        self.data_columns.as_ref()
+    pub fn custody_data_columns(&self) -> Option<&DataColumnSidecarList<E>> {
+        self.custody_data_columns.as_ref()
     }
 
     #[allow(clippy::type_complexity)]
@@ -650,9 +615,9 @@ impl<E: EthSpec> AvailableBlock<E> {
             block_root,
             block,
             blobs,
-            data_columns,
+            custody_data_columns,
         } = self;
-        (block_root, block, blobs, data_columns)
+        (block_root, block, blobs, custody_data_columns)
     }
 }
 
@@ -732,6 +697,35 @@ impl Into<Vec<BlobIdentifier>> for MissingBlobs {
             MissingBlobs::KnownMissing(v) => v,
             MissingBlobs::PossibleMissing(v) => v,
             MissingBlobs::BlobsNotRequired => vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum MissingDataColumns {
+    /// We know for certain we must fetch this column ids
+    KnownMissing(Vec<BlobIdentifier>),
+    /// We don't know yet the full list of column ids to fetch
+    KnownMissingIncomplete(Vec<BlobIdentifier>),
+    /// Not required.
+    NotRequired,
+}
+
+impl MissingDataColumns {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            MissingDataColumns::KnownMissing(v) => v.is_empty(),
+            MissingDataColumns::KnownMissingIncomplete(_) => false,
+            MissingDataColumns::NotRequired => true,
+        }
+    }
+
+    pub fn indices(&self) -> Vec<u64> {
+        match self {
+            MissingDataColumns::KnownMissing(v) | MissingDataColumns::KnownMissingIncomplete(v) => {
+                v.iter().map(|id| id.index).collect()
+            }
+            MissingDataColumns::NotRequired => vec![],
         }
     }
 }

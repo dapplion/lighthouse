@@ -1,10 +1,12 @@
-use crate::gossipsub;
 use crate::multiaddr::Protocol;
 use crate::rpc::{MetaData, MetaDataV1, MetaDataV2};
 use crate::types::{
     error, EnrAttestationBitfield, EnrSyncCommitteeBitfield, GossipEncoding, GossipKind,
 };
+use crate::{gossipsub, CombinedKeyExt};
 use crate::{GossipTopic, NetworkConfig};
+pub use discv5::enr::NodeId;
+use discv5::enr::{CombinedKey, EnrKey};
 use futures::future::Either;
 use libp2p::core::{multiaddr::Multiaddr, muxing::StreamMuxerBox, transport::Boxed};
 use libp2p::identity::{secp256k1, Keypair};
@@ -106,6 +108,12 @@ fn keypair_from_bytes(mut bytes: Vec<u8>) -> error::Result<Keypair> {
             keypair.into()
         })
         .map_err(|e| format!("Unable to parse p2p secret key: {:?}", e).into())
+}
+
+/// NodeID from a local keypair
+pub fn node_id_from_keypair(keypair: Keypair) -> Result<NodeId, String> {
+    let key = CombinedKey::from_libp2p(keypair)?;
+    Ok(NodeId::from(key.public()))
 }
 
 /// Loads a private key from disk. If this fails, a new key is

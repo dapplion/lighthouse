@@ -1,10 +1,9 @@
 use crate::block_verification_types::RpcBlock;
-use crate::data_availability_checker::AvailabilityView;
 use bls::Hash256;
 use std::sync::Arc;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::data_column_sidecar::FixedDataColumnSidecarList;
-use types::{EthSpec, SignedBeaconBlock};
+use types::data_column_sidecar::DataColumnSidecarList;
+use types::{BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock};
 
 /// For requests triggered by an `UnknownBlockParent` or `UnknownBlobParent`, this struct
 /// is used to cache components as they are sent to the network service. We can't use the
@@ -14,7 +13,7 @@ pub struct ChildComponents<E: EthSpec> {
     pub block_root: Hash256,
     pub downloaded_block: Option<Arc<SignedBeaconBlock<E>>>,
     pub downloaded_blobs: FixedBlobSidecarList<E>,
-    pub downloaded_data_columns: FixedDataColumnSidecarList<E>,
+    pub downloaded_data_columns: Vec<Arc<DataColumnSidecar<E>>>,
 }
 
 impl<E: EthSpec> From<RpcBlock<E>> for ChildComponents<E> {
@@ -23,10 +22,7 @@ impl<E: EthSpec> From<RpcBlock<E>> for ChildComponents<E> {
         let fixed_blobs = blobs.map(|blobs| {
             FixedBlobSidecarList::from(blobs.into_iter().map(Some).collect::<Vec<_>>())
         });
-        let fixed_data_columns = data_columns.map(|data_columns| {
-            FixedDataColumnSidecarList::from(data_columns.into_iter().map(Some).collect::<Vec<_>>())
-        });
-        Self::new(block_root, Some(block), fixed_blobs, fixed_data_columns)
+        Self::new(block_root, Some(block), fixed_blobs, data_columns)
     }
 }
 
@@ -43,7 +39,7 @@ impl<E: EthSpec> ChildComponents<E> {
         block_root: Hash256,
         block: Option<Arc<SignedBeaconBlock<E>>>,
         blobs: Option<FixedBlobSidecarList<E>>,
-        data_columns: Option<FixedDataColumnSidecarList<E>>,
+        data_columns: Option<DataColumnSidecarList<E>>,
     ) -> Self {
         let mut cache = Self::empty(block_root);
         if let Some(block) = block {
@@ -53,9 +49,42 @@ impl<E: EthSpec> ChildComponents<E> {
             cache.merge_blobs(blobs);
         }
         if let Some(data_columns) = data_columns {
-            cache.merge_data_columns(data_columns);
+            cache.merge_data_columns(data_columns.to_vec())
         }
         cache
+    }
+
+    pub fn merge_block(&mut self, block: Arc<SignedBeaconBlock<E>>) {
+        self.downloaded_block = Some(block);
+    }
+
+    pub fn merge_blob(&mut self, blob: Arc<BlobSidecar<E>>) {
+        if let Some(blob_ref) = self.downloaded_blobs.get_mut(blob.index as usize) {
+            *blob_ref = Some(blob);
+        }
+    }
+
+    pub fn merge_blobs(&mut self, blobs: FixedBlobSidecarList<E>) {
+        for blob in blobs.iter().flatten() {
+            self.merge_blob(blob.clone());
+        }
+    }
+
+    pub fn merge_data_columns(&mut self, data_columns: Vec<Arc<DataColumnSidecar<E>>>) {
+        for data_column in data_columns {
+            self.merge_data_column(data_column);
+        }
+    }
+
+    pub fn merge_data_column(&mut self, data_column: Arc<DataColumnSidecar<E>>) {
+        if self
+            .downloaded_data_columns
+            .iter()
+            .find(|d| d.index == data_column.index)
+            .is_none()
+        {
+            self.downloaded_data_columns.push(data_column)
+        }
     }
 
     pub fn clear_blobs(&mut self) {
