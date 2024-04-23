@@ -34,7 +34,6 @@
 //! search for the block and subsequently search for parents if needed.
 
 use super::backfill_sync::{BackFillSync, ProcessResult, SyncStart};
-use super::block_lookups::common::LookupType;
 use super::block_lookups::BlockLookups;
 use super::network_context::{BlockOrBlob, RangeRequestId, RpcEvent, SyncNetworkContext};
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
@@ -79,7 +78,6 @@ pub type Id = u32;
 pub struct SingleLookupReqId {
     pub id: Id,
     pub req_counter: Id,
-    pub lookup_type: LookupType,
 }
 
 /// Id of rpc requests sent by sync to the network.
@@ -153,7 +151,6 @@ pub enum SyncMessage<E: EthSpec> {
 pub enum BlockProcessType {
     SingleBlock { id: Id },
     SingleBlob { id: Id },
-    ParentLookup { chain_hash: Hash256 },
 }
 
 #[derive(Debug)]
@@ -263,12 +260,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn active_single_lookups(&self) -> Vec<(Id, Hash256)> {
+    pub(crate) fn active_single_lookups(&self) -> Vec<(Id, Hash256, Option<Hash256>)> {
         self.block_lookups.active_single_lookups()
     }
 
     #[cfg(test)]
-    pub(crate) fn active_parent_lookups(&self) -> Vec<Hash256> {
+    pub(crate) fn active_parent_lookups(&self) -> Vec<Vec<Hash256>> {
         self.block_lookups.active_parent_lookups()
     }
 
@@ -632,9 +629,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         result,
                         &mut self.network,
                     ),
-                BlockProcessType::ParentLookup { chain_hash } => self
-                    .block_lookups
-                    .parent_block_processed(chain_hash, result, &mut self.network),
             },
             SyncMessage::BatchProcessed { sync_type, result } => match sync_type {
                 ChainSegmentProcessId::RangeBatchId(chain_id, epoch) => {
@@ -771,11 +765,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 let dropped_single_blocks_requests =
                     self.block_lookups.drop_single_block_requests();
 
-                // - Parent lookups:
-                //   Disabled while in this state. We drop current requests and don't search for new
-                //   blocks.
-                let dropped_parent_chain_requests = self.block_lookups.drop_parent_chain_requests();
-
                 // - Range:
                 //   We still send found peers to range so that it can keep track of potential chains
                 //   with respect to our current peers. Range will stop processing batches in the
@@ -784,10 +773,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 // - Backfill: Not affected by ee states, nothing to do.
 
                 // Some logs.
-                if dropped_single_blocks_requests > 0 || dropped_parent_chain_requests > 0 {
+                if dropped_single_blocks_requests > 0 {
                     debug!(self.log, "Execution engine not online. Dropping active requests.";
                         "dropped_single_blocks_requests" => dropped_single_blocks_requests,
-                        "dropped_parent_chain_requests" => dropped_parent_chain_requests,
                     );
                 }
             }
@@ -827,44 +815,23 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     ) {
         if let Some(resp) = self.network.on_single_block_response(id, block) {
             match resp {
-                Ok((block, seen_timestamp)) => match id.lookup_type {
-                    LookupType::Current => self
-                        .block_lookups
-                        .single_lookup_response::<BlockRequestState>(
-                            id,
-                            peer_id,
-                            block,
-                            seen_timestamp,
-                            &mut self.network,
-                        ),
-                    LookupType::Parent => self
-                        .block_lookups
-                        .parent_lookup_response::<BlockRequestState>(
-                            id,
-                            peer_id,
-                            block,
-                            seen_timestamp,
-                            &mut self.network,
-                        ),
-                },
-                Err(error) => match id.lookup_type {
-                    LookupType::Current => self
-                        .block_lookups
-                        .single_block_lookup_failed::<BlockRequestState>(
-                            id,
-                            &peer_id,
-                            &mut self.network,
-                            error,
-                        ),
-                    LookupType::Parent => self
-                        .block_lookups
-                        .parent_lookup_failed::<BlockRequestState>(
-                            id,
-                            &peer_id,
-                            &mut self.network,
-                            error,
-                        ),
-                },
+                Ok((block, seen_timestamp)) => self
+                    .block_lookups
+                    .single_lookup_response::<BlockRequestState>(
+                        id,
+                        peer_id,
+                        block,
+                        seen_timestamp,
+                        &mut self.network,
+                    ),
+                Err(error) => self
+                    .block_lookups
+                    .single_block_lookup_failed::<BlockRequestState>(
+                        id,
+                        &peer_id,
+                        &mut self.network,
+                        error,
+                    ),
             }
         }
     }
@@ -902,45 +869,23 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     ) {
         if let Some(resp) = self.network.on_single_blob_response(id, blob) {
             match resp {
-                Ok((blobs, seen_timestamp)) => match id.lookup_type {
-                    LookupType::Current => self
-                        .block_lookups
-                        .single_lookup_response::<BlobRequestState<T::EthSpec>>(
-                            id,
-                            peer_id,
-                            blobs,
-                            seen_timestamp,
-                            &mut self.network,
-                        ),
-                    LookupType::Parent => self
-                        .block_lookups
-                        .parent_lookup_response::<BlobRequestState<T::EthSpec>>(
-                            id,
-                            peer_id,
-                            blobs,
-                            seen_timestamp,
-                            &mut self.network,
-                        ),
-                },
-
-                Err(error) => match id.lookup_type {
-                    LookupType::Current => self
-                        .block_lookups
-                        .single_block_lookup_failed::<BlobRequestState<T::EthSpec>>(
-                            id,
-                            &peer_id,
-                            &mut self.network,
-                            error,
-                        ),
-                    LookupType::Parent => self
-                        .block_lookups
-                        .parent_lookup_failed::<BlobRequestState<T::EthSpec>>(
-                            id,
-                            &peer_id,
-                            &mut self.network,
-                            error,
-                        ),
-                },
+                Ok((blobs, seen_timestamp)) => self
+                    .block_lookups
+                    .single_lookup_response::<BlobRequestState<T::EthSpec>>(
+                        id,
+                        peer_id,
+                        blobs,
+                        seen_timestamp,
+                        &mut self.network,
+                    ),
+                Err(error) => self
+                    .block_lookups
+                    .single_block_lookup_failed::<BlobRequestState<T::EthSpec>>(
+                        id,
+                        &peer_id,
+                        &mut self.network,
+                        error,
+                    ),
             }
         }
     }

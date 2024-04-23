@@ -83,14 +83,13 @@ pub trait RequestState<T: BeaconChainTypes> {
         let (peer_id, request) = self.build_request(lookup_type)?;
 
         // Update request state.
-        let req_counter = self.get_state_mut().on_download_start(peer_id);
+        let req_counter = self
+            .get_state_mut()
+            .on_download_start(peer_id)
+            .map_err(LookupRequestError::BadState)?;
 
         // Make request
-        let id = SingleLookupReqId {
-            id,
-            req_counter,
-            lookup_type,
-        };
+        let id = SingleLookupReqId { id, req_counter };
         Self::make_request(id, peer_id, request, cx)
     }
 

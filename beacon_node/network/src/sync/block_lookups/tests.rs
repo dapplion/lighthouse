@@ -194,7 +194,7 @@ impl TestRig {
         self.sync_manager.handle_message(sync_message);
     }
 
-    fn active_single_lookups(&self) -> Vec<(Id, Hash256)> {
+    fn active_single_lookups(&self) -> Vec<(Id, Hash256, Option<Hash256>)> {
         self.sync_manager.active_single_lookups()
     }
 
@@ -202,12 +202,22 @@ impl TestRig {
         self.sync_manager.active_single_lookups().len()
     }
 
-    fn active_parent_lookups(&self) -> Vec<Hash256> {
+    fn active_parent_lookups(&self) -> Vec<Vec<Hash256>> {
         self.sync_manager.active_parent_lookups()
     }
 
     fn active_parent_lookups_count(&self) -> usize {
         self.sync_manager.active_parent_lookups().len()
+    }
+
+    fn assert_parent_lookups_count(&self, count: usize) {
+        assert_eq!(
+            self.active_parent_lookups_count(),
+            count,
+            "Unexpected count of parent lookups. Parent lookups: {:?}. Current lookups: {:?}",
+            self.active_parent_lookups(),
+            self.active_single_lookups()
+        );
     }
 
     fn failed_chains_contains(&mut self, chain_hash: &Hash256) -> bool {
@@ -217,16 +227,16 @@ impl TestRig {
     fn find_single_lookup_for(&self, block_root: Hash256) -> Id {
         self.active_single_lookups()
             .iter()
-            .find(|(_, b)| b == &block_root)
+            .find(|(_, b, _)| b == &block_root)
             .unwrap_or_else(|| panic!("no single block lookup found for {block_root}"))
             .0
     }
 
     fn expect_no_active_parent_lookups(&self) {
-        assert_eq!(
-            self.active_parent_lookups(),
-            vec![],
-            "expected no parent lookups"
+        assert!(
+            self.active_parent_lookups().is_empty(),
+            "expected no parent lookups: {:?}",
+            self.active_parent_lookups()
         );
     }
 
@@ -272,24 +282,34 @@ impl TestRig {
         blocks: &[Arc<SignedBeaconBlock<E>>],
     ) {
         // Send import events for all pending parent blocks
-        for block in blocks {
+        for _ in blocks {
             self.parent_block_processed_imported(chain_hash);
         }
         // Send final import event for the block that triggered the lookup
         let trigger_lookup = self
             .active_single_lookups()
             .iter()
-            .find(|(_, block_root)| block_root == &chain_hash)
+            .find(|(_, block_root, _)| block_root == &chain_hash)
             .copied()
             .unwrap_or_else(|| panic!("There should exist a single block lookup for {chain_hash}"));
         self.single_block_component_processed_imported(trigger_lookup.0, chain_hash);
     }
 
     fn parent_block_processed(&mut self, chain_hash: Hash256, result: BlockProcessingResult<E>) {
-        self.send_sync_message(SyncMessage::BlockComponentProcessed {
-            process_type: BlockProcessType::ParentLookup { chain_hash },
-            result,
-        });
+        // Locate a parent lookup chain with tip hash `chain_hash`
+        let parent_chain = self
+            .active_parent_lookups()
+            .into_iter()
+            .find(|chain| chain.first() == Some(&chain_hash))
+            .unwrap_or_else(|| {
+                panic!(
+                    "No parent chain with chain_hash {chain_hash:?}: {:?}",
+                    self.active_parent_lookups()
+                )
+            });
+
+        let id = self.find_single_lookup_for(*parent_chain.last().unwrap());
+        self.single_block_component_processed(id, result);
     }
 
     fn parent_block_processed_imported(&mut self, chain_hash: Hash256) {
@@ -330,6 +350,7 @@ impl TestRig {
         peer_id: PeerId,
         beacon_block: Option<Arc<SignedBeaconBlock<E>>>,
     ) {
+        self.log("parent_lookup_block_response");
         self.send_sync_message(SyncMessage::RpcBlock {
             request_id: SyncRequestId::SingleBlock { id },
             peer_id,
@@ -344,6 +365,7 @@ impl TestRig {
         peer_id: PeerId,
         beacon_block: Option<Arc<SignedBeaconBlock<E>>>,
     ) {
+        self.log("single_lookup_block_response");
         self.send_sync_message(SyncMessage::RpcBlock {
             request_id: SyncRequestId::SingleBlock { id },
             peer_id,
@@ -358,6 +380,7 @@ impl TestRig {
         peer_id: PeerId,
         blob_sidecar: Option<Arc<BlobSidecar<E>>>,
     ) {
+        self.log("parent_lookup_blob_response");
         self.send_sync_message(SyncMessage::RpcBlob {
             request_id: SyncRequestId::SingleBlob { id },
             peer_id,
@@ -444,11 +467,7 @@ impl TestRig {
                 peer_id: _,
                 request: Request::BlocksByRoot(request),
                 request_id: RequestId::Sync(SyncRequestId::SingleBlock { id }),
-            } if id.lookup_type == LookupType::Current
-                && request.block_roots().to_vec().contains(&for_block) =>
-            {
-                Some(*id)
-            }
+            } if request.block_roots().to_vec().contains(&for_block) => Some(*id),
             _ => None,
         })
         .unwrap_or_else(|e| panic!("Expected block request for {for_block:?}: {e}"))
@@ -461,12 +480,11 @@ impl TestRig {
                 peer_id: _,
                 request: Request::BlobsByRoot(request),
                 request_id: RequestId::Sync(SyncRequestId::SingleBlob { id }),
-            } if id.lookup_type == LookupType::Current
-                && request
-                    .blob_ids
-                    .to_vec()
-                    .iter()
-                    .any(|r| r.block_root == for_block) =>
+            } if request
+                .blob_ids
+                .to_vec()
+                .iter()
+                .any(|r| r.block_root == for_block) =>
             {
                 Some(*id)
             }
@@ -482,11 +500,7 @@ impl TestRig {
                 peer_id: _,
                 request: Request::BlocksByRoot(request),
                 request_id: RequestId::Sync(SyncRequestId::SingleBlock { id }),
-            } if id.lookup_type == LookupType::Parent
-                && request.block_roots().to_vec().contains(&for_block) =>
-            {
-                Some(*id)
-            }
+            } if request.block_roots().to_vec().contains(&for_block) => Some(*id),
             _ => None,
         })
         .unwrap_or_else(|e| panic!("Expected block parent request for {for_block:?}: {e}"))
@@ -499,12 +513,11 @@ impl TestRig {
                 peer_id: _,
                 request: Request::BlobsByRoot(request),
                 request_id: RequestId::Sync(SyncRequestId::SingleBlob { id }),
-            } if id.lookup_type == LookupType::Parent
-                && request
-                    .blob_ids
-                    .to_vec()
-                    .iter()
-                    .all(|r| r.block_root == for_block) =>
+            } if request
+                .blob_ids
+                .to_vec()
+                .iter()
+                .all(|r| r.block_root == for_block) =>
             {
                 Some(*id)
             }
@@ -1108,12 +1121,13 @@ fn test_same_chain_race_condition() {
         rig.expect_block_process(ResponseType::Block);
         // the processing result
         if i + 2 == depth {
-            // one block was removed
+            rig.log(&format!("Block {i} was removed and is already known"));
             rig.parent_block_processed(
                 chain_hash,
                 BlockError::BlockIsAlreadyKnown(block.canonical_root()).into(),
             )
         } else {
+            rig.log(&format!("Block {i} ParentUnknown"));
             rig.parent_block_processed(
                 chain_hash,
                 BlockError::ParentUnknown(RpcBlock::new_without_blobs(None, block)).into(),
@@ -1132,6 +1146,13 @@ fn test_same_chain_race_condition() {
 
     rig.parent_chain_processed_success(chain_hash, &blocks);
     rig.expect_no_active_lookups();
+}
+
+#[test]
+fn test_penalize_wrong_peer_with_cached_child() {
+    // peer A sends blob with malicious data as unknown parent
+    // peer B serves parent and rest of blocks
+    // All components are sent as RpcBlock, penalizing peer B
 }
 
 mod deneb_only {
@@ -1276,7 +1297,6 @@ mod deneb_only {
         }
 
         fn parent_block_response(mut self) -> Self {
-            self.rig.log("parent_block_response");
             self.rig.expect_empty_network();
             let block = self.parent_block.pop_front().unwrap().clone();
             let _ = self.unknown_parent_block.insert(block.clone());
@@ -1286,12 +1306,11 @@ mod deneb_only {
                 Some(block),
             );
 
-            assert_eq!(self.rig.active_parent_lookups_count(), 1);
+            self.rig.assert_parent_lookups_count(1);
             self
         }
 
         fn parent_blob_response(mut self) -> Self {
-            self.rig.log("parent_blob_response");
             let blobs = self.parent_blobs.pop_front().unwrap();
             let _ = self.unknown_parent_blobs.insert(blobs.clone());
             for blob in &blobs {
@@ -1321,7 +1340,6 @@ mod deneb_only {
         }
 
         fn block_response(mut self) -> Self {
-            self.rig.log("block_response");
             // The peer provides the correct block, should not be penalized. Now the block should be sent
             // for processing.
             self.rig.single_lookup_block_response(
@@ -1423,7 +1441,7 @@ mod deneb_only {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(self.block_root)),
             );
             self.rig.expect_empty_network();
-            assert_eq!(self.rig.active_parent_lookups_count(), 0);
+            self.rig.assert_parent_lookups_count(0);
             self
         }
 

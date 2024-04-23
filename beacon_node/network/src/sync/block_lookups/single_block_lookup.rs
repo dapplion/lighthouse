@@ -69,6 +69,20 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         self.block_request_state.requested_block_root
     }
 
+    pub fn parent_root(&self) -> Option<Hash256> {
+        if let Some(c) = &self.child_components {
+            if let Some(block) = &c.downloaded_block {
+                return Some(block.parent_root());
+            }
+            for blob in c.downloaded_blobs.iter() {
+                if let Some(blob) = blob {
+                    return Some(blob.block_parent_root());
+                }
+            }
+        }
+        None
+    }
+
     /// Check the block root matches the requested block root.
     pub fn is_for_block(&self, block_root: Hash256) -> bool {
         self.block_root() == block_root
@@ -114,14 +128,24 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         Ok(())
     }
 
+    /// Transform a lookup from a CachedChild into a valid state that can receive a processing
+    /// result.
+    pub fn force_into_processing_state(&mut self, peer_id: PeerId) -> Result<(), String> {
+        self.block_request_state.state.on_download_start(peer_id)?;
+        self.block_request_state.state.on_download_success()?;
+        self.blob_request_state.state.on_download_start(peer_id)?;
+        self.blob_request_state.state.on_download_success()?;
+        Ok(())
+    }
+
     /// Returns a `CachedChild`, which is a wrapper around a `RpcBlock` that is either:
     ///
     /// 1. `NotRequired`: there is no child caching required for this lookup.
     /// 2. `DownloadIncomplete`: Child caching is required, but all components are not yet downloaded.
     /// 3. `Ok`: The child is required and we have downloaded it.
     /// 4. `Err`: The child is required, but has failed consistency checks.
-    pub fn get_cached_child_block(&self) -> CachedChild<T::EthSpec> {
-        if let Some(components) = self.child_components.as_ref() {
+    pub fn get_cached_child_block(&self) -> Option<CachedChild<T::EthSpec>> {
+        self.child_components.as_ref().map(|components| {
             let Some(block) = components.downloaded_block.as_ref() else {
                 return CachedChild::DownloadIncomplete("missing block".to_owned());
             };
@@ -144,9 +168,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 Ok(rpc_block) => CachedChild::Ok(rpc_block),
                 Err(e) => CachedChild::Err(e),
             }
-        } else {
-            CachedChild::NotRequired
-        }
+        })
     }
 
     /// Accepts a verified response, and adds it to the child components if required. This method
@@ -155,13 +177,11 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     pub fn add_response<R: RequestState<T>>(
         &mut self,
         verified_response: R::VerifiedResponseType,
-    ) -> CachedChild<T::EthSpec> {
+    ) -> Option<CachedChild<T::EthSpec>> {
         if let Some(child_components) = self.child_components.as_mut() {
             R::add_to_child_components(verified_response, child_components);
-            self.get_cached_child_block()
-        } else {
-            CachedChild::NotRequired
         }
+        self.get_cached_child_block()
     }
 
     /// Add a child component to the lookup request. Merges with any existing child components.
@@ -364,8 +384,6 @@ pub enum CachedChild<E: EthSpec> {
     Ok(RpcBlock<E>),
     /// All child components have not yet been received.
     DownloadIncomplete(String),
-    /// Child components should not be cached, send this directly for processing.
-    NotRequired,
     /// There was an error during consistency checks between block and blobs.
     Err(AvailabilityCheckError),
 }
@@ -442,10 +460,17 @@ impl SingleLookupRequestState {
         }
     }
 
-    pub fn on_download_start(&mut self, peer_id: PeerId) -> u32 {
-        self.state = State::Downloading { peer_id };
-        self.req_counter += 1;
-        self.req_counter
+    pub fn on_download_start(&mut self, peer_id: PeerId) -> Result<u32, String> {
+        match &self.state {
+            State::AwaitingDownload => {
+                self.state = State::Downloading { peer_id };
+                self.req_counter += 1;
+                Ok(self.req_counter)
+            }
+            other => Err(format!(
+                "request bad state, expected AwaitingDownload got {other}"
+            )),
+        }
     }
 
     /// Registers a failure in downloading a block. This might be a peer disconnection or a wrong
@@ -462,7 +487,7 @@ impl SingleLookupRequestState {
                 Ok(())
             }
             other => Err(format!(
-                "request bad state, expected downloading got {other}"
+                "request bad state, expected Downloading got {other}"
             )),
         }
     }
