@@ -1,14 +1,19 @@
 use crate::network_beacon_processor::NetworkBeaconProcessor;
 
 use crate::service::RequestId;
-use crate::sync::manager::{RequestId as SyncRequestId, SingleLookupReqId, SyncManager};
+use crate::sync::manager::{
+    BlockProcessType, RequestId as SyncRequestId, SingleLookupReqId, SyncManager,
+};
 use crate::sync::SyncMessage;
 use crate::NetworkMessage;
 use std::sync::Arc;
 
 use super::*;
 
-use crate::sync::block_lookups::common::ResponseType;
+use crate::sync::block_lookups::common::{
+    ResponseType, PARENT_DEPTH_TOLERANCE, PARENT_FAIL_TOLERANCE,
+};
+use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::builder::Witness;
 use beacon_chain::eth1_chain::CachingEth1Backend;
 use beacon_chain::test_utils::{
@@ -339,7 +344,7 @@ impl TestRig {
         result: BlockProcessingResult<E>,
     ) {
         self.send_sync_message(SyncMessage::BlockComponentProcessed {
-            process_type: BlockProcessType::SingleBlob { id: id.id },
+            process_type: BlockProcessType::SingleBlob { id: id.lookup_id },
             result,
         })
     }
@@ -682,7 +687,7 @@ fn test_single_block_lookup_happy_path() {
     // Send the stream termination. Peer should have not been penalized, and the request removed
     // after processing.
     rig.single_lookup_block_response(id, peer_id, None);
-    rig.single_block_component_processed_imported(id.id, block_root);
+    rig.single_block_component_processed_imported(id.lookup_id, block_root);
     rig.expect_empty_network();
     rig.expect_no_active_lookups();
 }
@@ -769,7 +774,7 @@ fn test_single_block_lookup_becomes_parent_request() {
     // Send the stream termination. Peer should have not been penalized, and the request moved to a
     // parent request after processing.
     rig.single_block_component_processed(
-        id.id,
+        id.lookup_id,
         BlockError::ParentUnknown(RpcBlock::new_without_blobs(None, block)).into(),
     );
     assert_eq!(rig.active_single_lookups_count(), 1);
@@ -900,7 +905,7 @@ fn test_parent_lookup_too_many_attempts() {
 
     // Trigger the request
     rig.trigger_unknown_parent_block(peer_id, block.into());
-    for i in 1..=parent_lookup::PARENT_FAIL_TOLERANCE {
+    for i in 1..=PARENT_FAIL_TOLERANCE {
         let id = rig.expect_block_parent_request(parent_root);
         // Blobs are only requested in the first iteration as this test only retries blocks
         if rig.after_deneb() && i == 1 {
@@ -941,7 +946,7 @@ fn test_parent_lookup_too_many_download_attempts_no_blacklist() {
 
     // Trigger the request
     rig.trigger_unknown_parent_block(peer_id, block.into());
-    for i in 1..=parent_lookup::PARENT_FAIL_TOLERANCE {
+    for i in 1..=PARENT_FAIL_TOLERANCE {
         assert!(!rig.failed_chains_contains(&block_root));
         let id = rig.expect_block_parent_request(parent_root);
         // Blobs are only requested in the first iteration as this test only retries blocks
@@ -966,7 +971,7 @@ fn test_parent_lookup_too_many_download_attempts_no_blacklist() {
 
 #[test]
 fn test_parent_lookup_too_many_processing_attempts_must_blacklist() {
-    const PROCESSING_FAILURES: u8 = parent_lookup::PARENT_FAIL_TOLERANCE / 2 + 1;
+    const PROCESSING_FAILURES: u8 = PARENT_FAIL_TOLERANCE / 2 + 1;
     let mut rig = TestRig::test_setup();
     let (parent, block, parent_root, block_root) = rig.rand_block_and_parent();
     let peer_id = rig.new_connected_peer();
@@ -975,7 +980,7 @@ fn test_parent_lookup_too_many_processing_attempts_must_blacklist() {
     rig.trigger_unknown_parent_block(peer_id, block.into());
 
     rig.log("Fail downloading the block");
-    for i in 0..(parent_lookup::PARENT_FAIL_TOLERANCE - PROCESSING_FAILURES) {
+    for i in 0..(PARENT_FAIL_TOLERANCE - PROCESSING_FAILURES) {
         let id = rig.expect_block_parent_request(parent_root);
         // Blobs are only requested in the first iteration as this test only retries blocks
         if rig.after_deneb() && i == 0 {
@@ -1007,7 +1012,7 @@ fn test_parent_lookup_too_many_processing_attempts_must_blacklist() {
 #[test]
 fn test_parent_lookup_too_deep() {
     let mut rig = TestRig::test_setup();
-    let mut blocks = rig.rand_blockchain(parent_lookup::PARENT_DEPTH_TOLERANCE);
+    let mut blocks = rig.rand_blockchain(PARENT_DEPTH_TOLERANCE);
 
     let peer_id = rig.new_connected_peer();
     let trigger_block = blocks.pop().unwrap();
@@ -1068,7 +1073,7 @@ fn test_single_block_lookup_ignored_response() {
     // after processing.
     rig.single_lookup_block_response(id, peer_id, None);
     // Send an Ignored response, the request should be dropped
-    rig.single_block_component_processed(id.id, BlockProcessingResult::Ignored);
+    rig.single_block_component_processed(id.lookup_id, BlockProcessingResult::Ignored);
     rig.expect_empty_network();
     rig.expect_no_active_lookups();
 }
@@ -1157,7 +1162,9 @@ fn test_penalize_wrong_peer_with_cached_child() {
 
 mod deneb_only {
     use super::*;
-    use beacon_chain::data_availability_checker::AvailabilityCheckError;
+    use beacon_chain::{
+        block_verification_types::RpcBlock, data_availability_checker::AvailabilityCheckError,
+    };
     use ssz_types::VariableList;
     use std::collections::VecDeque;
 
@@ -1426,7 +1433,7 @@ mod deneb_only {
             // Missing blobs should be the request is not removed, the outstanding blobs request should
             // mean we do not send a new request.
             self.rig.single_block_component_processed(
-                self.block_req_id.expect("block request id").id,
+                self.block_req_id.expect("block request id").lookup_id,
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(self.block_root)),
             );
             self.rig.expect_empty_network();
@@ -1474,7 +1481,7 @@ mod deneb_only {
 
         fn invalid_block_processed(mut self) -> Self {
             self.rig.single_block_component_processed(
-                self.block_req_id.expect("block request id").id,
+                self.block_req_id.expect("block request id").lookup_id,
                 BlockProcessingResult::Err(BlockError::ProposalSignatureInvalid),
             );
             assert_eq!(self.rig.active_single_lookups_count(), 1);
@@ -1483,7 +1490,7 @@ mod deneb_only {
 
         fn invalid_blob_processed(mut self) -> Self {
             self.rig.single_block_component_processed(
-                self.blob_req_id.expect("blob request id").id,
+                self.blob_req_id.expect("blob request id").lookup_id,
                 BlockProcessingResult::Err(BlockError::AvailabilityCheck(
                     AvailabilityCheckError::KzgVerificationFailed,
                 )),
@@ -1494,7 +1501,7 @@ mod deneb_only {
 
         fn missing_components_from_block_request(mut self) -> Self {
             self.rig.single_block_component_processed(
-                self.block_req_id.expect("block request id").id,
+                self.block_req_id.expect("block request id").lookup_id,
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
                     self.slot,
                     self.block_root,
