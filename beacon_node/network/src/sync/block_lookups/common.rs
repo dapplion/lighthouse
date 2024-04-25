@@ -4,7 +4,7 @@ use crate::sync::block_lookups::single_block_lookup::{
 use crate::sync::block_lookups::{
     BlobRequestState, BlockRequestState, PeerId, SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS,
 };
-use crate::sync::manager::{BlockProcessType, Id, SingleLookupReqId, SLOT_IMPORT_TOLERANCE};
+use crate::sync::manager::{BlockProcessType, Id, SLOT_IMPORT_TOLERANCE};
 use crate::sync::network_context::{
     BlobsByRootSingleBlockRequest, BlocksByRootSingleRequest, SyncNetworkContext,
 };
@@ -23,27 +23,12 @@ pub enum ResponseType {
     Blob,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum LookupType {
-    Current,
-    Parent,
-}
-
 /// How many attempts we try to find a parent of a block before we give up trying.
 pub(crate) const PARENT_FAIL_TOLERANCE: u8 = 5;
 /// The maximum depth we will search for a parent block. In principle we should have sync'd any
 /// canonical chain to its head once the peer connects. A chain should not appear where it's depth
 /// is further back than the most recent head slot.
 pub(crate) const PARENT_DEPTH_TOLERANCE: usize = SLOT_IMPORT_TOLERANCE * 2;
-
-impl LookupType {
-    fn max_attempts(&self) -> u8 {
-        match self {
-            LookupType::Current => SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS,
-            LookupType::Parent => PARENT_FAIL_TOLERANCE,
-        }
-    }
-}
 
 /// This trait unifies common single block lookup functionality across blocks and blobs. This
 /// includes making requests, verifying responses, and handling processing results. A
@@ -63,13 +48,14 @@ pub trait RequestState<T: BeaconChainTypes> {
     fn continue_request(
         &mut self,
         id: Id,
-        lookup_type: LookupType,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
         if let Some(peer_id) = Self::get_state_mut(self).maybe_start_download()? {
             // Verify the current request has not exceeded the maximum number of attempts.
             let request_state = self.get_state();
-            if request_state.failed_attempts() >= lookup_type.max_attempts() {
+            // TODO: Okay to use `SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS` for both current and parent
+            // lookups now? It not trivial to identify what is a "parent lookup" now.
+            if request_state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
                 let cannot_process = request_state.more_failed_processing_attempts();
                 return Err(LookupRequestError::TooManyAttempts { cannot_process });
             }
@@ -179,6 +165,11 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
         peer_id: PeerId,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
+        // TODO: Use cx to figure out which blobs are still to be downloaded
+        // - Check against the current cached block in the blocks response the required num of blobs
+        // - Check against da checker if there's a blob how many we need
+        // - Check against da checker if there are some blobs already downloaded
+
         cx.blob_lookup_request(
             id,
             peer_id,

@@ -34,19 +34,20 @@
 //! search for the block and subsequently search for parents if needed.
 
 use super::backfill_sync::{BackFillSync, ProcessResult, SyncStart};
-use super::block_lookups::{BlockLookups, UnknownParentTrigger};
+use super::block_lookups::BlockLookups;
 use super::network_context::{BlockOrBlob, RangeRequestId, RpcEvent, SyncNetworkContext};
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
 use crate::network_beacon_processor::{ChainSegmentProcessId, NetworkBeaconProcessor};
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
-use crate::sync::block_lookups::{BlobRequestState, BlockRequestState};
+use crate::sync::block_lookups::{BlobRequestState, BlockComponent, BlockRequestState};
 use crate::sync::block_sidecar_coupling::BlocksAndBlobsRequestInfo;
 use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::block_verification_types::RpcBlock;
+use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::{
-    AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes, BlockError, EngineState,
+    AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes, BlobError, BlockError, EngineState,
 };
 use futures::StreamExt;
 use lighthouse_network::rpc::RPCError;
@@ -572,7 +573,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     block_root,
                     parent_root,
                     block_slot,
-                    UnknownParentTrigger::Block(block.block_cloned()),
+                    BlockComponent::Block((block.block_cloned(), block_root, timestamp_now())),
                 );
             }
             SyncMessage::UnknownParentBlob(peer_id, blob) => {
@@ -585,7 +586,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     block_root,
                     parent_root,
                     blob_slot,
-                    UnknownParentTrigger::Blob(blob),
+                    BlockComponent::Blob((blob, block_root, timestamp_now())),
                 );
             }
             SyncMessage::UnknownBlockHashFromAttestation(peer_id, block_root) => {
@@ -604,11 +605,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncMessage::BlockComponentProcessed {
                 process_type,
                 result,
-            } => self.block_lookups.single_block_component_processed_2(
-                process_type,
-                result,
-                &mut self.network,
-            ),
+            } => self
+                .block_lookups
+                .on_processing_result(process_type, result, &mut self.network),
             SyncMessage::BatchProcessed { sync_type, result } => match sync_type {
                 ChainSegmentProcessId::RangeBatchId(chain_id, epoch) => {
                     self.range_sync.handle_block_process_result(
@@ -644,21 +643,19 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         block_root: Hash256,
         parent_root: Hash256,
         slot: Slot,
-        unknown_parent_trigger: UnknownParentTrigger<T::EthSpec>,
+        unknown_parent_trigger: BlockComponent<T::EthSpec>,
     ) {
         match self.should_search_for_block(Some(slot), &peer_id) {
             Ok(_) => {
-                self.block_lookups.search_parent(
-                    slot,
-                    block_root,
+                self.block_lookups.search_parent_of_child(
                     parent_root,
+                    block_root,
                     &[peer_id],
                     &mut self.network,
                 );
-                self.block_lookups.search_child_block(
+                self.block_lookups.search_block(
                     block_root,
-                    parent_root,
-                    unknown_parent_trigger,
+                    Some((peer_id, unknown_parent_trigger)),
                     &[peer_id],
                     &mut self.network,
                 );
@@ -673,7 +670,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         match self.should_search_for_block(None, &peer_id) {
             Ok(_) => {
                 self.block_lookups
-                    .search_block(block_root, &[peer_id], &mut self.network);
+                    .search_block(block_root, None, &[peer_id], &mut self.network);
             }
             Err(reason) => {
                 debug!(self.log, "Ignoring unknown block request"; "block_root" => %block_root, "reason" => reason);
