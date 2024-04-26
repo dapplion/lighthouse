@@ -67,8 +67,8 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
     /// Mark this lookup as no longer awaiting a parent lookup. Components can be sent for
     /// processing.
-    pub fn resolve_awaiting_parent(&mut self) -> Option<Hash256> {
-        self.awaiting_parent.take()
+    pub fn resolve_awaiting_parent(&mut self) {
+        self.awaiting_parent = None;
     }
 
     pub fn add_child_components(&mut self, block_component: BlockComponent<T::EthSpec>) {
@@ -106,7 +106,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         self.block_request_state
             .state
             .get_available_peers()
-            .chain(self.blob_request_state.state.get_used_peers())
+            .chain(self.blob_request_state.state.get_available_peers())
             .unique()
     }
 
@@ -294,7 +294,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
-                "request bad state, expected AwaitingDownload got {other}"
+                "Bad state on_download_start expected AwaitingDownload got {other}"
             ))),
         }
     }
@@ -309,7 +309,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
-                "request bad state, expected Downloading got {other}"
+                "Bad state on_download_failure expected Downloading got {other}"
             ))),
         }
     }
@@ -324,7 +324,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
-                "request bad state, expected Downloading got {other}"
+                "Bad state on_download_success expected Downloading got {other}"
             ))),
         }
     }
@@ -351,7 +351,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
-                "request bad state, expected Processing got {other}"
+                "Bad state on revert_to_awaiting_processing expected Processing got {other}"
             ))),
         }
     }
@@ -366,7 +366,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
                 Ok(peer_id)
             }
             other => Err(LookupRequestError::BadState(format!(
-                "request bad state, expected Processing got {other}"
+                "Bad state on_processing_failure expected Processing got {other}"
             ))),
         }
     }
@@ -378,7 +378,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
-                "request bad state, expected Processing got {other}"
+                "Bad state on_processing_success expected Processing got {other}"
             ))),
         }
     }
