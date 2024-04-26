@@ -1,8 +1,10 @@
+use self::parent_chain::{compute_parent_chains, NodeChain};
 use self::single_block_lookup::{DownloadResult, LookupRequestError, SingleBlockLookup};
 use super::manager::{BlockProcessType, BlockProcessingResult};
 use super::network_context::{RpcProcessingResult, SyncNetworkContext};
 use crate::metrics;
-use crate::sync::block_lookups::common::PARENT_DEPTH_TOLERANCE;
+use crate::sync::block_lookups::common::{ResponseType, PARENT_DEPTH_TOLERANCE};
+use crate::sync::block_lookups::parent_chain::find_oldest_fork_ancestor;
 use crate::sync::manager::Id;
 use crate::sync::network_context::LookupFailure;
 use beacon_chain::block_verification_types::AsBlock;
@@ -14,13 +16,13 @@ use lighthouse_network::{PeerAction, PeerId};
 use lru_cache::LRUTimeCache;
 pub use single_block_lookup::{BlobRequestState, BlockRequestState};
 use slog::{debug, error, trace, warn, Logger};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use store::Hash256;
 use types::{BlobSidecar, EthSpec, SignedBeaconBlock};
 
 pub mod common;
+pub mod parent_chain;
 mod single_block_lookup;
 #[cfg(test)]
 mod tests;
@@ -55,6 +57,7 @@ pub struct BlockLookups<T: BeaconChainTypes> {
     /// A cache of failed chain lookups to prevent duplicate searches.
     failed_chains: LRUTimeCache<Hash256>,
 
+    // TODO: Why not index lookups by block_root?
     single_block_lookups: FnvHashMap<SingleLookupId, SingleBlockLookup<T>>,
 
     /// The logger for the import manager.
@@ -91,49 +94,14 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     }
 
     /// Returns a vec of all parent lookup chains by tip, in descending slot order (tip first)
-    pub(crate) fn active_parent_lookups(&self) -> Vec<Vec<Hash256>> {
-        let mut child_to_parent = HashMap::new();
-        let mut parent_to_child = HashMap::<Hash256, Vec<Hash256>>::new();
-        for lookup in self.single_block_lookups.values() {
-            let block_root = lookup.block_root();
-            let parent_root = lookup.awaiting_parent();
-            child_to_parent.insert(block_root, parent_root);
-            if let Some(parent_root) = parent_root {
-                parent_to_child
-                    .entry(parent_root)
-                    .or_default()
-                    .push(block_root);
-            }
-        }
-
-        let mut parent_chains = vec![];
-
-        // Iterate blocks which no child
-        for lookup in self.single_block_lookups.values() {
-            let mut block_root = lookup.block_root();
-            if parent_to_child.get(&block_root).is_none() {
-                let mut chain = vec![];
-
-                // Resolve chain of blocks
-                loop {
-                    if let Some(parent_root) = child_to_parent.get(&block_root) {
-                        // block_root is a known block that may or may not have a parent root
-                        chain.push(block_root);
-                        if let Some(parent_root) = parent_root {
-                            block_root = *parent_root;
-                            continue;
-                        }
-                    }
-                    break;
-                }
-
-                if chain.len() > 1 {
-                    parent_chains.push(chain);
-                }
-            }
-        }
-
-        parent_chains
+    pub(crate) fn active_parent_lookups(&self) -> Vec<NodeChain> {
+        compute_parent_chains(
+            &self
+                .single_block_lookups
+                .values()
+                .map(|lookup| lookup.into())
+                .collect::<Vec<_>>(),
+        )
     }
 
     /* Lookup requests */
@@ -171,8 +139,8 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         block_root: Hash256,
         peer_source: &[PeerId],
         cx: &mut SyncNetworkContext<T>,
-    ) -> bool {
-        self.new_current_lookup(block_root, None, None, peer_source, cx)
+    ) {
+        self.new_current_lookup(block_root, None, None, peer_source, cx);
     }
 
     /// A block or blob triggers the search of a parent.
@@ -187,34 +155,40 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         peers: &[PeerId],
         cx: &mut SyncNetworkContext<T>,
     ) -> bool {
-        for parent_chain in self.active_parent_lookups() {
-            if parent_chain.last() == Some(&child_block_root_trigger)
+        let parent_chains = self.active_parent_lookups();
+
+        for (chain_idx, parent_chain) in parent_chains.iter().enumerate() {
+            if parent_chain.ancestor() == child_block_root_trigger
                 && parent_chain.len() >= PARENT_DEPTH_TOLERANCE
             {
                 debug!(self.log, "Parent lookup chain too long"; "block_root" => ?block_root_to_search);
 
                 // Searching for this parent would extend a parent chain over the max
                 // Insert the tip only to failed chains
-                let chain_hash = parent_chain.first().expect("has at least one element");
-                self.failed_chains.insert(*chain_hash);
+                self.failed_chains.insert(parent_chain.tip);
 
-                // Drop all lookups descending from the child of the too long parent chain
-                if let Some((lookup_id, lookup)) = self
-                    .single_block_lookups
-                    .iter()
-                    .find(|(_, l)| l.block_root() == child_block_root_trigger)
-                {
-                    for &peer_id in lookup.all_used_peers() {
-                        cx.report_peer(peer_id, PeerAction::LowToleranceError, "chain_too_long");
+                // Note: Drop only the chain that's too long until it merges with another chain
+                // that's not too long. Consider this attack: there's a chain of valid unknown
+                // blocks A -> B. A malicious peer builds `PARENT_DEPTH_TOLERANCE` garbage
+                // blocks on top of A forming A -> C. The malicious peer forces us to fetch C
+                // from it, which will result in parent A hitting the chain_too_long error. Then
+                // the valid chain A -> B is dropped too.
+                if let Ok(block_to_drop) = find_oldest_fork_ancestor(parent_chains, chain_idx) {
+                    // Drop all lookups descending from the child of the too long parent chain
+                    if let Some((lookup_id, lookup)) = self
+                        .single_block_lookups
+                        .iter()
+                        .find(|(_, l)| l.block_root() == block_to_drop)
+                    {
+                        for &peer_id in lookup.all_used_peers() {
+                            cx.report_peer(
+                                peer_id,
+                                PeerAction::LowToleranceError,
+                                "chain_too_long",
+                            );
+                        }
+                        self.drop_lookup_and_childs(*lookup_id);
                     }
-
-                    // TODO: Drop only the chain that's too long until it merges with another chain
-                    // that's not too long. Consider this attack: there's a chain of valid unknown
-                    // blocks A -> B. A malicious peer builds `PARENT_DEPTH_TOLERANCE` garbage
-                    // blocks on top of A forming A -> C. The malicious peer forces us to fetch C
-                    // from it, which will result in parent A hitting the chain_too_long error. Then
-                    // the valid chain A -> B is dropped too.
-                    self.drop_lookup_and_childs(*lookup_id);
                 }
 
                 return false;
@@ -350,7 +324,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         match response {
             Ok((response, seen_timestamp)) => {
                 debug!(self.log,
-                    "Block lookup download success";
+                    "Received lookup download success";
                     "block_root" => %block_root,
                     "peer_id" => %peer_id,
                     "response_type" => ?response_type,
@@ -370,7 +344,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             }
             Err(e) => {
                 debug!(self.log,
-                    "Block lookup download failure";
+                    "Received lookup download failure";
                     "block_root" => %block_root,
                     "peer_id" => %peer_id,
                     "response_type" => ?response_type,
@@ -419,7 +393,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             let id = match process_type {
                 BlockProcessType::SingleBlock { id } | BlockProcessType::SingleBlob { id } => id,
             };
-            debug!(self.log, "Dropping lookup on request error"; "id" => id, "error" => ?e);
+            debug!(self.log, "Dropping lookup on request error"; "component" => process_type.component(), "id" => process_type.id(), "error" => ?e);
             self.drop_lookup_and_childs(id);
             self.update_metrics();
         }
@@ -441,11 +415,10 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
 
         debug!(
             self.log,
-            "Block component processed for lookup";
-            "response_type" => ?R::response_type(),
+            "Received lookup processing result";
+            "component" => ?R::response_type(),
             "block_root" => ?block_root,
             "result" => ?result,
-            "id" => lookup_id,
         );
 
         let action = match result {
@@ -468,13 +441,15 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 // wrong. If we already had both a block and blobs response processed, we should penalize the
                 // blobs peer because they did not provide all blobs on the initial request.
                 if lookup.both_components_processed() {
-                    if let Ok(blob_peer) = lookup.blob_request_state.state.on_processing_failure() {
-                        cx.report_peer(
-                            blob_peer,
-                            PeerAction::MidToleranceError,
-                            "sent_incomplete_blobs",
-                        );
-                    }
+                    let blob_peer = lookup
+                        .blob_request_state
+                        .state
+                        .on_post_process_validation_failure()?;
+                    cx.report_peer(
+                        blob_peer,
+                        PeerAction::MidToleranceError,
+                        "sent_incomplete_blobs",
+                    );
                 }
                 Action::Retry
             }
@@ -483,8 +458,8 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 // This implies that the cpu is overloaded. Drop the request.
                 warn!(
                     self.log,
-                    "Single block processing was ignored, cpu might be overloaded";
-                    "action" => "dropping single block request"
+                    "Lookup component processing ignored, cpu might be overloaded";
+                    "component" => ?R::response_type(),
                 );
                 Action::Drop
             }
@@ -492,7 +467,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 match e {
                     BlockError::BeaconChainError(e) => {
                         // Internal error
-                        error!(self.log, "Beacon chain error processing single block"; "block_root" => %block_root, "error" => ?e);
+                        error!(self.log, "Beacon chain error processing lookup component"; "block_root" => %block_root, "error" => ?e);
                         Action::Drop
                     }
                     BlockError::ParentUnknown(block) => {
@@ -532,7 +507,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                         Action::Drop
                     }
                     other => {
-                        debug!(self.log, "Invalid block in single block lookup"; "block_root" => %block_root, "error" => ?other);
+                        debug!(self.log, "Invalid lookup component"; "block_root" => %block_root, "component" => ?R::response_type(), "error" => ?other);
                         let peer_id = request_state.on_processing_failure()?;
                         // TODO: Why is the original code downscoring the block peer regardless of
                         // type of request? Sending a blob for verification can result in an error
@@ -540,7 +515,10 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                         cx.report_peer(
                             peer_id,
                             PeerAction::MidToleranceError,
-                            "single_block_processing_failure",
+                            match R::response_type() {
+                                ResponseType::Block => "lookup_block_processing_failure",
+                                ResponseType::Blob => "lookup_blobs_processing_failure",
+                            },
                         );
 
                         Action::Retry
@@ -552,10 +530,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         match action {
             Action::Retry => {
                 // Trigger download for all components in case `MissingComponents` failed the blob
-                // request.
-                // TODO: `continue_requests` must know when to not move a request forward:
-                // - If parent unknown do not request data?
-                // - If parent unknown error hold off for processing
+                // request. Also if blobs are `AwaitingProcessing` and need to be progressed
                 lookup.continue_requests(cx)?;
             }
             Action::ParentUnknown { parent_root } => {

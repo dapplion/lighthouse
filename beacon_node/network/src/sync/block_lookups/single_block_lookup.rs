@@ -131,10 +131,12 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             .state
             .peek_downloaded_data()
             .map(|block| block.num_expected_blobs());
+        let block_is_processed = self.block_request_state.state.is_processed();
         R::request_state_mut(self).continue_request(
             id,
             awaiting_parent,
             downloaded_block_expected_blobs,
+            block_is_processed,
             cx,
         )
     }
@@ -214,7 +216,7 @@ pub enum State<T: Clone> {
     Downloading,
     AwaitingProcess(DownloadResult<T>),
     Processing(DownloadResult<T>),
-    Processed { peer_id: PeerId },
+    Processed(PeerId),
 }
 
 /// Object representing the state of a single block or blob lookup request.
@@ -371,14 +373,29 @@ impl<T: Clone> SingleLookupRequestState<T> {
         }
     }
 
-    pub fn on_processing_success(&mut self) -> Result<(), LookupRequestError> {
+    pub fn on_processing_success(&mut self) -> Result<PeerId, LookupRequestError> {
         match &self.state {
             State::Processing(result) => {
-                self.state = State::Processed { peer_id: result.3 };
-                Ok(())
+                let peer_id = result.3;
+                self.state = State::Processed(peer_id);
+                Ok(peer_id)
             }
             other => Err(LookupRequestError::BadState(format!(
                 "Bad state on_processing_success expected Processing got {other}"
+            ))),
+        }
+    }
+
+    pub fn on_post_process_validation_failure(&mut self) -> Result<PeerId, LookupRequestError> {
+        match &self.state {
+            State::Processed(peer_id) => {
+                let peer_id = *peer_id;
+                self.failed_processing = self.failed_processing.saturating_add(1);
+                self.state = State::AwaitingDownload;
+                Ok(peer_id)
+            }
+            other => Err(LookupRequestError::BadState(format!(
+                "Bad state on_post_process_validation_failure expected Processed got {other}"
             ))),
         }
     }

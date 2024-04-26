@@ -151,6 +151,21 @@ pub enum BlockProcessType {
     SingleBlob { id: Id },
 }
 
+impl BlockProcessType {
+    pub fn component(&self) -> &'static str {
+        match self {
+            BlockProcessType::SingleBlock { .. } => "block",
+            BlockProcessType::SingleBlob { .. } => "blob",
+        }
+    }
+
+    pub fn id(&self) -> Id {
+        match self {
+            BlockProcessType::SingleBlock { id } | BlockProcessType::SingleBlob { id } => *id,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum BlockProcessingResult<E: EthSpec> {
     Ok(AvailabilityProcessingStatus),
@@ -261,7 +276,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
 
     #[cfg(test)]
     pub(crate) fn active_parent_lookups(&self) -> Vec<Vec<Hash256>> {
-        self.block_lookups.active_parent_lookups()
+        self.block_lookups
+            .active_parent_lookups()
+            .iter()
+            .map(|c| c.chain.clone())
+            .collect()
     }
 
     #[cfg(test)]
