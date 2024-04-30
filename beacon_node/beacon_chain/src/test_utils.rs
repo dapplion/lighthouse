@@ -1883,7 +1883,8 @@ where
                 NotifyExecutionLayer::Yes,
                 || Ok(()),
             )
-            .await?
+            .await
+            .map_err(|_| BlockError::BeaconChainError(todo!("placeholder")))?
             .try_into()
             .unwrap();
         self.chain.recompute_head_at_current_slot().await;
@@ -1909,7 +1910,8 @@ where
                 NotifyExecutionLayer::Yes,
                 || Ok(()),
             )
-            .await?
+            .await
+            .map_err(|_| BlockError::BeaconChainError(todo!("placeholder")))?
             .try_into()
             .expect("block blobs are available");
         self.chain.recompute_head_at_current_slot().await;

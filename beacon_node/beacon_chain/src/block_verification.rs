@@ -134,6 +134,92 @@ const MAXIMUM_BLOCK_SLOT_NUMBER: u64 = 4_294_967_296; // 2^32
 /// Only useful for testing.
 const WRITE_BLOCK_PROCESSING_SSZ: bool = cfg!(feature = "write_ssz_files");
 
+#[derive(Debug)]
+pub enum BlobProcessError {
+    BeaconChainError(BeaconChainError),
+    ImportError(BlockImportError),
+    AvailabilityCheckError(AvailabilityCheckError),
+    AlreadyImported(Hash256),
+}
+
+impl From<BeaconChainError> for BlobProcessError {
+    fn from(e: BeaconChainError) -> Self {
+        Self::BeaconChainError(e)
+    }
+}
+
+impl From<BlockImportError> for BlobProcessError {
+    fn from(e: BlockImportError) -> Self {
+        Self::ImportError(e)
+    }
+}
+
+impl From<AvailabilityCheckError> for BlobProcessError {
+    fn from(e: AvailabilityCheckError) -> Self {
+        Self::AvailabilityCheckError(e)
+    }
+}
+
+#[derive(Debug)]
+pub enum BlockProcessError<E: EthSpec> {
+    BlockError(BlockError<E>),
+    BeaconChainError(BeaconChainError),
+    ImportError(BlockImportError),
+    AvailabilityCheckError(AvailabilityCheckError),
+}
+
+impl<E: EthSpec> From<BlockError<E>> for BlockProcessError<E> {
+    fn from(e: BlockError<E>) -> Self {
+        match e {
+            BlockError::BeaconChainError(e) => Self::BeaconChainError(e),
+            e => Self::BlockError(e),
+        }
+    }
+}
+
+impl<E: EthSpec> From<BeaconChainError> for BlockProcessError<E> {
+    fn from(e: BeaconChainError) -> Self {
+        Self::BeaconChainError(e)
+    }
+}
+
+impl<E: EthSpec> From<BlockImportError> for BlockProcessError<E> {
+    fn from(e: BlockImportError) -> Self {
+        Self::ImportError(e)
+    }
+}
+
+impl<E: EthSpec> From<AvailabilityCheckError> for BlockProcessError<E> {
+    fn from(e: AvailabilityCheckError) -> Self {
+        Self::AvailabilityCheckError(e)
+    }
+}
+
+#[derive(Debug)]
+pub enum BlockImportError {
+    /// There was an error whilst processing the block. It is not necessarily invalid.
+    ///
+    /// ## Peer scoring
+    ///
+    /// We were unable to process this block due to an internal error. It's unclear if the block is
+    /// valid.
+    BeaconChainError(BeaconChainError),
+    /// There was an error whilst verifying weak subjectivity. This block conflicts with the
+    /// configured weak subjectivity checkpoint and was not imported.
+    ///
+    /// ## Peer scoring
+    ///
+    /// The block is invalid and the peer is faulty.
+    WeakSubjectivityConflict,
+    AvailabilityCheckError(AvailabilityCheckError),
+}
+
+impl From<BeaconChainError> for BlockImportError {
+    fn from(e: BeaconChainError) -> Self {
+        BlockImportError::BeaconChainError(e)
+    }
+}
+
 /// Returned when a block was not verified. A block is not verified for two reasons:
 ///
 /// - The block is malformed/invalid (indicated by all results other than `BeaconChainError`.

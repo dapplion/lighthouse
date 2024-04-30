@@ -8,7 +8,7 @@ use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::sync::block_lookups::common::LookupType;
 use crate::sync::block_lookups::parent_lookup::{ParentLookup, RequestError};
 use crate::sync::block_lookups::single_block_lookup::{CachedChild, LookupRequestError};
-use crate::sync::manager::{Id, SingleLookupReqId};
+use crate::sync::manager::{BlockComponentProcessError, Id, SingleLookupReqId};
 use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
 pub use beacon_chain::data_availability_checker::ChildComponents;
 use beacon_chain::data_availability_checker::{
@@ -718,7 +718,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn single_block_component_processed<R: RequestState<T>>(
         &mut self,
         target_id: Id,
-        result: BlockProcessingResult<T::EthSpec>,
+        result: BlockProcessingResult,
         cx: &mut SyncNetworkContext<T>,
     ) {
         let Some(mut lookup) = self.single_block_lookups.remove(&target_id) else {
@@ -747,7 +747,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
 
         let action = match result {
             BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(_))
-            | BlockProcessingResult::Err(BlockError::BlockIsAlreadyKnown { .. }) => {
+            | BlockProcessingResult::Err(BlockComponentProcessError::AlreadyImported { .. }) => {
                 // Successfully imported
                 trace!(self.log, "Single block processing succeeded"; "block" => %block_root);
                 Action::Drop
@@ -795,45 +795,22 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             }
             BlockProcessingResult::Err(e) => {
                 let root = lookup.block_root();
-                trace!(self.log, "Single block processing failed"; "block" => %root, "error" => %e);
+                trace!(self.log, "Single block processing failed"; "block" => %root, "error" => ?e);
                 match e {
-                    BlockError::BeaconChainError(e) => {
+                    BlockComponentProcessError::Internal(e) => {
                         // Internal error
-                        error!(self.log, "Beacon chain error processing single block"; "block_root" => %root, "error" => ?e);
+                        error!(self.log, "Lookup processing internal error"; "block_root" => %root, "error" => e);
                         Action::Drop
                     }
-                    BlockError::ParentUnknown(block) => {
-                        let slot = block.slot();
-                        let parent_root = block.parent_root();
-                        lookup.add_child_components(block.into());
-                        Action::ParentUnknown { parent_root, slot }
-                    }
-                    ref e @ BlockError::ExecutionPayloadError(ref epe) if !epe.penalize_peer() => {
-                        // These errors indicate that the execution layer is offline
-                        // and failed to validate the execution payload. Do not downscore peer.
-                        debug!(
-                            self.log,
-                            "Single block lookup failed. Execution layer is offline / unsynced / misconfigured";
-                            "root" => %root,
-                            "error" => ?e
-                        );
-                        Action::Drop
-                    }
-                    BlockError::AvailabilityCheck(e) => match e.category() {
-                        AvailabilityCheckErrorCategory::Internal => {
-                            warn!(self.log, "Internal availability check failure"; "root" => %root, "peer_id" => %peer_id, "error" => ?e);
-                            lookup.block_request_state.state.on_download_failure();
-                            lookup.blob_request_state.state.on_download_failure();
-                            Action::Retry
+                    BlockComponentProcessError::ParentUnknown(parent_root) => {
+                        Action::ParentUnknown {
+                            parent_root,
+                            // Wait for https://github.com/sigp/lighthouse/pull/5655
+                            slot: todo!(),
                         }
-                        AvailabilityCheckErrorCategory::Malicious => {
-                            warn!(self.log, "Availability check failure"; "root" => %root, "peer_id" => %peer_id, "error" => ?e);
-                            lookup.handle_availability_check_failure(cx);
-                            Action::Retry
-                        }
-                    },
-                    other => {
-                        warn!(self.log, "Peer sent invalid block in single block lookup"; "root" => %root, "error" => ?other, "peer_id" => %peer_id);
+                    }
+                    BlockComponentProcessError::Invalid(e) => {
+                        warn!(self.log, "Peer sent invalid block in single block lookup"; "root" => %root, "error" => ?e, "peer_id" => %peer_id);
                         if let Ok(block_peer) = lookup.block_request_state.state.processing_peer() {
                             cx.report_peer(
                                 block_peer,
@@ -878,7 +855,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn parent_block_processed(
         &mut self,
         chain_hash: Hash256,
-        result: BlockProcessingResult<T::EthSpec>,
+        result: BlockProcessingResult,
         cx: &mut SyncNetworkContext<T>,
     ) {
         let index = self
