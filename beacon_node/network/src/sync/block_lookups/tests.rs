@@ -703,11 +703,10 @@ impl TestRig {
 fn stable_rng() {
     let mut rng = XorShiftRng::from_seed([42; 16]);
     let (block, _) = generate_rand_block_and_blobs::<E>(ForkName::Base, NumBlobs::None, &mut rng);
-    // TODO: Make rand block generation stable
-    assert_ne!(
+    assert_eq!(
         block.canonical_root(),
         Hash256::from_slice(
-            &hex::decode("9cfcfc321759d8a2c38d6541a966da5e88fe8729ed5a5ab37013781ff097b0d6")
+            &hex::decode("adfd2e9e7a7976e8ccaed6eaf0257ed36a5b476732fee63ff44966602fd099ec")
                 .unwrap()
         ),
         "rng produces a consistent value"
