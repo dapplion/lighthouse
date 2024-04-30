@@ -48,7 +48,8 @@ use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_availability_checker::ChildComponents;
 use beacon_chain::{
-    AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes, BlockError, EngineState,
+    AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes, BlobProcessError, BlockError,
+    BlockProcessError, EngineState,
 };
 use futures::StreamExt;
 use lighthouse_network::rpc::RPCError;
@@ -144,7 +145,7 @@ pub enum SyncMessage<E: EthSpec> {
     /// Block processed
     BlockComponentProcessed {
         process_type: BlockProcessType,
-        result: BlockProcessingResult<E>,
+        result: BlockProcessingResult,
     },
 }
 
@@ -157,10 +158,19 @@ pub enum BlockProcessType {
 }
 
 #[derive(Debug)]
-pub enum BlockProcessingResult<E: EthSpec> {
+pub enum BlockProcessingResult {
     Ok(AvailabilityProcessingStatus),
-    Err(BlockError<E>),
+    Err(BlockComponentProcessError),
     Ignored,
+}
+
+#[derive(Debug)]
+pub enum BlockComponentProcessError {
+    ParentUnknown(Hash256),
+    AlreadyImported(Hash256),
+    // TODO: Not okay, errors should only be serialized if debug logs are enabled
+    Internal(String),
+    Invalid(String),
 }
 
 /// The result of processing multiple blocks (a chain segment).
@@ -1029,19 +1039,35 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 }
 
-impl<E: EthSpec> From<Result<AvailabilityProcessingStatus, BlockError<E>>>
-    for BlockProcessingResult<E>
+impl<T: Into<BlockComponentProcessError>> From<Result<AvailabilityProcessingStatus, T>>
+    for BlockProcessingResult
 {
-    fn from(result: Result<AvailabilityProcessingStatus, BlockError<E>>) -> Self {
+    fn from(result: Result<AvailabilityProcessingStatus, T>) -> Self {
         match result {
             Ok(status) => BlockProcessingResult::Ok(status),
-            Err(e) => BlockProcessingResult::Err(e),
+            Err(e) => BlockProcessingResult::Err(e.into()),
         }
     }
 }
 
-impl<E: EthSpec> From<BlockError<E>> for BlockProcessingResult<E> {
-    fn from(e: BlockError<E>) -> Self {
-        BlockProcessingResult::Err(e)
+impl<E: EthSpec> From<BlockProcessError<E>> for BlockComponentProcessError {
+    fn from(value: BlockProcessError<E>) -> Self {
+        match value {
+            BlockProcessError::BlockError(_) => todo!(),
+            BlockProcessError::BeaconChainError(_) => todo!(),
+            BlockProcessError::ImportError(_) => todo!(),
+            BlockProcessError::AvailabilityCheckError(_) => todo!(),
+        }
+    }
+}
+
+impl From<BlobProcessError> for BlockComponentProcessError {
+    fn from(value: BlobProcessError) -> Self {
+        match value {
+            BlobProcessError::BeaconChainError(_) => todo!(),
+            BlobProcessError::ImportError(_) => todo!(),
+            BlobProcessError::AvailabilityCheckError(_) => todo!(),
+            BlobProcessError::AlreadyImported(_) => todo!(),
+        }
     }
 }

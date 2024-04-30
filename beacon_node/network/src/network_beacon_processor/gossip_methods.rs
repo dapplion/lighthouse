@@ -4,7 +4,6 @@ use crate::{
     service::NetworkMessage,
     sync::SyncMessage,
 };
-use beacon_chain::blob_verification::{GossipBlobError, GossipVerifiedBlob};
 use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::store::Error;
 use beacon_chain::{
@@ -17,6 +16,10 @@ use beacon_chain::{
     validator_monitor::{get_block_delay_ms, get_slot_delay_ms},
     AvailabilityProcessingStatus, BeaconChainError, BeaconChainTypes, BlockError, ForkChoiceError,
     GossipVerifiedBlock, NotifyExecutionLayer,
+};
+use beacon_chain::{
+    blob_verification::{GossipBlobError, GossipVerifiedBlob},
+    BlockProcessError,
 };
 use lighthouse_network::{Client, MessageAcceptance, MessageId, PeerAction, PeerId, ReportSource};
 use operation_pool::ReceivedPreCapella;
@@ -778,14 +781,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     "block_root" => %block_root,
                 );
             }
-            Err(BlockError::BlockIsAlreadyKnown(_)) => {
-                debug!(
-                    self.log,
-                    "Ignoring gossip blob already imported";
-                    "block_root" => ?block_root,
-                    "blob_index" =>  blob_index,
-                );
-            }
+            // No case for BlockIsAlreadyKnown
             Err(err) => {
                 debug!(
                     self.log,
@@ -1187,7 +1183,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     "block_root" => %block_root,
                 );
             }
-            Err(BlockError::ParentUnknown(block)) => {
+            Err(BlockProcessError::BlockError(BlockError::ParentUnknown(block))) => {
                 // Inform the sync manager to find parents for this block
                 // This should not occur. It should be checked by `should_forward_block`
                 error!(
@@ -1201,14 +1197,16 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     block_root,
                 ));
             }
-            Err(ref e @ BlockError::ExecutionPayloadError(ref epe)) if !epe.penalize_peer() => {
+            Err(BlockProcessError::BlockError(
+                ref e @ BlockError::ExecutionPayloadError(ref epe),
+            )) if !epe.penalize_peer() => {
                 debug!(
                     self.log,
                     "Failed to verify execution payload";
-                    "error" => %e
+                    "error" => ?e
                 );
             }
-            Err(BlockError::AvailabilityCheck(err)) => {
+            Err(BlockProcessError::BlockError(BlockError::AvailabilityCheck(err))) => {
                 match err.category() {
                     AvailabilityCheckErrorCategory::Internal => {
                         warn!(
@@ -2764,7 +2762,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         invalid_block_storage: &InvalidBlockStorage,
         block_root: Hash256,
         block: &SignedBeaconBlock<T::EthSpec>,
-        error: &BlockError<T::EthSpec>,
+        error: &BlockProcessError<T::EthSpec>,
         log: &Logger,
     ) {
         if let InvalidBlockStorage::Enabled(base_dir) = invalid_block_storage {
@@ -2812,7 +2810,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             };
 
             write_file(block_path, &block.as_ssz_bytes());
-            write_file(error_path, error.to_string().as_bytes());
+            write_file(error_path, todo!()); // impl to_string
         }
     }
 }

@@ -249,7 +249,7 @@ impl TestRig {
         )
     }
 
-    fn parent_block_processed(&mut self, chain_hash: Hash256, result: BlockProcessingResult<E>) {
+    fn parent_block_processed(&mut self, chain_hash: Hash256, result: BlockProcessingResult) {
         self.send_sync_message(SyncMessage::BlockComponentProcessed {
             process_type: BlockProcessType::ParentLookup { chain_hash },
             result,
@@ -266,7 +266,7 @@ impl TestRig {
     fn single_block_component_processed(
         &mut self,
         id: SingleLookupReqId,
-        result: BlockProcessingResult<E>,
+        result: BlockProcessingResult,
     ) {
         self.send_sync_message(SyncMessage::BlockComponentProcessed {
             process_type: BlockProcessType::SingleBlock { id: id.id },
@@ -288,7 +288,7 @@ impl TestRig {
     fn single_blob_component_processed(
         &mut self,
         id: SingleLookupReqId,
-        result: BlockProcessingResult<E>,
+        result: BlockProcessingResult,
     ) {
         self.send_sync_message(SyncMessage::BlockComponentProcessed {
             process_type: BlockProcessType::SingleBlob { id: id.id },
