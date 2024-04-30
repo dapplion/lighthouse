@@ -55,8 +55,6 @@ pub trait RequestState<T: BeaconChainTypes> {
         // Attempt to progress awaiting downloads
         if self.get_state().is_awaiting_download() {
             // Verify the current request has not exceeded the maximum number of attempts.
-            // TODO: Okay to use `SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS` for both current and parent
-            // lookups now? It not trivial to identify what is a "parent lookup" now.
             let request_state = self.get_state();
             if request_state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
                 let cannot_process = request_state.more_failed_processing_attempts();
@@ -76,11 +74,8 @@ pub trait RequestState<T: BeaconChainTypes> {
         // Otherwise, attempt to progress awaiting processing
         // If this request is awaiting a parent lookup to be processed, do not send for processing.
         // The request will be rejected with unknown parent error.
-        } else if !awaiting_parent &&
-            // TODO: Blob processing / import does not check for unknown parent. As a temporary fix
-            // and to emulate the behaviour before this PR, hold blobs for processing until the
-            // block has been processed i.e. it has a known parent.
-             (block_is_processed || matches!(Self::response_type(), ResponseType::Block))
+        } else if !awaiting_parent
+            && (block_is_processed || matches!(Self::response_type(), ResponseType::Block))
         {
             // maybe_start_processing returns Some if state == AwaitingProcess. This pattern is
             // useful to conditionally access the result data.
