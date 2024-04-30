@@ -1237,13 +1237,6 @@ fn test_same_chain_race_condition() {
     rig.expect_no_active_lookups();
 }
 
-#[test]
-fn test_penalize_wrong_peer_with_cached_child() {
-    // peer A sends blob with malicious data as unknown parent
-    // peer B serves parent and rest of blocks
-    // All components are sent as RpcBlock, penalizing peer B
-}
-
 mod deneb_only {
     use super::*;
     use beacon_chain::{
@@ -1392,7 +1385,6 @@ mod deneb_only {
             self
         }
 
-        // TODO: Eventually deprecate this function
         fn set_block_id_for_import(mut self) -> Self {
             let lookup_id = self.rig.find_single_lookup_for(self.block_root);
             self.block_req_id = Some(SingleLookupReqId {
