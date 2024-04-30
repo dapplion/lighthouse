@@ -1173,7 +1173,7 @@ fn test_parent_lookup_ignored_response() {
     rig.trigger_unknown_parent_block(peer_id, block.clone().into());
     let id = rig.expect_parent_request_block_and_blobs(parent_root);
     // Note: single block lookup for current `block` does not trigger any request because it does
-    // not has blobs, and the block is already cached
+    // not have blobs, and the block is already cached
 
     // Peer sends the right block, it should be sent for processing. Peer should not be penalized.
     rig.parent_lookup_block_response(id, peer_id, Some(parent.into()));
