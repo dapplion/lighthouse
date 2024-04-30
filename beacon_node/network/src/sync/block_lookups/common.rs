@@ -141,12 +141,18 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
 
     fn send_for_processing(
         id: SingleLookupId,
-        (block, block_root, seen_timestamp, _): DownloadResult<Self::VerifiedResponseType>,
+        download_result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
+        let DownloadResult {
+            value,
+            block_root,
+            seen_timestamp,
+            peer_id: _,
+        } = download_result;
         cx.send_block_for_processing(
             block_root,
-            RpcBlock::new_without_blobs(Some(block_root), block),
+            RpcBlock::new_without_blobs(Some(block_root), value),
             seen_timestamp,
             BlockProcessType::SingleBlock { id },
         )
@@ -189,12 +195,18 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
 
     fn send_for_processing(
         id: Id,
-        (verified, block_root, seen_timestamp, _): DownloadResult<Self::VerifiedResponseType>,
+        download_result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
+        let DownloadResult {
+            value,
+            block_root,
+            seen_timestamp,
+            peer_id: _,
+        } = download_result;
         cx.send_blobs_for_processing(
             block_root,
-            verified,
+            value,
             seen_timestamp,
             BlockProcessType::SingleBlob { id },
         )

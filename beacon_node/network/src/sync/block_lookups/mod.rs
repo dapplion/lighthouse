@@ -1,5 +1,6 @@
 use self::parent_chain::{compute_parent_chains, NodeChain};
-use self::single_block_lookup::{DownloadResult, LookupRequestError, SingleBlockLookup};
+pub use self::single_block_lookup::DownloadResult;
+use self::single_block_lookup::{LookupRequestError, SingleBlockLookup};
 use super::manager::{BlockProcessType, BlockProcessingResult};
 use super::network_context::{RpcProcessingResult, SyncNetworkContext};
 use crate::metrics;
@@ -38,8 +39,8 @@ pub enum BlockComponent<E: EthSpec> {
 impl<E: EthSpec> BlockComponent<E> {
     fn parent_root(&self) -> Hash256 {
         match self {
-            BlockComponent::Block(block) => block.0.parent_root(),
-            BlockComponent::Blob(blob) => blob.0.block_parent_root(),
+            BlockComponent::Block(block) => block.value.parent_root(),
+            BlockComponent::Blob(blob) => blob.value.block_parent_root(),
         }
     }
 }
@@ -333,12 +334,12 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 // Register the download peer here. Once we have received some data over the wire we
                 // attribute it to this peer for scoring latter regardless of how the request was
                 // done.
-                request_state.on_download_success((
-                    response,
+                request_state.on_download_success(DownloadResult {
+                    value: response,
                     block_root,
                     seen_timestamp,
                     peer_id,
-                ))?;
+                })?;
                 // continue_request will send for  processing as the request state is AwaitingProcessing
                 lookup.continue_request::<R>(cx)
             }
