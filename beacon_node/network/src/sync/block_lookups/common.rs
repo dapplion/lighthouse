@@ -28,6 +28,16 @@ pub enum ResponseType {
 /// is further back than the most recent head slot.
 pub(crate) const PARENT_DEPTH_TOLERANCE: usize = SLOT_IMPORT_TOLERANCE * 2;
 
+pub enum AwaitingParent {
+    True,
+    False,
+}
+
+pub enum BlockIsProcessed {
+    True,
+    False,
+}
+
 /// This trait unifies common single block lookup functionality across blocks and blobs. This
 /// includes making requests, verifying responses, and handling processing results. A
 /// `SingleBlockLookup` includes both a `BlockRequestState` and a `BlobRequestState`, this trait is
@@ -47,9 +57,9 @@ pub trait RequestState<T: BeaconChainTypes> {
     fn continue_request(
         &mut self,
         id: Id,
-        awaiting_parent: bool,
+        awaiting_parent: AwaitingParent,
         downloaded_block_expected_blobs: Option<usize>,
-        block_is_processed: bool,
+        block_is_processed: BlockIsProcessed,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
         // Attempt to progress awaiting downloads
@@ -74,8 +84,9 @@ pub trait RequestState<T: BeaconChainTypes> {
         // Otherwise, attempt to progress awaiting processing
         // If this request is awaiting a parent lookup to be processed, do not send for processing.
         // The request will be rejected with unknown parent error.
-        } else if !awaiting_parent
-            && (block_is_processed || matches!(Self::response_type(), ResponseType::Block))
+        } else if matches!(awaiting_parent, AwaitingParent::False)
+            && (matches!(block_is_processed, BlockIsProcessed::True)
+                || matches!(Self::response_type(), ResponseType::Block))
         {
             // maybe_start_processing returns Some if state == AwaitingProcess. This pattern is
             // useful to conditionally access the result data.

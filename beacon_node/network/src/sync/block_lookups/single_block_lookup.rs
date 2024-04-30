@@ -1,3 +1,4 @@
+use super::common::{AwaitingParent, BlockIsProcessed};
 use super::{BlockComponent, PeerId};
 use crate::sync::block_lookups::common::RequestState;
 use crate::sync::block_lookups::Id;
@@ -125,13 +126,21 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
         let id = self.id;
-        let awaiting_parent = self.awaiting_parent.is_some();
+        let awaiting_parent = if self.awaiting_parent.is_some() {
+            AwaitingParent::True
+        } else {
+            AwaitingParent::False
+        };
         let downloaded_block_expected_blobs = self
             .block_request_state
             .state
             .peek_downloaded_data()
             .map(|block| block.num_expected_blobs());
-        let block_is_processed = self.block_request_state.state.is_processed();
+        let block_is_processed = if self.block_request_state.state.is_processed() {
+            BlockIsProcessed::True
+        } else {
+            BlockIsProcessed::False
+        };
         R::request_state_mut(self).continue_request(
             id,
             awaiting_parent,
