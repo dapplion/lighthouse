@@ -12,7 +12,7 @@ use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::BeaconChainTypes;
 use std::sync::Arc;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::{Hash256, SignedBeaconBlock};
+use types::SignedBeaconBlock;
 
 use super::single_block_lookup::DownloadResult;
 use super::SingleLookupId;
@@ -98,10 +98,6 @@ pub trait RequestState<T: BeaconChainTypes> {
 
     /* Response handling methods */
 
-    /// A getter for the parent root of the response. Returns an `Option` because we won't know
-    /// the blob parent if we don't end up getting any blobs in the response.
-    fn get_parent_root(verified_response: &Self::VerifiedResponseType) -> Option<Hash256>;
-
     /// Send the response to the beacon processor.
     fn send_for_processing(
         id: Id,
@@ -141,10 +137,6 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
             BlocksByRootSingleRequest(self.requested_block_root),
         )
         .map_err(LookupRequestError::SendFailed)
-    }
-
-    fn get_parent_root(verified_response: &Arc<SignedBeaconBlock<T::EthSpec>>) -> Option<Hash256> {
-        Some(verified_response.parent_root())
     }
 
     fn send_for_processing(
@@ -193,14 +185,6 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
             downloaded_block_expected_blobs,
         )
         .map_err(LookupRequestError::SendFailed)
-    }
-
-    fn get_parent_root(verified_response: &FixedBlobSidecarList<T::EthSpec>) -> Option<Hash256> {
-        verified_response
-            .into_iter()
-            .filter_map(|blob| blob.as_ref())
-            .map(|blob| blob.block_parent_root())
-            .next()
     }
 
     fn send_for_processing(
