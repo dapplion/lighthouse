@@ -179,12 +179,12 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 }
 
 /// The state of the blob request component of a `SingleBlockLookup`.
-pub struct BlobRequestState<E: EthSpec> {
+pub struct BlobRequestState {
     pub block_root: Hash256,
     pub state: SingleLookupRequestState<FixedBlobSidecarList<E>>,
 }
 
-impl<E: EthSpec> BlobRequestState<E> {
+impl BlobRequestState {
     pub fn new(block_root: Hash256, peer_source: &[PeerId]) -> Self {
         Self {
             block_root,

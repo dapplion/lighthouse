@@ -853,7 +853,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     ) {
         if let Some(resp) = self.network.on_single_blob_response(id, blob) {
             self.block_lookups
-                .on_download_response::<BlobRequestState<T::EthSpec>>(
+                .on_download_response::<BlobRequestState>(
                     id.lookup_id,
                     peer_id,
                     resp,
