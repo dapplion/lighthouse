@@ -283,15 +283,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn active_parent_lookups(&self) -> Vec<Vec<Hash256>> {
-        self.block_lookups
-            .active_parent_lookups()
-            .iter()
-            .map(|c| c.chain.clone())
-            .collect()
-    }
-
-    #[cfg(test)]
     pub(crate) fn get_failed_chains(&mut self) -> Vec<Hash256> {
         self.block_lookups.get_failed_chains()
     }

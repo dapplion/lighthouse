@@ -1,4 +1,4 @@
-use super::common::{AwaitingParent, BlockIsProcessed};
+use super::common::AwaitingParent;
 use super::{BlockComponent, PeerId};
 use crate::sync::block_lookups::common::RequestState;
 use crate::sync::block_lookups::Id;
@@ -162,27 +162,19 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             .state
             .peek_downloaded_data()
             .map(|block| block.num_expected_blobs());
-        let block_is_processed = self.block_request_state.state.is_processed();
         R::request_state_mut(self).continue_request(
             id,
             AwaitingParent(awaiting_parent),
             downloaded_block_expected_blobs,
-            BlockIsProcessed(block_is_processed),
             cx,
         )
     }
 
-    /// Add all given peers to both block and blob request states.
-    pub fn add_peer(&mut self, peer_id: PeerId) {
-        self.block_request_state.state.add_peer(&peer_id);
-        self.blob_request_state.state.add_peer(&peer_id);
-    }
-
-    /// Add all given peers to both block and blob request states.
-    pub fn add_peers(&mut self, peers: &[PeerId]) {
-        for peer in peers {
-            self.add_peer(*peer);
-        }
+    /// Add all given peers to both block and blob request states. Returns true if the peer is
+    /// newly inserted into some request
+    pub fn add_peer(&mut self, peer_id: PeerId) -> bool {
+        self.block_request_state.state.add_peer(peer_id)
+            || self.blob_request_state.state.add_peer(peer_id)
     }
 
     /// Returns true if the block has already been downloaded.
@@ -464,9 +456,9 @@ impl<T: Clone> SingleLookupRequestState<T> {
         self.failed_processing >= self.failed_downloading
     }
 
-    /// This method should be used for peers wrapped in `PeerId::BlockAndBlobs`.
-    pub fn add_peer(&mut self, peer_id: &PeerId) {
-        self.available_peers.insert(*peer_id);
+    /// Adds a peer to available peers. Returns true if the peer was newly inserted.
+    pub fn add_peer(&mut self, peer_id: PeerId) -> bool {
+        self.available_peers.insert(peer_id)
     }
 
     /// If a peer disconnects, this request could be failed. If so, an error is returned
