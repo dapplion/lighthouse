@@ -28,8 +28,6 @@ pub(crate) const PARENT_DEPTH_TOLERANCE: usize = SLOT_IMPORT_TOLERANCE * 2;
 
 /// Wrapper around bool to prevent mixing this argument with `BlockIsProcessed`
 pub(crate) struct AwaitingParent(pub bool);
-/// Wrapper around bool to prevent mixing this argument with `AwaitingParent`
-pub(crate) struct BlockIsProcessed(pub bool);
 
 /// This trait unifies common single block lookup functionality across blocks and blobs. This
 /// includes making requests, verifying responses, and handling processing results. A
@@ -49,9 +47,13 @@ pub trait RequestState<T: BeaconChainTypes> {
         id: Id,
         awaiting_parent: AwaitingParent,
         downloaded_block_expected_blobs: Option<usize>,
-        block_is_processed: BlockIsProcessed,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
+        // Only progress block request if awaiting parent
+        if awaiting_parent.0 && matches!(Self::response_type(), ResponseType::Block) {
+            return Ok(());
+        }
+
         // Attempt to progress awaiting downloads
         if self.get_state().is_awaiting_download() {
             // Verify the current request has not exceeded the maximum number of attempts.
@@ -61,29 +63,25 @@ pub trait RequestState<T: BeaconChainTypes> {
                 return Err(LookupRequestError::TooManyAttempts { cannot_process });
             }
 
-            let peer_id = self
-                .get_state_mut()
-                .use_rand_available_peer()
-                .ok_or(LookupRequestError::NoPeers)?;
-
-            // make_request returns true only if a request needs to be made
-            if self.make_request(id, peer_id, downloaded_block_expected_blobs, cx)? {
-                self.get_state_mut().on_download_start()?;
+            if let Some(peer_id) = self.get_state_mut().use_rand_available_peer() {
+                // make_request returns true only if a request needs to be made
+                if self.make_request(id, peer_id, downloaded_block_expected_blobs, cx)? {
+                    self.get_state_mut().on_download_start()?;
+                } else {
+                    self.get_state_mut().on_completed_request()?;
+                }
             } else {
-                self.get_state_mut().on_completed_request()?;
+                if !awaiting_parent.0 {
+                    return Err(LookupRequestError::NoPeers);
+                }
             }
+        }
 
         // Otherwise, attempt to progress awaiting processing
-        // If this request is awaiting a parent lookup to be processed, do not send for processing.
-        // The request will be rejected with unknown parent error.
-        } else if !awaiting_parent.0
-            && (block_is_processed.0 || matches!(Self::response_type(), ResponseType::Block))
-        {
-            // maybe_start_processing returns Some if state == AwaitingProcess. This pattern is
-            // useful to conditionally access the result data.
-            if let Some(result) = self.get_state_mut().maybe_start_processing() {
-                return Self::send_for_processing(id, result, cx);
-            }
+        // maybe_start_processing returns Some if state == AwaitingProcess. This pattern is
+        // useful to conditionally access the result data.
+        if let Some(result) = self.get_state_mut().maybe_start_processing() {
+            return Self::send_for_processing(id, result, cx);
         }
 
         Ok(())

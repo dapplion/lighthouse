@@ -194,6 +194,27 @@ impl TestRig {
         (parent, block, parent_root, block_root)
     }
 
+    pub fn rand_block_with_blobs_and_parent(
+        &mut self,
+        num_blobs: NumBlobs,
+    ) -> (
+        SignedBeaconBlock<E>,
+        SignedBeaconBlock<E>,
+        Vec<BlobSidecar<E>>,
+        Hash256,
+        Hash256,
+    ) {
+        let parent = self.rand_block();
+        let parent_root = parent.canonical_root();
+        let (mut block, mut blobs) = self.rand_block_and_blobs(num_blobs);
+        *block.message_mut().parent_root_mut() = parent_root;
+        for blob in blobs.iter_mut() {
+            blob.signed_block_header.message.parent_root = parent_root;
+        }
+        let block_root = block.canonical_root();
+        (parent, block, blobs, parent_root, block_root)
+    }
+
     fn send_sync_message(&mut self, sync_message: SyncMessage<E>) {
         self.sync_manager.handle_message(sync_message);
     }
@@ -206,14 +227,6 @@ impl TestRig {
         self.sync_manager.active_single_lookups().len()
     }
 
-    fn active_parent_lookups(&self) -> Vec<Vec<Hash256>> {
-        self.sync_manager.active_parent_lookups()
-    }
-
-    fn active_parent_lookups_count(&self) -> usize {
-        self.sync_manager.active_parent_lookups().len()
-    }
-
     fn assert_single_lookups_count(&self, count: usize) {
         assert_eq!(
             self.active_single_lookups_count(),
@@ -223,20 +236,17 @@ impl TestRig {
         );
     }
 
-    fn assert_parent_lookups_count(&self, count: usize) {
-        assert_eq!(
-            self.active_parent_lookups_count(),
-            count,
-            "Unexpected count of parent lookups. Parent lookups: {:?}. Current lookups: {:?}",
-            self.active_parent_lookups(),
-            self.active_single_lookups()
-        );
-    }
-
     fn assert_lookup_is_active(&self, block_root: Hash256) {
         let lookups = self.sync_manager.active_single_lookups();
         if !lookups.iter().any(|l| l.1 == block_root) {
-            panic!("Expected lookup {block_root} to be the only active: {lookups:?}");
+            panic!("Expected lookup {block_root} to be active: {lookups:?}");
+        }
+    }
+
+    fn assert_lookup_is_not_active(&self, block_root: Hash256) {
+        let lookups = self.sync_manager.active_single_lookups();
+        if lookups.iter().any(|l| l.1 == block_root) {
+            panic!("Expected lookup {block_root} to be not active: {lookups:?}");
         }
     }
 
@@ -293,50 +303,21 @@ impl TestRig {
         peer_id
     }
 
-    fn parent_chain_processed_success(
-        &mut self,
-        chain_hash: Hash256,
-        blocks: &[Arc<SignedBeaconBlock<E>>],
-    ) {
-        // Send import events for all pending parent blocks
-        for _ in blocks {
-            self.parent_block_processed_imported(chain_hash);
-        }
-        // Send final import event for the block that triggered the lookup
-        self.single_block_component_processed_imported(chain_hash);
+    fn lookup_block_processed_imported(&mut self, block_root: Hash256) {
+        self.lookup_block_processed(
+            block_root,
+            BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(block_root)),
+        );
     }
 
-    /// Locate a parent lookup chain with tip hash `chain_hash`
-    fn find_oldest_parent_lookup(&self, chain_hash: Hash256) -> Hash256 {
-        let parent_chain = self
-            .active_parent_lookups()
-            .into_iter()
-            .find(|chain| chain.first() == Some(&chain_hash))
-            .unwrap_or_else(|| {
-                panic!(
-                    "No parent chain with chain_hash {chain_hash:?}: Parent lookups {:?} Single lookups {:?}",
-                    self.active_parent_lookups(),
-                    self.active_single_lookups(),
-                )
-            });
-        *parent_chain.last().unwrap()
-    }
-
-    fn parent_block_processed(&mut self, chain_hash: Hash256, result: BlockProcessingResult<E>) {
-        let id = self.find_single_lookup_for(self.find_oldest_parent_lookup(chain_hash));
+    fn lookup_block_processed(&mut self, block_root: Hash256, result: BlockProcessingResult<E>) {
+        let id = self.find_single_lookup_for(block_root);
         self.single_block_component_processed(id, result);
     }
 
-    fn parent_blob_processed(&mut self, chain_hash: Hash256, result: BlockProcessingResult<E>) {
-        let id = self.find_single_lookup_for(self.find_oldest_parent_lookup(chain_hash));
+    fn lookup_blob_processed(&mut self, block_root: Hash256, result: BlockProcessingResult<E>) {
+        let id = self.find_single_lookup_for(block_root);
         self.single_blob_component_processed(id, result);
-    }
-
-    fn parent_block_processed_imported(&mut self, chain_hash: Hash256) {
-        self.parent_block_processed(
-            chain_hash,
-            BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(chain_hash)),
-        );
     }
 
     fn single_block_component_processed(&mut self, id: Id, result: BlockProcessingResult<E>) {
@@ -828,7 +809,6 @@ fn test_single_block_lookup_becomes_parent_request() {
     assert_eq!(rig.active_single_lookups_count(), 2); // 2 = current + parent
     rig.expect_parent_request_block_and_blobs(parent_root);
     rig.expect_empty_network();
-    assert_eq!(rig.active_parent_lookups_count(), 1);
 }
 
 #[test]
@@ -848,12 +828,12 @@ fn test_parent_lookup_happy_path() {
     rig.expect_empty_network();
 
     // Processing succeeds, now the rest of the chain should be sent for processing.
-    rig.parent_block_processed(
-        block_root,
-        BlockError::BlockIsAlreadyKnown(block_root).into(),
+    rig.lookup_block_processed(
+        parent_root,
+        BlockError::BlockIsAlreadyKnown(parent_root).into(),
     );
-    rig.expect_parent_chain_process();
-    rig.parent_chain_processed_success(block_root, &[]);
+    rig.expect_block_process(ResponseType::Block);
+    rig.lookup_block_processed_imported(block_root);
     rig.expect_no_active_lookups();
 }
 
@@ -883,9 +863,9 @@ fn test_parent_lookup_wrong_response() {
     rig.expect_block_process(ResponseType::Block);
 
     // Processing succeeds, now the rest of the chain should be sent for processing.
-    rig.parent_block_processed_imported(block_root);
-    rig.expect_parent_chain_process();
-    rig.parent_chain_processed_success(block_root, &[]);
+    rig.lookup_block_processed_imported(parent_root);
+    rig.expect_block_process(ResponseType::Block);
+    rig.lookup_block_processed_imported(block_root);
     rig.expect_no_active_lookups();
 }
 
@@ -910,9 +890,9 @@ fn test_parent_lookup_empty_response() {
     rig.expect_block_process(ResponseType::Block);
 
     // Processing succeeds, now the rest of the chain should be sent for processing.
-    rig.parent_block_processed_imported(block_root);
-
-    rig.single_block_component_processed_imported(block_root);
+    rig.lookup_block_processed_imported(parent_root);
+    rig.expect_block_process(ResponseType::Block);
+    rig.lookup_block_processed_imported(block_root);
     rig.expect_no_active_lookups();
 }
 
@@ -936,9 +916,9 @@ fn test_parent_lookup_rpc_failure() {
     rig.expect_block_process(ResponseType::Block);
 
     // Processing succeeds, now the rest of the chain should be sent for processing.
-    rig.parent_block_processed_imported(block_root);
-    rig.expect_parent_chain_process();
-    rig.parent_chain_processed_success(block_root, &[]);
+    rig.lookup_block_processed_imported(parent_root);
+    rig.expect_block_process(ResponseType::Block);
+    rig.lookup_block_processed_imported(block_root);
     rig.expect_no_active_lookups();
 }
 
@@ -1044,7 +1024,7 @@ fn test_parent_lookup_too_many_processing_attempts_must_blacklist() {
         rig.assert_not_failed_chain(block_root);
         // send the right parent but fail processing
         rig.parent_lookup_block_response(id, peer_id, Some(parent.clone().into()));
-        rig.parent_block_processed(block_root, BlockError::InvalidSignature.into());
+        rig.lookup_block_processed(parent_root, BlockError::InvalidSignature.into());
         rig.parent_lookup_block_response(id, peer_id, None);
         rig.expect_penalty(peer_id, "lookup_block_processing_failure");
     }
@@ -1064,7 +1044,8 @@ fn test_parent_lookup_too_deep() {
     rig.trigger_unknown_parent_block(peer_id, trigger_block);
 
     for block in blocks.into_iter().rev() {
-        let id = rig.expect_parent_request_block_and_blobs(block.canonical_root());
+        let block_root = block.canonical_root();
+        let id = rig.expect_parent_request_block_and_blobs(block_root);
         // the block
         rig.parent_lookup_block_response(id, peer_id, Some(block.clone()));
         // the stream termination
@@ -1072,14 +1053,32 @@ fn test_parent_lookup_too_deep() {
         // the processing request
         rig.expect_block_process(ResponseType::Block);
         // the processing result
-        rig.parent_block_processed(
-            chain_hash,
+        rig.lookup_block_processed(
+            block_root,
             BlockError::ParentUnknown(RpcBlock::new_without_blobs(None, block)).into(),
         )
     }
 
     rig.expect_penalty(peer_id, "chain_too_long");
     assert!(rig.failed_chains_contains(&chain_hash));
+}
+
+#[test]
+fn test_dont_penalize_unknown_parent_event_no_response() {
+    let mut rig = TestRig::test_setup();
+    let peer_id = rig.new_connected_peer();
+    // Create parent -> block with blobs
+    let (_, _, mut blobs, parent_root, block_root) =
+        rig.rand_block_with_blobs_and_parent(NumBlobs::Number(1));
+    let blob = blobs.remove(0);
+    // Ensure there's a lookup for current and parent
+    rig.trigger_unknown_parent_blob(peer_id, blob);
+    rig.assert_lookup_is_active(parent_root);
+    rig.assert_lookup_is_active(block_root);
+    // Peer does not have the block yet
+    let id = rig.expect_block_lookup_request(block_root);
+    rig.single_lookup_block_response(id, peer_id, None);
+    rig.expect_no_penalty_for(peer_id);
 }
 
 #[test]
@@ -1104,7 +1103,7 @@ fn test_parent_lookup_disconnection_peer_left() {
     }
     // Disconnect the first peer only, which is the one handling the request
     rig.peer_disconnected(*peer_ids.first().unwrap());
-    rig.assert_parent_lookups_count(1);
+    rig.assert_lookup_is_active(trigger_block.canonical_root());
 }
 
 #[test]
@@ -1166,7 +1165,7 @@ fn test_single_block_lookup_ignored_response() {
 fn test_parent_lookup_ignored_response() {
     let mut rig = TestRig::test_setup();
 
-    let (parent, block, parent_root, block_root) = rig.rand_block_and_parent();
+    let (parent, block, parent_root, _) = rig.rand_block_and_parent();
     let peer_id = rig.new_connected_peer();
 
     // Trigger the request
@@ -1181,7 +1180,7 @@ fn test_parent_lookup_ignored_response() {
     rig.expect_empty_network();
 
     // Return an Ignored result. The request should be dropped
-    rig.parent_block_processed(block_root, BlockProcessingResult::Ignored);
+    rig.lookup_block_processed(parent_root, BlockProcessingResult::Ignored);
     rig.expect_empty_network();
     rig.expect_no_active_lookups();
 }
@@ -1197,11 +1196,11 @@ fn test_same_chain_race_condition() {
     let mut blocks = rig.rand_blockchain(depth);
     let peer_id = rig.new_connected_peer();
     let trigger_block = blocks.pop().unwrap();
-    let chain_hash = trigger_block.canonical_root();
     rig.trigger_unknown_parent_block(peer_id, trigger_block.clone());
 
     for (i, block) in blocks.clone().into_iter().rev().enumerate() {
-        let id = rig.expect_parent_request_block_and_blobs(block.canonical_root());
+        let block_root = block.canonical_root();
+        let id = rig.expect_parent_request_block_and_blobs(block_root);
         // the block
         rig.parent_lookup_block_response(id, peer_id, Some(block.clone()));
         // the stream termination
@@ -1211,14 +1210,14 @@ fn test_same_chain_race_condition() {
         // the processing result
         if i + 2 == depth {
             rig.log(&format!("Block {i} was removed and is already known"));
-            rig.parent_block_processed(
-                chain_hash,
-                BlockError::BlockIsAlreadyKnown(block.canonical_root()).into(),
+            rig.single_block_component_processed(
+                rig.find_single_lookup_for(block_root),
+                BlockError::BlockIsAlreadyKnown(block_root).into(),
             )
         } else {
             rig.log(&format!("Block {i} ParentUnknown"));
-            rig.parent_block_processed(
-                chain_hash,
+            rig.single_block_component_processed(
+                rig.find_single_lookup_for(block_root),
                 BlockError::ParentUnknown(RpcBlock::new_without_blobs(None, block)).into(),
             )
         }
@@ -1332,13 +1331,12 @@ mod deneb_only {
                         ));
 
                         let parent_root = block.parent_root();
-                        let blob_req_id = rig.expect_blob_lookup_request(block_root);
                         let parent_block_req_id = rig.expect_block_parent_request(parent_root);
                         let parent_blob_req_id = rig.expect_blob_parent_request(parent_root);
                         rig.expect_empty_network(); // expect no more requests
                         (
                             None,
-                            Some(blob_req_id),
+                            None,
                             Some(parent_block_req_id),
                             Some(parent_blob_req_id),
                         )
@@ -1348,14 +1346,12 @@ mod deneb_only {
                         let parent_root = single_blob.block_parent_root();
                         rig.send_sync_message(SyncMessage::UnknownParentBlob(peer_id, single_blob));
 
-                        let block_req_id = rig.expect_block_lookup_request(block_root);
-                        let blobs_req_id = rig.expect_blob_lookup_request(block_root);
                         let parent_block_req_id = rig.expect_block_parent_request(parent_root);
                         let parent_blob_req_id = rig.expect_blob_parent_request(parent_root);
                         rig.expect_empty_network(); // expect no more requests
                         (
-                            Some(block_req_id),
-                            Some(blobs_req_id),
+                            None,
+                            None,
                             Some(parent_block_req_id),
                             Some(parent_blob_req_id),
                         )
@@ -1385,9 +1381,19 @@ mod deneb_only {
             self
         }
 
+        fn trigger_unknown_block_attestation(mut self) -> Self {
+            self.rig
+                .send_sync_message(SyncMessage::UnknownBlockHashFromAttestation(
+                    self.peer_id,
+                    self.block_root,
+                ));
+            self
+        }
+
         fn parent_block_response(mut self) -> Self {
             self.rig.expect_empty_network();
             let block = self.parent_block.pop_front().unwrap().clone();
+            let block_root = block.canonical_root();
             let _ = self.unknown_parent_block.insert(block.clone());
             self.rig.parent_lookup_block_response(
                 self.parent_block_req_id.expect("parent request id"),
@@ -1395,7 +1401,7 @@ mod deneb_only {
                 Some(block),
             );
 
-            self.rig.assert_parent_lookups_count(1);
+            self.rig.assert_lookup_is_active(block_root);
             self
         }
 
@@ -1408,7 +1414,7 @@ mod deneb_only {
                     self.peer_id,
                     Some(blob.clone()),
                 );
-                assert_eq!(self.rig.active_parent_lookups_count(), 1);
+                self.rig.assert_lookup_is_active(blob.block_root());
             }
             self.rig.parent_lookup_blob_response(
                 self.parent_blob_req_id.expect("blob request id"),
@@ -1553,23 +1559,23 @@ mod deneb_only {
 
         fn parent_block_imported(mut self) -> Self {
             self.rig.log("parent_block_imported");
-            self.rig.parent_block_processed(
+            self.rig.lookup_block_processed(
                 self.block_root,
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(self.block_root)),
             );
             self.rig.expect_empty_network();
-            self.rig.assert_parent_lookups_count(0);
+            self.rig.assert_lookup_is_not_active(self.block_root);
             self
         }
 
         fn parent_blob_imported(mut self) -> Self {
             self.rig.log("parent_blob_imported");
-            self.rig.parent_blob_processed(
+            self.rig.lookup_blob_processed(
                 self.block_root,
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(self.block_root)),
             );
             self.rig.expect_empty_network();
-            self.rig.assert_parent_lookups_count(0);
+            self.rig.assert_lookup_is_not_active(self.block_root);
             self
         }
 
@@ -1584,40 +1590,42 @@ mod deneb_only {
                 self.unknown_parent_blobs.take().map(VariableList::from),
             )
             .unwrap();
-            self.rig.parent_block_processed(
+            self.rig.lookup_block_processed(
                 self.block_root,
                 BlockProcessingResult::Err(BlockError::ParentUnknown(block)),
             );
-            assert_eq!(self.rig.active_parent_lookups_count(), 1);
+            self.rig.assert_lookup_is_active(self.block_root);
             self
         }
 
         fn parent_block_missing_components(mut self) -> Self {
             let block = self.unknown_parent_block.clone().unwrap();
-            self.rig.parent_block_processed(
-                self.block_root,
+            let id = self.rig.find_single_lookup_for(block.canonical_root());
+            let block_root = block.canonical_root();
+            self.rig.single_block_component_processed(
+                id,
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
                     block.slot(),
-                    block.canonical_root(),
+                    block_root,
                 )),
             );
-            self.rig.parent_blob_processed(
-                self.block_root,
+            self.rig.single_blob_component_processed(
+                id,
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
                     block.slot(),
-                    block.canonical_root(),
+                    block_root,
                 )),
             );
-            assert_eq!(self.rig.active_parent_lookups_count(), 1);
+            self.rig.assert_lookup_is_active(block_root);
             self
         }
 
         fn invalid_parent_processed(mut self) -> Self {
-            self.rig.parent_block_processed(
+            self.rig.lookup_block_processed(
                 self.block_root,
                 BlockProcessingResult::Err(BlockError::ProposalSignatureInvalid),
             );
-            assert_eq!(self.rig.active_parent_lookups_count(), 1);
+            self.rig.assert_lookup_is_active(self.block_root);
             self
         }
 
@@ -1677,6 +1685,11 @@ mod deneb_only {
         fn expect_no_penalty_and_no_requests(mut self) -> Self {
             self.rig.expect_empty_network();
             self
+        }
+        fn expect_block_and_blobs_request(self) -> Self {
+            let s = self.expect_block_request();
+            let s = s.expect_blobs_request();
+            s
         }
         fn expect_block_request(mut self) -> Self {
             let id = self
@@ -2153,8 +2166,7 @@ mod deneb_only {
         };
 
         tester
-            .block_response()
-            .log(" Return empty blobs for parent, block errors with missing components, downscore")
+            .log("Return empty blobs for parent, block errors with missing components, downscore")
             .empty_parent_blobs_response()
             .expect_no_penalty_and_no_requests()
             .parent_block_response()
@@ -2166,6 +2178,9 @@ mod deneb_only {
             .expect_block_process()
             .parent_blob_imported()
             .log("resolve original block trigger blobs request and import")
+            .trigger_unknown_block_attestation()
+            .expect_block_and_blobs_request()
+            .block_response()
             .blobs_response()
             .block_imported()
             .expect_no_active_lookups();
