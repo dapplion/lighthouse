@@ -974,6 +974,12 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
             .goodbye_peer(peer_id, reason, source);
     }
 
+    /// Hard (ungraceful) disconnect for testing purposes only
+    /// Use goodbye_peer for disconnections, do not use this function.
+    pub fn __hard_disconnect_testing_only(&mut self, peer_id: PeerId) {
+        let _ = self.swarm.disconnect_peer_id(peer_id);
+    }
+
     /// Returns an iterator over all enr entries in the DHT.
     pub fn enr_entries(&self) -> Vec<Enr> {
         self.discovery().table_entries_enr()
@@ -1195,6 +1201,9 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
             Request::DataColumnsByRoot { .. } => {
                 metrics::inc_counter_vec(&metrics::TOTAL_RPC_REQUESTS, &["data_columns_by_root"])
             }
+            Request::DataColumnsByRange { .. } => {
+                metrics::inc_counter_vec(&metrics::TOTAL_RPC_REQUESTS, &["data_columns_by_range"])
+            }
         }
         NetworkEvent::RequestReceived {
             peer_id,
@@ -1378,12 +1387,18 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
         let peer_id = event.peer_id;
 
         if !self.peer_manager().is_connected(&peer_id) {
-            debug!(
-                self.log,
-                "Ignoring rpc message of disconnecting peer";
-                event
-            );
-            return None;
+            // Sync expects a RPCError::Disconnected to drop associated lookups with this peer.
+            // Silencing this event breaks the API contract with RPC where every request ends with
+            // - A stream termination event, or
+            // - An RPCError event
+            if !matches!(event.event, HandlerEvent::Err(HandlerErr::Outbound { .. })) {
+                debug!(
+                    self.log,
+                    "Ignoring rpc message of disconnecting peer";
+                    event
+                );
+                return None;
+            }
         }
 
         let handler_id = event.conn_id;
@@ -1521,6 +1536,14 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
                         );
                         Some(event)
                     }
+                    InboundRequest::DataColumnsByRange(req) => {
+                        let event = self.build_request(
+                            peer_request_id,
+                            peer_id,
+                            Request::DataColumnsByRange(req),
+                        );
+                        Some(event)
+                    }
                     InboundRequest::LightClientBootstrap(req) => {
                         let event = self.build_request(
                             peer_request_id,
@@ -1581,6 +1604,9 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
                     RPCResponse::DataColumnsByRoot(resp) => {
                         self.build_response(id, peer_id, Response::DataColumnsByRoot(Some(resp)))
                     }
+                    RPCResponse::DataColumnsByRange(resp) => {
+                        self.build_response(id, peer_id, Response::DataColumnsByRange(Some(resp)))
+                    }
                     // Should never be reached
                     RPCResponse::LightClientBootstrap(bootstrap) => {
                         self.build_response(id, peer_id, Response::LightClientBootstrap(bootstrap))
@@ -1604,6 +1630,7 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
                     ResponseTermination::BlobsByRange => Response::BlobsByRange(None),
                     ResponseTermination::BlobsByRoot => Response::BlobsByRoot(None),
                     ResponseTermination::DataColumnsByRoot => Response::DataColumnsByRoot(None),
+                    ResponseTermination::DataColumnsByRange => Response::DataColumnsByRange(None),
                 };
                 self.build_response(id, peer_id, response)
             }
@@ -1698,12 +1725,16 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
             libp2p::upnp::Event::NewExternalAddr(addr) => {
                 info!(self.log, "UPnP route established"; "addr" => %addr);
                 let mut iter = addr.iter();
-                // Skip Ip address.
-                iter.next();
+                let is_ip6 = {
+                    let addr = iter.next();
+                    matches!(addr, Some(MProtocol::Ip6(_)))
+                };
                 match iter.next() {
                     Some(multiaddr::Protocol::Udp(udp_port)) => match iter.next() {
                         Some(multiaddr::Protocol::QuicV1) => {
-                            if let Err(e) = self.discovery_mut().update_enr_quic_port(udp_port) {
+                            if let Err(e) =
+                                self.discovery_mut().update_enr_quic_port(udp_port, is_ip6)
+                            {
                                 warn!(self.log, "Failed to update ENR"; "error" => e);
                             }
                         }
@@ -1712,7 +1743,7 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
                         }
                     },
                     Some(multiaddr::Protocol::Tcp(tcp_port)) => {
-                        if let Err(e) = self.discovery_mut().update_enr_tcp_port(tcp_port) {
+                        if let Err(e) = self.discovery_mut().update_enr_tcp_port(tcp_port, is_ip6) {
                             warn!(self.log, "Failed to update ENR"; "error" => e);
                         }
                     }

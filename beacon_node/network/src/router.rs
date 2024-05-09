@@ -220,6 +220,10 @@ impl<T: BeaconChainTypes> Router<T> {
                 self.network_beacon_processor
                     .send_data_columns_by_roots_request(peer_id, request_id, request),
             ),
+            Request::DataColumnsByRange(request) => self.handle_beacon_processor_send_result(
+                self.network_beacon_processor
+                    .send_data_columns_by_range_request(peer_id, request_id, request),
+            ),
             Request::LightClientBootstrap(request) => self.handle_beacon_processor_send_result(
                 self.network_beacon_processor
                     .send_light_client_bootstrap_request(peer_id, request_id, request),
@@ -264,6 +268,9 @@ impl<T: BeaconChainTypes> Router<T> {
             }
             Response::DataColumnsByRoot(data_column) => {
                 self.on_data_columns_by_root_response(peer_id, request_id, data_column);
+            }
+            Response::DataColumnsByRange(data_column) => {
+                self.on_data_columns_by_range_response(peer_id, request_id, data_column);
             }
             // Light client responses should not be received
             Response::LightClientBootstrap(_)
@@ -638,11 +645,62 @@ impl<T: BeaconChainTypes> Router<T> {
     /// Handle a `DataColumnsByRoot` response from the peer.
     pub fn on_data_columns_by_root_response(
         &mut self,
-        _peer_id: PeerId,
-        _request_id: RequestId,
-        _data_column_sidecar: Option<Arc<DataColumnSidecar<T::EthSpec>>>,
+        peer_id: PeerId,
+        request_id: RequestId,
+        data_column: Option<Arc<DataColumnSidecar<T::EthSpec>>>,
     ) {
-        // TODO(das) implement `DataColumnsByRoot` response handling
+        let request_id = match request_id {
+            RequestId::Sync(sync_id) => match sync_id {
+                id @ SyncId::DataColumnsByRoot { .. } => id,
+                other => {
+                    crit!(self.log, "DataColumnsByRoot response on incorrect request"; "request" => ?other);
+                    return;
+                }
+            },
+            RequestId::Router => {
+                crit!(self.log, "All DataColumnsByRoot requests belong to sync"; "peer_id" => %peer_id);
+                return;
+            }
+        };
+
+        trace!(
+            self.log,
+            "Received DataColumnsByRoot Response";
+            "peer" => %peer_id,
+        );
+        self.send_to_sync(SyncMessage::RpcDataColumn {
+            request_id,
+            peer_id,
+            data_column,
+            seen_timestamp: timestamp_now(),
+        });
+    }
+
+    pub fn on_data_columns_by_range_response(
+        &mut self,
+        peer_id: PeerId,
+        request_id: RequestId,
+        data_column: Option<Arc<DataColumnSidecar<T::EthSpec>>>,
+    ) {
+        trace!(
+            self.log,
+            "Received DataColumnsByRange Response";
+            "peer" => %peer_id,
+        );
+
+        if let RequestId::Sync(id) = request_id {
+            self.send_to_sync(SyncMessage::RpcDataColumn {
+                peer_id,
+                request_id: id,
+                data_column,
+                seen_timestamp: timestamp_now(),
+            });
+        } else {
+            crit!(
+                self.log,
+                "All data columns by range responses should belong to sync"
+            );
+        }
     }
 
     fn handle_beacon_processor_send_result(

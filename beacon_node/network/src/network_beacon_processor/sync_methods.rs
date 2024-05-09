@@ -8,6 +8,7 @@ use crate::sync::{
 use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
 use beacon_chain::data_availability_checker::AvailabilityCheckError;
 use beacon_chain::data_availability_checker::MaybeAvailableBlock;
+use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::{
     validator_monitor::get_slot_delay_ms, AvailabilityProcessingStatus, BeaconChainError,
     BeaconChainTypes, BlockError, ChainSegmentResult, HistoricalBlockError, NotifyExecutionLayer,
@@ -33,8 +34,6 @@ pub enum ChainSegmentProcessId {
     RangeBatchId(ChainId, Epoch),
     /// Processing ID for a backfill syncing batch.
     BackSyncBatchId(Epoch),
-    /// Processing Id of the parent lookup of a block.
-    ParentLookup(Hash256),
 }
 
 /// Returned when a chain segment import fails.
@@ -305,6 +304,58 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         });
     }
 
+    pub async fn process_rpc_custody_columns(
+        self: Arc<NetworkBeaconProcessor<T>>,
+        block_root: Hash256,
+        custody_columns: Vec<CustodyDataColumn<T::EthSpec>>,
+        _seen_timestamp: Duration,
+        process_type: BlockProcessType,
+    ) {
+        let result = self
+            .chain
+            .process_rpc_custody_columns(block_root, custody_columns)
+            .await;
+
+        match &result {
+            Ok(AvailabilityProcessingStatus::Imported(hash)) => {
+                debug!(
+                    self.log,
+                    "Block components retrieved";
+                    "result" => "imported block and custody columns",
+                    "block_hash" => %hash,
+                );
+                self.chain.recompute_head_at_current_slot().await;
+            }
+            Ok(AvailabilityProcessingStatus::MissingComponents(_, _)) => {
+                debug!(
+                    self.log,
+                    "Missing components over rpc";
+                    "block_hash" => %block_root,
+                );
+            }
+            Err(BlockError::BlockIsAlreadyKnown(_)) => {
+                debug!(
+                    self.log,
+                    "Custody columns have already been imported";
+                    "block_hash" => %block_root,
+                );
+            }
+            Err(e) => {
+                warn!(
+                    self.log,
+                    "Error when importing rpc custody columns";
+                    "error" => ?e,
+                    "block_hash" => %block_root,
+                );
+            }
+        }
+
+        self.send_sync_message(SyncMessage::BlockComponentProcessed {
+            process_type,
+            result: result.into(),
+        });
+    }
+
     /// Validate a list of data columns received from RPC requests
     pub async fn validate_rpc_data_columns(
         self: Arc<NetworkBeaconProcessor<T>>,
@@ -416,41 +467,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                                 penalty,
                             },
                             None => BatchProcessResult::NonFaultyFailure,
-                        }
-                    }
-                }
-            }
-            // this is a parent lookup request from the sync manager
-            ChainSegmentProcessId::ParentLookup(chain_head) => {
-                debug!(
-                    self.log, "Processing parent lookup";
-                    "chain_hash" => %chain_head,
-                    "blocks" => downloaded_blocks.len()
-                );
-                // parent blocks are ordered from highest slot to lowest, so we need to process in
-                // reverse
-                match self
-                    .process_blocks(downloaded_blocks.iter().rev(), notify_execution_layer)
-                    .await
-                {
-                    (imported_blocks, Err(e)) => {
-                        debug!(self.log, "Parent lookup failed"; "error" => %e.message);
-                        match e.peer_action {
-                            Some(penalty) => BatchProcessResult::FaultyFailure {
-                                imported_blocks: imported_blocks > 0,
-                                penalty,
-                            },
-                            None => BatchProcessResult::NonFaultyFailure,
-                        }
-                    }
-                    (imported_blocks, Ok(_)) => {
-                        debug!(
-                            self.log, "Parent lookup processed successfully";
-                            "chain_hash" => %chain_head,
-                            "imported_blocks" => imported_blocks
-                        );
-                        BatchProcessResult::Success {
-                            was_non_empty: imported_blocks > 0,
                         }
                     }
                 }

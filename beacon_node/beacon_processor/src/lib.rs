@@ -162,6 +162,7 @@ const MAX_RPC_BLOCK_QUEUE_LEN: usize = 1_024;
 const MAX_RPC_BLOB_QUEUE_LEN: usize = 1_024;
 
 /// TODO(das): Placeholder number
+const MAX_RPC_CUSTODY_COLUMN_QUEUE_LEN: usize = 1000;
 const MAX_RPC_VERIFY_DATA_COLUMN_QUEUE_LEN: usize = 1000;
 const MAX_SAMPLING_RESULT_QUEUE_LEN: usize = 1000;
 
@@ -192,6 +193,10 @@ const MAX_BLOBS_BY_ROOTS_QUEUE_LEN: usize = 1_024;
 /// The maximum number of queued `DataColumnsByRootRequest` objects received from the network RPC that
 /// will be stored before we start dropping them.
 const MAX_DATA_COLUMNS_BY_ROOTS_QUEUE_LEN: usize = 2_048;
+
+/// The maximum number of queued `DataColumnsByRangeRequest` objects received from the network RPC that
+/// will be stored before we start dropping them.
+const MAX_DATA_COLUMNS_BY_RANGE_QUEUE_LEN: usize = 2_048;
 
 /// Maximum number of `SignedBlsToExecutionChange` messages to queue before dropping them.
 ///
@@ -260,6 +265,7 @@ pub const GOSSIP_LIGHT_CLIENT_OPTIMISTIC_UPDATE: &str = "light_client_optimistic
 pub const RPC_BLOCK: &str = "rpc_block";
 pub const IGNORED_RPC_BLOCK: &str = "ignored_rpc_block";
 pub const RPC_BLOBS: &str = "rpc_blob";
+pub const RPC_CUSTODY_COLUMN: &str = "rpc_custody_column";
 pub const RPC_VERIFY_DATA_COLUMNS: &str = "rpc_verify_data_columns";
 pub const SAMPLING_RESULT: &str = "sampling_result";
 pub const CHAIN_SEGMENT: &str = "chain_segment";
@@ -270,6 +276,7 @@ pub const BLOCKS_BY_ROOTS_REQUEST: &str = "blocks_by_roots_request";
 pub const BLOBS_BY_RANGE_REQUEST: &str = "blobs_by_range_request";
 pub const BLOBS_BY_ROOTS_REQUEST: &str = "blobs_by_roots_request";
 pub const DATA_COLUMNS_BY_ROOTS_REQUEST: &str = "data_columns_by_roots_request";
+pub const DATA_COLUMNS_BY_RANGE_REQUEST: &str = "data_columns_by_range_request";
 pub const LIGHT_CLIENT_BOOTSTRAP_REQUEST: &str = "light_client_bootstrap";
 pub const LIGHT_CLIENT_FINALITY_UPDATE_REQUEST: &str = "light_client_finality_update_request";
 pub const LIGHT_CLIENT_OPTIMISTIC_UPDATE_REQUEST: &str = "light_client_optimistic_update_request";
@@ -647,6 +654,7 @@ pub enum Work<E: EthSpec> {
     RpcBlobs {
         process_fn: AsyncFn,
     },
+    RpcCustodyColumn(AsyncFn),
     RpcVerifyDataColumn(AsyncFn),
     SamplingResult(AsyncFn),
     IgnoredRpcBlock {
@@ -660,6 +668,7 @@ pub enum Work<E: EthSpec> {
     BlobsByRangeRequest(BlockingFn),
     BlobsByRootsRequest(BlockingFn),
     DataColumnsByRootsRequest(BlockingFn),
+    DataColumnsByRangeRequest(BlockingFn),
     GossipBlsToExecutionChange(BlockingFn),
     LightClientBootstrapRequest(BlockingFn),
     LightClientOptimisticUpdateRequest(BlockingFn),
@@ -695,6 +704,7 @@ impl<E: EthSpec> Work<E> {
             Work::GossipLightClientOptimisticUpdate(_) => GOSSIP_LIGHT_CLIENT_OPTIMISTIC_UPDATE,
             Work::RpcBlock { .. } => RPC_BLOCK,
             Work::RpcBlobs { .. } => RPC_BLOBS,
+            Work::RpcCustodyColumn { .. } => RPC_CUSTODY_COLUMN,
             Work::RpcVerifyDataColumn(_) => RPC_VERIFY_DATA_COLUMNS,
             Work::SamplingResult(_) => SAMPLING_RESULT,
             Work::IgnoredRpcBlock { .. } => IGNORED_RPC_BLOCK,
@@ -706,6 +716,7 @@ impl<E: EthSpec> Work<E> {
             Work::BlobsByRangeRequest(_) => BLOBS_BY_RANGE_REQUEST,
             Work::BlobsByRootsRequest(_) => BLOBS_BY_ROOTS_REQUEST,
             Work::DataColumnsByRootsRequest(_) => DATA_COLUMNS_BY_ROOTS_REQUEST,
+            Work::DataColumnsByRangeRequest(_) => DATA_COLUMNS_BY_RANGE_REQUEST,
             Work::LightClientBootstrapRequest(_) => LIGHT_CLIENT_BOOTSTRAP_REQUEST,
             Work::LightClientOptimisticUpdateRequest(_) => LIGHT_CLIENT_OPTIMISTIC_UPDATE_REQUEST,
             Work::LightClientFinalityUpdateRequest(_) => LIGHT_CLIENT_FINALITY_UPDATE_REQUEST,
@@ -858,6 +869,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
         // Using a FIFO queue since blocks need to be imported sequentially.
         let mut rpc_block_queue = FifoQueue::new(MAX_RPC_BLOCK_QUEUE_LEN);
         let mut rpc_blob_queue = FifoQueue::new(MAX_RPC_BLOB_QUEUE_LEN);
+        let mut rpc_custody_column_queue = FifoQueue::new(MAX_RPC_CUSTODY_COLUMN_QUEUE_LEN);
         let mut rpc_verify_data_column_queue = FifoQueue::new(MAX_RPC_VERIFY_DATA_COLUMN_QUEUE_LEN);
         let mut sampling_result_queue = FifoQueue::new(MAX_SAMPLING_RESULT_QUEUE_LEN);
         let mut chain_segment_queue = FifoQueue::new(MAX_CHAIN_SEGMENT_QUEUE_LEN);
@@ -873,6 +885,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
         let mut blbroots_queue = FifoQueue::new(MAX_BLOBS_BY_ROOTS_QUEUE_LEN);
         let mut blbrange_queue = FifoQueue::new(MAX_BLOBS_BY_RANGE_QUEUE_LEN);
         let mut dcbroots_queue = FifoQueue::new(MAX_DATA_COLUMNS_BY_ROOTS_QUEUE_LEN);
+        let mut dcbrange_queue = FifoQueue::new(MAX_DATA_COLUMNS_BY_RANGE_QUEUE_LEN);
 
         let mut gossip_bls_to_execution_change_queue =
             FifoQueue::new(MAX_BLS_TO_EXECUTION_CHANGE_QUEUE_LEN);
@@ -1016,6 +1029,8 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         } else if let Some(item) = rpc_blob_queue.pop() {
                             self.spawn_worker(item, idle_tx);
                         // TODO(das): decide proper priorization for sampling columns
+                        } else if let Some(item) = rpc_custody_column_queue.pop() {
+                            self.spawn_worker(item, idle_tx);
                         } else if let Some(item) = rpc_verify_data_column_queue.pop() {
                             self.spawn_worker(item, idle_tx);
                         } else if let Some(item) = sampling_result_queue.pop() {
@@ -1181,6 +1196,8 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             self.spawn_worker(item, idle_tx);
                         } else if let Some(item) = dcbroots_queue.pop() {
                             self.spawn_worker(item, idle_tx);
+                        } else if let Some(item) = dcbrange_queue.pop() {
+                            self.spawn_worker(item, idle_tx);
                         // Prioritize sampling requests after block syncing requests
                         } else if let Some(item) = unknown_block_sampling_request_queue.pop() {
                             self.spawn_worker(item, idle_tx);
@@ -1316,6 +1333,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                 rpc_block_queue.push(work, work_id, &self.log)
                             }
                             Work::RpcBlobs { .. } => rpc_blob_queue.push(work, work_id, &self.log),
+                            Work::RpcCustodyColumn { .. } => {
+                                rpc_custody_column_queue.push(work, work_id, &self.log)
+                            }
                             Work::RpcVerifyDataColumn(_) => {
                                 rpc_verify_data_column_queue.push(work, work_id, &self.log)
                             }
@@ -1361,6 +1381,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             }
                             Work::DataColumnsByRootsRequest { .. } => {
                                 dcbroots_queue.push(work, work_id, &self.log)
+                            }
+                            Work::DataColumnsByRangeRequest { .. } => {
+                                dcbrange_queue.push(work, work_id, &self.log)
                             }
                             Work::UnknownLightClientOptimisticUpdate { .. } => {
                                 unknown_light_client_update_queue.push(work, work_id, &self.log)
@@ -1417,6 +1440,10 @@ impl<E: EthSpec> BeaconProcessor<E> {
                 metrics::set_gauge(
                     &metrics::BEACON_PROCESSOR_RPC_BLOB_QUEUE_TOTAL,
                     rpc_blob_queue.len() as i64,
+                );
+                metrics::set_gauge(
+                    &metrics::BEACON_PROCESSOR_RPC_CUSTODY_COLUMN_QUEUE_TOTAL,
+                    rpc_custody_column_queue.len() as i64,
                 );
                 metrics::set_gauge(
                     &metrics::BEACON_PROCESSOR_RPC_VERIFY_DATA_COLUMN_QUEUE_TOTAL,
@@ -1567,6 +1594,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
             } => task_spawner.spawn_async(process_fn),
             Work::RpcBlock { process_fn }
             | Work::RpcBlobs { process_fn }
+            | Work::RpcCustodyColumn(process_fn)
             | Work::RpcVerifyDataColumn(process_fn)
             | Work::SamplingResult(process_fn) => task_spawner.spawn_async(process_fn),
             Work::IgnoredRpcBlock { process_fn } => task_spawner.spawn_blocking(process_fn),
@@ -1577,7 +1605,8 @@ impl<E: EthSpec> BeaconProcessor<E> {
             }),
             Work::BlobsByRangeRequest(process_fn)
             | Work::BlobsByRootsRequest(process_fn)
-            | Work::DataColumnsByRootsRequest(process_fn) => {
+            | Work::DataColumnsByRootsRequest(process_fn)
+            | Work::DataColumnsByRangeRequest(process_fn) => {
                 task_spawner.spawn_blocking(process_fn)
             }
             Work::BlocksByRangeRequest(work) | Work::BlocksByRootsRequest(work) => {
