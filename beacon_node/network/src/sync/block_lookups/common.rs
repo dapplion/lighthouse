@@ -1,5 +1,5 @@
 use crate::sync::block_lookups::single_block_lookup::{
-    LookupRequestError, SingleBlockLookup, SingleLookupRequestState,
+    LookupError, SingleBlockLookup, SingleLookupRequestState,
 };
 use crate::sync::block_lookups::{BlobRequestState, BlockRequestState, PeerId};
 use crate::sync::manager::{BlockProcessType, Id, SLOT_IMPORT_TOLERANCE};
@@ -49,7 +49,7 @@ pub trait RequestState<T: BeaconChainTypes> {
         peer_id: PeerId,
         downloaded_block_expected_blobs: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<bool, LookupRequestError>;
+    ) -> Result<bool, LookupError>;
 
     /* Response handling methods */
 
@@ -58,7 +58,7 @@ pub trait RequestState<T: BeaconChainTypes> {
         id: Id,
         result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
-    ) -> Result<(), LookupRequestError>;
+    ) -> Result<(), LookupError>;
 
     /* Utility methods */
 
@@ -84,16 +84,16 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
         peer_id: PeerId,
         _: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<bool, LookupRequestError> {
+    ) -> Result<bool, LookupError> {
         cx.block_lookup_request(id, peer_id, self.requested_block_root)
-            .map_err(LookupRequestError::SendFailed)
+            .map_err(LookupError::SendFailed)
     }
 
     fn send_for_processing(
         id: SingleLookupId,
         download_result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
-    ) -> Result<(), LookupRequestError> {
+    ) -> Result<(), LookupError> {
         let DownloadResult {
             value,
             block_root,
@@ -106,7 +106,7 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
             seen_timestamp,
             BlockProcessType::SingleBlock { id },
         )
-        .map_err(LookupRequestError::SendFailed)
+        .map_err(LookupError::SendFailed)
     }
 
     fn response_type() -> ResponseType {
@@ -132,21 +132,21 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
         peer_id: PeerId,
         downloaded_block_expected_blobs: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<bool, LookupRequestError> {
+    ) -> Result<bool, LookupError> {
         cx.blob_lookup_request(
             id,
             peer_id,
             self.block_root,
             downloaded_block_expected_blobs,
         )
-        .map_err(LookupRequestError::SendFailed)
+        .map_err(LookupError::SendFailed)
     }
 
     fn send_for_processing(
         id: Id,
         download_result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
-    ) -> Result<(), LookupRequestError> {
+    ) -> Result<(), LookupError> {
         let DownloadResult {
             value,
             block_root,
@@ -159,7 +159,7 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
             seen_timestamp,
             BlockProcessType::SingleBlob { id },
         )
-        .map_err(LookupRequestError::SendFailed)
+        .map_err(LookupError::SendFailed)
     }
 
     fn response_type() -> ResponseType {
@@ -186,16 +186,16 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
         _peer_id: PeerId,
         downloaded_block_expected_blobs: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<bool, LookupRequestError> {
+    ) -> Result<bool, LookupError> {
         cx.custody_lookup_request(id, self.block_root, downloaded_block_expected_blobs)
-            .map_err(LookupRequestError::SendFailed)
+            .map_err(LookupError::SendFailed)
     }
 
     fn send_for_processing(
         id: Id,
         download_result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
-    ) -> Result<(), LookupRequestError> {
+    ) -> Result<(), LookupError> {
         let DownloadResult {
             value,
             block_root,
@@ -208,7 +208,7 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
             seen_timestamp,
             BlockProcessType::SingleCustodyColumn(id),
         )
-        .map_err(LookupRequestError::SendFailed)
+        .map_err(LookupError::SendFailed)
     }
 
     fn response_type() -> ResponseType {

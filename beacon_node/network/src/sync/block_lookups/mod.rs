@@ -1,12 +1,13 @@
 use self::parent_chain::{compute_parent_chains, NodeChain};
 pub use self::single_block_lookup::DownloadResult;
-use self::single_block_lookup::{LookupRequestError, LookupResult, SingleBlockLookup};
+use self::single_block_lookup::{LookupError, LookupResult, SingleBlockLookup};
 use super::manager::{BlockProcessType, BlockProcessingResult};
-use super::network_context::{LookupFailure, PeerGroup, SyncNetworkContext};
+use super::network_context::{PeerGroup, RpcByRootRequestError, SyncNetworkContext};
 use crate::metrics;
 use crate::sync::block_lookups::common::{ResponseType, PARENT_DEPTH_TOLERANCE};
 use crate::sync::block_lookups::parent_chain::find_oldest_fork_ancestor;
 use crate::sync::manager::Id;
+use crate::sync::network_context::custody::CustodyRequestError;
 use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::data_availability_checker::AvailabilityCheckErrorCategory;
 use beacon_chain::{AvailabilityProcessingStatus, BeaconChainTypes, BlockError};
@@ -30,6 +31,13 @@ mod tests;
 
 const FAILED_CHAINS_CACHE_EXPIRY_SECONDS: u64 = 60;
 pub const SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS: u8 = 4;
+
+#[derive(Debug)]
+pub enum LookupRequestError {
+    BlockRequestError(RpcByRootRequestError),
+    BlobRequestError(RpcByRootRequestError),
+    CustodyRequestError(CustodyRequestError),
+}
 
 pub enum BlockComponent<E: EthSpec> {
     Block(DownloadResult<Arc<SignedBeaconBlock<E>>>),
@@ -305,7 +313,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn on_download_response<R: RequestState<T>>(
         &mut self,
         id: SingleLookupId,
-        response: Result<(R::VerifiedResponseType, PeerGroup, Duration), LookupFailure>,
+        response: Result<(R::VerifiedResponseType, PeerGroup, Duration), LookupRequestError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
         let result = self.on_download_response_inner::<R>(id, response, cx);
@@ -316,9 +324,9 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn on_download_response_inner<R: RequestState<T>>(
         &mut self,
         id: SingleLookupId,
-        response: Result<(R::VerifiedResponseType, PeerGroup, Duration), LookupFailure>,
+        response: Result<(R::VerifiedResponseType, PeerGroup, Duration), LookupRequestError>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<LookupResult, LookupRequestError> {
+    ) -> Result<LookupResult, LookupError> {
         // Note: do not downscore peers here for requests errors, SyncNetworkContext does it.
 
         let response_type = R::response_type();
@@ -326,7 +334,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             // We don't have the ability to cancel in-flight RPC requests. So this can happen
             // if we started this RPC request, and later saw the block/blobs via gossip.
             debug!(self.log, "Block returned for single block lookup not present"; "id" => id);
-            return Err(LookupRequestError::UnknownLookup);
+            return Err(LookupError::UnknownLookup);
         };
 
         let block_root = lookup.block_root();
@@ -412,10 +420,10 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         lookup_id: SingleLookupId,
         result: BlockProcessingResult<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<LookupResult, LookupRequestError> {
+    ) -> Result<LookupResult, LookupError> {
         let Some(lookup) = self.single_block_lookups.get_mut(&lookup_id) else {
             debug!(self.log, "Unknown single block lookup"; "id" => lookup_id);
-            return Err(LookupRequestError::UnknownLookup);
+            return Err(LookupError::UnknownLookup);
         };
 
         let block_root = lookup.block_root();
@@ -557,7 +565,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             }
             Action::Drop => {
                 // Drop with noop
-                Err(LookupRequestError::Failed)
+                Err(LookupError::Failed)
             }
             Action::Continue => {
                 // Drop this completed lookup only
@@ -608,7 +616,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     fn on_lookup_result(
         &mut self,
         id: SingleLookupId,
-        result: Result<LookupResult, LookupRequestError>,
+        result: Result<LookupResult, LookupError>,
         source: &str,
         cx: &mut SyncNetworkContext<T>,
     ) {

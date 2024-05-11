@@ -9,11 +9,11 @@ use slog::{debug, warn};
 use std::{marker::PhantomData, sync::Arc};
 use types::{data_column_sidecar::ColumnIndex, DataColumnSidecar, Epoch, Hash256};
 
-use super::{PeerGroup, RpcProcessingResult, SyncNetworkContext};
+use super::{PeerGroup, RpcByRootRequestResult, SyncNetworkContext};
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct CustodyId {
-    pub id: CustodyRequester,
+    pub requester: CustodyRequester,
     pub column_index: ColumnIndex,
 }
 
@@ -36,14 +36,15 @@ pub struct ActiveCustodyRequest<T: BeaconChainTypes> {
 }
 
 #[derive(Debug)]
-pub enum Error {
+pub enum CustodyRequestError {
     SendFailed(&'static str),
     TooManyFailures,
     BadState(String),
     NoPeers(ColumnIndex),
 }
 
-type CustodyRequestResult<E> = Result<Option<(Vec<CustodyDataColumn<E>>, PeerGroup)>, Error>;
+type CustodyRequestResult<E> =
+    Result<Option<(Vec<CustodyDataColumn<E>>, PeerGroup)>, CustodyRequestError>;
 
 impl<T: BeaconChainTypes> ActiveCustodyRequest<T> {
     pub(crate) fn new(
@@ -79,7 +80,7 @@ impl<T: BeaconChainTypes> ActiveCustodyRequest<T> {
         &mut self,
         _peer_id: PeerId,
         column_index: ColumnIndex,
-        resp: RpcProcessingResult<DataColumnSidecarList<T::EthSpec>>,
+        resp: RpcByRootRequestResult<DataColumnSidecarList<T::EthSpec>>,
         cx: &mut SyncNetworkContext<T>,
     ) -> CustodyRequestResult<T::EthSpec> {
         // TODO(das): Should downscore peers for verify errors here
@@ -164,7 +165,7 @@ impl<T: BeaconChainTypes> ActiveCustodyRequest<T> {
 }
 
 mod request {
-    use super::{CustodyId, CustodyRequester, Error};
+    use super::{CustodyId, CustodyRequestError, CustodyRequester};
     use crate::sync::{
         manager::DataColumnsByRootRequester,
         network_context::{DataColumnsByRootSingleBlockRequest, SyncNetworkContext},
@@ -218,7 +219,7 @@ mod request {
             block_epoch: Epoch,
             requester: CustodyRequester,
             cx: &mut SyncNetworkContext<T>,
-        ) -> Result<bool, Error> {
+        ) -> Result<bool, CustodyRequestError> {
             match &self.status {
                 Status::NotStarted => {}                    // Ok to continue
                 Status::Downloading(_) => return Ok(false), // Already downloading
@@ -226,7 +227,7 @@ mod request {
             }
 
             if self.download_failures > MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS {
-                return Err(Error::TooManyFailures);
+                return Err(CustodyRequestError::TooManyFailures);
             }
 
             // TODO: When is a fork and only a subset of your peers know about a block, sampling should only
@@ -238,12 +239,12 @@ mod request {
                 // Do not tolerate not having custody peers, hard error.
                 // TODO(das): we might implement some grace period. The request will pause for X
                 // seconds expecting the peer manager to find peers before failing the request.
-                return Err(Error::NoPeers(self.column_index));
+                return Err(CustodyRequestError::NoPeers(self.column_index));
             };
 
             cx.data_column_lookup_request(
                 DataColumnsByRootRequester::Custody(CustodyId {
-                    id: requester,
+                    requester,
                     column_index: self.column_index,
                 }),
                 peer_id,
@@ -252,32 +253,32 @@ mod request {
                     indices: vec![self.column_index],
                 },
             )
-            .map_err(Error::SendFailed)?;
+            .map_err(CustodyRequestError::SendFailed)?;
 
             self.status = Status::Downloading(peer_id);
             Ok(true)
         }
 
-        pub(crate) fn on_download_error(&mut self) -> Result<PeerId, Error> {
+        pub(crate) fn on_download_error(&mut self) -> Result<PeerId, CustodyRequestError> {
             match self.status.clone() {
                 Status::Downloading(peer_id) => {
                     self.download_failures += 1;
                     self.status = Status::NotStarted;
                     Ok(peer_id)
                 }
-                other => Err(Error::BadState(format!(
+                other => Err(CustodyRequestError::BadState(format!(
                     "bad state on_sampling_error expected Sampling got {other:?}"
                 ))),
             }
         }
 
-        pub(crate) fn on_download_success(&mut self) -> Result<(), Error> {
+        pub(crate) fn on_download_success(&mut self) -> Result<(), CustodyRequestError> {
             match &self.status {
                 Status::Downloading(peer) => {
                     self.status = Status::Downloaded(*peer);
                     Ok(())
                 }
-                other => Err(Error::BadState(format!(
+                other => Err(CustodyRequestError::BadState(format!(
                     "bad state on_sampling_success expected Sampling got {other:?}"
                 ))),
             }

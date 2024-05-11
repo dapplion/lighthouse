@@ -2,7 +2,7 @@
 //! channel and stores a global RPC ID to perform requests.
 
 pub use self::custody::CustodyId;
-use self::custody::{ActiveCustodyRequest, CustodyRequester, Error as CustodyRequestError};
+use self::custody::{ActiveCustodyRequest, CustodyRequestError, CustodyRequester};
 use self::requests::{
     ActiveBlobsByRootRequest, ActiveBlocksByRootRequest, ActiveDataColumnsByRootRequest,
 };
@@ -30,7 +30,7 @@ use lighthouse_network::rpc::{BlocksByRangeRequest, GoodbyeReason, RPCError};
 use lighthouse_network::{
     Client, Eth2Enr, NetworkGlobals, PeerAction, PeerId, ReportSource, Request,
 };
-pub use requests::LookupVerifyError;
+pub use requests::RpcByRootVerifyError;
 use slog::{debug, error, trace, warn};
 use slot_clock::SlotClock;
 use std::collections::hash_map::Entry;
@@ -71,24 +71,23 @@ pub enum RpcEvent<T> {
     RPCError(RPCError),
 }
 
-pub type RpcProcessingResult<T> = Result<(T, Duration), LookupFailure>;
-
 #[derive(Debug)]
-pub enum LookupFailure {
-    RpcError(RPCError),
-    LookupVerifyError(LookupVerifyError),
-    CustodyRequestError(CustodyRequestError),
+pub enum RpcByRootRequestError {
+    NetworkError(RPCError),
+    VerifyError(RpcByRootVerifyError),
 }
 
-impl From<RPCError> for LookupFailure {
+pub type RpcByRootRequestResult<T> = Result<(T, Duration), RpcByRootRequestError>;
+
+impl From<RPCError> for RpcByRootRequestError {
     fn from(e: RPCError) -> Self {
-        LookupFailure::RpcError(e)
+        Self::NetworkError(e)
     }
 }
 
-impl From<LookupVerifyError> for LookupFailure {
-    fn from(e: LookupVerifyError) -> Self {
-        LookupFailure::LookupVerifyError(e)
+impl From<RpcByRootVerifyError> for RpcByRootRequestError {
+    fn from(e: RpcByRootVerifyError) -> Self {
+        Self::VerifyError(e)
     }
 }
 
@@ -801,7 +800,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         request_id: SingleLookupReqId,
         peer_id: PeerId,
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) -> Option<RpcProcessingResult<Arc<SignedBeaconBlock<T::EthSpec>>>> {
+    ) -> Option<RpcByRootRequestResult<Arc<SignedBeaconBlock<T::EthSpec>>>> {
         let Entry::Occupied(mut request) = self.blocks_by_root_requests.entry(request_id) else {
             return None;
         };
@@ -827,8 +826,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             }
         };
 
-        if let Err(ref e) = resp {
-            self.on_lookup_failure(peer_id, e);
+        if let Err(RpcByRootRequestError::VerifyError(e)) = &resp {
+            self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
         }
         Some(resp)
     }
@@ -838,7 +837,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         request_id: SingleLookupReqId,
         peer_id: PeerId,
         blob: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
-    ) -> Option<RpcProcessingResult<FixedBlobSidecarList<T::EthSpec>>> {
+    ) -> Option<RpcByRootRequestResult<FixedBlobSidecarList<T::EthSpec>>> {
         let Entry::Occupied(mut request) = self.blobs_by_root_requests.entry(request_id) else {
             return None;
         };
@@ -869,8 +868,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             }
         };
 
-        if let Err(ref e) = resp {
-            self.on_lookup_failure(peer_id, e);
+        if let Err(RpcByRootRequestError::VerifyError(e)) = &resp {
+            self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
         }
         Some(resp)
     }
@@ -883,7 +882,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         item: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
     ) -> Option<(
         DataColumnsByRootRequester,
-        RpcProcessingResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>,
+        RpcByRootRequestResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>,
     )> {
         let Entry::Occupied(mut request) = self.data_columns_by_root_requests.entry(id) else {
             return None;
@@ -914,8 +913,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             }
         };
 
-        if let Err(ref e) = resp {
-            self.on_lookup_failure(peer_id, e);
+        if let Err(RpcByRootRequestError::VerifyError(e)) = &resp {
+            self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
         }
         Some((requester, resp))
     }
@@ -932,14 +931,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         &mut self,
         id: CustodyId,
         peer_id: PeerId,
-        resp: RpcProcessingResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>,
+        resp: RpcByRootRequestResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>,
     ) -> Option<(
         CustodyRequester,
-        Result<(Vec<CustodyDataColumn<T::EthSpec>>, PeerGroup), LookupFailure>,
+        Result<(Vec<CustodyDataColumn<T::EthSpec>>, PeerGroup), CustodyRequestError>,
     )> {
         // Note: need to remove the request to borrow self again below. Otherwise we can't
         // do nested requests
-        let Some(mut request) = self.custody_by_root_requests.remove(&id.id) else {
+        let Some(mut request) = self.custody_by_root_requests.remove(&id.requester) else {
             // TOOD(das): This log can happen if the request is error'ed early and dropped
             debug!(self.log, "Custody column downloaded event for unknown request"; "id" => ?id);
             return None;
@@ -947,7 +946,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         let result = request
             .on_data_column_downloaded(peer_id, id.column_index, resp, self)
-            .map_err(LookupFailure::CustodyRequestError)
             .transpose();
 
         // Convert a result from internal format of `ActiveCustodyRequest` (error first to use ?) to
@@ -962,9 +960,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 }
             }
 
-            Some((id.id, result))
+            Some((id.requester, result))
         } else {
-            self.custody_by_root_requests.insert(id.id, request);
+            self.custody_by_root_requests.insert(id.requester, request);
             None
         }
     }
@@ -1064,31 +1062,17 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             }
         }
     }
-
-    /// Downscore peers for lookup errors that originate from sync
-    pub fn on_lookup_failure(&self, peer_id: PeerId, err: &LookupFailure) {
-        match err {
-            // RPCErros are downscored in the network handler
-            LookupFailure::RpcError(_) => {}
-            // Only downscore lookup verify errors. RPC errors are downscored in the network handler.
-            LookupFailure::LookupVerifyError(e) => {
-                self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
-            }
-            // CustodyRequestError are downscored in the each data_columns_by_root request
-            LookupFailure::CustodyRequestError(_) => {}
-        }
-    }
 }
 
 fn to_fixed_blob_sidecar_list<E: EthSpec>(
     blobs: Vec<Arc<BlobSidecar<E>>>,
-) -> Result<FixedBlobSidecarList<E>, LookupVerifyError> {
+) -> Result<FixedBlobSidecarList<E>, RpcByRootVerifyError> {
     let mut fixed_list = FixedBlobSidecarList::default();
     for blob in blobs.into_iter() {
         let index = blob.index as usize;
         *fixed_list
             .get_mut(index)
-            .ok_or(LookupVerifyError::UnrequestedBlobIndex(index as u64))? = Some(blob)
+            .ok_or(RpcByRootVerifyError::UnrequestedBlobIndex(index as u64))? = Some(blob)
     }
     Ok(fixed_list)
 }

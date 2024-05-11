@@ -46,6 +46,7 @@ use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::block_lookups::{
     BlobRequestState, BlockComponent, BlockRequestState, CustodyRequestState, DownloadResult,
+    LookupRequestError,
 };
 use crate::sync::block_sidecar_coupling::RangeBlockComponentsRequest;
 use crate::sync::network_context::PeerGroup;
@@ -894,7 +895,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     id.lookup_id,
                     resp.map(|(value, seen_timestamp)| {
                         (value, PeerGroup::from_single(peer_id), seen_timestamp)
-                    }),
+                    })
+                    .map_err(LookupRequestError::BlockRequestError),
                     &mut self.network,
                 )
         }
@@ -968,7 +970,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     id.lookup_id,
                     resp.map(|(value, seen_timestamp)| {
                         (value, PeerGroup::from_single(peer_id), seen_timestamp)
-                    }),
+                    })
+                    .map_err(LookupRequestError::BlobRequestError),
                     &mut self.network,
                 )
         }
@@ -1002,9 +1005,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         self.block_lookups
                             .on_download_response::<CustodyRequestState<T::EthSpec>>(
                                 requester.0.lookup_id,
-                                custody_columns.map(|(columns, peer_group)| {
-                                    (columns, peer_group, seen_timestamp)
-                                }),
+                                custody_columns
+                                    .map(|(columns, peer_group)| {
+                                        (columns, peer_group, seen_timestamp)
+                                    })
+                                    .map_err(LookupRequestError::CustodyRequestError),
                                 &mut self.network,
                             );
                     }
