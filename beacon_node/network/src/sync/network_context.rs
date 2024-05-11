@@ -91,6 +91,8 @@ impl From<RpcByRootVerifyError> for RpcByRootRequestError {
     }
 }
 
+pub type ReqId = u32;
+
 #[derive(Clone, Debug)]
 pub struct PeerGroup {
     peers: Vec<PeerId>,
@@ -410,20 +412,18 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         lookup_id: SingleLookupId,
         peer_id: PeerId,
         block_root: Hash256,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<Option<ReqId>, &'static str> {
         if self
             .chain
             .reqresp_pre_import_cache
             .read()
             .contains_key(&block_root)
         {
-            return Ok(false);
+            return Ok(None);
         }
 
-        let id = SingleLookupReqId {
-            lookup_id,
-            req_id: self.next_id(),
-        };
+        let req_id = self.next_id();
+        let id = SingleLookupReqId { lookup_id, req_id };
 
         debug!(
             self.log,
@@ -445,7 +445,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.blocks_by_root_requests
             .insert(id, ActiveBlocksByRootRequest::new(request));
 
-        Ok(true)
+        Ok(Some(req_id))
     }
 
     /// Request necessary blobs for `block_root`. Requests only the necessary blobs by checking:
@@ -460,7 +460,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peer_id: PeerId,
         block_root: Hash256,
         downloaded_block_expected_blobs: Option<usize>,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<Option<ReqId>, &'static str> {
         // Check if we are into deneb, and before peerdas
         if !self
             .chain
@@ -474,7 +474,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     .epoch(T::EthSpec::slots_per_epoch()),
             )
         {
-            return Ok(false);
+            return Ok(None);
         }
 
         let expected_blobs = downloaded_block_expected_blobs
@@ -500,13 +500,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         if indices.is_empty() {
             // No blobs required, do not issue any request
-            return Ok(false);
+            return Ok(None);
         }
 
-        let id = SingleLookupReqId {
-            lookup_id,
-            req_id: self.next_id(),
-        };
+        let req_id = self.next_id();
+        let id = SingleLookupReqId { lookup_id, req_id };
 
         debug!(
             self.log,
@@ -532,7 +530,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.blobs_by_root_requests
             .insert(id, ActiveBlobsByRootRequest::new(request));
 
-        Ok(true)
+        Ok(Some(req_id))
     }
 
     pub fn data_column_lookup_request(
@@ -540,8 +538,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         requester: DataColumnsByRootRequester,
         peer_id: PeerId,
         request: DataColumnsByRootSingleBlockRequest,
-    ) -> Result<(), &'static str> {
+    ) -> Result<ReqId, &'static str> {
         let req_id = self.next_id();
+        let id = DataColumnsByRootRequestId { requester, req_id };
+
         debug!(
             self.log,
             "Sending DataColumnsByRoot Request";
@@ -549,10 +549,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             "block_root" => ?request.block_root,
             "indices" => ?request.indices,
             "peer" => %peer_id,
-            "requester" => ?requester,
-            "id" => req_id,
+            "id" => ?id,
         );
-        let id = DataColumnsByRootRequestId { requester, req_id };
 
         self.send_network_msg(NetworkMessage::SendRequest {
             peer_id,
@@ -563,7 +561,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.data_columns_by_root_requests
             .insert(id, ActiveDataColumnsByRootRequest::new(request, requester));
 
-        Ok(())
+        Ok(req_id)
     }
 
     pub fn custody_lookup_request(
@@ -571,7 +569,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         lookup_id: SingleLookupId,
         block_root: Hash256,
         downloaded_block_expected_data: Option<usize>,
-    ) -> Result<bool, &'static str> {
+    ) -> Result<Option<ReqId>, &'static str> {
         // Check if we are into peerdas
         if !self
             .chain
@@ -585,7 +583,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     .epoch(T::EthSpec::slots_per_epoch()),
             )
         {
-            return Ok(false);
+            return Ok(None);
         }
 
         let expects_data = downloaded_block_expected_data
@@ -600,7 +598,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         // No data required for this block
         if !expects_data {
-            return Ok(false);
+            return Ok(None);
         }
 
         let custody_indexes_imported = self
@@ -621,13 +619,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         if custody_indexes_to_fetch.is_empty() {
             // No indexes required, do not issue any request
-            return Ok(false);
+            return Ok(None);
         }
 
-        let id = SingleLookupReqId {
-            lookup_id,
-            req_id: self.next_id(),
-        };
+        let req_id = self.next_id();
+        let id = SingleLookupReqId { lookup_id, req_id };
 
         debug!(
             self.log,
@@ -653,7 +649,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 // created cannot return data immediately, it must send some request to the network
                 // first. And there must exist some request, `custody_indexes_to_fetch` is not empty.
                 self.custody_by_root_requests.insert(requester, request);
-                Ok(true)
+                Ok(Some(req_id))
             }
             // TODO(das): handle this error properly
             Err(_) => Err("custody_send_error"),

@@ -2,7 +2,7 @@ use super::common::ResponseType;
 use super::{BlockComponent, PeerId, SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS};
 use crate::sync::block_lookups::common::RequestState;
 use crate::sync::block_lookups::Id;
-use crate::sync::network_context::{PeerGroup, SyncNetworkContext};
+use crate::sync::network_context::{PeerGroup, ReqId, SyncNetworkContext};
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::BeaconChainTypes;
 use rand::seq::IteratorRandom;
@@ -41,6 +41,13 @@ pub enum LookupError {
     Failed,
     /// Attempted to retrieve a not known lookup id
     UnknownLookup,
+    /// Received a download result for a different request id than the in-flight request.
+    /// There should only exist a single request at a time. Having multiple requests is a bug and
+    /// can result in undefined state, so it's treated as a hard error and the lookup is dropped.
+    UnexpectedRequestId {
+        expected_req_id: ReqId,
+        req_id: ReqId,
+    },
 }
 
 pub struct SingleBlockLookup<T: BeaconChainTypes> {
@@ -172,8 +179,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             }
 
             // make_request returns true only if a request needs to be made
-            if request.make_request(id, peer_id, downloaded_block_expected_blobs, cx)? {
-                request.get_state_mut().on_download_start()?;
+            if let Some(req_id) =
+                request.make_request(id, peer_id, downloaded_block_expected_blobs, cx)?
+            {
+                request.get_state_mut().on_download_start(req_id)?;
             } else {
                 request.get_state_mut().on_completed_request()?;
             }
@@ -280,7 +289,7 @@ pub struct DownloadResult<T: Clone> {
 #[derive(Debug)]
 pub enum State<T: Clone> {
     AwaitingDownload,
-    Downloading,
+    Downloading(ReqId),
     AwaitingProcess(DownloadResult<T>),
     Processing(DownloadResult<T>),
     Processed(Option<PeerGroup>),
@@ -348,10 +357,10 @@ impl<T: Clone> SingleLookupRequestState<T> {
     }
 
     /// Switch to `Downloading` if the request is in `AwaitingDownload` state, otherwise returns None.
-    pub fn on_download_start(&mut self) -> Result<(), LookupError> {
+    pub fn on_download_start(&mut self, req_id: ReqId) -> Result<(), LookupError> {
         match &self.state {
             State::AwaitingDownload => {
-                self.state = State::Downloading;
+                self.state = State::Downloading(req_id);
                 Ok(())
             }
             other => Err(LookupError::BadState(format!(
@@ -362,9 +371,15 @@ impl<T: Clone> SingleLookupRequestState<T> {
 
     /// Registers a failure in downloading a block. This might be a peer disconnection or a wrong
     /// block.
-    pub fn on_download_failure(&mut self) -> Result<(), LookupError> {
+    pub fn on_download_failure(&mut self, req_id: ReqId) -> Result<(), LookupError> {
         match &self.state {
-            State::Downloading => {
+            State::Downloading(expected_req_id) => {
+                if req_id != *expected_req_id {
+                    return Err(LookupError::UnexpectedRequestId {
+                        expected_req_id: *expected_req_id,
+                        req_id,
+                    });
+                }
                 self.failed_downloading = self.failed_downloading.saturating_add(1);
                 self.state = State::AwaitingDownload;
                 Ok(())
@@ -375,9 +390,19 @@ impl<T: Clone> SingleLookupRequestState<T> {
         }
     }
 
-    pub fn on_download_success(&mut self, result: DownloadResult<T>) -> Result<(), LookupError> {
+    pub fn on_download_success(
+        &mut self,
+        req_id: ReqId,
+        result: DownloadResult<T>,
+    ) -> Result<(), LookupError> {
         match &self.state {
-            State::Downloading => {
+            State::Downloading(expected_req_id) => {
+                if req_id != *expected_req_id {
+                    return Err(LookupError::UnexpectedRequestId {
+                        expected_req_id: *expected_req_id,
+                        req_id,
+                    });
+                }
                 self.state = State::AwaitingProcess(result);
                 Ok(())
             }

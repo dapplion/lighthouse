@@ -3,7 +3,7 @@ use crate::sync::block_lookups::single_block_lookup::{
 };
 use crate::sync::block_lookups::{BlobRequestState, BlockRequestState, PeerId};
 use crate::sync::manager::{BlockProcessType, Id, SLOT_IMPORT_TOLERANCE};
-use crate::sync::network_context::SyncNetworkContext;
+use crate::sync::network_context::{ReqId, SyncNetworkContext};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::BeaconChainTypes;
@@ -49,7 +49,7 @@ pub trait RequestState<T: BeaconChainTypes> {
         peer_id: PeerId,
         downloaded_block_expected_blobs: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<bool, LookupError>;
+    ) -> Result<Option<ReqId>, LookupError>;
 
     /* Response handling methods */
 
@@ -84,7 +84,7 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
         peer_id: PeerId,
         _: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<bool, LookupError> {
+    ) -> Result<Option<ReqId>, LookupError> {
         cx.block_lookup_request(id, peer_id, self.requested_block_root)
             .map_err(LookupError::SendFailed)
     }
@@ -132,7 +132,7 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
         peer_id: PeerId,
         downloaded_block_expected_blobs: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<bool, LookupError> {
+    ) -> Result<Option<ReqId>, LookupError> {
         cx.blob_lookup_request(
             id,
             peer_id,
@@ -186,7 +186,7 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
         _peer_id: PeerId,
         downloaded_block_expected_blobs: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<bool, LookupError> {
+    ) -> Result<Option<ReqId>, LookupError> {
         cx.custody_lookup_request(id, self.block_root, downloaded_block_expected_blobs)
             .map_err(LookupError::SendFailed)
     }
