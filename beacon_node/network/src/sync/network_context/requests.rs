@@ -12,11 +12,21 @@ use types::{
 
 #[derive(Debug, PartialEq, Eq, IntoStaticStr)]
 pub enum RpcByRootVerifyError {
+    /// On a request that expects strictly one item, we receive the stream termination before
+    /// that item
     NoResponseReturned,
+    /// On a request for a strict number of items, we receive the stream termination before the
+    /// expected count of items
+    NotEnoughResponsesReturned,
+    /// Received more items than expected
     TooManyResponses,
+    /// Received an item that corresponds to a different request block root
     UnrequestedBlockRoot(Hash256),
+    /// Received a blob / column with an index that is not in the requested set
     UnrequestedBlobIndex(u64),
+    /// Blob or column inclusion proof does not match its own header
     InvalidInclusionProof,
+    /// Received more than one item for the tuple (block_root, index)
     DuplicateData,
 }
 
@@ -143,11 +153,13 @@ impl<E: EthSpec> ActiveBlobsByRootRequest<E> {
         }
     }
 
-    pub fn terminate(self) -> Option<Vec<Arc<BlobSidecar<E>>>> {
+    /// Handle a stream termination. Expects sender to strictly send the requested number of items
+    pub fn terminate(self) -> Result<(), RpcByRootVerifyError> {
         if self.resolved {
-            None
+            Ok(())
         } else {
-            Some(self.blobs)
+            // Expect to receive the stream termination AFTER the expect number of items
+            Err(RpcByRootVerifyError::NotEnoughResponsesReturned)
         }
     }
 }
@@ -227,6 +239,7 @@ impl<E: EthSpec, T: Copy> ActiveDataColumnsByRootRequest<E, T> {
         }
     }
 
+    /// Handle stream termination. Allows the sender to return less items than requested.
     pub fn terminate(self) -> Option<Vec<Arc<DataColumnSidecar<E>>>> {
         if self.resolved {
             None

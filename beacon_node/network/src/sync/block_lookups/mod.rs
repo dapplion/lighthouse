@@ -456,27 +456,15 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 // if both components have been processed.
                 request_state.on_processing_success()?;
 
-                // If this was the result of a block request, we can't determined if the block peer did anything
-                // wrong. If we already had both a block and blobs response processed, we should penalize the
-                // blobs peer because they did not provide all blobs on the initial request.
-                if lookup.both_components_processed() {
-                    // TODO(das): extend to columns peers too
-                    if let Some(blob_peer) = lookup
-                        .blob_request_state
-                        .state
-                        .on_post_process_validation_failure()?
-                    {
-                        // TODO(das): downscore only the peer that served the request for all blobs
-                        for peer in blob_peer.all() {
-                            cx.report_peer(
-                                *peer,
-                                PeerAction::MidToleranceError,
-                                "sent_incomplete_blobs",
-                            );
-                        }
-                    }
+                // We don't request for other block components until being sure that the block has
+                // data. If we request blobs / columns to a peer we are sure those must exist.
+                // Therefore if all components are processed and we still receive `MissingComponents`
+                // it indicates an internal bug.
+                if lookup.all_components_processed() {
+                    return Err(LookupError::MissingComponentsAfterAllProcessed);
+                } else {
+                    Action::Retry
                 }
-                Action::Retry
             }
             BlockProcessingResult::Ignored => {
                 // Beacon processor signalled to ignore the block processing result.

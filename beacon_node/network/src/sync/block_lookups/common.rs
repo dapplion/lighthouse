@@ -187,8 +187,12 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
         downloaded_block_expected_blobs: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<Option<ReqId>, LookupError> {
-        cx.custody_lookup_request(id, self.block_root, downloaded_block_expected_blobs)
-            .map_err(LookupError::SendFailed)
+        cx.custody_lookup_request(
+            id,
+            self.block_root,
+            downloaded_block_expected_blobs.map(|n| n > 0),
+        )
+        .map_err(LookupError::SendFailed)
     }
 
     fn send_for_processing(

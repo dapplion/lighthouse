@@ -477,16 +477,18 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             return Ok(None);
         }
 
-        let expected_blobs = downloaded_block_expected_blobs
-            .or_else(|| {
-                self.chain
-                    .data_availability_checker
-                    .num_expected_blobs(&block_root)
-            })
-            .unwrap_or(
-                // If we don't about the block being requested, attempt to fetch all blobs
-                T::EthSpec::max_blobs_per_block(),
-            );
+        // Do not download blobs until the block is downloaded (or already in the da_checker).
+        // Then we avoid making requests to peers for  blocks that may not have data. If the
+        // block is not yet downloaded, do nothing. There is at least one future event to
+        // continue this request.
+        let Some(expected_blobs) = downloaded_block_expected_blobs else {
+            return Ok(None);
+        };
+
+        // No data required
+        if expected_blobs == 0 {
+            return Ok(None);
+        }
 
         let imported_blob_indexes = self
             .chain
@@ -568,7 +570,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         &mut self,
         lookup_id: SingleLookupId,
         block_root: Hash256,
-        downloaded_block_expected_data: Option<usize>,
+        downloaded_block_expected_data: Option<bool>,
     ) -> Result<Option<ReqId>, &'static str> {
         // Check if we are into peerdas
         if !self
@@ -586,15 +588,13 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             return Ok(None);
         }
 
-        let expects_data = downloaded_block_expected_data
-            .or_else(|| {
-                self.chain
-                    .data_availability_checker
-                    .num_expected_blobs(&block_root)
-            })
-            .map(|n| n > 0)
-            // If we don't know about the block being requested, assume block has data
-            .unwrap_or(true);
+        // Do not download columns until the block is downloaded (or already in the da_checker).
+        // Then we avoid making requests to peers for blocks that may not have data. If the
+        // block is not yet downloaded, do nothing. There is at least one future event to
+        // continue this request.
+        let Some(expects_data) = downloaded_block_expected_data else {
+            return Ok(None);
+        };
 
         // No data required for this block
         if !expects_data {
@@ -849,15 +849,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     Err(e.into())
                 }
             },
-            RpcEvent::StreamTermination => {
-                // Stream terminator
-                match request.remove().terminate() {
-                    Some(blobs) => to_fixed_blob_sidecar_list(blobs)
-                        .map(|blobs| (blobs, timestamp_now()))
-                        .map_err(Into::into),
-                    None => return None,
-                }
-            }
+            RpcEvent::StreamTermination => match request.remove().terminate() {
+                Ok(_) => return None,
+                Err(e) => Err(e.into()),
+            },
             RpcEvent::RPCError(e) => {
                 request.remove();
                 Err(e.into())
@@ -896,13 +891,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     Err(e.into())
                 }
             },
-            RpcEvent::StreamTermination => {
-                // Stream terminator
-                match request.remove().terminate() {
-                    Some(items) => Ok((items, timestamp_now())),
-                    None => return None,
-                }
-            }
+            RpcEvent::StreamTermination => match request.remove().terminate() {
+                Some(items) => Ok((items, timestamp_now())),
+                None => return None,
+            },
             RpcEvent::RPCError(e) => {
                 request.remove();
                 Err(e.into())
