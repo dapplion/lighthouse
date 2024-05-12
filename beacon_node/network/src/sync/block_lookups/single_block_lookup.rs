@@ -6,14 +6,14 @@ use crate::sync::network_context::{PeerGroup, ReqId, SyncNetworkContext};
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::BeaconChainTypes;
 use rand::seq::IteratorRandom;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Duration;
 use store::Hash256;
 use strum::IntoStaticStr;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::{EthSpec, SignedBeaconBlock};
+use types::{ColumnIndex, EthSpec, SignedBeaconBlock};
 
 // Dedicated enum for LookupResult to force its usage
 #[must_use = "LookupResult must be handled with on_lookup_result"]
@@ -44,6 +44,8 @@ pub enum LookupError {
     MissingComponentsAfterAllProcessed,
     /// Attempted to retrieve a not known lookup id
     UnknownLookup,
+    /// Attempted to retrieve a not known lookup request by index
+    UnknownComponentIndex(usize),
     /// Received a download result for a different request id than the in-flight request.
     /// There should only exist a single request at a time. Having multiple requests is a bug and
     /// can result in undefined state, so it's treated as a hard error and the lookup is dropped.
@@ -57,7 +59,7 @@ pub struct SingleBlockLookup<T: BeaconChainTypes> {
     pub id: Id,
     pub block_request_state: BlockRequestState<T::EthSpec>,
     pub blob_request_state: BlobRequestState<T::EthSpec>,
-    pub custody_request_state: CustodyRequestState<T::EthSpec>,
+    pub custody_columns_requests: HashMap<ColumnIndex, CustodyColumnRequestState<T::EthSpec>>,
     block_root: Hash256,
     awaiting_parent: Option<Hash256>,
     /// Peers that claim to have imported this block
@@ -66,17 +68,26 @@ pub struct SingleBlockLookup<T: BeaconChainTypes> {
 
 impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     pub fn new(
-        requested_block_root: Hash256,
+        block_root: Hash256,
         peers: &[PeerId],
         id: Id,
         awaiting_parent: Option<Hash256>,
+        custody_column_indexes: Vec<ColumnIndex>,
     ) -> Self {
         Self {
             id,
-            block_request_state: BlockRequestState::new(requested_block_root),
-            blob_request_state: BlobRequestState::new(requested_block_root),
-            custody_request_state: CustodyRequestState::new(requested_block_root),
-            block_root: requested_block_root,
+            block_request_state: BlockRequestState::new(block_root),
+            blob_request_state: BlobRequestState::new(block_root),
+            custody_columns_requests: custody_column_indexes
+                .into_iter()
+                .map(|column_index| {
+                    (
+                        column_index,
+                        CustodyColumnRequestState::new(block_root, column_index),
+                    )
+                })
+                .collect(),
+            block_root,
             awaiting_parent,
             peers: peers.iter().copied().collect(),
         }
@@ -137,17 +148,26 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupResult, LookupError> {
         // TODO: Check what's necessary to download, specially for blobs
-        self.continue_request::<BlockRequestState<T::EthSpec>>(cx)?;
-        self.continue_request::<BlobRequestState<T::EthSpec>>(cx)?;
-        self.continue_request::<CustodyRequestState<T::EthSpec>>(cx)?;
+        self.continue_request::<BlockRequestState<T::EthSpec>>(cx, 0)?;
+        self.continue_request::<BlobRequestState<T::EthSpec>>(cx, 0)?;
+
+        // TODO(das): Quick hack, but data inefficient to allocate this array every time
+        let column_indexes = self
+            .custody_columns_requests
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for column_index in column_indexes {
+            self.continue_request::<CustodyColumnRequestState<T::EthSpec>>(
+                cx,
+                column_index as usize,
+            )?;
+        }
 
         // If all components of this lookup are already processed, there will be no future events
         // that can make progress so it must be dropped. Consider the lookup completed.
         // This case can happen if we receive the components from gossip during a retry.
-        if self.block_request_state.state.is_processed()
-            && self.blob_request_state.state.is_processed()
-            && self.custody_request_state.state.is_processed()
-        {
+        if self.all_components_processed() {
             Ok(LookupResult::Completed)
         } else {
             Ok(LookupResult::Pending)
@@ -158,14 +178,22 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     fn continue_request<R: RequestState<T>>(
         &mut self,
         cx: &mut SyncNetworkContext<T>,
+        component_index: usize,
     ) -> Result<(), LookupError> {
         let id = self.id;
         let awaiting_parent = self.awaiting_parent.is_some();
         let block_is_processed = self.block_request_state.state.is_processed();
-        let request = R::request_state_mut(self);
+        let request = R::request_state_mut(self, component_index).expect("TODO");
 
         // Attempt to progress awaiting downloads
         if request.get_state().is_awaiting_download() {
+            // Verify the current request has not exceeded the maximum number of attempts.
+            let request_state = request.get_state();
+            if request_state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
+                let cannot_process = request_state.more_failed_processing_attempts();
+                return Err(LookupError::TooManyAttempts { cannot_process });
+            }
+
             let downloaded_block_expected_blobs = self
                 .block_request_state
                 .state
@@ -185,7 +213,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 });
 
             let peer_id = self.get_rand_available_peer().ok_or(LookupError::NoPeers)?;
-            let request = R::request_state_mut(self);
+            let request = R::request_state_mut(self, component_index).expect("TODO");
 
             // Verify the current request has not exceeded the maximum number of attempts.
             let request_state = request.get_state();
@@ -212,7 +240,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             // maybe_start_processing returns Some if state == AwaitingProcess. This pattern is
             // useful to conditionally access the result data.
             if let Some(result) = request.get_state_mut().maybe_start_processing() {
-                return R::send_for_processing(id, result, cx);
+                return R::send_for_processing(id, component_index, result, cx);
             }
         }
 
@@ -229,7 +257,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     pub fn all_components_processed(&self) -> bool {
         self.block_request_state.state.is_processed()
             && self.blob_request_state.state.is_processed()
-            && self.custody_request_state.state.is_processed()
+            && self
+                .custody_columns_requests
+                .values()
+                .all(|r| r.state.is_processed())
     }
 
     /// Remove peer from available peers. Return true if there are no more available peers and all
@@ -240,7 +271,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         self.peers.is_empty()
             && self.block_request_state.state.is_awaiting_download()
             && self.blob_request_state.state.is_awaiting_download()
-            && self.custody_request_state.state.is_awaiting_download()
+            && self
+                .custody_columns_requests
+                .values()
+                .all(|r| r.state.is_awaiting_download())
     }
 
     /// Selects a random peer from available peers if any, inserts it in used peers and returns it.
@@ -265,15 +299,17 @@ impl<E: EthSpec> BlobRequestState<E> {
 }
 
 /// The state of the blob request component of a `SingleBlockLookup`.
-pub struct CustodyRequestState<E: EthSpec> {
+pub struct CustodyColumnRequestState<E: EthSpec> {
     pub block_root: Hash256,
-    pub state: SingleLookupRequestState<Vec<CustodyDataColumn<E>>>,
+    pub column_index: ColumnIndex,
+    pub state: SingleLookupRequestState<CustodyDataColumn<E>>,
 }
 
-impl<E: EthSpec> CustodyRequestState<E> {
-    pub fn new(block_root: Hash256) -> Self {
+impl<E: EthSpec> CustodyColumnRequestState<E> {
+    pub fn new(block_root: Hash256, column_index: ColumnIndex) -> Self {
         Self {
             block_root,
+            column_index,
             state: SingleLookupRequestState::new(),
         }
     }

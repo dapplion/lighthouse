@@ -544,6 +544,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let req_id = self.next_id();
         let id = DataColumnsByRootRequestId { requester, req_id };
 
+        // TODO(das): Check here if the column is already in the da_checker. Here you can prevent
+        // re-fetching sampling columns for columns that:
+        // - Part of custody and already downloaded and verified
+        // - Part of custody and already imported
+
         debug!(
             self.log,
             "Sending DataColumnsByRoot Request";
@@ -564,6 +569,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .insert(id, ActiveDataColumnsByRootRequest::new(request, requester));
 
         Ok(req_id)
+    }
+
+    pub fn custody_column_lookup_request(
+        &mut self,
+        lookup_id: SingleLookupId,
+        column_index: ColumnIndex,
+        block_root: Hash256,
+        downloaded_block_expected_data: Option<bool>,
+    ) -> Result<Option<ReqId>, &'static str> {
+        todo!()
     }
 
     pub fn custody_lookup_request(

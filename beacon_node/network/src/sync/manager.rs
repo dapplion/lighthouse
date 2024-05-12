@@ -45,7 +45,7 @@ use crate::network_beacon_processor::{ChainSegmentProcessId, NetworkBeaconProces
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::block_lookups::{
-    BlobRequestState, BlockComponent, BlockRequestState, CustodyRequestState, DownloadResult,
+    BlobRequestState, BlockComponent, BlockRequestState, CustodyColumnRequestState, DownloadResult,
     LookupRequestError,
 };
 use crate::sync::block_sidecar_coupling::RangeBlockComponentsRequest;
@@ -66,7 +66,9 @@ use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use types::{BlobSidecar, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock, Slot};
+use types::{
+    BlobSidecar, ColumnIndex, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock, Slot,
+};
 
 /// The number of slots ahead of us that is allowed before requesting a long-range (batch)  Sync
 /// from a peer. If a peer is within this tolerance (forwards or backwards), it is treated as a
@@ -188,7 +190,7 @@ pub enum SyncMessage<E: EthSpec> {
 pub enum BlockProcessType {
     SingleBlock { id: Id },
     SingleBlob { id: Id },
-    SingleCustodyColumn(Id),
+    SingleCustodyColumn(Id, ColumnIndex),
 }
 
 impl BlockProcessType {
@@ -196,7 +198,7 @@ impl BlockProcessType {
         match self {
             BlockProcessType::SingleBlock { id }
             | BlockProcessType::SingleBlob { id }
-            | BlockProcessType::SingleCustodyColumn(id) => *id,
+            | BlockProcessType::SingleCustodyColumn(id, _) => *id,
         }
     }
 }
@@ -893,6 +895,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             self.block_lookups
                 .on_download_response::<BlockRequestState<T::EthSpec>>(
                     id,
+                    0, // component_index = 0, there's a single block
                     resp.map(|(value, seen_timestamp)| {
                         (value, PeerGroup::from_single(peer_id), seen_timestamp)
                     })
@@ -968,6 +971,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             self.block_lookups
                 .on_download_response::<BlobRequestState<T::EthSpec>>(
                     id,
+                    0, // component_index = 0, there's a single blob request
                     resp.map(|(value, seen_timestamp)| {
                         (value, PeerGroup::from_single(peer_id), seen_timestamp)
                     })
@@ -1003,11 +1007,17 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         // TODO(das): get proper timestamp
                         let seen_timestamp = timestamp_now();
                         self.block_lookups
-                            .on_download_response::<CustodyRequestState<T::EthSpec>>(
+                            .on_download_response::<CustodyColumnRequestState<T::EthSpec>>(
                                 requester.0,
+                                0, // TODO(das): pass actual column index
                                 custody_columns
-                                    .map(|(columns, peer_group)| {
-                                        (columns, peer_group, seen_timestamp)
+                                    .map(|(mut columns, peer_group)| {
+                                        (
+                                            // TODO(das): handle peer not having column
+                                            columns.remove(0),
+                                            peer_group,
+                                            seen_timestamp,
+                                        )
                                     })
                                     .map_err(LookupRequestError::CustodyRequestError),
                                 &mut self.network,

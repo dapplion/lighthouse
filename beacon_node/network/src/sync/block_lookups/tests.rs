@@ -617,32 +617,34 @@ impl TestRig {
         };
 
         let first_column = data_columns.first().cloned().unwrap();
+        let last_index = sampling_ids.len() - 1;
 
-        for (id, column_index) in sampling_ids {
+        for (i, (id, column_index)) in sampling_ids.into_iter().enumerate() {
             self.log(&format!("return valid data column for {column_index}"));
 
             let data_column = data_columns[column_index as usize].clone();
             self.complete_data_columns_by_root_request(id, data_column);
+
+            // Expect work event
+            // TODO(das): worth it to append sender id to the work event for stricter assertion?
+            self.expect_rpc_custody_column_work_event();
+
+            // Respond with valid result
+            self.send_sync_message(SyncMessage::BlockComponentProcessed {
+                process_type: BlockProcessType::SingleCustodyColumn(lookup_id, column_index),
+                // Last column + should consider last element
+                result: if i == last_index && !missing_components {
+                    BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(
+                        first_column.block_root(),
+                    ))
+                } else {
+                    BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
+                        first_column.slot(),
+                        first_column.block_root(),
+                    ))
+                },
+            });
         }
-
-        // Expect work event
-        // TODO(das): worth it to append sender id to the work event for stricter assertion?
-        self.expect_rpc_custody_column_work_event();
-
-        // Respond with valid result
-        self.send_sync_message(SyncMessage::BlockComponentProcessed {
-            process_type: BlockProcessType::SingleCustodyColumn(lookup_id),
-            result: if missing_components {
-                BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
-                    first_column.slot(),
-                    first_column.block_root(),
-                ))
-            } else {
-                BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(
-                    first_column.block_root(),
-                ))
-            },
-        });
     }
 
     fn complete_data_columns_by_root_request(
@@ -1622,6 +1624,25 @@ fn custody_lookup_happy_path() {
         return;
     };
     r.new_connected_peers(100); // Add enough sampling peers
+    let (block, data_columns) = r.rand_block_and_data_columns();
+    let block_root = block.canonical_root();
+    let peer_id = r.new_connected_peer();
+    r.trigger_unknown_block_from_attestation(block_root, peer_id);
+    // Should not request blobs
+    let id = r.expect_block_lookup_request(block.canonical_root());
+    r.complete_valid_block_request(id, block.into(), true);
+    let custody_column_count = E::min_custody_requirement() * E::data_columns_per_subnet();
+    let custody_ids = r.expect_only_data_columns_by_root_requests(block_root, custody_column_count);
+    r.complete_valid_custody_request(custody_ids, data_columns, false);
+    r.expect_no_active_lookups();
+}
+
+#[test]
+fn custody_lookup_no_peers_available_initially() {
+    let Some(mut r) = TestRig::test_setup_after_peerdas() else {
+        return;
+    };
+    // Do not add peers initially
     let (block, data_columns) = r.rand_block_and_data_columns();
     let block_root = block.canonical_root();
     let peer_id = r.new_connected_peer();
