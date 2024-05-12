@@ -3,13 +3,12 @@ use crate::sync::block_lookups::single_block_lookup::{
 };
 use crate::sync::block_lookups::{BlobRequestState, BlockRequestState, PeerId};
 use crate::sync::manager::{BlockProcessType, Id, SLOT_IMPORT_TOLERANCE};
-use crate::sync::network_context::{ReqId, SyncNetworkContext};
+use crate::sync::network_context::{LookupRequestResult, SyncNetworkContext};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::BeaconChainTypes;
 use std::sync::Arc;
-use types::blob_sidecar::FixedBlobSidecarList;
-use types::SignedBeaconBlock;
+use types::{blob_sidecar::FixedBlobSidecarList, SignedBeaconBlock, Slot};
 
 use super::single_block_lookup::DownloadResult;
 use super::SingleLookupId;
@@ -47,9 +46,9 @@ pub trait RequestState<T: BeaconChainTypes> {
         &self,
         id: Id,
         peer_id: PeerId,
-        downloaded_block_expected_blobs: Option<usize>,
+        downloaded_block: Option<(usize, Slot)>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<Option<ReqId>, LookupError>;
+    ) -> Result<LookupRequestResult, LookupError>;
 
     /* Response handling methods */
 
@@ -82,9 +81,9 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
         &self,
         id: SingleLookupId,
         peer_id: PeerId,
-        _: Option<usize>,
+        _: Option<(usize, Slot)>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<Option<ReqId>, LookupError> {
+    ) -> Result<LookupRequestResult, LookupError> {
         cx.block_lookup_request(id, peer_id, self.requested_block_root)
             .map_err(LookupError::SendFailed)
     }
@@ -130,16 +129,24 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
         &self,
         id: Id,
         peer_id: PeerId,
-        downloaded_block_expected_blobs: Option<usize>,
+        downloaded_block: Option<(usize, Slot)>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<Option<ReqId>, LookupError> {
-        cx.blob_lookup_request(
-            id,
-            peer_id,
-            self.block_root,
-            downloaded_block_expected_blobs,
-        )
-        .map_err(LookupError::SendFailed)
+    ) -> Result<LookupRequestResult, LookupError> {
+        // Do not download blobs until the block is downloaded (or already in the da_checker).
+        // Then we avoid making requests to peers for  blocks that may not have data. If the
+        // block is not yet downloaded, do nothing. There is at least one future event to
+        // continue this request.
+        let Some((expected_blobs, block_slot)) = downloaded_block else {
+            return Ok(LookupRequestResult::AwaitingElse);
+        };
+
+        // No data required
+        if expected_blobs == 0 {
+            return Ok(LookupRequestResult::NoRequestNeeded);
+        }
+
+        cx.blob_lookup_request(id, peer_id, self.block_root, block_slot, expected_blobs)
+            .map_err(LookupError::SendFailed)
     }
 
     fn send_for_processing(
@@ -184,15 +191,24 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
         id: Id,
         // TODO(das): consider selecting peers that have custody but are in this set
         _peer_id: PeerId,
-        downloaded_block_expected_blobs: Option<usize>,
+        downloaded_block: Option<(usize, Slot)>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<Option<ReqId>, LookupError> {
-        cx.custody_lookup_request(
-            id,
-            self.block_root,
-            downloaded_block_expected_blobs.map(|n| n > 0),
-        )
-        .map_err(LookupError::SendFailed)
+    ) -> Result<LookupRequestResult, LookupError> {
+        // Do not download columns until the block is downloaded (or already in the da_checker).
+        // Then we avoid making requests to peers for blocks that may not have data. If the
+        // block is not yet downloaded, do nothing. There is at least one future event to
+        // continue this request.
+        let Some((expected_blobs, block_slot)) = downloaded_block else {
+            return Ok(LookupRequestResult::AwaitingElse);
+        };
+
+        // No data required
+        if expected_blobs == 0 {
+            return Ok(LookupRequestResult::NoRequestNeeded);
+        }
+
+        cx.custody_lookup_request(id, self.block_root, block_slot)
+            .map_err(LookupError::SendFailed)
     }
 
     fn send_for_processing(

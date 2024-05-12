@@ -141,6 +141,16 @@ impl<T: BeaconChainTypes> ActiveCustodyRequest<T> {
             }
         }
 
+        // Here could check if we have >50% of columns and send for processing. Then the processing
+        // result is complex it can include:
+        // - Zero or more columns are invalid, need to downscore peers
+        // - Columns have been re-constructed, need to broascast
+        // - Block import result:
+        //   - Ok, imported
+        //   - Missing components: need to continue request and fetch more columns. If missing
+        //   components because there are no blobs can only mean that we need more columns. Block
+        //   must be processed at this point?
+
         // All requests have completed successfully. We may not have all the expected columns if the
         // serving peers claim that this block has no data.
         if successes == self.column_requests.len() {

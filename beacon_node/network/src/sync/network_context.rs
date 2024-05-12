@@ -32,7 +32,6 @@ use lighthouse_network::{
 };
 pub use requests::RpcByRootVerifyError;
 use slog::{debug, error, trace, warn};
-use slot_clock::SlotClock;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,6 +107,20 @@ impl PeerGroup {
     pub fn all(&self) -> &[PeerId] {
         &self.peers
     }
+}
+
+pub enum LookupRequestResult {
+    /// A request is sent. Sync MUST receive an event from the network in the future for either:
+    /// completed response or failed request
+    RequestSent(ReqId),
+    /// No request is sent, and no further action is necessary to consider this request completed
+    NoRequestNeeded,
+    /// No request is sent, but the request is not completed. Request is processing from a different
+    /// source (i.e. block received from gossip) and sync MUST receive an event with that processing
+    /// result.
+    AwaitingOtherSource,
+    /// TODO: no action now, we are waiting on something else
+    AwaitingElse,
 }
 
 /// Wraps a Network channel to employ various RPC related network functionality for the Sync manager. This includes management of a global RPC request Id.
@@ -412,14 +425,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         lookup_id: SingleLookupId,
         peer_id: PeerId,
         block_root: Hash256,
-    ) -> Result<Option<ReqId>, &'static str> {
+    ) -> Result<LookupRequestResult, &'static str> {
         if self
             .chain
             .reqresp_pre_import_cache
             .read()
             .contains_key(&block_root)
         {
-            return Ok(None);
+            return Ok(LookupRequestResult::NoRequestNeeded);
         }
 
         let req_id = self.next_id();
@@ -445,7 +458,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.blocks_by_root_requests
             .insert(id, ActiveBlocksByRootRequest::new(request));
 
-        Ok(Some(req_id))
+        Ok(LookupRequestResult::RequestSent(req_id))
     }
 
     /// Request necessary blobs for `block_root`. Requests only the necessary blobs by checking:
@@ -459,35 +472,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         lookup_id: SingleLookupId,
         peer_id: PeerId,
         block_root: Hash256,
-        downloaded_block_expected_blobs: Option<usize>,
-    ) -> Result<Option<ReqId>, &'static str> {
+        block_slot: Slot,
+        expected_blobs: usize,
+    ) -> Result<LookupRequestResult, &'static str> {
         // Check if we are into deneb, and before peerdas
         if !self
             .chain
             .data_availability_checker
-            .blobs_required_for_epoch(
-                // TODO(das): use the block's slot
-                self.chain
-                    .slot_clock
-                    .now_or_genesis()
-                    .ok_or("clock not available")?
-                    .epoch(T::EthSpec::slots_per_epoch()),
-            )
+            .blobs_required_for_epoch(block_slot.epoch(T::EthSpec::slots_per_epoch()))
         {
-            return Ok(None);
-        }
-
-        // Do not download blobs until the block is downloaded (or already in the da_checker).
-        // Then we avoid making requests to peers for  blocks that may not have data. If the
-        // block is not yet downloaded, do nothing. There is at least one future event to
-        // continue this request.
-        let Some(expected_blobs) = downloaded_block_expected_blobs else {
-            return Ok(None);
-        };
-
-        // No data required
-        if expected_blobs == 0 {
-            return Ok(None);
+            return Ok(LookupRequestResult::NoRequestNeeded);
         }
 
         let imported_blob_indexes = self
@@ -502,7 +496,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         if indices.is_empty() {
             // No blobs required, do not issue any request
-            return Ok(None);
+            return Ok(LookupRequestResult::NoRequestNeeded);
         }
 
         let req_id = self.next_id();
@@ -532,7 +526,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.blobs_by_root_requests
             .insert(id, ActiveBlobsByRootRequest::new(request));
 
-        Ok(Some(req_id))
+        Ok(LookupRequestResult::RequestSent(req_id))
     }
 
     pub fn data_column_lookup_request(
@@ -570,35 +564,15 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         &mut self,
         lookup_id: SingleLookupId,
         block_root: Hash256,
-        downloaded_block_expected_data: Option<bool>,
-    ) -> Result<Option<ReqId>, &'static str> {
+        block_slot: Slot,
+    ) -> Result<LookupRequestResult, &'static str> {
         // Check if we are into peerdas
         if !self
             .chain
             .data_availability_checker
-            .data_columns_required_for_epoch(
-                // TODO(das): use the block's slot
-                self.chain
-                    .slot_clock
-                    .now_or_genesis()
-                    .ok_or("clock not available")?
-                    .epoch(T::EthSpec::slots_per_epoch()),
-            )
+            .data_columns_required_for_epoch(block_slot.epoch(T::EthSpec::slots_per_epoch()))
         {
-            return Ok(None);
-        }
-
-        // Do not download columns until the block is downloaded (or already in the da_checker).
-        // Then we avoid making requests to peers for blocks that may not have data. If the
-        // block is not yet downloaded, do nothing. There is at least one future event to
-        // continue this request.
-        let Some(expects_data) = downloaded_block_expected_data else {
-            return Ok(None);
-        };
-
-        // No data required for this block
-        if !expects_data {
-            return Ok(None);
+            return Ok(LookupRequestResult::NoRequestNeeded);
         }
 
         let custody_indexes_imported = self
@@ -619,7 +593,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         if custody_indexes_to_fetch.is_empty() {
             // No indexes required, do not issue any request
-            return Ok(None);
+            return Ok(LookupRequestResult::NoRequestNeeded);
         }
 
         let req_id = self.next_id();
@@ -649,10 +623,20 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 // created cannot return data immediately, it must send some request to the network
                 // first. And there must exist some request, `custody_indexes_to_fetch` is not empty.
                 self.custody_by_root_requests.insert(requester, request);
-                Ok(Some(req_id))
+                Ok(LookupRequestResult::RequestSent(req_id))
             }
             // TODO(das): handle this error properly
-            Err(_) => Err("custody_send_error"),
+            Err(e) => {
+                debug!(
+                    self.log,
+                    "Error sending custody request";
+                    "block_root" => ?block_root,
+                    "id" => ?id,
+                    "error" => ?e,
+                );
+
+                Err("custody_send_error")
+            }
         }
     }
 

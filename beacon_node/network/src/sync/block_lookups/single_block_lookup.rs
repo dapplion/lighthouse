@@ -2,7 +2,7 @@ use super::common::ResponseType;
 use super::{BlockComponent, PeerId, SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS};
 use crate::sync::block_lookups::common::RequestState;
 use crate::sync::block_lookups::Id;
-use crate::sync::network_context::{PeerGroup, ReqId, SyncNetworkContext};
+use crate::sync::network_context::{LookupRequestResult, PeerGroup, ReqId, SyncNetworkContext};
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::BeaconChainTypes;
 use rand::seq::IteratorRandom;
@@ -166,11 +166,11 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
         // Attempt to progress awaiting downloads
         if request.get_state().is_awaiting_download() {
-            let downloaded_block_expected_blobs = self
+            let downloaded_block = self
                 .block_request_state
                 .state
                 .peek_downloaded_data()
-                .map(|block| block.num_expected_blobs())
+                .map(|block| (block.num_expected_blobs(), block.slot()))
                 .or_else(|| {
                     // This is a bit of a hack, becase the block request `Processed` state does not
                     // store block details. `peek_downloaded_data` only returns data if the block is
@@ -195,12 +195,17 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             }
 
             // make_request returns true only if a request needs to be made
-            if let Some(req_id) =
-                request.make_request(id, peer_id, downloaded_block_expected_blobs, cx)?
-            {
-                request.get_state_mut().on_download_start(req_id)?;
-            } else {
-                request.get_state_mut().on_completed_request()?;
+            match request.make_request(id, peer_id, downloaded_block, cx)? {
+                LookupRequestResult::RequestSent(req_id) => {
+                    request.get_state_mut().on_download_start(req_id)?
+                }
+                LookupRequestResult::NoRequestNeeded => {
+                    request.get_state_mut().on_completed_request()?
+                }
+                LookupRequestResult::AwaitingOtherSource => {
+                    todo!()
+                }
+                LookupRequestResult::AwaitingElse => return Ok(()),
             }
 
         // Otherwise, attempt to progress awaiting processing
