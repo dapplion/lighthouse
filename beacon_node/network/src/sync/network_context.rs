@@ -1,8 +1,6 @@
 //! Provides network functionality for the Syncing thread. This fundamentally wraps a network
 //! channel and stores a global RPC ID to perform requests.
 
-pub use self::custody::CustodyId;
-use self::custody::{ActiveCustodyRequest, CustodyRequestError, CustodyRequester};
 use self::requests::{
     ActiveBlobsByRootRequest, ActiveBlocksByRootRequest, ActiveDataColumnsByRootRequest,
 };
@@ -43,7 +41,6 @@ use types::{
     SignedBeaconBlock, Slot,
 };
 
-pub mod custody;
 mod requests;
 
 pub struct BlocksAndBlobsByRangeResponse<E: EthSpec> {
@@ -102,9 +99,6 @@ impl PeerGroup {
     pub fn from_single(peer: PeerId) -> Self {
         Self { peers: vec![peer] }
     }
-    pub fn from_set(peers: Vec<PeerId>) -> Self {
-        Self { peers }
-    }
     pub fn all(&self) -> &[PeerId] {
         &self.peers
     }
@@ -127,8 +121,6 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
         DataColumnsByRootRequestId,
         ActiveDataColumnsByRootRequest<T::EthSpec, DataColumnsByRootRequester>,
     >,
-    /// Mapping of active custody column requests for a block root
-    custody_by_root_requests: FnvHashMap<CustodyRequester, ActiveCustodyRequest<T>>,
 
     /// BlocksByRange requests paired with BlobsByRange
     range_block_components_requests:
@@ -180,7 +172,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             blocks_by_root_requests: <_>::default(),
             blobs_by_root_requests: <_>::default(),
             data_columns_by_root_requests: <_>::default(),
-            custody_by_root_requests: <_>::default(),
             range_block_components_requests: FnvHashMap::default(),
             network_beacon_processor,
             chain,
@@ -544,6 +535,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let req_id = self.next_id();
         let id = DataColumnsByRootRequestId { requester, req_id };
 
+        // TODO(das): Check here if the column is already in the da_checker. Here you can prevent
+        // re-fetching sampling columns for columns that:
+        // - Part of custody and already downloaded and verified
+        // - Part of custody and already imported
+
         debug!(
             self.log,
             "Sending DataColumnsByRoot Request";
@@ -564,96 +560,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .insert(id, ActiveDataColumnsByRootRequest::new(request, requester));
 
         Ok(req_id)
-    }
-
-    pub fn custody_lookup_request(
-        &mut self,
-        lookup_id: SingleLookupId,
-        block_root: Hash256,
-        downloaded_block_expected_data: Option<bool>,
-    ) -> Result<Option<ReqId>, &'static str> {
-        // Check if we are into peerdas
-        if !self
-            .chain
-            .data_availability_checker
-            .data_columns_required_for_epoch(
-                // TODO(das): use the block's slot
-                self.chain
-                    .slot_clock
-                    .now_or_genesis()
-                    .ok_or("clock not available")?
-                    .epoch(T::EthSpec::slots_per_epoch()),
-            )
-        {
-            return Ok(None);
-        }
-
-        // Do not download columns until the block is downloaded (or already in the da_checker).
-        // Then we avoid making requests to peers for blocks that may not have data. If the
-        // block is not yet downloaded, do nothing. There is at least one future event to
-        // continue this request.
-        let Some(expects_data) = downloaded_block_expected_data else {
-            return Ok(None);
-        };
-
-        // No data required for this block
-        if !expects_data {
-            return Ok(None);
-        }
-
-        let custody_indexes_imported = self
-            .chain
-            .data_availability_checker
-            .imported_custody_column_indexes(&block_root)
-            .unwrap_or_default();
-
-        // TODO(das): figure out how to pass block.slot if we end up doing rotation
-        let block_epoch = Epoch::new(0);
-        let custody_indexes_duty = self.network_globals().custody_columns(block_epoch)?;
-
-        // Include only the blob indexes not yet imported (received through gossip)
-        let custody_indexes_to_fetch = custody_indexes_duty
-            .into_iter()
-            .filter(|index| !custody_indexes_imported.contains(index))
-            .collect::<Vec<_>>();
-
-        if custody_indexes_to_fetch.is_empty() {
-            // No indexes required, do not issue any request
-            return Ok(None);
-        }
-
-        let req_id = self.next_id();
-        let id = SingleLookupReqId { lookup_id, req_id };
-
-        debug!(
-            self.log,
-            "Starting custody columns request";
-            "block_root" => ?block_root,
-            "indices" => ?custody_indexes_to_fetch,
-            "id" => ?id
-        );
-
-        let requester = CustodyRequester(id);
-        let mut request = ActiveCustodyRequest::new(
-            block_root,
-            requester,
-            custody_indexes_to_fetch,
-            self.log.clone(),
-        );
-
-        // TODO(das): start request
-        // Note that you can only send, but not handle a response here
-        match request.continue_requests(self) {
-            Ok(_) => {
-                // Ignoring the result of `continue_requests` is okay. A request that has just been
-                // created cannot return data immediately, it must send some request to the network
-                // first. And there must exist some request, `custody_indexes_to_fetch` is not empty.
-                self.custody_by_root_requests.insert(requester, request);
-                Ok(Some(req_id))
-            }
-            // TODO(das): handle this error properly
-            Err(_) => Err("custody_send_error"),
-        }
     }
 
     pub fn is_execution_engine_online(&self) -> bool {
@@ -905,54 +811,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
         }
         Some((requester, resp))
-    }
-
-    /// Insert a downloaded column into an active custody request. Then make progress on the
-    /// entire request.
-    ///
-    /// ### Returns
-    ///
-    /// - `Some`: Request completed, won't make more progress. Expect requester to act on the result.
-    /// - `None`: Request still active, requester should do no action
-    #[allow(clippy::type_complexity)]
-    pub fn on_custody_by_root_response(
-        &mut self,
-        id: CustodyId,
-        peer_id: PeerId,
-        resp: RpcByRootRequestResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>,
-    ) -> Option<(
-        CustodyRequester,
-        Result<(Vec<CustodyDataColumn<T::EthSpec>>, PeerGroup), CustodyRequestError>,
-    )> {
-        // Note: need to remove the request to borrow self again below. Otherwise we can't
-        // do nested requests
-        let Some(mut request) = self.custody_by_root_requests.remove(&id.requester) else {
-            // TOOD(das): This log can happen if the request is error'ed early and dropped
-            debug!(self.log, "Custody column downloaded event for unknown request"; "id" => ?id);
-            return None;
-        };
-
-        let result = request
-            .on_data_column_downloaded(peer_id, id.column_index, resp, self)
-            .transpose();
-
-        // Convert a result from internal format of `ActiveCustodyRequest` (error first to use ?) to
-        // an Option first to use in an `if let Some() { act on result }` block.
-        if let Some(result) = result {
-            match result.as_ref() {
-                Ok((columns, peer_group)) => {
-                    debug!(self.log, "Custody request success, removing"; "id" => ?id, "count" => columns.len(), "peers" => ?peer_group)
-                }
-                Err(e) => {
-                    debug!(self.log, "Custody request failure, removing"; "id" => ?id, "error" => ?e)
-                }
-            }
-
-            Some((id.requester, result))
-        } else {
-            self.custody_by_root_requests.insert(id.requester, request);
-            None
-        }
     }
 
     pub fn send_block_for_processing(

@@ -1,20 +1,23 @@
 use crate::sync::block_lookups::single_block_lookup::{
     LookupError, SingleBlockLookup, SingleLookupRequestState,
 };
-use crate::sync::block_lookups::{BlobRequestState, BlockRequestState, PeerId};
-use crate::sync::manager::{BlockProcessType, Id, SLOT_IMPORT_TOLERANCE};
-use crate::sync::network_context::{ReqId, SyncNetworkContext};
+use crate::sync::block_lookups::{
+    BlobRequestState, BlockRequestState, CustodyColumnRequestState, PeerId,
+};
+use crate::sync::manager::{
+    BlockProcessType, DataColumnsByRootRequester, Id, SLOT_IMPORT_TOLERANCE,
+};
+use crate::sync::network_context::{
+    DataColumnsByRootSingleBlockRequest, ReqId, SyncNetworkContext,
+};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::BeaconChainTypes;
 use std::sync::Arc;
-use types::blob_sidecar::FixedBlobSidecarList;
-use types::SignedBeaconBlock;
+use types::{blob_sidecar::FixedBlobSidecarList, ColumnIndex, Epoch, SignedBeaconBlock};
 
 use super::single_block_lookup::DownloadResult;
 use super::SingleLookupId;
-
-use super::single_block_lookup::CustodyRequestState;
 
 #[derive(Debug, Copy, Clone)]
 pub enum ResponseType {
@@ -56,6 +59,7 @@ pub trait RequestState<T: BeaconChainTypes> {
     /// Send the response to the beacon processor.
     fn send_for_processing(
         id: Id,
+        component_index: usize,
         result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupError>;
@@ -66,7 +70,10 @@ pub trait RequestState<T: BeaconChainTypes> {
     fn response_type() -> ResponseType;
 
     /// A getter for the `BlockRequestState` or `BlobRequestState` associated with this trait.
-    fn request_state_mut(request: &mut SingleBlockLookup<T>) -> &mut Self;
+    fn request_state_mut(
+        request: &mut SingleBlockLookup<T>,
+        component_index: usize,
+    ) -> Option<&mut Self>;
 
     /// A getter for a reference to the `SingleLookupRequestState` associated with this trait.
     fn get_state(&self) -> &SingleLookupRequestState<Self::VerifiedResponseType>;
@@ -82,7 +89,7 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
         &self,
         id: SingleLookupId,
         peer_id: PeerId,
-        _: Option<usize>,
+        _downloaded_block_expected_blobs: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<Option<ReqId>, LookupError> {
         cx.block_lookup_request(id, peer_id, self.requested_block_root)
@@ -91,6 +98,7 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
 
     fn send_for_processing(
         id: SingleLookupId,
+        _component_index: usize,
         download_result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupError> {
@@ -112,8 +120,8 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
     fn response_type() -> ResponseType {
         ResponseType::Block
     }
-    fn request_state_mut(request: &mut SingleBlockLookup<T>) -> &mut Self {
-        &mut request.block_request_state
+    fn request_state_mut(request: &mut SingleBlockLookup<T>, _: usize) -> Option<&mut Self> {
+        Some(&mut request.block_request_state)
     }
     fn get_state(&self) -> &SingleLookupRequestState<Self::VerifiedResponseType> {
         &self.state
@@ -144,6 +152,7 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
 
     fn send_for_processing(
         id: Id,
+        _component_index: usize,
         download_result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupError> {
@@ -165,8 +174,8 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
     fn response_type() -> ResponseType {
         ResponseType::Blob
     }
-    fn request_state_mut(request: &mut SingleBlockLookup<T>) -> &mut Self {
-        &mut request.blob_request_state
+    fn request_state_mut(request: &mut SingleBlockLookup<T>, _: usize) -> Option<&mut Self> {
+        Some(&mut request.blob_request_state)
     }
     fn get_state(&self) -> &SingleLookupRequestState<Self::VerifiedResponseType> {
         &self.state
@@ -176,27 +185,49 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
     }
 }
 
-impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
-    type VerifiedResponseType = Vec<CustodyDataColumn<T::EthSpec>>;
+impl<T: BeaconChainTypes> RequestState<T> for CustodyColumnRequestState<T::EthSpec> {
+    type VerifiedResponseType = CustodyDataColumn<T::EthSpec>;
 
     fn make_request(
         &self,
         id: Id,
         // TODO(das): consider selecting peers that have custody but are in this set
         _peer_id: PeerId,
-        downloaded_block_expected_blobs: Option<usize>,
+        _downloaded_block_expected_blobs: Option<usize>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<Option<ReqId>, LookupError> {
-        cx.custody_lookup_request(
-            id,
-            self.block_root,
-            downloaded_block_expected_blobs.map(|n| n > 0),
+        // TODO: Ensure that requests are not sent when the block is:
+        // - not yet in PeerDAS epoch
+        // - outside da_boundary (maybe not necessary to check)
+
+        // TODO(das): no rotation
+        let block_epoch = Epoch::new(0);
+        // TODO: When is a fork and only a subset of your peers know about a block, sampling should only
+        // be queried on the peers on that fork. Should this case be handled? How to handle it?
+        let peer_ids = cx.get_custodial_peers(block_epoch, self.column_index);
+
+        // TODO(das) randomize custodial peer and avoid failing peers
+        let Some(peer_id) = peer_ids.first().cloned() else {
+            // Allow custody lookups to have zero peers. If no peers are found to have custody after
+            // some time the lookup is dropped.
+            return Ok(None);
+        };
+
+        cx.data_column_lookup_request(
+            DataColumnsByRootRequester::Custody(id, self.column_index),
+            peer_id,
+            DataColumnsByRootSingleBlockRequest {
+                block_root: self.block_root,
+                indices: vec![self.column_index],
+            },
         )
+        .map(Some)
         .map_err(LookupError::SendFailed)
     }
 
     fn send_for_processing(
         id: Id,
+        component_index: usize,
         download_result: DownloadResult<Self::VerifiedResponseType>,
         cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupError> {
@@ -208,9 +239,10 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
         } = download_result;
         cx.send_custody_columns_for_processing(
             block_root,
-            value,
+            // TODO(das): might be inneficient to send columns one by one
+            vec![value],
             seen_timestamp,
-            BlockProcessType::SingleCustodyColumn(id),
+            BlockProcessType::SingleCustodyColumn(id, component_index as ColumnIndex),
         )
         .map_err(LookupError::SendFailed)
     }
@@ -218,8 +250,13 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
     fn response_type() -> ResponseType {
         ResponseType::CustodyColumn
     }
-    fn request_state_mut(request: &mut SingleBlockLookup<T>) -> &mut Self {
-        &mut request.custody_request_state
+    fn request_state_mut(
+        request: &mut SingleBlockLookup<T>,
+        component_index: usize,
+    ) -> Option<&mut Self> {
+        request
+            .custody_columns_requests
+            .get_mut(&(component_index as u64))
     }
     fn get_state(&self) -> &SingleLookupRequestState<Self::VerifiedResponseType> {
         &self.state

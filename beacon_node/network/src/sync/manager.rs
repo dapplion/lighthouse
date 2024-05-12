@@ -36,7 +36,8 @@
 use super::backfill_sync::{BackFillSync, ProcessResult, SyncStart};
 use super::block_lookups::BlockLookups;
 use super::network_context::{
-    BlockOrBlob, CustodyId, RangeRequestId, RpcEvent, SyncNetworkContext,
+    BlockOrBlob, RangeRequestId, RpcByRootRequestError, RpcByRootVerifyError, RpcEvent,
+    SyncNetworkContext,
 };
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
@@ -45,13 +46,14 @@ use crate::network_beacon_processor::{ChainSegmentProcessId, NetworkBeaconProces
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::block_lookups::{
-    BlobRequestState, BlockComponent, BlockRequestState, CustodyRequestState, DownloadResult,
+    BlobRequestState, BlockComponent, BlockRequestState, CustodyColumnRequestState, DownloadResult,
     LookupRequestError,
 };
 use crate::sync::block_sidecar_coupling::RangeBlockComponentsRequest;
 use crate::sync::network_context::PeerGroup;
 use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::block_verification_types::RpcBlock;
+use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::{
     AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes, BlockError, EngineState,
@@ -66,7 +68,9 @@ use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use types::{BlobSidecar, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock, Slot};
+use types::{
+    BlobSidecar, ColumnIndex, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock, Slot,
+};
 
 /// The number of slots ahead of us that is allowed before requesting a long-range (batch)  Sync
 /// from a peer. If a peer is within this tolerance (forwards or backwards), it is treated as a
@@ -107,7 +111,7 @@ pub struct DataColumnsByRootRequestId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum DataColumnsByRootRequester {
     Sampling(SamplingId),
-    Custody(CustodyId),
+    Custody(Id, ColumnIndex),
 }
 
 #[derive(Debug)]
@@ -188,7 +192,7 @@ pub enum SyncMessage<E: EthSpec> {
 pub enum BlockProcessType {
     SingleBlock { id: Id },
     SingleBlob { id: Id },
-    SingleCustodyColumn(Id),
+    SingleCustodyColumn(Id, ColumnIndex),
 }
 
 impl BlockProcessType {
@@ -196,7 +200,7 @@ impl BlockProcessType {
         match self {
             BlockProcessType::SingleBlock { id }
             | BlockProcessType::SingleBlob { id }
-            | BlockProcessType::SingleCustodyColumn(id) => *id,
+            | BlockProcessType::SingleCustodyColumn(id, _) => *id,
         }
     }
 }
@@ -893,6 +897,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             self.block_lookups
                 .on_download_response::<BlockRequestState<T::EthSpec>>(
                     id,
+                    0, // component_index = 0, there's a single block
                     resp.map(|(value, seen_timestamp)| {
                         (value, PeerGroup::from_single(peer_id), seen_timestamp)
                     })
@@ -968,6 +973,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             self.block_lookups
                 .on_download_response::<BlobRequestState<T::EthSpec>>(
                     id,
+                    0, // component_index = 0, there's a single blob request
                     resp.map(|(value, seen_timestamp)| {
                         (value, PeerGroup::from_single(peer_id), seen_timestamp)
                     })
@@ -996,23 +1002,38 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         self.on_sampling_result(requester, result)
                     }
                 }
-                DataColumnsByRootRequester::Custody(id) => {
-                    if let Some((requester, custody_columns)) =
-                        self.network.on_custody_by_root_response(id, peer_id, resp)
-                    {
-                        // TODO(das): get proper timestamp
-                        let seen_timestamp = timestamp_now();
-                        self.block_lookups
-                            .on_download_response::<CustodyRequestState<T::EthSpec>>(
-                                requester.0,
-                                custody_columns
-                                    .map(|(columns, peer_group)| {
-                                        (columns, peer_group, seen_timestamp)
-                                    })
-                                    .map_err(LookupRequestError::CustodyRequestError),
-                                &mut self.network,
-                            );
-                    }
+                DataColumnsByRootRequester::Custody(lookup_id, column_index) => {
+                    let resp = resp.and_then(|(data_columns, seen_timestamp)| {
+                        let data_column = data_columns.into_iter().next().ok_or(
+                            // TODO(das): block lookup must not allow a request to fail in response to these
+                            // error
+                            // TODO(das): failing peers should be tracked and not re-requested. We
+                            // should hold the custody request for a bit until someone has it.
+                            // Retrying the same peer over and over makes no sense
+                            RpcByRootRequestError::VerifyError(
+                                RpcByRootVerifyError::NoResponseReturned,
+                            ),
+                        )?;
+                        // on_data_columns_by_root_response ensures that peers return either nothing
+                        // or the data requested. block lookups only requests custody columns, so if
+                        // there is one item in this request, it must be a custody column.
+                        let custody_column = CustodyDataColumn::from_asserted_custody(data_column);
+                        Ok((custody_column, seen_timestamp))
+                    });
+                    // TODO(das): get proper timestamp
+                    self.block_lookups
+                        .on_download_response::<CustodyColumnRequestState<T::EthSpec>>(
+                            SingleLookupReqId {
+                                lookup_id,
+                                req_id: id.req_id,
+                            },
+                            column_index as usize,
+                            resp.map(|(value, seen_timestamp)| {
+                                (value, PeerGroup::from_single(peer_id), seen_timestamp)
+                            })
+                            .map_err(LookupRequestError::CustodyRequestError),
+                            &mut self.network,
+                        );
                 }
             }
         }
