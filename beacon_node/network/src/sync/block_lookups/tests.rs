@@ -89,6 +89,7 @@ type SamplingIds = Vec<(DataColumnsByRootRequestId, ColumnIndex)>;
 
 struct TestRigConfig {
     peer_das_enabled: bool,
+    supernode: bool,
 }
 
 impl TestRig {
@@ -99,7 +100,7 @@ impl TestRig {
         // Use `fork_from_env` logic to set correct fork epochs
         let mut spec = test_spec::<E>();
 
-        if let Some(config) = config {
+        if let Some(config) = &config {
             if config.peer_das_enabled {
                 spec.eip7594_fork_epoch = Some(Epoch::new(0));
             }
@@ -123,9 +124,15 @@ impl TestRig {
         let (network_tx, network_rx) = mpsc::unbounded_channel();
         // TODO(das): make the generation of the ENR use the deterministic rng to have consistent
         // column assignments
-        let globals = Arc::new(NetworkGlobals::new_test_globals(Vec::new(), &log));
+        let mut globals = NetworkGlobals::new_test_globals(Vec::new(), &log);
+        if let Some(config) = &config {
+            if config.supernode {
+                globals.test_mutate_custody_subnet_count(E::data_column_subnet_count() as u64);
+            }
+        }
+
         let (beacon_processor, beacon_processor_rx) = NetworkBeaconProcessor::null_for_testing(
-            globals,
+            Arc::new(globals),
             chain.clone(),
             harness.runtime.task_executor.clone(),
             log.clone(),
@@ -179,6 +186,19 @@ impl TestRig {
     fn test_setup_after_peerdas() -> Option<Self> {
         let r = Self::test_setup_with_config(Some(TestRigConfig {
             peer_das_enabled: true,
+            supernode: false,
+        }));
+        if r.after_deneb() {
+            Some(r)
+        } else {
+            None
+        }
+    }
+
+    fn test_setup_after_peerdas_supernode() -> Option<Self> {
+        let r = Self::test_setup_with_config(Some(TestRigConfig {
+            peer_das_enabled: true,
+            supernode: true,
         }));
         if r.after_deneb() {
             Some(r)
@@ -356,12 +376,26 @@ impl TestRig {
         self.network_globals
             .peers
             .write()
-            .__add_connected_peer_testing_only(&peer_id);
+            .__add_connected_peer_testing_only(&peer_id, false);
         peer_id
     }
 
-    fn new_connected_peers(&mut self, count: usize) -> Vec<PeerId> {
-        (0..count).map(|_| self.new_connected_peer()).collect()
+    fn new_connected_supernode_peer(&mut self) -> PeerId {
+        let peer_id = PeerId::random();
+        self.network_globals
+            .peers
+            .write()
+            .__add_connected_peer_testing_only(&peer_id, true);
+        peer_id
+    }
+
+    fn new_connected_peers_for_peerdas(&mut self) {
+        // Enough sampling peers with few columns
+        for _ in 0..100 {
+            self.new_connected_peer();
+        }
+        // One supernode peer to ensure all columns have at least one peer
+        self.new_connected_supernode_peer();
     }
 
     fn parent_chain_processed_success(
@@ -1584,7 +1618,7 @@ fn sampling_happy_path() {
     let Some(mut r) = TestRig::test_setup_after_peerdas() else {
         return;
     };
-    r.new_connected_peers(100); // Add enough sampling peers
+    r.new_connected_peers_for_peerdas();
     let (block, data_columns) = r.rand_block_and_data_columns();
     let block_root = block.canonical_root();
     r.trigger_sample_block(block_root, block.slot());
@@ -1601,7 +1635,7 @@ fn sampling_with_retries() {
     let Some(mut r) = TestRig::test_setup_after_peerdas() else {
         return;
     };
-    r.new_connected_peers(100); // Add enough sampling peers
+    r.new_connected_peers_for_peerdas();
     let (block, data_columns) = r.rand_block_and_data_columns();
     let block_root = block.canonical_root();
     r.trigger_sample_block(block_root, block.slot());
@@ -1621,7 +1655,7 @@ fn custody_lookup_happy_path() {
     let Some(mut r) = TestRig::test_setup_after_peerdas() else {
         return;
     };
-    r.new_connected_peers(100); // Add enough sampling peers
+    r.new_connected_peers_for_peerdas();
     let (block, data_columns) = r.rand_block_and_data_columns();
     let block_root = block.canonical_root();
     let peer_id = r.new_connected_peer();
@@ -1649,6 +1683,25 @@ fn custody_lookup_no_peers_available_initially() {
     let id = r.expect_block_lookup_request(block.canonical_root());
     r.complete_valid_block_request(id, block.into(), true);
     let custody_column_count = E::min_custody_requirement() * E::data_columns_per_subnet();
+    let custody_ids = r.expect_only_data_columns_by_root_requests(block_root, custody_column_count);
+    r.complete_valid_custody_request(custody_ids, data_columns, false);
+    r.expect_no_active_lookups();
+}
+
+#[test]
+fn custody_lookup_reconstruction() {
+    let Some(mut r) = TestRig::test_setup_after_peerdas_supernode() else {
+        return;
+    };
+    r.new_connected_peers_for_peerdas();
+    let (block, data_columns) = r.rand_block_and_data_columns();
+    let block_root = block.canonical_root();
+    let peer_id = r.new_connected_peer();
+    r.trigger_unknown_block_from_attestation(block_root, peer_id);
+    // Should not request blobs
+    let id = r.expect_block_lookup_request(block.canonical_root());
+    r.complete_valid_block_request(id, block.into(), true);
+    let custody_column_count = E::data_column_subnet_count() * E::data_columns_per_subnet();
     let custody_ids = r.expect_only_data_columns_by_root_requests(block_root, custody_column_count);
     r.complete_valid_custody_request(custody_ids, data_columns, false);
     r.expect_no_active_lookups();

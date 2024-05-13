@@ -74,19 +74,25 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         awaiting_parent: Option<Hash256>,
         custody_column_indexes: Vec<ColumnIndex>,
     ) -> Self {
+        let column_count = custody_column_indexes.len();
+        let custody_columns_requests = custody_column_indexes
+            .into_iter()
+            .map(|column_index| {
+                let request = CustodyColumnRequestState::new(block_root, column_index);
+                (column_index, request)
+            })
+            .collect::<HashMap<_, _>>();
+        debug_assert_eq!(
+            column_count,
+            custody_columns_requests.len(),
+            "duplicate column indexes"
+        );
+
         Self {
             id,
             block_request_state: BlockRequestState::new(block_root),
             blob_request_state: BlobRequestState::new(block_root),
-            custody_columns_requests: custody_column_indexes
-                .into_iter()
-                .map(|column_index| {
-                    (
-                        column_index,
-                        CustodyColumnRequestState::new(block_root, column_index),
-                    )
-                })
-                .collect(),
+            custody_columns_requests,
             block_root,
             awaiting_parent,
             peers: peers.iter().copied().collect(),
