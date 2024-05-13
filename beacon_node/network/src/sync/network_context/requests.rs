@@ -1,7 +1,7 @@
 use beacon_chain::get_block_root;
 use lighthouse_network::rpc::{
     methods::{BlobsByRootRequest, DataColumnsByRootRequest},
-    BlocksByRootRequest, RPCError,
+    BlocksByRootRequest,
 };
 use std::sync::Arc;
 use strum::IntoStaticStr;
@@ -11,12 +11,22 @@ use types::{
 };
 
 #[derive(Debug, PartialEq, Eq, IntoStaticStr)]
-pub enum LookupVerifyError {
+pub enum RpcByRootVerifyError {
+    /// On a request that expects strictly one item, we receive the stream termination before
+    /// that item
     NoResponseReturned,
+    /// On a request for a strict number of items, we receive the stream termination before the
+    /// expected count of items
+    NotEnoughResponsesReturned,
+    /// Received more items than expected
     TooManyResponses,
+    /// Received an item that corresponds to a different request block root
     UnrequestedBlockRoot(Hash256),
+    /// Received a blob / column with an index that is not in the requested set
     UnrequestedBlobIndex(u64),
+    /// Blob or column inclusion proof does not match its own header
     InvalidInclusionProof,
+    /// Received more than one item for the tuple (block_root, index)
     DuplicateData,
 }
 
@@ -39,14 +49,14 @@ impl ActiveBlocksByRootRequest {
     pub fn add_response<E: EthSpec>(
         &mut self,
         block: Arc<SignedBeaconBlock<E>>,
-    ) -> Result<Arc<SignedBeaconBlock<E>>, LookupVerifyError> {
+    ) -> Result<Arc<SignedBeaconBlock<E>>, RpcByRootVerifyError> {
         if self.resolved {
-            return Err(LookupVerifyError::TooManyResponses);
+            return Err(RpcByRootVerifyError::TooManyResponses);
         }
 
         let block_root = get_block_root(&block);
         if self.request.0 != block_root {
-            return Err(LookupVerifyError::UnrequestedBlockRoot(block_root));
+            return Err(RpcByRootVerifyError::UnrequestedBlockRoot(block_root));
         }
 
         // Valid data, blocks by root expects a single response
@@ -54,11 +64,11 @@ impl ActiveBlocksByRootRequest {
         Ok(block)
     }
 
-    pub fn terminate(self) -> Result<(), LookupVerifyError> {
+    pub fn terminate(self) -> Result<(), RpcByRootVerifyError> {
         if self.resolved {
             Ok(())
         } else {
-            Err(LookupVerifyError::NoResponseReturned)
+            Err(RpcByRootVerifyError::NoResponseReturned)
         }
     }
 }
@@ -114,23 +124,23 @@ impl<E: EthSpec> ActiveBlobsByRootRequest<E> {
     pub fn add_response(
         &mut self,
         blob: Arc<BlobSidecar<E>>,
-    ) -> Result<Option<Vec<Arc<BlobSidecar<E>>>>, LookupVerifyError> {
+    ) -> Result<Option<Vec<Arc<BlobSidecar<E>>>>, RpcByRootVerifyError> {
         if self.resolved {
-            return Err(LookupVerifyError::TooManyResponses);
+            return Err(RpcByRootVerifyError::TooManyResponses);
         }
 
         let block_root = blob.block_root();
         if self.request.block_root != block_root {
-            return Err(LookupVerifyError::UnrequestedBlockRoot(block_root));
+            return Err(RpcByRootVerifyError::UnrequestedBlockRoot(block_root));
         }
         if !blob.verify_blob_sidecar_inclusion_proof().unwrap_or(false) {
-            return Err(LookupVerifyError::InvalidInclusionProof);
+            return Err(RpcByRootVerifyError::InvalidInclusionProof);
         }
         if !self.request.indices.contains(&blob.index) {
-            return Err(LookupVerifyError::UnrequestedBlobIndex(blob.index));
+            return Err(RpcByRootVerifyError::UnrequestedBlobIndex(blob.index));
         }
         if self.blobs.iter().any(|b| b.index == blob.index) {
-            return Err(LookupVerifyError::DuplicateData);
+            return Err(RpcByRootVerifyError::DuplicateData);
         }
 
         self.blobs.push(blob);
@@ -143,11 +153,13 @@ impl<E: EthSpec> ActiveBlobsByRootRequest<E> {
         }
     }
 
-    pub fn terminate(self) -> Option<Vec<Arc<BlobSidecar<E>>>> {
+    /// Handle a stream termination. Expects sender to strictly send the requested number of items
+    pub fn terminate(self) -> Result<(), RpcByRootVerifyError> {
         if self.resolved {
-            None
+            Ok(())
         } else {
-            Some(self.blobs)
+            // Expect to receive the stream termination AFTER the expect number of items
+            Err(RpcByRootVerifyError::NotEnoughResponsesReturned)
         }
     }
 }
@@ -196,28 +208,25 @@ impl<E: EthSpec, T: Copy> ActiveDataColumnsByRootRequest<E, T> {
     pub fn add_response(
         &mut self,
         data_column: Arc<DataColumnSidecar<E>>,
-    ) -> Result<Option<Vec<Arc<DataColumnSidecar<E>>>>, RPCError> {
+    ) -> Result<Option<Vec<Arc<DataColumnSidecar<E>>>>, RpcByRootVerifyError> {
         if self.resolved {
-            return Err(RPCError::InvalidData("too many responses".to_string()));
+            return Err(RpcByRootVerifyError::TooManyResponses);
         }
 
         let block_root = data_column.block_root();
         if self.request.block_root != block_root {
-            return Err(RPCError::InvalidData(format!(
-                "un-requested block root {block_root:?}"
-            )));
+            return Err(RpcByRootVerifyError::UnrequestedBlockRoot(block_root));
         }
         if !data_column.verify_inclusion_proof().unwrap_or(false) {
-            return Err(RPCError::InvalidData("invalid inclusion proof".to_string()));
+            return Err(RpcByRootVerifyError::InvalidInclusionProof);
         }
         if !self.request.indices.contains(&data_column.index) {
-            return Err(RPCError::InvalidData(format!(
-                "un-requested index {}",
-                data_column.index
-            )));
+            return Err(RpcByRootVerifyError::UnrequestedBlobIndex(
+                data_column.index,
+            ));
         }
         if self.items.iter().any(|b| b.index == data_column.index) {
-            return Err(RPCError::InvalidData("duplicated data".to_string()));
+            return Err(RpcByRootVerifyError::DuplicateData);
         }
 
         self.items.push(data_column);
@@ -230,6 +239,7 @@ impl<E: EthSpec, T: Copy> ActiveDataColumnsByRootRequest<E, T> {
         }
     }
 
+    /// Handle stream termination. Allows the sender to return less items than requested.
     pub fn terminate(self) -> Option<Vec<Arc<DataColumnSidecar<E>>>> {
         if self.resolved {
             None

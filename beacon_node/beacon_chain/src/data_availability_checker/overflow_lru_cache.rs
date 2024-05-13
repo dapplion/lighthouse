@@ -47,7 +47,9 @@ use std::num::NonZeroUsize;
 use std::{collections::HashSet, sync::Arc};
 use types::blob_sidecar::BlobIdentifier;
 use types::data_column_sidecar::DataColumnIdentifier;
-use types::{BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, Epoch, EthSpec, Hash256};
+use types::{
+    BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, Epoch, EthSpec, Hash256, Slot,
+};
 
 /// This represents the components of a partially available block
 ///
@@ -129,10 +131,10 @@ impl<E: EthSpec> PendingComponents<E> {
     /// block.
     ///
     /// This corresponds to the number of commitments that are present in a block.
-    pub fn num_expected_blobs(&self) -> Option<usize> {
+    pub fn num_expected_blobs(&self) -> Option<(usize, Slot)> {
         self.get_cached_block()
             .as_ref()
-            .map(|b| b.get_commitments().len())
+            .map(|b| (b.get_commitments().len(), b.as_block().slot()))
     }
 
     /// Returns the number of blobs that have been received and are stored in the cache.
@@ -242,7 +244,7 @@ impl<E: EthSpec> PendingComponents<E> {
                     "num_expected_blobs" => ?self.num_expected_blobs(),
                     "num_received_blobs" => self.num_received_blobs(),
                 );
-                if let Some(num_expected_blobs) = self.num_expected_blobs() {
+                if let Some((num_expected_blobs, _)) = self.num_expected_blobs() {
                     num_expected_blobs == self.num_received_blobs()
                 } else {
                     false
@@ -257,7 +259,7 @@ impl<E: EthSpec> PendingComponents<E> {
                     "num_received_data_columns" => num_received_data_columns,
                 );
 
-                if let Some(num_expected_blobs) = self.num_expected_blobs() {
+                if let Some((num_expected_blobs, _)) = self.num_expected_blobs() {
                     // No data columns when there are 0 blobs
                     num_expected_blobs == 0 || num_expected_columns == num_received_data_columns
                 } else {

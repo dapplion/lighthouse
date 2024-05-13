@@ -16,7 +16,7 @@ use std::time::Duration;
 use task_executor::TaskExecutor;
 use types::blob_sidecar::{BlobIdentifier, BlobSidecar, FixedBlobSidecarList};
 use types::{
-    BlobSidecarList, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256, SignedBeaconBlock,
+    BlobSidecarList, ChainSpec, DataColumnSidecar, Epoch, EthSpec, Hash256, SignedBeaconBlock, Slot,
 };
 
 mod error;
@@ -113,7 +113,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
     }
 
     /// Return the required blobs `block_root` expects if the block is currenlty in the cache.
-    pub fn num_expected_blobs(&self, block_root: &Hash256) -> Option<usize> {
+    pub fn num_expected_blobs(&self, block_root: &Hash256) -> Option<(usize, Slot)> {
         self.availability_cache
             .peek_pending_components(block_root, |components| {
                 components.and_then(|components| components.num_expected_blobs())
