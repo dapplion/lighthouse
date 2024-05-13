@@ -1,4 +1,5 @@
 //! A collection of variables that are accessible outside of the network thread itself.
+use crate::discovery::enr::PEERDAS_CUSTODY_SUBNET_COUNT_ENR_KEY;
 use crate::peer_manager::peerdb::PeerDB;
 use crate::rpc::{MetaData, MetaDataV2};
 use crate::types::{BackFillState, SyncState};
@@ -6,6 +7,7 @@ use crate::EnrExt;
 use crate::{Client, Eth2Enr};
 use crate::{Enr, GossipTopic, Multiaddr, PeerId};
 use parking_lot::RwLock;
+use ssz::Encode;
 use std::collections::HashSet;
 use types::data_column_sidecar::ColumnIndex;
 use types::{DataColumnSubnetId, Epoch, EthSpec};
@@ -140,6 +142,22 @@ impl<E: EthSpec> NetworkGlobals<E> {
             false,
             log,
         )
+    }
+
+    /// TESTING ONLY. Set a custody_subnet_count value
+    pub fn test_mutate_custody_subnet_count(&mut self, value: u64) {
+        use crate::CombinedKeyExt;
+        // For test: use a random key. WARNING: changes ENR NodeID
+        let keypair = libp2p::identity::secp256k1::Keypair::generate();
+        let enr_key = discv5::enr::CombinedKey::from_secp256k1(&keypair);
+        self.local_enr
+            .write()
+            .insert(
+                PEERDAS_CUSTODY_SUBNET_COUNT_ENR_KEY,
+                &value.as_ssz_bytes(),
+                &enr_key,
+            )
+            .expect("u64 can be serialized");
     }
 }
 

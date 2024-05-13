@@ -1,5 +1,5 @@
-use self::request::ActiveColumnSampleRequest;
-use super::network_context::{LookupFailure, SyncNetworkContext};
+use self::request::{ActiveColumnSampleRequest, SamplingErrorReason};
+use super::network_context::{RpcByRootRequestError, SyncNetworkContext};
 use crate::metrics;
 use beacon_chain::BeaconChainTypes;
 use fnv::FnvHashMap;
@@ -101,7 +101,7 @@ impl<T: BeaconChainTypes> Sampling<T> {
         &mut self,
         id: SamplingId,
         peer_id: PeerId,
-        resp: Result<(DataColumnSidecarList<T::EthSpec>, Duration), LookupFailure>,
+        resp: Result<(DataColumnSidecarList<T::EthSpec>, Duration), RpcByRootRequestError>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Option<(SamplingRequester, SamplingResult)> {
         let Some(request) = self.requests.get_mut(&id.id) else {
@@ -235,7 +235,7 @@ impl<T: BeaconChainTypes> ActiveSamplingRequest<T> {
         &mut self,
         _peer_id: PeerId,
         column_index: ColumnIndex,
-        resp: Result<(DataColumnSidecarList<T::EthSpec>, Duration), LookupFailure>,
+        resp: Result<(DataColumnSidecarList<T::EthSpec>, Duration), RpcByRootRequestError>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<Option<()>, SamplingError> {
         // Select columns to sample
@@ -284,7 +284,7 @@ impl<T: BeaconChainTypes> ActiveSamplingRequest<T> {
                     // Peer does not have the requested data.
                     // TODO(das) what to do?
                     debug!(self.log, "Sampling peer claims to not have the data"; "block_root" => %self.block_root, "column_index" => column_index);
-                    request.on_sampling_error()?;
+                    request.on_sampling_error(SamplingErrorReason::DontHave)?;
                 }
             }
             Err(err) => {
@@ -293,7 +293,7 @@ impl<T: BeaconChainTypes> ActiveSamplingRequest<T> {
 
                 // Error downloading, maybe penalize peer and retry again.
                 // TODO(das) with different peer or different peer?
-                request.on_sampling_error()?;
+                request.on_sampling_error(SamplingErrorReason::DownloadError)?;
             }
         };
 
@@ -341,7 +341,7 @@ impl<T: BeaconChainTypes> ActiveSamplingRequest<T> {
 
                 // TODO(das): Peer sent invalid data, penalize and try again from different peer
                 // TODO(das): Count individual failures
-                let peer_id = request.on_sampling_error()?;
+                let peer_id = request.on_sampling_error(SamplingErrorReason::Invalid)?;
                 cx.report_peer(
                     peer_id,
                     PeerAction::LowToleranceError,
@@ -427,12 +427,20 @@ mod request {
     use std::collections::HashSet;
     use types::{data_column_sidecar::ColumnIndex, EthSpec, Hash256, Slot};
 
+    pub(crate) enum SamplingErrorReason {
+        DownloadError,
+        DontHave,
+        Invalid,
+    }
+
     pub(crate) struct ActiveColumnSampleRequest {
         column_index: ColumnIndex,
         status: Status,
         // TODO(das): Should downscore peers that claim to not have the sample?
-        #[allow(dead_code)]
+        /// Set of peers who claim to no have this column
         peers_dont_have: HashSet<PeerId>,
+        /// Set of peers that have sent us a sample with an invalid proof
+        peers_sent_invalid: HashSet<PeerId>,
     }
 
     #[derive(Debug, Clone)]
@@ -449,6 +457,7 @@ mod request {
                 column_index,
                 status: Status::NotStarted,
                 peers_dont_have: <_>::default(),
+                peers_sent_invalid: <_>::default(),
             }
         }
 
@@ -488,13 +497,30 @@ mod request {
 
             // TODO: When is a fork and only a subset of your peers know about a block, sampling should only
             // be queried on the peers on that fork. Should this case be handled? How to handle it?
-            let peer_ids = cx.get_custodial_peers(
+            let custodial_peer_ids = cx.get_custodial_peers(
                 block_slot.epoch(<T::EthSpec as EthSpec>::slots_per_epoch()),
                 self.column_index,
             );
 
-            // TODO(das) randomize custodial peer and avoid failing peers
-            if let Some(peer_id) = peer_ids.first().cloned() {
+            // TODO(das) randomize peer selection
+            let selected_peer_id: Option<PeerId> = {
+                // Filter out peers that have sent us invalid data, never request from then again
+                let peer_ids = custodial_peer_ids
+                    .iter()
+                    .filter(|peer| self.peers_sent_invalid.contains(peer))
+                    .collect::<Vec<_>>();
+                // Check if there are peers we haven't requested from yet
+                if let Some(peer) = peer_ids
+                    .iter()
+                    .find(|peer| !self.peers_dont_have.contains(peer))
+                {
+                    Some(**peer)
+                } else {
+                    peer_ids.first().copied().copied()
+                }
+            };
+
+            if let Some(peer_id) = selected_peer_id {
                 cx.data_column_lookup_request(
                     DataColumnsByRootRequester::Sampling(SamplingId {
                         id: requester,
@@ -516,10 +542,24 @@ mod request {
             }
         }
 
-        pub(crate) fn on_sampling_error(&mut self) -> Result<PeerId, SamplingError> {
+        pub(crate) fn on_sampling_error(
+            &mut self,
+            reason: SamplingErrorReason,
+        ) -> Result<PeerId, SamplingError> {
             match self.status.clone() {
                 Status::Sampling(peer_id) => {
                     self.status = Status::NotStarted;
+                    match reason {
+                        SamplingErrorReason::DownloadError => {
+                            // Allow download errors, don't track
+                        }
+                        SamplingErrorReason::DontHave => {
+                            self.peers_dont_have.insert(peer_id);
+                        }
+                        SamplingErrorReason::Invalid => {
+                            self.peers_sent_invalid.insert(peer_id);
+                        }
+                    }
                     Ok(peer_id)
                 }
                 other => Err(SamplingError::BadState(format!(
