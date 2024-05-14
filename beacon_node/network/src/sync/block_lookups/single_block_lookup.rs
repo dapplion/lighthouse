@@ -4,6 +4,7 @@ use crate::sync::block_lookups::common::RequestState;
 use crate::sync::block_lookups::Id;
 use crate::sync::network_context::{LookupRequestResult, SyncNetworkContext};
 use beacon_chain::BeaconChainTypes;
+use derivative::Derivative;
 use itertools::Itertools;
 use rand::seq::IteratorRandom;
 use std::collections::HashSet;
@@ -43,6 +44,8 @@ pub enum LookupRequestError {
     UnknownLookup,
 }
 
+#[derive(Derivative)]
+#[derivative(Debug(bound = "T: BeaconChainTypes"))]
 pub struct SingleBlockLookup<T: BeaconChainTypes> {
     pub id: Id,
     pub block_request_state: BlockRequestState<T::EthSpec>,
@@ -270,15 +273,17 @@ impl<E: EthSpec> BlockRequestState<E> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone, Derivative)]
+#[derivative(Debug)]
 pub struct DownloadResult<T: Clone> {
+    #[derivative(Debug = "ignore")]
     pub value: T,
     pub block_root: Hash256,
     pub seen_timestamp: Duration,
     pub peer_id: PeerId,
 }
 
-#[derive(PartialEq, Eq, IntoStaticStr)]
+#[derive(Debug, PartialEq, Eq, IntoStaticStr)]
 pub enum State<T: Clone> {
     AwaitingDownload,
     Downloading,
@@ -292,7 +297,7 @@ pub enum State<T: Clone> {
 }
 
 /// Object representing the state of a single block or blob lookup request.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub struct SingleLookupRequestState<T: Clone> {
     /// State of this request.
     state: State<T>,
@@ -535,46 +540,5 @@ impl<T: Clone> SingleLookupRequestState<T> {
 impl<T: Clone> std::fmt::Display for State<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", Into::<&'static str>::into(self))
-    }
-}
-
-// Debug is used in the log_stuck_lookups print to include some more info. Implements custom Debug
-// to not dump an entire block or blob to terminal which don't add valuable data.
-impl<T: Clone> std::fmt::Debug for State<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AwaitingDownload => write!(f, "AwaitingDownload"),
-            Self::Downloading => write!(f, "Downloading"),
-            Self::AwaitingProcess(d) => write!(f, "AwaitingProcess({:?})", d.peer_id),
-            Self::Processing(d) => write!(f, "Processing({:?})", d.peer_id),
-            Self::Processed(_) => write!(f, "Processed"),
-        }
-    }
-}
-
-// TODO: Manual implementation of Debug, otherwise T must be bounded by Debug
-impl<T: BeaconChainTypes> std::fmt::Debug for SingleBlockLookup<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SingleBlockLookup")
-            .field("id", &self.id)
-            .field("block_root", &self.block_root)
-            .field("awaiting_parent", &self.awaiting_parent)
-            .field("created", &self.created)
-            .field("block_request_state", &self.block_request_state)
-            .field("blob_request_state", &self.blob_request_state)
-            // Log peers once for block and blob requests as are identical
-            .field("peers", &self.block_request_state.state.available_peers)
-            .finish()
-    }
-}
-
-impl<T: Clone> std::fmt::Debug for SingleLookupRequestState<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("State")
-            .field("state", &self.state)
-            .field("failed_downloading", &self.failed_downloading)
-            .field("failed_processing", &self.failed_processing)
-            // Do not log available peers here, do it once in SingleBlockLookup
-            .finish()
     }
 }

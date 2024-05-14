@@ -683,7 +683,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             if lookup.elapsed_since_created() > Duration::from_secs(LOOKUP_MAX_DURATION_SECS) {
                 debug!(self.log, "Lookup maybe stuck";
                     // Fields id and block_root are also part of the summary. However, logging them
-                    // here allows log parsers o index them and have better search
+                    // here allows log parsers to index them and have better search
                     "id" => lookup.id,
                     "block_root" => ?lookup.block_root(),
                     "summary" => ?lookup,
