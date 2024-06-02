@@ -1378,19 +1378,6 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
     ) -> Option<NetworkEvent<AppReqId, E>> {
         let peer_id = event.peer_id;
 
-        if !self.peer_manager().is_connected(&peer_id)
-            // Do not permit Inbound events from peers that are being disconnected
-            && matches!(event.event, HandlerEvent::Err(HandlerErr::Inbound { .. }))
-            && matches!(event.event, HandlerEvent::Ok(RPCReceived::Request(..)))
-        {
-            debug!(
-                self.log,
-                "Ignoring rpc message of disconnecting peer";
-                event
-            );
-            return None;
-        }
-
         let handler_id = event.conn_id;
         // The METADATA and PING RPC responses are handled within the behaviour and not propagated
         match event.event {
@@ -1430,6 +1417,13 @@ impl<AppReqId: ReqId, E: EthSpec> Network<AppReqId, E> {
                 }
             }
             HandlerEvent::Ok(RPCReceived::Request(id, request)) => {
+                // Ignore Inbound requests from peers that are being disconnected. No point in doing
+                // work to retrieve data that can't be delivered.
+                if !self.peer_manager().is_connected(&peer_id) {
+                    debug!(self.log, "Ignoring rpc request of disconnecting peer"; "request" => ?request);
+                    return None;
+                }
+
                 let peer_request_id = (handler_id, id);
                 match request {
                     /* Behaviour managed protocols: Ping and Metadata */
