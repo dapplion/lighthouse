@@ -18,8 +18,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tree_hash::TreeHash;
 use types::{
-    Epoch, EthSpec, Hash256, IndexedAttestation, IndexedAttestationRefOnDisk, ProposerSlashing,
-    SignedBeaconBlockHeader, Slot,
+    Epoch, EthSpec, Hash256, IndexedAttestation, IndexedAttestationOnDisk,
+    IndexedAttestationRefOnDisk, ProposerSlashing, SignedBeaconBlockHeader, Slot,
 };
 
 /// Current database schema version, to check compatibility of on-disk DB with software.

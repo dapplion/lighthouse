@@ -1,6 +1,5 @@
 use crate::{database::CURRENT_SCHEMA_VERSION, Error, SlasherDB};
-use ssz::{Decode, Encode};
-use types::{EthSpec, IndexedAttestationBase, IndexedAttestationOnDisk};
+use types::EthSpec;
 
 impl<E: EthSpec> SlasherDB<E> {
     /// If the database exists, and has a schema, attempt to migrate it to the current version.
