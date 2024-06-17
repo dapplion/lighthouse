@@ -1,5 +1,6 @@
 use crate::{database::CURRENT_SCHEMA_VERSION, Error, SlasherDB};
-use types::EthSpec;
+use ssz::{Decode, Encode};
+use types::{EthSpec, IndexedAttestationBase, IndexedAttestationOnDisk};
 
 impl<E: EthSpec> SlasherDB<E> {
     /// If the database exists, and has a schema, attempt to migrate it to the current version.
@@ -17,6 +18,10 @@ impl<E: EthSpec> SlasherDB<E> {
                     software_schema_version: CURRENT_SCHEMA_VERSION,
                 }),
                 (x, y) if x == y => Ok(self),
+                (3, 4) => {
+                    // TODO migration
+                    Ok(self)
+                }
                 (_, _) => Err(Error::IncompatibleSchemaVersion {
                     database_schema_version: schema_version,
                     software_schema_version: CURRENT_SCHEMA_VERSION,
