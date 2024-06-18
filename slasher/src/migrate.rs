@@ -18,7 +18,7 @@ impl<E: EthSpec> SlasherDB<E> {
                 }),
                 (x, y) if x == y => Ok(self),
                 (3, 4) => {
-                    // TODO migration
+                    // TODO(electra): db migration due to `IndexedAttestationOnDisk`
                     Ok(self)
                 }
                 (_, _) => Err(Error::IncompatibleSchemaVersion {
