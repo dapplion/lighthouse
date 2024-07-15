@@ -6,9 +6,9 @@ use types::{Epoch, Hash256, Slot};
 #[derive(Clone, Debug, Serialize)]
 /// The current sync status of the peer.
 pub enum SyncStatus {
-    /// At the current state as our node or ahead of us.
+    /// Peer's head is known to us and close to our current head
     Synced { info: SyncInfo },
-    /// The peer has greater knowledge about the canonical chain than we do.
+    /// The peer has greater knowledge about a chain than we do.
     Advanced { info: SyncInfo },
     /// Is behind our current head and not useful for block downloads.
     Behind { info: SyncInfo },

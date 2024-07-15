@@ -42,7 +42,7 @@
 use super::block_storage::BlockStorage;
 use super::chain::{BatchId, ChainId, RemoveChain, SyncingChain};
 use super::chain_collection::ChainCollection;
-use super::sync_type::RangeSyncType;
+use super::RangeSyncType;
 use crate::status::ToStatusMessage;
 use crate::sync::network_context::SyncNetworkContext;
 use crate::sync::BatchProcessResult;
@@ -113,6 +113,7 @@ where
         local_info: SyncInfo,
         peer_id: PeerId,
         remote_info: SyncInfo,
+        remote_sync_type: RangeSyncType,
     ) {
         // evaluate which chain to sync from
 
@@ -128,7 +129,7 @@ where
         // is OK since we since only one finalized chain at a time.
 
         // determine which kind of sync to perform and set up the chains
-        match RangeSyncType::new(self.beacon_chain.as_ref(), &local_info, &remote_info) {
+        match remote_sync_type {
             RangeSyncType::Finalized => {
                 // Make sure we have not recently tried this chain
                 if self.failed_chains.contains(&remote_info.finalized_root) {
@@ -714,7 +715,13 @@ mod tests {
 
         // Get a peer with an advanced head
         let (head_peer, local_info, remote_info) = rig.head_peer();
-        range.add_peer(&mut rig.cx, local_info, head_peer, remote_info);
+        range.add_peer(
+            &mut rig.cx,
+            local_info,
+            head_peer,
+            remote_info,
+            RangeSyncType::Head,
+        );
         range.assert_state(RangeSyncType::Head);
 
         let fork = rig
@@ -728,7 +735,13 @@ mod tests {
 
         // Now get a peer with an advanced finalized epoch.
         let (finalized_peer, local_info, remote_info) = rig.finalized_peer();
-        range.add_peer(&mut rig.cx, local_info, finalized_peer, remote_info);
+        range.add_peer(
+            &mut rig.cx,
+            local_info,
+            finalized_peer,
+            remote_info,
+            RangeSyncType::Finalized,
+        );
         range.assert_state(RangeSyncType::Finalized);
 
         // Sync should have requested a batch, grab the request
@@ -747,7 +760,13 @@ mod tests {
         // Get a peer with an advanced head
         let (head_peer, local_info, head_info) = rig.head_peer();
         let head_peer_root = head_info.head_root;
-        range.add_peer(&mut rig.cx, local_info, head_peer, head_info);
+        range.add_peer(
+            &mut rig.cx,
+            local_info,
+            head_peer,
+            head_info,
+            RangeSyncType::Head,
+        );
         range.assert_state(RangeSyncType::Head);
 
         let fork = rig
@@ -762,7 +781,13 @@ mod tests {
         // Now get a peer with an advanced finalized epoch.
         let (finalized_peer, local_info, remote_info) = rig.finalized_peer();
         let finalized_peer_root = remote_info.finalized_root;
-        range.add_peer(&mut rig.cx, local_info, finalized_peer, remote_info);
+        range.add_peer(
+            &mut rig.cx,
+            local_info,
+            finalized_peer,
+            remote_info,
+            RangeSyncType::Finalized,
+        );
         range.assert_state(RangeSyncType::Finalized);
 
         // Sync should have requested a batch, grab the request
@@ -774,7 +799,13 @@ mod tests {
 
         // Add an additional peer to the second chain to make range update it's status
         let (finalized_peer, local_info, remote_info) = rig.finalized_peer();
-        range.add_peer(&mut rig.cx, local_info, finalized_peer, remote_info);
+        range.add_peer(
+            &mut rig.cx,
+            local_info,
+            finalized_peer,
+            remote_info,
+            RangeSyncType::Finalized,
+        );
     }
 
     #[test]
@@ -788,7 +819,13 @@ mod tests {
 
         // add some peers
         let (peer1, local_info, head_info) = rig.head_peer();
-        range.add_peer(&mut rig.cx, local_info, peer1, head_info);
+        range.add_peer(
+            &mut rig.cx,
+            local_info,
+            peer1,
+            head_info,
+            RangeSyncType::Head,
+        );
         let (block_req, blob_req_opt) = rig.grab_request(&peer1, fork);
 
         let (chain1, batch1, id1) =
@@ -805,7 +842,13 @@ mod tests {
 
         // while the ee is offline, more peers might arrive. Add a new finalized peer.
         let (peer2, local_info, finalized_info) = rig.finalized_peer();
-        range.add_peer(&mut rig.cx, local_info, peer2, finalized_info);
+        range.add_peer(
+            &mut rig.cx,
+            local_info,
+            peer2,
+            finalized_info,
+            RangeSyncType::Finalized,
+        );
         let (block_req, blob_req_opt) = rig.grab_request(&peer2, fork);
 
         let (chain2, batch2, id2) =

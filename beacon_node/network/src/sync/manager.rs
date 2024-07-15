@@ -315,9 +315,16 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         // update the state of the peer.
         let should_add = self.update_peer_sync_state(&peer_id, &local, &remote, &sync_type);
 
-        if matches!(sync_type, PeerSyncType::Advanced) && should_add {
-            self.range_sync
-                .add_peer(&mut self.network, local, peer_id, remote);
+        if should_add {
+            if let PeerSyncType::Advanced(range_sync_type) = sync_type {
+                self.range_sync.add_peer(
+                    &mut self.network,
+                    local,
+                    peer_id,
+                    remote,
+                    range_sync_type,
+                );
+            }
         }
 
         self.update_sync_state();

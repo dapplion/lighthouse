@@ -5,7 +5,7 @@
 
 use super::block_storage::BlockStorage;
 use super::chain::{ChainId, ProcessingResult, RemoveChain, SyncingChain};
-use super::sync_type::RangeSyncType;
+use super::RangeSyncType;
 use crate::metrics;
 use crate::sync::network_context::SyncNetworkContext;
 use beacon_chain::BeaconChainTypes;
@@ -64,7 +64,7 @@ impl<T: BeaconChainTypes, C: BlockStorage> ChainCollection<T, C> {
 
     /// Updates the Syncing state of the collection after a chain is removed.
     fn on_chain_removed(&mut self, id: &ChainId, was_syncing: bool, sync_type: RangeSyncType) {
-        let _ = metrics::get_int_gauge(&metrics::SYNCING_CHAINS_COUNT, &[sync_type.as_str()])
+        let _ = metrics::get_int_gauge(&metrics::SYNCING_CHAINS_COUNT, &[sync_type.into()])
             .map(|m| m.dec());
 
         match self.state {
@@ -498,9 +498,8 @@ impl<T: BeaconChainTypes, C: BlockStorage> ChainCollection<T, C> {
                 debug_assert_eq!(new_chain.get_id(), id);
                 debug!(self.log, "New chain added to sync"; "peer_id" => peer_rpr, "sync_type" => ?sync_type, &new_chain);
                 entry.insert(new_chain);
-                let _ =
-                    metrics::get_int_gauge(&metrics::SYNCING_CHAINS_COUNT, &[sync_type.as_str()])
-                        .map(|m| m.inc());
+                let _ = metrics::get_int_gauge(&metrics::SYNCING_CHAINS_COUNT, &[sync_type.into()])
+                    .map(|m| m.inc());
             }
         }
     }
