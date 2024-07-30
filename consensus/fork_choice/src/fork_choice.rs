@@ -8,10 +8,10 @@ use ssz_derive::{Decode, Encode};
 use state_processing::{
     per_block_processing::errors::AttesterSlashingValidationError, per_epoch_processing,
 };
-use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 use std::time::Duration;
+use std::{cmp::Ordering, collections::HashMap};
 use types::{
     consts::bellatrix::INTERVALS_PER_SLOT, AbstractExecPayload, AttestationShufflingId,
     AttesterSlashingRef, BeaconBlockRef, BeaconState, BeaconStateError, ChainSpec, Checkpoint,
@@ -249,6 +249,37 @@ impl<'a, E: EthSpec> From<IndexedAttestationRef<'a, E>> for QueuedAttestation {
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub struct QueuedAttestations {
+    lowest_permissible_slot: Slot,
+    attestations: HashMap<Slot, Vec<QueuedAttestation>>,
+}
+
+impl QueuedAttestations {
+    fn append(&mut self, attestation: QueuedAttestation) {
+        // append should always be called for future slots
+        if attestation.slot > self.lowest_permissible_slot {
+            self.attestations
+                .entry(attestation.slot)
+                .or_default()
+                .push(attestation);
+        }
+    }
+
+    fn dequeue(&mut self, current_slot: Slot) -> Vec<Vec<QueuedAttestation>> {
+        let mut dequeued_attestations = vec![];
+
+        for slot in self.lowest_permissible_slot.as_u64()..current_slot.as_u64() {
+            if let Some(attestations) = self.attestations.remove(&Slot::new(slot)) {
+                dequeued_attestations.push(attestations);
+            }
+        }
+
+        self.lowest_permissible_slot = current_slot;
+        dequeued_attestations
+    }
+}
+
 /// Returns all values in `self.queued_attestations` that have a slot that is earlier than the
 /// current slot. Also removes those values from `self.queued_attestations`.
 fn dequeue_attestations(
@@ -308,7 +339,7 @@ pub struct ForkChoice<T, E> {
     /// The underlying representation of the block DAG.
     proto_array: ProtoArrayForkChoice,
     /// Attestations that arrived at the current slot and must be queued for later processing.
-    queued_attestations: Vec<QueuedAttestation>,
+    queued_attestations: QueuedAttestations,
     /// Stores a cache of the values required to be sent to the execution layer.
     forkchoice_update_parameters: ForkchoiceUpdateParameters,
     _phantom: PhantomData<E>,
