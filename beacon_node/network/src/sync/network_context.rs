@@ -166,19 +166,16 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
     blocks_by_root_requests:
         ActiveRequests<SingleLookupReqId, ActiveBlocksByRootRequest<T::EthSpec>>,
-
     /// A mapping of active BlobsByRoot requests, including both current slot and parent lookups.
-    blobs_by_root_requests: FnvHashMap<SingleLookupReqId, ActiveBlobsByRootRequest<T::EthSpec>>,
+    blobs_by_root_requests: ActiveRequests<SingleLookupReqId, ActiveBlobsByRootRequest<T::EthSpec>>,
+    /// A mapping of active DataColumnsByRoot requests
+    data_columns_by_root_requests:
+        ActiveRequests<DataColumnsByRootRequestId, ActiveDataColumnsByRootRequest<T::EthSpec>>,
+    /// A mapping of active DataColumnsByRange requests
+    data_columns_by_range_requests: ActiveRequests<Id, ActiveDataColumnsByRangeRequest<T::EthSpec>>,
 
     /// Mapping of active custody column requests for a block root
     custody_by_root_requests: FnvHashMap<CustodyRequester, ActiveCustodyRequest<T>>,
-
-    /// A mapping of active DataColumnsByRoot requests
-    data_columns_by_root_requests:
-        FnvHashMap<DataColumnsByRootRequestId, ActiveDataColumnsByRootRequest<T::EthSpec>>,
-
-    /// A mapping of active DataColumnsByRange requests
-    data_columns_by_range_requests: ActiveRequests<Id, ActiveDataColumnsByRangeRequest<T::EthSpec>>,
 
     /// BlocksByRange requests paired with BlobsByRange
     range_block_components_requests:
@@ -228,8 +225,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             execution_engine_state: EngineState::Online, // always assume `Online` at the start
             request_id: 1,
             blocks_by_root_requests: ActiveRequests::new(),
-            blobs_by_root_requests: <_>::default(),
-            data_columns_by_root_requests: <_>::default(),
+            blobs_by_root_requests: ActiveRequests::new(),
+            data_columns_by_root_requests: ActiveRequests::new(),
             data_columns_by_range_requests: ActiveRequests::new(),
             custody_by_root_requests: <_>::default(),
             range_block_components_requests: FnvHashMap::default(),
@@ -259,24 +256,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .map(|id| SyncRequestId::SingleBlock { id: *id });
         let failed_blob_ids = self
             .blobs_by_root_requests
-            .iter()
-            .filter_map(|(id, request)| {
-                if request.peer_id == *peer_id {
-                    Some(SyncRequestId::SingleBlob { id: *id })
-                } else {
-                    None
-                }
-            });
-        let failed_data_column_by_root_ids =
-            self.data_columns_by_root_requests
-                .iter()
-                .filter_map(|(req_id, request)| {
-                    if request.peer_id == *peer_id {
-                        Some(SyncRequestId::DataColumnsByRoot(*req_id, request.requester))
-                    } else {
-                        None
-                    }
-                });
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|id| SyncRequestId::SingleBlob { id: *id });
+        let failed_data_column_by_root_ids = self
+            .data_columns_by_root_requests
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|req_id| SyncRequestId::DataColumnsByRoot(*req_id, _));
 
         failed_range_ids
             .chain(failed_block_ids)
@@ -473,8 +460,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         })
         .map_err(|_| RpcRequestSendError::NetworkSendError)?;
 
-        self.data_columns_by_range_requests
-            .insert(id, ActiveDataColumnsByRangeRequest::new(request, peer_id));
+        self.data_columns_by_range_requests.insert(
+            id,
+            ActiveDataColumnsByRangeRequest::new(request),
+            peer_id,
+        );
         Ok(id)
     }
 
@@ -590,7 +580,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .map_err(|_| RpcRequestSendError::NetworkSendError)?;
 
         self.blocks_by_root_requests
-            .insert(id, ActiveBlocksByRootRequest::new(request, peer_id));
+            .insert(id, ActiveBlocksByRootRequest::new(request), peer_id);
 
         Ok(LookupRequestResult::RequestSent(req_id))
     }
@@ -688,7 +678,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .map_err(|_| RpcRequestSendError::NetworkSendError)?;
 
         self.blobs_by_root_requests
-            .insert(id, ActiveBlobsByRootRequest::new(request, peer_id));
+            .insert(id, ActiveBlobsByRootRequest::new(request), peer_id);
 
         Ok(LookupRequestResult::RequestSent(req_id))
     }
@@ -720,7 +710,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         self.data_columns_by_root_requests.insert(
             req_id,
-            ActiveDataColumnsByRootRequest::new(request, peer_id, requester),
+            ActiveDataColumnsByRootRequest::new(request, requester),
+            peer_id,
         );
 
         Ok(LookupRequestResult::RequestSent(req_id))
@@ -935,122 +926,55 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<Arc<SignedBeaconBlock<T::EthSpec>>>> {
         let r = self.blocks_by_root_requests.on_response(id, rpc_event);
+        let r = match r {
+            Some(Ok((mut blocks, seen_timestamp))) => match blocks.pop() {
+                Some(block) => Some(Ok((block, seen_timestamp))),
+                None => Some(Err(LookupVerifyError::NoResponseReturned.into())),
+            },
+            Some(Err(e)) => Some(Err(e)),
+            None => None,
+        };
         if let Some(Err(RpcResponseError::VerifyError(e))) = &r {
             self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
         }
-        r.map(|r| {
-            r.map(|(mut blocks, seen_timestamp)| {
-                (
-                    // Must have exactly one element
-                    blocks.remove(0),
-                    seen_timestamp,
-                )
-            })
-        })
+        r
     }
 
     pub fn on_single_blob_response(
         &mut self,
-        request_id: SingleLookupReqId,
+        id: SingleLookupReqId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<FixedBlobSidecarList<T::EthSpec>>> {
-        let Entry::Occupied(mut request) = self.blobs_by_root_requests.entry(request_id) else {
-            metrics::inc_counter_vec(&metrics::SYNC_UNKNOWN_NETWORK_REQUESTS, &["blobs_by_root"]);
-            return None;
-        };
-
-        let resp = match rpc_event {
-            RpcEvent::Response(blob, seen_timestamp) => {
-                let request = request.get_mut();
-                match request.add_response(blob) {
-                    Ok(Some(blobs)) => to_fixed_blob_sidecar_list(blobs)
-                        .map(|blobs| (blobs, seen_timestamp))
-                        .map_err(|e| (e.into(), request.resolve())),
-                    Ok(None) => return None,
-                    Err(e) => Err((e.into(), request.resolve())),
-                }
-            }
-            RpcEvent::StreamTermination => match request.remove().terminate() {
-                Ok(_) => return None,
-                // (err, false = not resolved) because terminate returns Ok() if resolved
-                Err(e) => Err((e.into(), false)),
+        let r = self.blobs_by_root_requests.on_response(id, rpc_event);
+        let r = match r {
+            Some(Ok((blobs, seen_timestamp))) => match to_fixed_blob_sidecar_list(blobs) {
+                Ok(blobs) => Some(Ok((blobs, seen_timestamp))),
+                Err(e) => Some(Err(e.into())),
             },
-            RpcEvent::RPCError(e) => Err((e.into(), request.remove().resolve())),
+            Some(Err(e)) => Some(Err(e)),
+            None => None,
         };
-
-        match resp {
-            Ok(resp) => Some(Ok(resp)),
-            // Track if this request has already returned some value downstream. Ensure that
-            // downstream code only receives a single Result per request. If the serving peer does
-            // multiple penalizable actions per request, downscore and return None. This allows to
-            // catch if a peer is returning more blobs than requested or if the excess blobs are
-            // invalid.
-            Err((e, resolved)) => {
-                if let RpcResponseError::VerifyError(e) = &e {
-                    self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
-                }
-                if resolved {
-                    None
-                } else {
-                    Some(Err(e))
-                }
-            }
+        if let Some(Err(RpcResponseError::VerifyError(e))) = &r {
+            self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
         }
+        r
     }
 
     #[allow(clippy::type_complexity)]
     pub fn on_data_columns_by_root_response(
         &mut self,
         id: DataColumnsByRootRequestId,
-        _peer_id: PeerId,
+        peer_id: PeerId,
         rpc_event: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>> {
-        let Entry::Occupied(mut request) = self.data_columns_by_root_requests.entry(id) else {
-            metrics::inc_counter_vec(
-                &metrics::SYNC_UNKNOWN_NETWORK_REQUESTS,
-                &["data_columns_by_root"],
-            );
-            return None;
-        };
-
-        let resp = match rpc_event {
-            RpcEvent::Response(data_column, seen_timestamp) => {
-                let request = request.get_mut();
-                match request.add_response(data_column) {
-                    Ok(Some(data_columns)) => Ok((data_columns, seen_timestamp)),
-                    Ok(None) => return None,
-                    Err(e) => Err((e.into(), request.resolve())),
-                }
-            }
-            RpcEvent::StreamTermination => match request.remove().terminate() {
-                Ok(_) => return None,
-                // (err, false = not resolved) because terminate returns Ok() if resolved
-                Err(e) => Err((e.into(), false)),
-            },
-            RpcEvent::RPCError(e) => Err((e.into(), request.remove().resolve())),
-        };
-
-        match resp {
-            Ok(resp) => Some(Ok(resp)),
-            // Track if this request has already returned some value downstream. Ensure that
-            // downstream code only receives a single Result per request. If the serving peer does
-            // multiple penalizable actions per request, downscore and return None. This allows to
-            // catch if a peer is returning more columns than requested or if the excess blobs are
-            // invalid.
-            Err((e, resolved)) => {
-                if let RpcResponseError::VerifyError(_e) = &e {
-                    // TODO(das): this is a bug, we should not penalise peer in this case.
-                    // confirm this can be removed.
-                    // self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
-                }
-                if resolved {
-                    None
-                } else {
-                    Some(Err(e))
-                }
-            }
+        let r = self
+            .data_columns_by_root_requests
+            .on_response(id, rpc_event);
+        if let Some(Err(RpcResponseError::VerifyError(e))) = &r {
+            self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
         }
+        r
     }
 
     #[allow(clippy::type_complexity)]

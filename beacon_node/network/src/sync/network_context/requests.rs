@@ -4,7 +4,7 @@ use lighthouse_network::{
     rpc::{methods::BlobsByRootRequest, BlocksByRootRequest},
     PeerId,
 };
-use std::{collections::hash_map::Entry, hash::Hash, marker::PhantomData, sync::Arc};
+use std::{collections::hash_map::Entry, hash::Hash, sync::Arc};
 use strum::IntoStaticStr;
 use types::{
     blob_sidecar::BlobIdentifier, BlobSidecar, ChainSpec, EthSpec, Hash256, SignedBeaconBlock,
@@ -21,7 +21,42 @@ mod data_columns_by_range;
 mod data_columns_by_root;
 
 pub struct ActiveRequests<K: Eq + Hash, R: ActiveRequest> {
-    requests: FnvHashMap<K, R>,
+    requests: FnvHashMap<K, ActiveRequestOutter<R>>,
+}
+
+struct ActiveRequestOutter<R: ActiveRequest> {
+    inner: R,
+    peer_id: PeerId,
+    completed_early: bool,
+    expect_max_responses: bool,
+}
+
+impl<R: ActiveRequest> ActiveRequestOutter<R> {
+    fn add_response(&mut self, item: R::Item) -> Result<Option<Vec<R::Item>>, LookupVerifyError> {
+        // Reject items after `add_response()` considers the item set complete
+        if self.completed_early {
+            return Err(LookupVerifyError::TooManyResponses);
+        }
+
+        if self.inner.add_response(item)? {
+            self.completed_early = true;
+            Ok(Some(self.inner.consume_items()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn terminate(mut self) -> Result<Option<Vec<R::Item>>, LookupVerifyError> {
+        if self.completed_early {
+            Ok(None)
+        } else if self.expect_max_responses {
+            Err(LookupVerifyError::NotEnoughResponsesReturned {
+                actual: self.inner.consume_items().len(),
+            })
+        } else {
+            Ok(Some(self.inner.consume_items()))
+        }
+    }
 }
 
 impl<K: Eq + Hash, R: ActiveRequest> ActiveRequests<K, R> {
@@ -31,8 +66,16 @@ impl<K: Eq + Hash, R: ActiveRequest> ActiveRequests<K, R> {
         }
     }
 
-    pub fn insert(&mut self, id: K, request: R) {
-        self.requests.insert(id, request);
+    pub fn insert(&mut self, id: K, request: R, peer_id: PeerId) {
+        self.requests.insert(
+            id,
+            ActiveRequestOutter {
+                inner: request,
+                peer_id,
+                completed_early: false,
+                expect_max_responses: false,
+            },
+        );
     }
 
     pub fn on_response(
@@ -46,11 +89,11 @@ impl<K: Eq + Hash, R: ActiveRequest> ActiveRequests<K, R> {
 
         let resp = match rpc_event {
             RpcEvent::Response(item, seen_timestamp) => {
-                let request = request.get_mut();
+                let request = &mut request.get_mut();
                 match request.add_response(item) {
                     Ok(Some(items)) => Ok((items, seen_timestamp)),
                     Ok(None) => return None,
-                    Err(e) => Err((e.into(), request.resolve())),
+                    Err(e) => Err((e.into(), false)),
                 }
             }
             RpcEvent::StreamTermination => match request.remove().terminate() {
@@ -59,7 +102,7 @@ impl<K: Eq + Hash, R: ActiveRequest> ActiveRequests<K, R> {
                 // (err, false = not resolved) because terminate returns Ok() if resolved
                 Err(e) => Err((e.into(), false)),
             },
-            RpcEvent::RPCError(e) => Err((e.into(), request.remove().resolve())),
+            RpcEvent::RPCError(e) => Err((e.into(), false)),
         };
 
         match resp {
@@ -82,7 +125,7 @@ impl<K: Eq + Hash, R: ActiveRequest> ActiveRequests<K, R> {
     pub fn active_requests_of_peer(&self, peer_id: &PeerId) -> Vec<&K> {
         self.requests
             .iter()
-            .filter(|(_, request)| request.peer() == peer_id)
+            .filter(|(_, request)| &request.peer_id == peer_id)
             .map(|(id, _)| id)
             .collect()
     }
@@ -95,22 +138,15 @@ impl<K: Eq + Hash, R: ActiveRequest> ActiveRequests<K, R> {
 pub trait ActiveRequest {
     type Item;
 
-    fn add_response(
-        &mut self,
-        item: Self::Item,
-    ) -> Result<Option<Vec<Self::Item>>, LookupVerifyError>;
+    fn add_response(&mut self, item: Self::Item) -> Result<bool, LookupVerifyError>;
 
-    fn terminate(self) -> Result<Option<Vec<Self::Item>>, LookupVerifyError>;
-
-    fn resolve(&mut self) -> bool;
-
-    fn peer(&self) -> &PeerId;
+    fn consume_items(&mut self) -> Vec<Self::Item>;
 }
 
 #[derive(Debug, PartialEq, Eq, IntoStaticStr)]
 pub enum LookupVerifyError {
     NoResponseReturned,
-    NotEnoughResponsesReturned { expected: usize, actual: usize },
+    NotEnoughResponsesReturned { actual: usize },
     TooManyResponses,
     UnrequestedBlockRoot(Hash256),
     UnrequestedIndex(u64),
@@ -121,17 +157,15 @@ pub enum LookupVerifyError {
 pub struct ActiveBlocksByRootRequest<E: EthSpec> {
     request: BlocksByRootSingleRequest,
     resolved: bool,
-    pub(crate) peer_id: PeerId,
-    _phantom: PhantomData<E>,
+    item: Option<Arc<SignedBeaconBlock<E>>>,
 }
 
 impl<E: EthSpec> ActiveBlocksByRootRequest<E> {
-    pub fn new(request: BlocksByRootSingleRequest, peer_id: PeerId) -> Self {
+    pub fn new(request: BlocksByRootSingleRequest) -> Self {
         Self {
             request,
             resolved: false,
-            peer_id,
-            _phantom: PhantomData,
+            item: None,
         }
     }
 }
@@ -142,10 +176,7 @@ impl<E: EthSpec> ActiveRequest for ActiveBlocksByRootRequest<E> {
     /// Append a response to the single chunk request. If the chunk is valid, the request is
     /// resolved immediately.
     /// The active request SHOULD be dropped after `add_response` returns an error
-    fn add_response(
-        &mut self,
-        block: Arc<SignedBeaconBlock<E>>,
-    ) -> Result<Option<Vec<Self::Item>>, LookupVerifyError> {
+    fn add_response(&mut self, block: Self::Item) -> Result<bool, LookupVerifyError> {
         if self.resolved {
             return Err(LookupVerifyError::TooManyResponses);
         }
@@ -156,24 +187,15 @@ impl<E: EthSpec> ActiveRequest for ActiveBlocksByRootRequest<E> {
         }
 
         // Valid data, blocks by root expects a single response
-        self.resolved = true;
-        Ok(Some(vec![block]))
+        Ok(true)
     }
 
-    fn terminate(self) -> Result<Option<Vec<Self::Item>>, LookupVerifyError> {
-        if self.resolved {
-            Ok(None)
+    fn consume_items(&mut self) -> Vec<Self::Item> {
+        if let Some(item) = self.item.take() {
+            vec![item]
         } else {
-            Err(LookupVerifyError::NoResponseReturned)
+            vec![]
         }
-    }
-
-    fn resolve(&mut self) -> bool {
-        todo!();
-    }
-
-    fn peer(&self) -> &PeerId {
-        &self.peer_id
     }
 }
 
@@ -210,31 +232,24 @@ impl BlobsByRootSingleBlockRequest {
 pub struct ActiveBlobsByRootRequest<E: EthSpec> {
     request: BlobsByRootSingleBlockRequest,
     blobs: Vec<Arc<BlobSidecar<E>>>,
-    resolved: bool,
-    pub(crate) peer_id: PeerId,
 }
 
 impl<E: EthSpec> ActiveBlobsByRootRequest<E> {
-    pub fn new(request: BlobsByRootSingleBlockRequest, peer_id: PeerId) -> Self {
+    pub fn new(request: BlobsByRootSingleBlockRequest) -> Self {
         Self {
             request,
             blobs: vec![],
-            resolved: false,
-            peer_id,
         }
     }
+}
+
+impl<E: EthSpec> ActiveRequest for ActiveBlobsByRootRequest<E> {
+    type Item = Arc<BlobSidecar<E>>;
 
     /// Appends a chunk to this multi-item request. If all expected chunks are received, this
     /// method returns `Some`, resolving the request before the stream terminator.
     /// The active request SHOULD be dropped after `add_response` returns an error
-    pub fn add_response(
-        &mut self,
-        blob: Arc<BlobSidecar<E>>,
-    ) -> Result<Option<Vec<Arc<BlobSidecar<E>>>>, LookupVerifyError> {
-        if self.resolved {
-            return Err(LookupVerifyError::TooManyResponses);
-        }
-
+    fn add_response(&mut self, blob: Self::Item) -> Result<bool, LookupVerifyError> {
         let block_root = blob.block_root();
         if self.request.block_root != block_root {
             return Err(LookupVerifyError::UnrequestedBlockRoot(block_root));
@@ -250,29 +265,11 @@ impl<E: EthSpec> ActiveBlobsByRootRequest<E> {
         }
 
         self.blobs.push(blob);
-        if self.blobs.len() >= self.request.indices.len() {
-            // All expected chunks received, return result early
-            self.resolved = true;
-            Ok(Some(std::mem::take(&mut self.blobs)))
-        } else {
-            Ok(None)
-        }
+
+        Ok(self.blobs.len() >= self.request.indices.len())
     }
 
-    pub fn terminate(self) -> Result<(), LookupVerifyError> {
-        if self.resolved {
-            Ok(())
-        } else {
-            Err(LookupVerifyError::NotEnoughResponsesReturned {
-                expected: self.request.indices.len(),
-                actual: self.blobs.len(),
-            })
-        }
-    }
-
-    /// Mark request as resolved (= has returned something downstream) while marking this status as
-    /// true for future calls.
-    pub fn resolve(&mut self) -> bool {
-        std::mem::replace(&mut self.resolved, true)
+    fn consume_items(&mut self) -> Vec<Self::Item> {
+        std::mem::take(&mut self.blobs)
     }
 }
