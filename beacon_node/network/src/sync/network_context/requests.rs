@@ -1,3 +1,4 @@
+use crate::metrics;
 use beacon_chain::{get_block_root, validator_monitor::timestamp_now};
 use fnv::FnvHashMap;
 use lighthouse_network::{
@@ -158,6 +159,7 @@ pub enum LookupVerifyError {
     UnrequestedSlot(Slot),
     InvalidInclusionProof,
     DuplicateData,
+    BlockComponentCouplingError(String),
 }
 
 pub struct ActiveBlocksByRootRequest<E: EthSpec> {

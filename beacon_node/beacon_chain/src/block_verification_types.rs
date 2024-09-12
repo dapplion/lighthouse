@@ -198,6 +198,25 @@ impl<E: EthSpec> RpcBlock<E> {
         Self::new(Some(block_root), block, blobs)
     }
 
+    pub fn new_unchecked(
+        block_root: Hash256,
+        block: Arc<SignedBeaconBlock<E>>,
+        blobs: Option<BlobSidecarList<E>>,
+        custody_columns: Option<CustodyDataColumnList<E>>,
+    ) -> Self {
+        let inner = if let Some(custody_columns) = custody_columns {
+            RpcBlockInner::BlockAndCustodyColumns(block, custody_columns)
+        } else if let Some(blobs) = blobs {
+            RpcBlockInner::BlockAndBlobs(block, blobs)
+        } else {
+            RpcBlockInner::Block(block)
+        };
+        Self {
+            block_root,
+            block: inner,
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn deconstruct(
         self,

@@ -1,4 +1,4 @@
-use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
+use beacon_chain::block_verification_types::RpcBlock;
 use lighthouse_network::rpc::methods::BlocksByRangeRequest;
 use lighthouse_network::service::api_types::Id;
 use lighthouse_network::PeerId;
@@ -8,6 +8,8 @@ use std::ops::Sub;
 use std::time::{Duration, Instant};
 use strum::Display;
 use types::{Epoch, EthSpec, Slot};
+
+use crate::sync::block_sidecar_coupling::RangeBlockComponentsResponse;
 
 /// The number of times to retry a batch before it is considered failed.
 const MAX_BATCH_DOWNLOAD_ATTEMPTS: u8 = 5;
@@ -120,7 +122,7 @@ pub enum BatchState<E: EthSpec> {
     /// The batch is being downloaded.
     Downloading(PeerId, Id),
     /// The batch has been completely downloaded and is ready for processing.
-    AwaitingProcessing(PeerId, Vec<RpcBlock<E>>, Instant),
+    AwaitingProcessing(PeerId, RangeBlockComponentsResponse<E>, Instant),
     /// The batch is being processed.
     Processing(Attempt),
     /// The batch was successfully processed and is waiting to be validated.
@@ -270,43 +272,14 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
     #[must_use = "Batch may have failed"]
     pub fn download_completed(
         &mut self,
-        blocks: Vec<RpcBlock<E>>,
+        blocks: RangeBlockComponentsResponse<E>,
     ) -> Result<
         usize, /* Received blocks */
         Result<(Slot, Slot, BatchOperationOutcome), WrongState>,
     > {
         match self.state.poison() {
             BatchState::Downloading(peer, _request_id) => {
-                // verify that blocks are in range
-                if let Some(last_slot) = blocks.last().map(|b| b.slot()) {
-                    // the batch is non-empty
-                    let first_slot = blocks[0].slot();
-
-                    let failed_range = if first_slot < self.start_slot {
-                        Some((self.start_slot, first_slot))
-                    } else if self.end_slot < last_slot {
-                        Some((self.end_slot, last_slot))
-                    } else {
-                        None
-                    };
-
-                    if let Some((expected, received)) = failed_range {
-                        // this is a failed download, register the attempt and check if the batch
-                        // can be tried again
-                        self.failed_download_attempts.push(peer);
-                        self.state = if self.failed_download_attempts.len()
-                            >= B::max_batch_download_attempts() as usize
-                        {
-                            BatchState::Failed
-                        } else {
-                            // drop the blocks
-                            BatchState::AwaitingDownload
-                        };
-
-                        return Err(Ok((expected, received, self.outcome())));
-                    }
-                }
-
+                // Blocks are checked to be on the request range in `ActiveBlocksByRangeRequest`
                 let received = blocks.len();
                 self.state = BatchState::AwaitingProcessing(peer, blocks, Instant::now());
                 Ok(received)
@@ -383,6 +356,8 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
     pub fn start_processing(&mut self) -> Result<(Vec<RpcBlock<E>>, Duration), WrongState> {
         match self.state.poison() {
             BatchState::AwaitingProcessing(peer, blocks, start_instant) => {
+                // TODO(das): Store the peer group in the attempt
+                let blocks = blocks.rpc_blocks;
                 self.state = BatchState::Processing(Attempt::new::<B, E>(peer, &blocks));
                 Ok((blocks, start_instant.elapsed()))
             }

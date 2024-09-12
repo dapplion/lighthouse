@@ -1,164 +1,116 @@
 use beacon_chain::{
     block_verification_types::RpcBlock, data_column_verification::CustodyDataColumn, get_block_root,
 };
-use lighthouse_network::{service::api_types::Id, PeerId};
+use lighthouse_network::{
+    service::api_types::{
+        BlobsByRangeRequestId, BlocksByRangeRequestId, DataColumnsByRangeRequestId,
+    },
+    PeerId,
+};
 use ssz_types::VariableList;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 use types::{
-    BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock,
+    BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, EthSpec, Hash256, RuntimeVariableList,
+    SignedBeaconBlock,
 };
+
+use super::network_context::PeerGroup;
 
 #[derive(Debug)]
 pub struct RangeBlockComponentsRequest<E: EthSpec> {
-    /// Blocks we have received awaiting for their corresponding sidecar.
-    blocks: VecDeque<Arc<SignedBeaconBlock<E>>>,
-    /// Sidecars we have received awaiting for their corresponding block.
-    blobs: VecDeque<Arc<BlobSidecar<E>>>,
-    data_columns: VecDeque<Arc<DataColumnSidecar<E>>>,
-    /// Whether the individual RPC request for blocks is finished or not.
-    is_blocks_stream_terminated: bool,
-    /// Whether the individual RPC request for sidecars is finished or not.
-    is_sidecars_stream_terminated: bool,
-    custody_columns_streams_terminated: usize,
-    /// Used to determine if this accumulator should wait for a sidecars stream termination
-    expects_blobs: bool,
-    expects_custody_columns: Option<Vec<ColumnIndex>>,
-    /// Used to determine if the number of data columns stream termination this accumulator should
-    /// wait for. This may be less than the number of `expects_custody_columns` due to request batching.
-    custody_column_request_ids: Option<Vec<Id>>,
-    /// The peers the request was made to.
-    pub(crate) peer_ids: Vec<PeerId>,
+    /// Active blocks_by_range request
+    blocks_request: Status<BlocksByRangeRequestId, Vec<Arc<SignedBeaconBlock<E>>>>,
+    /// Active 1 or 0 blobs_by_range request
+    blobs_request: Status<BlobsByRangeRequestId, Vec<Arc<BlobSidecar<E>>>>,
+    /// Active set of data_column_by_range requests
+    data_column_requests: HashMap<
+        DataColumnsByRangeRequestId,
+        Status<DataColumnsByRangeRequestId, Vec<Arc<DataColumnSidecar<E>>>>,
+    >,
+    /// Attribute which peer is responsible for each column
+    peer_by_data_column: HashMap<ColumnIndex, PeerId>,
 }
 
 impl<E: EthSpec> RangeBlockComponentsRequest<E> {
     pub fn new(
-        expects_blobs: bool,
-        expects_custody_columns: Option<Vec<ColumnIndex>>,
-        custody_column_request_ids: Option<Vec<Id>>,
-        peer_ids: Vec<PeerId>,
+        blocks_req_id: BlocksByRangeRequestId,
+        blobs_req_id: Option<BlobsByRangeRequestId>,
+        data_column_requests: Vec<(DataColumnsByRangeRequestId, PeerId, Vec<ColumnIndex>)>,
     ) -> Self {
+        let mut peer_by_data_column = HashMap::new();
+        for (_, peer_id, indices) in &data_column_requests {
+            for index in indices {
+                peer_by_data_column.insert(*index, *peer_id);
+            }
+        }
+
         Self {
-            blocks: <_>::default(),
-            blobs: <_>::default(),
-            data_columns: <_>::default(),
-            is_blocks_stream_terminated: false,
-            is_sidecars_stream_terminated: false,
-            custody_columns_streams_terminated: 0,
-            expects_blobs,
-            expects_custody_columns,
-            custody_column_request_ids,
-            peer_ids,
+            blocks_request: Status::Downloading(blocks_req_id),
+            blobs_request: match blobs_req_id {
+                Some(blobs_req_id) => Status::Downloading(blobs_req_id),
+                None => Status::NotRequired,
+            },
+            data_column_requests: data_column_requests
+                .into_iter()
+                .map(|(id, _, _)| (id, Status::Downloading(id)))
+                .collect(),
+            peer_by_data_column,
         }
     }
 
-    // TODO: This function should be deprecated when simplying the retry mechanism of this range
-    // requests.
-    pub fn get_requirements(&self) -> (bool, Option<Vec<ColumnIndex>>) {
-        (self.expects_blobs, self.expects_custody_columns.clone())
+    pub fn add_block_response(&mut self, peer_id: PeerId, blocks: Vec<Arc<SignedBeaconBlock<E>>>) {
+        // TODO: Harden Status state transitions
+        self.blocks_request = Status::Downloaded(blocks, peer_id);
     }
 
-    pub fn add_block_response(&mut self, blocks: Vec<Arc<SignedBeaconBlock<E>>>) {
-        self.blocks = blocks;
-        self.is_blocks_stream_terminated = true;
+    pub fn add_sidecar_response(&mut self, peer_id: PeerId, blobs: Vec<Arc<BlobSidecar<E>>>) {
+        // TODO: Harden Status state transitions
+        self.blobs_request = Status::Downloaded(blobs, peer_id);
     }
 
-    pub fn add_sidecar_response(&mut self, blobs: Vec<Arc<BlobSidecar<E>>>) {
-        self.blobs = blobs;
-        self.is_sidecars_stream_terminated = true;
+    pub fn add_data_column(
+        &mut self,
+        req_id: DataColumnsByRangeRequestId,
+        peer_id: PeerId,
+        columns: Vec<Arc<DataColumnSidecar<E>>>,
+    ) -> Result<(), String> {
+        let Some(req) = self.data_column_requests.get_mut(&req_id) else {
+            return Err(format!("unknown req_id {req_id:?}"));
+        };
+
+        // TODO: Harden Status state transitions
+        *req = Status::Downloaded(columns, peer_id);
+        Ok(())
     }
 
-    pub fn add_data_column(&mut self, columns: Vec<Arc<DataColumnSidecar<E>>>) {
-        for column in columns {
-            self.data_columns.push_back(column);
-        }
-        // TODO(das): this mechanism is dangerous, if somehow there are two requests for the
-        // same column index it can terminate early. This struct should track that all requests
-        // for all custody columns terminate.
-        self.custody_columns_streams_terminated += 1;
-    }
-
-    pub fn into_responses(self, spec: &ChainSpec) -> Result<Vec<RpcBlock<E>>, String> {
-        if let Some(expects_custody_columns) = self.expects_custody_columns.clone() {
-            self.into_responses_with_custody_columns(expects_custody_columns, spec)
+    pub fn into_responses(
+        self,
+        spec: &ChainSpec,
+    ) -> Result<RangeBlockComponentsResponse<E>, String> {
+        if !self.data_column_requests.is_empty() {
+            self.into_responses_with_custody_columns(spec)
         } else {
             self.into_responses_with_blobs()
         }
     }
 
-    fn into_responses_with_blobs(self) -> Result<Vec<RpcBlock<E>>, String> {
-        let RangeBlockComponentsRequest { blocks, blobs, .. } = self;
+    fn into_responses_with_blobs(self) -> Result<RangeBlockComponentsResponse<E>, String> {
+        let (blocks, block_peer) = match self.blocks_request {
+            Status::NotRequired => unreachable!(),
+            Status::Downloading { .. } => return Err("block_request pending".to_owned()),
+            Status::Downloaded(blocks, peer) => (blocks, peer),
+        };
+        let (blobs, blob_peer) = match self.blobs_request {
+            Status::NotRequired => (vec![], None),
+            Status::Downloading { .. } => return Err("blob_request pending".to_owned()),
+            Status::Downloaded(blobs, peer) => (blobs, Some(peer)),
+        };
 
-        // There can't be more more blobs than blocks. i.e. sending any blob (empty
-        // included) for a skipped slot is not permitted.
-        let mut responses = Vec::with_capacity(blocks.len());
-        let mut blob_iter = blobs.into_iter().peekable();
-        for block in blocks.into_iter() {
-            let mut blob_list = Vec::with_capacity(E::max_blobs_per_block());
-            while {
-                let pair_next_blob = blob_iter
-                    .peek()
-                    .map(|sidecar| sidecar.slot() == block.slot())
-                    .unwrap_or(false);
-                pair_next_blob
-            } {
-                blob_list.push(blob_iter.next().ok_or("Missing next blob".to_string())?);
-            }
+        let mut blobs_by_block = HashMap::<Hash256, Vec<Arc<BlobSidecar<E>>>>::new();
 
-            let mut blobs_buffer = vec![None; E::max_blobs_per_block()];
-            for blob in blob_list {
-                let blob_index = blob.index as usize;
-                let Some(blob_opt) = blobs_buffer.get_mut(blob_index) else {
-                    return Err("Invalid blob index".to_string());
-                };
-                if blob_opt.is_some() {
-                    return Err("Repeat blob index".to_string());
-                } else {
-                    *blob_opt = Some(blob);
-                }
-            }
-            let blobs = VariableList::from(blobs_buffer.into_iter().flatten().collect::<Vec<_>>());
-            responses.push(RpcBlock::new(None, block, Some(blobs)).map_err(|e| format!("{e:?}"))?)
-        }
-
-        // if accumulated sidecars is not empty, throw an error.
-        if blob_iter.next().is_some() {
-            return Err("Received sidecars that don't pair well".to_string());
-        }
-
-        Ok(responses)
-    }
-
-    fn into_responses_with_custody_columns(
-        self,
-        expects_custody_columns: Vec<ColumnIndex>,
-        spec: &ChainSpec,
-    ) -> Result<Vec<RpcBlock<E>>, String> {
-        let RangeBlockComponentsRequest {
-            blocks,
-            data_columns,
-            ..
-        } = self;
-
-        // Group data columns by block_root and index
-        let mut data_columns_by_block =
-            HashMap::<Hash256, HashMap<ColumnIndex, Arc<DataColumnSidecar<E>>>>::new();
-
-        for column in data_columns {
-            let block_root = column.block_root();
-            let index = column.index;
-            if data_columns_by_block
-                .entry(block_root)
-                .or_default()
-                .insert(index, column)
-                .is_some()
-            {
-                return Err(format!(
-                    "Repeated column block_root {block_root:?} index {index}"
-                ));
-            }
+        for blob in blobs {
+            let block_root = blob.block_root();
+            blobs_by_block.entry(block_root).or_default().push(blob);
         }
 
         // Now iterate all blocks ensuring that the block roots of each block and data column match,
@@ -167,41 +119,89 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
 
         for block in blocks {
             let block_root = get_block_root(&block);
-            rpc_blocks.push(if block.num_expected_blobs() > 0 {
-                let Some(mut data_columns_by_index) = data_columns_by_block.remove(&block_root)
-                else {
-                    // This PR ignores the fix from https://github.com/sigp/lighthouse/pull/5675
-                    // which allows blobs to not match blocks.
-                    // TODO(das): on the initial version of PeerDAS the beacon chain does not check
-                    // rpc custody requirements and dropping this check can allow the block to have
-                    // an inconsistent DB.
-                    return Err(format!("No columns for block {block_root:?} with data"));
-                };
+            let blobs = blobs_by_block
+                .remove(&block_root)
+                .map(|blobs| VariableList::from(blobs));
+            rpc_blocks.push(RpcBlock::new_unchecked(block_root, block, blobs, None));
+        }
 
-                let mut custody_columns = vec![];
-                for index in &expects_custody_columns {
-                    let Some(data_column) = data_columns_by_index.remove(index) else {
-                        return Err(format!("No column for block {block_root:?} index {index}"));
-                    };
-                    // Safe to convert to `CustodyDataColumn`: we have asserted that the index of
-                    // this column is in the set of `expects_custody_columns` and with the expected
-                    // block root, so for the expected epoch of this batch.
-                    custody_columns.push(CustodyDataColumn::from_asserted_custody(data_column));
+        Ok(RangeBlockComponentsResponse {
+            rpc_blocks,
+            peers: RangeBlockComponentsPeers {
+                block_peer,
+                blob_peer,
+                data_columns_peer_group: None,
+                peer_by_data_column: self.peer_by_data_column,
+            },
+        })
+    }
+
+    fn into_responses_with_custody_columns(
+        self,
+        spec: &ChainSpec,
+    ) -> Result<RangeBlockComponentsResponse<E>, String> {
+        let (blocks, block_peer) = match self.blocks_request {
+            Status::NotRequired => unreachable!(),
+            Status::Downloading { .. } => return Err("block_request pending".to_owned()),
+            Status::Downloaded(blocks, peer) => (blocks, peer),
+        };
+
+        let mut data_columns = vec![];
+        let mut columns_by_peer = HashMap::<PeerId, Vec<usize>>::new();
+        for req in self.data_column_requests.into_values() {
+            match req {
+                Status::NotRequired => unreachable!(),
+                Status::Downloading { .. } => return Err("data_column_request pending".to_owned()),
+                Status::Downloaded(columns, peer) => {
+                    columns_by_peer
+                        .entry(peer)
+                        .or_default()
+                        .extend(columns.iter().map(|d| d.index as usize));
+                    data_columns.extend(columns);
                 }
+            }
+        }
 
-                // Assert that there are no columns left
-                if !data_columns_by_index.is_empty() {
-                    let remaining_indices = data_columns_by_index.keys().collect::<Vec<_>>();
-                    return Err(format!(
-                        "Not all columns consumed for block {block_root:?}: {remaining_indices:?}"
-                    ));
-                }
+        // Group data columns by block_root and index
+        let mut data_columns_by_block = HashMap::<Hash256, Vec<_>>::new();
 
-                RpcBlock::new_with_custody_columns(Some(block_root), block, custody_columns, spec)
-                    .map_err(|e| format!("{e:?}"))?
-            } else {
-                RpcBlock::new_without_blobs(Some(block_root), block)
-            });
+        for column in data_columns {
+            data_columns_by_block
+                .entry(column.block_root())
+                .or_default()
+                // Safe to convert to `CustodyDataColumn`: we have asserted that the index of
+                // this column is in the set of `expects_custody_columns` and with the expected
+                // block root, so for the expected epoch of this batch.
+                .push(CustodyDataColumn::from_asserted_custody(column));
+            // Note: no need to check for duplicates `ActiveDataColumnsByRangeRequest` ensures that
+            // only requested column indices are returned.
+        }
+
+        // Here we don't know what's the canonical block at a specific slot. A block may claim to
+        // have data (some blob transactions) but be invalid. Therefore, the block peer may disagree
+        // with the data column peer wether a block has data or not. However, we can match columns to
+        // blocks by block roots safely. If the block peer and column peer disagree we will have a
+        // mismatch of columns, which we HAVE to tolerate here.
+        //
+        // Note that we can have a partial match of columns. Column peers can disagree between them,
+        // so we must track who was expected to provide what columns for a set of indexes. If the
+        // block ends up with data and we are missing columns, penalize the peers that did not send
+        // the columns.
+
+        // Now iterate all blocks ensuring that the block roots of each block and data column match,
+        // plus we have columns for our custody requirements
+        let mut rpc_blocks = Vec::with_capacity(blocks.len());
+
+        for block in blocks {
+            let block_root = get_block_root(&block);
+            let columns = match data_columns_by_block.remove(&block_root) {
+                Some(columns) => Some(
+                    RuntimeVariableList::new(columns, spec.number_of_columns)
+                        .map_err(|e| format!("{:?}", e))?,
+                ),
+                None => None,
+            };
+            rpc_blocks.push(RpcBlock::new_unchecked(block_root, block, None, columns));
         }
 
         // Assert that there are no columns left for other blocks
@@ -210,22 +210,65 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
             return Err(format!("Not all columns consumed: {remaining_roots:?}"));
         }
 
-        Ok(rpc_blocks)
+        Ok(RangeBlockComponentsResponse {
+            rpc_blocks,
+            peers: RangeBlockComponentsPeers {
+                block_peer,
+                blob_peer: None,
+                data_columns_peer_group: Some(PeerGroup::from_set(columns_by_peer)),
+                peer_by_data_column: self.peer_by_data_column,
+            },
+        })
     }
 
     pub fn is_finished(&self) -> bool {
-        if !self.is_blocks_stream_terminated {
+        if !self.blocks_request.completed() {
             return false;
         }
-        if self.expects_blobs && !self.is_sidecars_stream_terminated {
+        if !self.blobs_request.completed() {
             return false;
         }
-        if let Some(custody_column_request_ids) = &self.custody_column_request_ids {
-            if self.custody_columns_streams_terminated < custody_column_request_ids.len() {
+        for data_column_request in self.data_column_requests.values() {
+            if !data_column_request.completed() {
                 return false;
             }
         }
         true
+    }
+}
+
+pub struct RangeBlockComponentsPeers {
+    pub block_peer: PeerId,
+    pub blob_peer: Option<PeerId>,
+    pub data_columns_peer_group: Option<PeerGroup>,
+    pub peer_by_data_column: HashMap<ColumnIndex, PeerId>,
+}
+
+pub struct RangeBlockComponentsResponse<E: EthSpec> {
+    pub rpc_blocks: Vec<RpcBlock<E>>,
+    pub peers: RangeBlockComponentsPeers,
+}
+
+impl<E: EthSpec> RangeBlockComponentsResponse<E> {
+    pub fn len(&self) -> usize {
+        self.rpc_blocks.len()
+    }
+}
+
+#[derive(Debug)]
+enum Status<I, T> {
+    NotRequired,
+    Downloading(I),
+    Downloaded(T, PeerId),
+}
+
+impl<I, T> Status<I, T> {
+    fn completed(&self) -> bool {
+        match self {
+            Self::NotRequired => true,
+            Self::Downloading { .. } => false,
+            Self::Downloaded { .. } => true,
+        }
     }
 }
 
@@ -245,14 +288,15 @@ mod tests {
         let mut info = RangeBlockComponentsRequest::<E>::new(false, None, None, vec![peer_id]);
         let mut rng = XorShiftRng::from_seed([42; 16]);
         let blocks = (0..4)
-            .map(|_| generate_rand_block_and_blobs::<E>(ForkName::Base, NumBlobs::None, &mut rng).0)
+            .map(|_| {
+                generate_rand_block_and_blobs::<E>(ForkName::Base, NumBlobs::None, &mut rng)
+                    .0
+                    .into()
+            })
             .collect::<Vec<_>>();
 
         // Send blocks and complete terminate response
-        for block in blocks {
-            info.add_block_response(Some(block.into()));
-        }
-        info.add_block_response(None);
+        info.add_block_response(blocks);
 
         // Assert response is finished and RpcBlocks can be constructed
         assert!(info.is_finished());
@@ -267,17 +311,16 @@ mod tests {
         let blocks = (0..4)
             .map(|_| {
                 // Always generate some blobs.
-                generate_rand_block_and_blobs::<E>(ForkName::Deneb, NumBlobs::Number(3), &mut rng).0
+                generate_rand_block_and_blobs::<E>(ForkName::Deneb, NumBlobs::Number(3), &mut rng)
+                    .0
+                    .into()
             })
             .collect::<Vec<_>>();
 
         // Send blocks and complete terminate response
-        for block in blocks {
-            info.add_block_response(Some(block.into()));
-        }
-        info.add_block_response(None);
+        info.add_block_response(blocks);
         // Expect no blobs returned
-        info.add_sidecar_response(None);
+        info.add_sidecar_response(vec![]);
 
         // Assert response is finished and RpcBlocks can be constructed, even if blobs weren't returned.
         // This makes sure we don't expect blobs here when they have expired. Checking this logic should
@@ -310,25 +353,18 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Send blocks and complete terminate response
-        for block in &blocks {
-            info.add_block_response(Some(block.0.clone().into()));
-        }
-        info.add_block_response(None);
+        info.add_block_response(blocks.iter().map(|b| b.0.clone().into()).collect());
         // Assert response is not finished
         assert!(!info.is_finished());
 
-        // Send data columns interleaved
-        for block in &blocks {
-            for column in &block.1 {
-                if expects_custody_columns.contains(&column.index) {
-                    info.add_data_column(Some(column.clone()));
-                }
-            }
-        }
-
-        // Terminate the requests
-        for (i, _column_index) in expects_custody_columns.iter().enumerate() {
-            info.add_data_column(None);
+        // Send data columns
+        for (i, &column_index) in expects_custody_columns.iter().enumerate() {
+            info.add_data_column(
+                blocks
+                    .iter()
+                    .flat_map(|b| b.1.iter().filter(|d| d.index == column_index).cloned())
+                    .collect(),
+            );
 
             if i < expects_custody_columns.len() - 1 {
                 assert!(
@@ -350,8 +386,14 @@ mod tests {
     #[test]
     fn rpc_block_with_custody_columns_batched() {
         let spec = test_spec::<E>();
-        let expects_custody_columns = vec![1, 2, 3, 4];
-        let custody_column_request_ids = vec![0, 1];
+        let batched_column_requests = vec![vec![1_u64, 2], vec![3, 4]];
+        let expects_custody_columns = batched_column_requests
+            .iter()
+            .cloned()
+            .flatten()
+            .collect::<Vec<_>>();
+        let custody_column_request_ids =
+            (0..batched_column_requests.len() as u32).collect::<Vec<_>>();
         let num_of_data_column_requests = custody_column_request_ids.len();
         let mut info = RangeBlockComponentsRequest::<E>::new(
             false,
@@ -372,25 +414,23 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Send blocks and complete terminate response
-        for block in &blocks {
-            info.add_block_response(Some(block.0.clone().into()));
-        }
-        info.add_block_response(None);
+        info.add_block_response(blocks.iter().map(|b| b.0.clone().into()).collect());
         // Assert response is not finished
         assert!(!info.is_finished());
 
-        // Send data columns interleaved
-        for block in &blocks {
-            for column in &block.1 {
-                if expects_custody_columns.contains(&column.index) {
-                    info.add_data_column(Some(column.clone()));
-                }
-            }
-        }
+        for (i, column_indices) in batched_column_requests.iter().enumerate() {
+            // Send the set of columns in the same batch request
+            info.add_data_column(
+                blocks
+                    .iter()
+                    .flat_map(|b| {
+                        b.1.iter()
+                            .filter(|d| column_indices.contains(&d.index))
+                            .cloned()
+                    })
+                    .collect::<Vec<_>>(),
+            );
 
-        // Terminate the requests
-        for i in 0..num_of_data_column_requests {
-            info.add_data_column(None);
             if i < num_of_data_column_requests - 1 {
                 assert!(
                     !info.is_finished(),

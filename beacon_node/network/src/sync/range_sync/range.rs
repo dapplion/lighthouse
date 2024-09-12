@@ -45,9 +45,9 @@ use super::chain_collection::ChainCollection;
 use super::sync_type::RangeSyncType;
 use crate::metrics;
 use crate::status::ToStatusMessage;
+use crate::sync::block_sidecar_coupling::RangeBlockComponentsResponse;
 use crate::sync::network_context::SyncNetworkContext;
 use crate::sync::BatchProcessResult;
-use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::rpc::GoodbyeReason;
 use lighthouse_network::service::api_types::Id;
@@ -211,7 +211,7 @@ where
         chain_id: ChainId,
         batch_id: BatchId,
         request_id: Id,
-        blocks: Vec<RpcBlock<T::EthSpec>>,
+        blocks: RangeBlockComponentsResponse<T::EthSpec>,
     ) {
         // check if this chunk removes the chain
         match self.chains.call_by_id(chain_id, |chain| {
@@ -390,11 +390,12 @@ mod tests {
     use crate::NetworkMessage;
 
     use super::*;
-    use crate::sync::network_context::{BlockOrBlob, RangeRequestId};
+    use crate::sync::network_context::{BlockOrBlob, RangeRequestId, RangeRequester};
     use beacon_chain::builder::Witness;
     use beacon_chain::eth1_chain::CachingEth1Backend;
     use beacon_chain::parking_lot::RwLock;
     use beacon_chain::test_utils::{BeaconChainHarness, EphemeralHarnessType};
+    use beacon_chain::validator_monitor::timestamp_now;
     use beacon_chain::EngineState;
     use beacon_processor::WorkEvent as BeaconWorkEvent;
     use lighthouse_network::service::api_types::SyncRequestId;
@@ -565,12 +566,16 @@ mod tests {
             if blob_req_opt.is_some() {
                 match block_req {
                     AppRequestId::Sync(SyncRequestId::RangeBlockAndBlobs { id }) => {
-                        let _ = self
-                            .cx
-                            .range_block_and_blob_response(id, BlockOrBlob::Block(None));
+                        let _ = self.cx.range_block_and_blob_response(
+                            id,
+                            BlockOrBlob::Block(Ok((vec![], timestamp_now()))),
+                        );
                         let response = self
                             .cx
-                            .range_block_and_blob_response(id, BlockOrBlob::Blob(None))
+                            .range_block_and_blob_response(
+                                id,
+                                BlockOrBlob::Blob(Ok((vec![], timestamp_now()))),
+                            )
                             .unwrap();
                         let (chain_id, batch_id) =
                             TestRig::unwrap_range_request_id(response.sender_id);
@@ -583,7 +588,10 @@ mod tests {
                     AppRequestId::Sync(SyncRequestId::RangeBlockAndBlobs { id }) => {
                         let response = self
                             .cx
-                            .range_block_and_blob_response(id, BlockOrBlob::Block(None))
+                            .range_block_and_blob_response(
+                                id,
+                                BlockOrBlob::Block(Ok((vec![], timestamp_now()))),
+                            )
                             .unwrap();
                         let (chain_id, batch_id) =
                             TestRig::unwrap_range_request_id(response.sender_id);
@@ -594,8 +602,8 @@ mod tests {
             }
         }
 
-        fn unwrap_range_request_id(sender_id: RangeRequestId) -> (ChainId, BatchId) {
-            if let RangeRequestId::RangeSync { chain_id, batch_id } = sender_id {
+        fn unwrap_range_request_id(sender_id: RangeRequester) -> (ChainId, BatchId) {
+            if let RangeRequester::RangeSync { chain_id, batch_id } = sender_id {
                 (chain_id, batch_id)
             } else {
                 panic!("expected RangeSync request: {:?}", sender_id)

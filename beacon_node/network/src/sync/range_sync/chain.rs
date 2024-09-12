@@ -3,13 +3,12 @@ use super::RangeSyncType;
 use crate::metrics;
 use crate::metrics::PEERS_PER_COLUMN_SUBNET;
 use crate::network_beacon_processor::ChainSegmentProcessId;
-use crate::sync::network_context::RangeRequestId;
+use crate::sync::block_sidecar_coupling::RangeBlockComponentsResponse;
 use crate::sync::{network_context::SyncNetworkContext, BatchOperationOutcome, BatchProcessResult};
-use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::BeaconChainTypes;
 use fnv::FnvHashMap;
 use lighthouse_metrics::set_int_gauge;
-use lighthouse_network::service::api_types::Id;
+use lighthouse_network::service::api_types::{Id, RangeRequester};
 use lighthouse_network::{PeerAction, PeerId};
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -245,7 +244,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         batch_id: BatchId,
         peer_id: &PeerId,
         request_id: Id,
-        blocks: Vec<RpcBlock<T::EthSpec>>,
+        blocks: RangeBlockComponentsResponse<T::EthSpec>,
     ) -> ProcessingResult {
         // check if we have this batch
         let batch = match self.batches.get_mut(&batch_id) {
@@ -492,6 +491,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             }
         };
 
+        // TODO(das): Retrieve the peer group not only the block/blobs peer
         let peer = batch.current_peer().cloned().ok_or_else(|| {
             RemoveChain::WrongBatchState(format!(
                 "Processing target is in wrong state: {:?}",
@@ -563,6 +563,8 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 penalty,
             } => {
                 // Penalize the peer appropiately.
+                // TODO(das): `BatchProcessResult::FaultyFailure` should inform which specific
+                //            peer is at fault (block/blob or some custody column peer)
                 network.report_peer(peer, *penalty, "faulty_batch");
 
                 // Check if this batch is allowed to continue
@@ -969,7 +971,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 peer,
                 batch_type,
                 request,
-                RangeRequestId::RangeSync {
+                RangeRequester::RangeSync {
                     chain_id: self.id,
                     batch_id,
                 },

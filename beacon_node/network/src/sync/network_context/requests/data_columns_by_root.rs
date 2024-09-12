@@ -68,4 +68,8 @@ impl<E: EthSpec> ActiveRequest for ActiveDataColumnsByRootRequest<E> {
     fn consume_items(&mut self) -> Vec<Self::Item> {
         std::mem::take(&mut self.items)
     }
+
+    fn name() -> &'static str {
+        "data_columns_by_root"
+    }
 }

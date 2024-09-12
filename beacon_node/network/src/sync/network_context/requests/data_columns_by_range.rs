@@ -27,7 +27,7 @@ impl<E: EthSpec> ActiveRequest for ActiveBlocksByRangeRequest<E> {
 
     fn add_response(&mut self, item: Self::Item) -> Result<bool, LookupVerifyError> {
         if item.slot().as_u64() < *self.request.start_slot()
-            || item.slot().as_u64() > self.request.start_slot() + self.request.count()
+            || item.slot().as_u64() >= self.request.start_slot() + self.request.count()
         {
             return Err(LookupVerifyError::UnrequestedSlot(item.slot()));
         }
@@ -67,7 +67,7 @@ impl<E: EthSpec> ActiveRequest for ActiveBlobsByRangeRequest<E> {
 
     fn add_response(&mut self, item: Self::Item) -> Result<bool, LookupVerifyError> {
         if item.slot() < self.request.start_slot
-            || item.slot() > self.request.start_slot + self.request.count
+            || item.slot() >= self.request.start_slot + self.request.count
         {
             return Err(LookupVerifyError::UnrequestedSlot(item.slot()));
         }
@@ -109,7 +109,7 @@ impl<E: EthSpec> ActiveRequest for ActiveDataColumnsByRangeRequest<E> {
 
     fn add_response(&mut self, item: Self::Item) -> Result<bool, LookupVerifyError> {
         if item.slot() < self.request.start_slot
-            || item.slot() > self.request.start_slot + self.request.count
+            || item.slot() >= self.request.start_slot + self.request.count
         {
             return Err(LookupVerifyError::UnrequestedSlot(item.slot()));
         }
