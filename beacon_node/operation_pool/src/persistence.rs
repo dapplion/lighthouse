@@ -193,6 +193,8 @@ impl<T: EthSpec> PersistedOperationPool<T> {
             proposer_slashings,
             voluntary_exits,
             bls_to_execution_changes: RwLock::new(bls_to_execution_changes),
+            // TODO(maxeb): persist consolidations
+            consolidations: <_>::default(),
             reward_cache: Default::default(),
             _phantom: Default::default(),
         };

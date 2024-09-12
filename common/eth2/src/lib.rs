@@ -1372,6 +1372,39 @@ impl BeaconNodeHttpClient {
         Ok(())
     }
 
+    /// `POST beacon/pool/consolidations`
+    pub async fn post_beacon_pool_consolidations(
+        &self,
+        consolidation: &SignedConsolidation,
+    ) -> Result<(), Error> {
+        let mut path = self.eth_path(V1)?;
+
+        path.path_segments_mut()
+            .map_err(|()| Error::InvalidUrl(self.server.clone()))?
+            .push("beacon")
+            .push("pool")
+            .push("consolidations");
+
+        self.post(path, &consolidation).await?;
+
+        Ok(())
+    }
+
+    /// `GET beacon/pool/consolidations`
+    pub async fn get_beacon_pool_consolidations(
+        &self,
+    ) -> Result<GenericResponse<Vec<SignedConsolidation>>, Error> {
+        let mut path = self.eth_path(V1)?;
+
+        path.path_segments_mut()
+            .map_err(|()| Error::InvalidUrl(self.server.clone()))?
+            .push("beacon")
+            .push("pool")
+            .push("consolidations");
+
+        self.get(path).await
+    }
+
     /// `GET beacon/deposit_snapshot`
     pub async fn get_deposit_snapshot(&self) -> Result<Option<types::DepositTreeSnapshot>, Error> {
         let mut path = self.eth_path(V1)?;

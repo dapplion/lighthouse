@@ -22,8 +22,8 @@ use state_processing::{
     block_signature_verifier::Error as BlockSignatureVerifierError,
     per_block_processing::errors::{
         AttestationValidationError, AttesterSlashingValidationError,
-        BlsExecutionChangeValidationError, ExitValidationError, ProposerSlashingValidationError,
-        SyncCommitteeMessageValidationError,
+        BlsExecutionChangeValidationError, ConsolidationValidationError, ExitValidationError,
+        ProposerSlashingValidationError, SyncCommitteeMessageValidationError,
     },
     signature_sets::Error as SignatureSetError,
     state_advance::Error as StateAdvanceError,
@@ -76,6 +76,7 @@ pub enum BeaconChainError {
     ProposerSlashingValidationError(ProposerSlashingValidationError),
     AttesterSlashingValidationError(AttesterSlashingValidationError),
     BlsExecutionChangeValidationError(BlsExecutionChangeValidationError),
+    ConsolidationValidationError(ConsolidationValidationError),
     StateSkipTooLarge {
         start_slot: Slot,
         requested_slot: Slot,
@@ -235,6 +236,7 @@ easy_from_to!(ExitValidationError, BeaconChainError);
 easy_from_to!(ProposerSlashingValidationError, BeaconChainError);
 easy_from_to!(AttesterSlashingValidationError, BeaconChainError);
 easy_from_to!(BlsExecutionChangeValidationError, BeaconChainError);
+easy_from_to!(ConsolidationValidationError, BeaconChainError);
 easy_from_to!(SszTypesError, BeaconChainError);
 easy_from_to!(OpPoolError, BeaconChainError);
 easy_from_to!(NaiveAggregationError, BeaconChainError);

@@ -82,8 +82,8 @@ use types::{
     AttesterSlashing, BeaconStateError, CommitteeCache, ConfigAndPreset, Epoch, EthSpec, ForkName,
     ForkVersionedResponse, Hash256, ProposerPreparationData, ProposerSlashing, RelativeEpoch,
     SignedAggregateAndProof, SignedBlindedBeaconBlock, SignedBlsToExecutionChange,
-    SignedContributionAndProof, SignedValidatorRegistrationData, SignedVoluntaryExit, Slot,
-    SyncCommitteeMessage, SyncContributionData,
+    SignedConsolidation, SignedContributionAndProof, SignedValidatorRegistrationData,
+    SignedVoluntaryExit, Slot, SyncCommitteeMessage, SyncContributionData,
 };
 use validator::pubkey_to_validator_index;
 use version::{
@@ -2222,6 +2222,47 @@ pub fn serve<T: BeaconChainTypes>(
                             failures,
                         ))
                     }
+                })
+            },
+        );
+
+    // GET beacon/pool/consolidations
+    let get_beacon_pool_consolidations = beacon_pool_path
+        .clone()
+        .and(warp::path("consolidations"))
+        .and(warp::path::end())
+        .then(
+            |task_spawner: TaskSpawner<T::EthSpec>, chain: Arc<BeaconChain<T>>| {
+                task_spawner.blocking_json_task(Priority::P1, move || {
+                    let consolidations = chain.op_pool.get_all_consolidations();
+                    Ok(api_types::GenericResponse::from(consolidations))
+                })
+            },
+        );
+
+    // POST beacon/pool/consolidations
+    let post_beacon_pool_consolidations = beacon_pool_path
+        .clone()
+        .and(warp::path("consolidations"))
+        .and(warp::path::end())
+        .and(warp::body::json())
+        .then(
+            |task_spawner: TaskSpawner<T::EthSpec>,
+             chain: Arc<BeaconChain<T>>,
+             consolidation: SignedConsolidation| {
+                task_spawner.blocking_json_task(Priority::P0, move || {
+                    chain
+                        .verify_and_import_consolidation(consolidation)
+                        .map_err(|e| {
+                            warp_utils::reject::object_invalid(format!(
+                                "gossip verification failed: {:?}",
+                                e
+                            ))
+                        })?;
+
+                    // TODO(maxeb): register to validator monitor?
+
+                    Ok(())
                 })
             },
         );
@@ -4567,6 +4608,7 @@ pub fn serve<T: BeaconChainTypes>(
                 .uor(get_beacon_pool_proposer_slashings)
                 .uor(get_beacon_pool_voluntary_exits)
                 .uor(get_beacon_pool_bls_to_execution_changes)
+                .uor(get_beacon_pool_consolidations)
                 .uor(get_beacon_deposit_snapshot)
                 .uor(get_beacon_rewards_blocks)
                 .uor(get_config_fork_schedule)
@@ -4645,6 +4687,7 @@ pub fn serve<T: BeaconChainTypes>(
                     .uor(post_beacon_pool_voluntary_exits)
                     .uor(post_beacon_pool_sync_committees)
                     .uor(post_beacon_pool_bls_to_execution_changes)
+                    .uor(post_beacon_pool_consolidations)
                     .uor(post_beacon_state_validators)
                     .uor(post_beacon_state_validator_balances)
                     .uor(post_beacon_rewards_attestations)

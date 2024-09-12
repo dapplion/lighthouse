@@ -338,6 +338,7 @@ struct PartialBeaconBlock<E: EthSpec> {
     sync_aggregate: Option<SyncAggregate<E>>,
     prepare_payload_handle: Option<PreparePayloadHandle<E>>,
     bls_to_execution_changes: Vec<SignedBlsToExecutionChange>,
+    consolidations: Vec<SignedConsolidation>,
 }
 
 pub type BeaconForkChoice<T> = ForkChoice<
@@ -2551,6 +2552,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         } else {
             false
         }
+    }
+
+    /// Verify and import a consolidation and queue it for inclusion in an appropriate block.
+    pub fn verify_and_import_consolidation(
+        &self,
+        consolidation: SignedConsolidation,
+    ) -> Result<(), Error> {
+        // Add to the op pool (if we have the ability to propose blocks).
+        if self.eth1_chain.is_some() {
+            let head_snapshot = self.head().snapshot;
+            let head_state = &head_snapshot.beacon_state;
+
+            // TODO(maxeb): may double insert, since there's no observable cache
+            self.op_pool
+                .insert_consolidation(consolidation.validate(head_state, &self.spec)?)
+        }
+
+        Ok(())
     }
 
     /// Attempt to obtain sync committee duties from the head.
@@ -4888,6 +4907,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .op_pool
             .get_bls_to_execution_changes(&state, &self.spec);
 
+        let consolidations = self.op_pool.get_consolidations(&state, &self.spec);
+
         // Iterate through the naive aggregation pool and ensure all the attestations from there
         // are included in the operation pool.
         let unagg_import_timer =
@@ -5047,6 +5068,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             sync_aggregate,
             prepare_payload_handle,
             bls_to_execution_changes,
+            consolidations,
         })
     }
 
@@ -5075,6 +5097,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // produce said `execution_payload`.
             prepare_payload_handle: _,
             bls_to_execution_changes,
+            consolidations,
         } = partial_beacon_block;
 
         let (inner_block, maybe_blobs_and_proofs, execution_payload_value) = match &state {
@@ -5218,6 +5241,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                                     "Kzg commitments missing from block contents".to_string(),
                                 ),
                             )?,
+                            consolidations: consolidations.into(),
                         },
                     }),
                     maybe_blobs_and_proofs,

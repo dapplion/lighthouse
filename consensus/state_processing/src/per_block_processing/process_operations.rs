@@ -1,3 +1,4 @@
+use super::verify_consolidation::verify_consolidation;
 use super::*;
 use crate::common::{
     altair::{get_base_reward, BaseRewardPerIncrement},
@@ -36,6 +37,10 @@ pub fn process_operations<T: EthSpec, Payload: AbstractExecPayload<T>>(
 
     if let Ok(bls_to_execution_changes) = block_body.bls_to_execution_changes() {
         process_bls_to_execution_changes(state, bls_to_execution_changes, verify_signatures, spec)?;
+    }
+
+    if let Ok(consolidations) = block_body.consolidations() {
+        process_consolidations(state, consolidations, verify_signatures, spec)?;
     }
 
     Ok(())
@@ -322,6 +327,41 @@ pub fn process_bls_to_execution_changes<T: EthSpec>(
                 &signed_address_change.message.to_execution_address,
                 spec,
             );
+    }
+
+    Ok(())
+}
+
+/// Validates each `consolidation` and updates the state
+///
+/// Returns `Ok(())` if the validation and state updates completed successfully. Otherwise returns
+/// an `Err` describing the invalid object or cause of failure.
+pub fn process_consolidations<T: EthSpec>(
+    state: &mut BeaconState<T>,
+    consolidations: &[SignedConsolidation],
+    verify_signatures: VerifySignatures,
+    spec: &ChainSpec,
+) -> Result<(), BlockProcessingError> {
+    for (i, consolidation) in consolidations.iter().enumerate() {
+        verify_consolidation(state, consolidation, verify_signatures, spec)
+            .map_err(|e| e.into_with_index(i))?;
+
+        let index = consolidation.message.source_index as usize;
+
+        let active_balance = state.get_validator_active_balance(index, spec)?;
+        let consolidation_queue_epoch =
+            state.compute_consolidation_epoch_and_update_churn(active_balance, spec)?;
+
+        state.get_validator_mut(index)?.exit_epoch = consolidation_queue_epoch;
+        state.get_validator_mut(index)?.withdrawable_epoch =
+            consolidation_queue_epoch.safe_add(spec.min_validator_withdrawability_delay)?;
+
+        state
+            .pending_consolidations_mut()?
+            .push(PendingConsolidation {
+                source_index: consolidation.message.source_index,
+                target_index: consolidation.message.target_index,
+            })?;
     }
 
     Ok(())

@@ -18,6 +18,7 @@ pub use persistence::{
     PersistedOperationPoolV15, PersistedOperationPoolV5,
 };
 pub use reward_cache::RewardCache;
+use types::SignedConsolidation;
 
 use crate::attestation_storage::{AttestationMap, CheckpointKey};
 use crate::bls_to_execution_changes::BlsToExecutionChanges;
@@ -29,7 +30,7 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use state_processing::per_block_processing::errors::AttestationValidationError;
 use state_processing::per_block_processing::{
-    get_slashable_indices_modular, verify_exit, VerifySignatures,
+    get_slashable_indices_modular, verify_consolidation, verify_exit, VerifySignatures,
 };
 use state_processing::{SigVerifiedOp, VerifyOperation};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
@@ -58,6 +59,8 @@ pub struct OperationPool<T: EthSpec + Default> {
     voluntary_exits: RwLock<HashMap<u64, SigVerifiedOp<SignedVoluntaryExit, T>>>,
     /// Map from credential changing validator to their position in the queue.
     bls_to_execution_changes: RwLock<BlsToExecutionChanges<T>>,
+    /// Map from source validator index to consolidation.
+    consolidations: RwLock<HashMap<u64, SigVerifiedOp<SignedConsolidation, T>>>,
     /// Reward cache for accelerating attestation packing.
     reward_cache: RwLock<RewardCache>,
     _phantom: PhantomData<T>,
@@ -615,6 +618,44 @@ impl<T: EthSpec> OperationPool<T> {
             .prune(head_block, head_state, spec)
     }
 
+    /// Insert a consolidation into the pool.
+    pub fn insert_consolidation(
+        &self,
+        verified_consolidation: SigVerifiedOp<SignedConsolidation, T>,
+    ) {
+        self.consolidations.write().insert(
+            verified_consolidation.as_inner().message.source_index,
+            verified_consolidation,
+        );
+    }
+
+    /// Get a list of consolidations for inclusion in a block.
+    pub fn get_consolidations(
+        &self,
+        state: &BeaconState<T>,
+        spec: &ChainSpec,
+    ) -> Vec<SignedConsolidation> {
+        filter_limit_operations(
+            self.consolidations.read().values(),
+            |consolidation| {
+                consolidation.signature_is_still_valid(&state.fork())
+                // TODO(maxeb): do a more succint check of validity
+                    && verify_consolidation(state, consolidation.as_inner(), VerifySignatures::False, spec).is_ok()
+            },
+            |consolidation| consolidation.as_inner().clone(),
+            T::MaxConsolidations::to_usize(),
+        )
+    }
+
+    /// Prune consolidations for validators which are exited in the finalized epoch.
+    pub fn prune_consolidations(&self, head_state: &BeaconState<T>) {
+        prune_validator_hash_map(
+            &mut self.consolidations.write(),
+            |_, validator| validator.exit_epoch <= head_state.finalized_checkpoint().epoch,
+            head_state,
+        );
+    }
+
     /// Prune all types of transactions given the latest head state and head fork.
     pub fn prune_all<Payload: AbstractExecPayload<T>>(
         &self,
@@ -629,6 +670,7 @@ impl<T: EthSpec> OperationPool<T> {
         self.prune_attester_slashings(head_state);
         self.prune_voluntary_exits(head_state);
         self.prune_bls_to_execution_changes(head_block, head_state, spec);
+        self.prune_consolidations(head_state);
     }
 
     /// Total number of voluntary exits in the pool.
@@ -703,6 +745,17 @@ impl<T: EthSpec> OperationPool<T> {
             .read()
             .iter_fifo()
             .map(|address_change| address_change.as_inner().clone())
+            .collect()
+    }
+
+    /// Returns all known `SignedConsolidation` objects.
+    ///
+    /// This method may return objects that are invalid for block inclusion.
+    pub fn get_all_consolidations(&self) -> Vec<SignedConsolidation> {
+        self.consolidations
+            .read()
+            .iter()
+            .map(|(_, consolidation)| consolidation.as_inner().clone())
             .collect()
     }
 }

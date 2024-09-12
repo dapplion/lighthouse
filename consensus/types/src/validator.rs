@@ -95,6 +95,18 @@ impl Validator {
             .unwrap_or(false)
     }
 
+    /// Returns `true` if the validator has compounding withdrawal credential.
+    pub fn has_eth1_or_compounding_withdrawal_credential(&self, spec: &ChainSpec) -> bool {
+        self.withdrawal_credentials
+            .as_bytes()
+            .first()
+            .map(|byte| {
+                *byte == spec.eth1_address_withdrawal_prefix_byte
+                    || *byte == spec.compounding_withdrawal_prefix_byte
+            })
+            .unwrap_or(false)
+    }
+
     /// Get the eth1 withdrawal address if this validator has one initialized.
     pub fn get_eth1_withdrawal_address(&self, spec: &ChainSpec) -> Option<Address> {
         self.has_eth1_withdrawal_credential(spec)

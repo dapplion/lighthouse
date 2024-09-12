@@ -325,6 +325,12 @@ where
     pub exit_balance_to_consume: Gwei,
     #[superstruct(only(Deneb))]
     pub earliest_exit_epoch: Epoch,
+    #[superstruct(only(Deneb))]
+    pub consolidation_balance_to_consume: Gwei,
+    #[superstruct(only(Deneb))]
+    pub earliest_consolidation_epoch: Epoch,
+    #[superstruct(only(Deneb))]
+    pub pending_consolidations: VariableList<PendingConsolidation, T::MaxPendingConsolidations>,
 
     // Caching (not in the spec)
     #[serde(skip_serializing, skip_deserializing)]
@@ -1390,6 +1396,69 @@ impl<T: EthSpec> BeaconState<T> {
         }
 
         Ok(*self.earliest_exit_epoch()?)
+    }
+
+    pub fn get_consolidation_churn_limit(&self, spec: &ChainSpec) -> Result<Gwei, Error> {
+        Ok(self
+            .get_churn_limit_gwei(spec)?
+            .safe_sub(self.get_activation_churn_limit(spec)?)?)
+    }
+
+    pub fn compute_consolidation_epoch_and_update_churn(
+        &mut self,
+        consolidation_balance: Gwei,
+        spec: &ChainSpec,
+    ) -> Result<Epoch, Error> {
+        let earliest_consolidation_epoch =
+            self.compute_activation_exit_epoch(self.current_epoch(), spec)?;
+        let per_epoch_churn = self.get_consolidation_churn_limit(spec)?;
+        // New epoch for exits.
+        if *self.earliest_consolidation_epoch()? < earliest_consolidation_epoch {
+            *self.earliest_consolidation_epoch_mut()? = earliest_consolidation_epoch;
+            *self.consolidation_balance_to_consume_mut()? = per_epoch_churn;
+        }
+
+        // Exit fits in the current earliest epoch.
+        if consolidation_balance <= *self.consolidation_balance_to_consume()? {
+            self.consolidation_balance_to_consume_mut()?
+                .safe_sub_assign(consolidation_balance)?;
+        } else {
+            // Exit doesn't fit in the current earliest epoch.
+            let balance_to_process =
+                consolidation_balance.safe_sub(*self.consolidation_balance_to_consume()?)?;
+            let additional_epochs =
+                Epoch::new((balance_to_process.safe_div(per_epoch_churn)?).into());
+            let remainder = balance_to_process.safe_rem(per_epoch_churn)?;
+            self.earliest_consolidation_epoch_mut()?
+                .safe_add_assign(additional_epochs.safe_add(1)?)?;
+            *self.consolidation_balance_to_consume_mut()? = per_epoch_churn.safe_sub(remainder)?;
+        }
+
+        Ok(*self.earliest_consolidation_epoch()?)
+    }
+
+    pub fn get_validator_active_balance(
+        &self,
+        index: usize,
+        spec: &ChainSpec,
+    ) -> Result<Gwei, Error> {
+        let active_balance_ceil = if self
+            .get_validator(index)?
+            .has_eth1_withdrawal_credential(spec)
+        {
+            spec.min_activation_balance
+        } else {
+            spec.max_effective_balance(ForkName::Deneb)
+        };
+
+        Ok(std::cmp::min(
+            *self
+                .balances()
+                .get(index)
+                .ok_or(Error::BalancesOutOfBounds(index))?,
+            active_balance_ceil,
+        )
+        .into())
     }
 
     /// Returns the `slot`, `index`, `committee_position` and `committee_len` for which a validator must produce an

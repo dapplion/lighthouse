@@ -80,6 +80,8 @@ pub struct BeaconBlockBody<T: EthSpec, Payload: AbstractExecPayload<T> = FullPay
         VariableList<SignedBlsToExecutionChange, T::MaxBlsToExecutionChanges>,
     #[superstruct(only(Deneb))]
     pub blob_kzg_commitments: KzgCommitments<T>,
+    #[superstruct(only(Deneb))]
+    pub consolidations: VariableList<SignedConsolidation, T::MaxConsolidations>,
     #[superstruct(only(Base, Altair))]
     #[ssz(skip_serializing, skip_deserializing)]
     #[tree_hash(skip_hashing)]
@@ -431,6 +433,7 @@ impl<E: EthSpec> From<BeaconBlockBodyDeneb<E, FullPayload<E>>>
             execution_payload: FullPayloadDeneb { execution_payload },
             bls_to_execution_changes,
             blob_kzg_commitments,
+            consolidations,
         } = body;
 
         (
@@ -449,6 +452,7 @@ impl<E: EthSpec> From<BeaconBlockBodyDeneb<E, FullPayload<E>>>
                 },
                 bls_to_execution_changes,
                 blob_kzg_commitments,
+                consolidations,
             },
             Some(execution_payload),
         )
@@ -551,6 +555,7 @@ impl<E: EthSpec> BeaconBlockBodyDeneb<E, FullPayload<E>> {
             execution_payload: FullPayloadDeneb { execution_payload },
             bls_to_execution_changes,
             blob_kzg_commitments,
+            consolidations,
         } = self;
 
         BeaconBlockBodyDeneb {
@@ -568,6 +573,7 @@ impl<E: EthSpec> BeaconBlockBodyDeneb<E, FullPayload<E>> {
             },
             bls_to_execution_changes: bls_to_execution_changes.clone(),
             blob_kzg_commitments: blob_kzg_commitments.clone(),
+            consolidations: consolidations.clone(),
         }
     }
 }

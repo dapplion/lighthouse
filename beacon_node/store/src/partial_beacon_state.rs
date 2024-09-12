@@ -124,6 +124,12 @@ where
     pub exit_balance_to_consume: Gwei,
     #[superstruct(only(Deneb))]
     pub earliest_exit_epoch: Epoch,
+    #[superstruct(only(Deneb))]
+    pub consolidation_balance_to_consume: Gwei,
+    #[superstruct(only(Deneb))]
+    pub earliest_consolidation_epoch: Epoch,
+    #[superstruct(only(Deneb))]
+    pub pending_consolidations: VariableList<PendingConsolidation, T::MaxPendingConsolidations>,
 }
 
 /// Implement the conversion function from BeaconState -> PartialBeaconState.
@@ -254,7 +260,10 @@ impl<T: EthSpec> PartialBeaconState<T> {
                     deposit_balance_to_consume,
                     pending_balance_deposits,
                     earliest_exit_epoch,
-                    exit_balance_to_consume
+                    exit_balance_to_consume,
+                    earliest_consolidation_epoch,
+                    consolidation_balance_to_consume,
+                    pending_consolidations
                 ],
                 [historical_summaries]
             ),
@@ -503,7 +512,10 @@ impl<E: EthSpec> TryInto<BeaconState<E>> for PartialBeaconState<E> {
                     deposit_balance_to_consume,
                     pending_balance_deposits,
                     earliest_exit_epoch,
-                    exit_balance_to_consume
+                    exit_balance_to_consume,
+                    earliest_consolidation_epoch,
+                    consolidation_balance_to_consume,
+                    pending_consolidations
                 ],
                 [historical_summaries]
             ),

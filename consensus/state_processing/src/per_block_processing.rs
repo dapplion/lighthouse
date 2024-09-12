@@ -19,6 +19,7 @@ pub use verify_attestation::{
     verify_attestation_for_block_inclusion, verify_attestation_for_state,
 };
 pub use verify_bls_to_execution_change::verify_bls_to_execution_change;
+pub use verify_consolidation::verify_consolidation;
 pub use verify_deposit::{
     get_existing_validator_index, verify_deposit_merkle_proof, verify_deposit_signature,
 };
@@ -35,6 +36,7 @@ pub mod tests;
 mod verify_attestation;
 mod verify_attester_slashing;
 mod verify_bls_to_execution_change;
+mod verify_consolidation;
 mod verify_deposit;
 mod verify_exit;
 mod verify_proposer_slashing;

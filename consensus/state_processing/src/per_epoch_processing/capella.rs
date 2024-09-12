@@ -57,6 +57,7 @@ pub fn process_epoch<T: EthSpec>(
     process_eth1_data_reset(state)?;
 
     process_pending_balance_deposits(state, spec)?;
+    process_pending_consolidations(state, spec)?;
 
     // Update effective balances with hysteresis (lag).
     process_effective_balance_updates(state, Some(&participation_cache), spec)?;
@@ -121,6 +122,62 @@ pub fn process_pending_balance_deposits<T: EthSpec>(
         let mut pending_balance_deposits_vec = pending_balance_deposits.to_vec();
         pending_balance_deposits_vec.drain(0..next_pending_deposit_index);
         *pending_balance_deposits = pending_balance_deposits_vec.into();
+    }
+
+    Ok(())
+}
+
+pub fn process_pending_consolidations<T: EthSpec>(
+    state: &mut BeaconState<T>,
+    spec: &ChainSpec,
+) -> Result<(), Error> {
+    let current_epoch = state.current_epoch();
+
+    if let BeaconState::Deneb(BeaconStateDeneb {
+        ref mut pending_consolidations,
+        ref mut balances,
+        ref validators,
+        ..
+    }) = state
+    {
+        let mut next_pending_consolidation = 0;
+
+        for pending_consolidation in pending_consolidations.iter() {
+            let source_index = pending_consolidation.source_index as usize;
+            let source_validator = validators
+                .get(source_index)
+                .ok_or(BeaconStateError::UnknownValidator(source_index))?;
+            if source_validator.withdrawable_epoch > current_epoch {
+                break;
+            }
+
+            if !source_validator.slashed {
+                // Move active balance to target. Excess balance will be withdrawn.
+                // Inlined get_active_balance function
+                let active_balance_ceil = if source_validator.has_eth1_withdrawal_credential(spec) {
+                    spec.min_activation_balance
+                } else {
+                    spec.max_effective_balance(types::ForkName::Deneb)
+                };
+                let balance_source = balances
+                    .get_mut(source_index)
+                    .ok_or(BeaconStateError::BalancesOutOfBounds(source_index))?;
+                let target_index = pending_consolidation.target_index as usize;
+                let active_balance = std::cmp::min(*balance_source, active_balance_ceil);
+                balance_source.safe_sub_assign(active_balance)?;
+                let balance_target = balances
+                    .get_mut(target_index)
+                    .ok_or(BeaconStateError::BalancesOutOfBounds(source_index))?;
+                balance_target.safe_add_assign(active_balance)?;
+            }
+
+            next_pending_consolidation.safe_add_assign(1)?;
+        }
+
+        // TODO(maxeb), converting to vec to have something while SSZ api supports pop
+        let mut pending_consolidations_vec = pending_consolidations.to_vec();
+        pending_consolidations_vec.drain(0..next_pending_consolidation);
+        *pending_consolidations = pending_consolidations_vec.into();
     }
 
     Ok(())

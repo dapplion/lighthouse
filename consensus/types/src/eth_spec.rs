@@ -76,6 +76,8 @@ pub trait EthSpec:
     type HistoricalRootsLimit: Unsigned + Clone + Sync + Send + Debug + PartialEq;
     type ValidatorRegistryLimit: Unsigned + Clone + Sync + Send + Debug + PartialEq;
     type MaxPendingBalanceDeposits: Unsigned + Clone + Sync + Send + Debug + PartialEq;
+    type MaxPendingConsolidations: Unsigned + Clone + Sync + Send + Debug + PartialEq;
+    type MaxConsolidations: Unsigned + Clone + Sync + Send + Debug + PartialEq;
     /*
      * Max operations per block
      */
@@ -305,6 +307,8 @@ impl EthSpec for MainnetEthSpec {
     type HistoricalRootsLimit = U16777216;
     type ValidatorRegistryLimit = U1099511627776;
     type MaxPendingBalanceDeposits = U1099511627776;
+    type MaxPendingConsolidations = U1099511627776;
+    type MaxConsolidations = U16;
     type MaxProposerSlashings = U16;
     type MaxAttesterSlashings = U2;
     type MaxAttestations = U128;
@@ -368,6 +372,8 @@ impl EthSpec for MinimalEthSpec {
         HistoricalRootsLimit,
         ValidatorRegistryLimit,
         MaxPendingBalanceDeposits,
+        MaxPendingConsolidations,
+        MaxConsolidations,
         MaxProposerSlashings,
         MaxAttesterSlashings,
         MaxAttestations,
@@ -410,6 +416,8 @@ impl EthSpec for GnosisEthSpec {
     type HistoricalRootsLimit = U16777216;
     type ValidatorRegistryLimit = U1099511627776;
     type MaxPendingBalanceDeposits = U1099511627776;
+    type MaxPendingConsolidations = U1099511627776;
+    type MaxConsolidations = U16;
     type MaxProposerSlashings = U16;
     type MaxAttesterSlashings = U2;
     type MaxAttestations = U128;
