@@ -1,5 +1,4 @@
 use lighthouse_network::rpc::methods::DataColumnsByRootRequest;
-use lighthouse_network::service::api_types::DataColumnsByRootRequester;
 use std::sync::Arc;
 use types::{ChainSpec, DataColumnIdentifier, DataColumnSidecar, EthSpec, Hash256};
 
@@ -29,20 +28,13 @@ impl DataColumnsByRootSingleBlockRequest {
 pub struct ActiveDataColumnsByRootRequest<E: EthSpec> {
     request: DataColumnsByRootSingleBlockRequest,
     items: Vec<Arc<DataColumnSidecar<E>>>,
-    resolved: bool,
-    pub(crate) requester: DataColumnsByRootRequester,
 }
 
 impl<E: EthSpec> ActiveDataColumnsByRootRequest<E> {
-    pub fn new(
-        request: DataColumnsByRootSingleBlockRequest,
-        requester: DataColumnsByRootRequester,
-    ) -> Self {
+    pub fn new(request: DataColumnsByRootSingleBlockRequest) -> Self {
         Self {
             request,
             items: vec![],
-            resolved: false,
-            requester,
         }
     }
 }
@@ -54,10 +46,6 @@ impl<E: EthSpec> ActiveRequest for ActiveDataColumnsByRootRequest<E> {
     /// method returns `Some`, resolving the request before the stream terminator.
     /// The active request SHOULD be dropped after `add_response` returns an error
     fn add_response(&mut self, data_column: Self::Item) -> Result<bool, LookupVerifyError> {
-        if self.resolved {
-            return Err(LookupVerifyError::TooManyResponses);
-        }
-
         let block_root = data_column.block_root();
         if self.request.block_root != block_root {
             return Err(LookupVerifyError::UnrequestedBlockRoot(block_root));

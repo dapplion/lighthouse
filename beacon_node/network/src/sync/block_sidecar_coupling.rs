@@ -60,28 +60,24 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         (self.expects_blobs, self.expects_custody_columns.clone())
     }
 
-    pub fn add_block_response(&mut self, block_opt: Option<Arc<SignedBeaconBlock<E>>>) {
-        match block_opt {
-            Some(block) => self.blocks.push_back(block),
-            None => self.is_blocks_stream_terminated = true,
-        }
+    pub fn add_block_response(&mut self, blocks: Vec<Arc<SignedBeaconBlock<E>>>) {
+        self.blocks = blocks;
+        self.is_blocks_stream_terminated = true;
     }
 
-    pub fn add_sidecar_response(&mut self, sidecar_opt: Option<Arc<BlobSidecar<E>>>) {
-        match sidecar_opt {
-            Some(sidecar) => self.blobs.push_back(sidecar),
-            None => self.is_sidecars_stream_terminated = true,
-        }
+    pub fn add_sidecar_response(&mut self, blobs: Vec<Arc<BlobSidecar<E>>>) {
+        self.blobs = blobs;
+        self.is_sidecars_stream_terminated = true;
     }
 
-    pub fn add_data_column(&mut self, column_opt: Option<Arc<DataColumnSidecar<E>>>) {
-        match column_opt {
-            Some(column) => self.data_columns.push_back(column),
-            // TODO(das): this mechanism is dangerous, if somehow there are two requests for the
-            // same column index it can terminate early. This struct should track that all requests
-            // for all custody columns terminate.
-            None => self.custody_columns_streams_terminated += 1,
+    pub fn add_data_column(&mut self, columns: Vec<Arc<DataColumnSidecar<E>>>) {
+        for column in columns {
+            self.data_columns.push_back(column);
         }
+        // TODO(das): this mechanism is dangerous, if somehow there are two requests for the
+        // same column index it can terminate early. This struct should track that all requests
+        // for all custody columns terminate.
+        self.custody_columns_streams_terminated += 1;
     }
 
     pub fn into_responses(self, spec: &ChainSpec) -> Result<Vec<RpcBlock<E>>, String> {

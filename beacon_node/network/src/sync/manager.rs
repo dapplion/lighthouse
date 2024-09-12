@@ -380,13 +380,15 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncRequestId::SingleBlob { id } => {
                 self.on_single_blob_response(id, peer_id, RpcEvent::RPCError(error))
             }
-            SyncRequestId::DataColumnsByRoot(req_id, requester) => self
-                .on_data_columns_by_root_response(
-                    req_id,
-                    requester,
-                    peer_id,
-                    RpcEvent::RPCError(error),
-                ),
+            SyncRequestId::DataColumnsByRoot(req_id) => {
+                self.on_data_columns_by_root_response(req_id, peer_id, RpcEvent::RPCError(error))
+            }
+            SyncRequestId::BlocksByRange(id) => {
+                self.on_blocks_by_range_response(id, peer_id, RpcEvent::RPCError(error))
+            }
+            SyncRequestId::BlobsByRange(id) => {
+                self.on_blobs_by_range_response(id, peer_id, RpcEvent::RPCError(error))
+            }
             SyncRequestId::DataColumnsByRange(id) => {
                 self.on_data_columns_by_range_response(id, peer_id, RpcEvent::RPCError(error))
             }
@@ -934,9 +936,14 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     None => RpcEvent::StreamTermination,
                 },
             ),
-            SyncRequestId::RangeBlockAndBlobs { id } => {
-                self.range_block_and_blobs_response(id, peer_id, block.into())
-            }
+            SyncRequestId::BlocksByRange(id) => self.on_blocks_by_range_response(
+                id,
+                peer_id,
+                match block {
+                    Some(block) => RpcEvent::Response(block, seen_timestamp),
+                    None => RpcEvent::StreamTermination,
+                },
+            ),
             _ => {
                 crit!(self.log, "bad request id for block"; "peer_id" => %peer_id  );
             }
@@ -977,9 +984,14 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     None => RpcEvent::StreamTermination,
                 },
             ),
-            SyncRequestId::RangeBlockAndBlobs { id } => {
-                self.range_block_and_blobs_response(id, peer_id, blob.into())
-            }
+            SyncRequestId::BlobsByRange(id) => self.on_blobs_by_range_response(
+                id,
+                peer_id,
+                match blob {
+                    Some(blob) => RpcEvent::Response(blob, seen_timestamp),
+                    None => RpcEvent::StreamTermination,
+                },
+            ),
             _ => {
                 crit!(self.log, "bad request id for blob"; "peer_id" => %peer_id);
             }
@@ -994,10 +1006,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         seen_timestamp: Duration,
     ) {
         match request_id {
-            SyncRequestId::DataColumnsByRoot(req_id, requester) => {
+            SyncRequestId::DataColumnsByRoot(req_id) => {
                 self.on_data_columns_by_root_response(
                     req_id,
-                    requester,
                     peer_id,
                     match data_column {
                         Some(data_column) => RpcEvent::Response(data_column, seen_timestamp),
@@ -1005,11 +1016,14 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     },
                 );
             }
-            SyncRequestId::RangeBlockAndBlobs { id } => {
-                self.range_block_and_blobs_response(
+            SyncRequestId::DataColumnsByRange(id) => {
+                self.on_data_columns_by_range_response(
                     id,
                     peer_id,
-                    BlockOrBlob::CustodyColumns(data_column),
+                    match data_column {
+                        Some(data_column) => RpcEvent::Response(data_column, seen_timestamp),
+                        None => RpcEvent::StreamTermination,
+                    },
                 );
             }
             _ => {
@@ -1039,7 +1053,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     fn on_data_columns_by_root_response(
         &mut self,
         req_id: DataColumnsByRootRequestId,
-        requester: DataColumnsByRootRequester,
         peer_id: PeerId,
         data_column: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
     ) {
@@ -1047,7 +1060,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             self.network
                 .on_data_columns_by_root_response(req_id, peer_id, data_column)
         {
-            match requester {
+            match req_id.requester {
                 DataColumnsByRootRequester::Sampling(id) => {
                     if let Some((requester, result)) =
                         self.sampling
@@ -1077,17 +1090,39 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         }
     }
 
+    fn on_blocks_by_range_response(
+        &mut self,
+        id: Id,
+        peer_id: PeerId,
+        block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) {
+        if let Some(resp) = self.network.on_blocks_by_range_response(id, peer_id, block) {
+            self.on_range_components_response(id, peer_id, BlockOrBlob::Block(resp));
+        }
+    }
+
+    fn on_blobs_by_range_response(
+        &mut self,
+        id: Id,
+        peer_id: PeerId,
+        blob: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
+    ) {
+        if let Some(resp) = self.network.on_blobs_by_range_response(id, peer_id, blob) {
+            self.on_range_components_response(id, peer_id, BlockOrBlob::Blob(resp));
+        }
+    }
+
     fn on_data_columns_by_range_response(
         &mut self,
         id: Id,
         peer_id: PeerId,
         data_column: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
     ) {
-        if let Some(_resp) =
-            self.network
-                .on_data_columns_by_range_response(id, peer_id, data_column)
+        if let Some(resp) = self
+            .network
+            .on_data_columns_by_range_response(id, peer_id, data_column)
         {
-            todo!();
+            self.on_range_components_response(id, peer_id, BlockOrBlob::CustodyColumns(resp));
         }
     }
 
@@ -1126,7 +1161,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
 
     /// Handles receiving a response for a range sync request that should have both blocks and
     /// blobs.
-    fn range_block_and_blobs_response(
+    fn on_range_components_response(
         &mut self,
         id: Id,
         peer_id: PeerId,

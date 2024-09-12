@@ -7,10 +7,12 @@ use lighthouse_network::{
 use std::{collections::hash_map::Entry, hash::Hash, sync::Arc};
 use strum::IntoStaticStr;
 use types::{
-    blob_sidecar::BlobIdentifier, BlobSidecar, ChainSpec, EthSpec, Hash256, SignedBeaconBlock,
+    blob_sidecar::BlobIdentifier, BlobSidecar, ChainSpec, EthSpec, Hash256, SignedBeaconBlock, Slot,
 };
 
-pub use data_columns_by_range::ActiveDataColumnsByRangeRequest;
+pub use data_columns_by_range::{
+    ActiveBlobsByRangeRequest, ActiveBlocksByRangeRequest, ActiveDataColumnsByRangeRequest,
+};
 pub use data_columns_by_root::{
     ActiveDataColumnsByRootRequest, DataColumnsByRootSingleBlockRequest,
 };
@@ -84,6 +86,7 @@ impl<K: Eq + Hash, R: ActiveRequest> ActiveRequests<K, R> {
         rpc_event: RpcEvent<R::Item>,
     ) -> Option<RpcResponseResult<Vec<R::Item>>> {
         let Entry::Occupied(mut request) = self.requests.entry(id) else {
+            metrics::inc_counter_vec(&metrics::SYNC_UNKNOWN_NETWORK_REQUESTS, &[R::name()]);
             return None;
         };
 
@@ -141,6 +144,8 @@ pub trait ActiveRequest {
     fn add_response(&mut self, item: Self::Item) -> Result<bool, LookupVerifyError>;
 
     fn consume_items(&mut self) -> Vec<Self::Item>;
+
+    fn name() -> &'static str;
 }
 
 #[derive(Debug, PartialEq, Eq, IntoStaticStr)]
@@ -150,6 +155,7 @@ pub enum LookupVerifyError {
     TooManyResponses,
     UnrequestedBlockRoot(Hash256),
     UnrequestedIndex(u64),
+    UnrequestedSlot(Slot),
     InvalidInclusionProof,
     DuplicateData,
 }
@@ -196,6 +202,10 @@ impl<E: EthSpec> ActiveRequest for ActiveBlocksByRootRequest<E> {
         } else {
             vec![]
         }
+    }
+
+    fn name() -> &'static str {
+        "blocks_by_root"
     }
 }
 
@@ -271,5 +281,9 @@ impl<E: EthSpec> ActiveRequest for ActiveBlobsByRootRequest<E> {
 
     fn consume_items(&mut self) -> Vec<Self::Item> {
         std::mem::take(&mut self.blobs)
+    }
+
+    fn name() -> &'static str {
+        "blobs_by_root"
     }
 }

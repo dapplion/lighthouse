@@ -32,7 +32,10 @@ pub struct SingleLookupReqId {
 /// Request ID for data_columns_by_root requests. Block lookup do not issue this requests directly.
 /// Wrapping this particular req_id, ensures not mixing this requests with a custody req_id.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct DataColumnsByRootRequestId(pub Id);
+pub struct DataColumnsByRootRequestId {
+    pub id: Id,
+    pub requester: DataColumnsByRootRequester,
+}
 
 /// Id of rpc requests sent by sync to the network.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -42,9 +45,13 @@ pub enum SyncRequestId {
     /// Request searching for a set of blobs given a hash.
     SingleBlob { id: SingleLookupReqId },
     /// Request searching for a set of data columns given a hash and list of column indices.
-    DataColumnsByRoot(DataColumnsByRootRequestId, DataColumnsByRootRequester),
+    DataColumnsByRoot(DataColumnsByRootRequestId),
     /// Range request that is composed by both a block range request and a blob range request.
     RangeBlockAndBlobs { id: Id },
+    /// Blocks by range request
+    BlocksByRange(Id),
+    /// Blobs by range request
+    BlobsByRange(Id),
     /// Data columns by range request
     DataColumnsByRange(Id),
 }
@@ -249,6 +256,6 @@ impl slog::Value for RequestId {
 
 impl std::fmt::Display for DataColumnsByRootRequestId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.id)
     }
 }
