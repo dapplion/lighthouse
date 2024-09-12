@@ -25,8 +25,8 @@ use lighthouse_network::service::api_types::{
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource, Request};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use requests::ActiveDataColumnsByRootRequest;
 pub use requests::LookupVerifyError;
+use requests::{ActiveDataColumnsByRangeRequest, ActiveDataColumnsByRootRequest, ActiveRequests};
 use slog::{debug, error, warn};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -164,7 +164,8 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     request_id: Id,
 
     /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
-    blocks_by_root_requests: FnvHashMap<SingleLookupReqId, ActiveBlocksByRootRequest>,
+    blocks_by_root_requests:
+        ActiveRequests<SingleLookupReqId, ActiveBlocksByRootRequest<T::EthSpec>>,
 
     /// A mapping of active BlobsByRoot requests, including both current slot and parent lookups.
     blobs_by_root_requests: FnvHashMap<SingleLookupReqId, ActiveBlobsByRootRequest<T::EthSpec>>,
@@ -175,6 +176,9 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active DataColumnsByRoot requests
     data_columns_by_root_requests:
         FnvHashMap<DataColumnsByRootRequestId, ActiveDataColumnsByRootRequest<T::EthSpec>>,
+
+    /// A mapping of active DataColumnsByRange requests
+    data_columns_by_range_requests: ActiveRequests<Id, ActiveDataColumnsByRangeRequest<T::EthSpec>>,
 
     /// BlocksByRange requests paired with BlobsByRange
     range_block_components_requests:
@@ -223,9 +227,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             network_send,
             execution_engine_state: EngineState::Online, // always assume `Online` at the start
             request_id: 1,
-            blocks_by_root_requests: <_>::default(),
+            blocks_by_root_requests: ActiveRequests::new(),
             blobs_by_root_requests: <_>::default(),
             data_columns_by_root_requests: <_>::default(),
+            data_columns_by_range_requests: ActiveRequests::new(),
             custody_by_root_requests: <_>::default(),
             range_block_components_requests: FnvHashMap::default(),
             network_beacon_processor,
@@ -249,14 +254,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         let failed_block_ids = self
             .blocks_by_root_requests
-            .iter()
-            .filter_map(|(id, request)| {
-                if request.peer_id == *peer_id {
-                    Some(SyncRequestId::SingleBlock { id: *id })
-                } else {
-                    None
-                }
-            });
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|id| SyncRequestId::SingleBlock { id: *id });
         let failed_blob_ids = self
             .blobs_by_root_requests
             .iter()
@@ -344,7 +344,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     ) -> Result<Id, RpcRequestSendError> {
         let epoch = Slot::new(*request.start_slot()).epoch(T::EthSpec::slots_per_epoch());
         let id = self.next_id();
-        let mut requested_peers = vec![peer_id];
+        let requested_peers = vec![peer_id];
         debug!(
             self.log,
             "Sending BlocksByRange request";
@@ -387,37 +387,26 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             false
         };
 
-        let (expects_custody_columns, num_of_custody_column_req) =
+        let (expects_custody_columns, columns_by_range_request_ids) =
             if matches!(batch_type, ByRangeRequestType::BlocksAndColumns) {
                 let custody_indexes = self.network_globals().custody_columns.clone();
-                let mut num_of_custody_column_req = 0;
 
-                for (peer_id, columns_by_range_request) in
-                    self.make_columns_by_range_requests(request, &custody_indexes)?
-                {
-                    requested_peers.push(peer_id);
-
-                    debug!(
-                        self.log,
-                        "Sending DataColumnsByRange requests";
-                        "method" => "DataColumnsByRange",
-                        "count" => columns_by_range_request.count,
-                        "epoch" => epoch,
-                        "columns" => ?columns_by_range_request.columns,
-                        "peer" => %peer_id,
-                    );
-
-                    self.send_network_msg(NetworkMessage::SendRequest {
-                        peer_id,
-                        request: Request::DataColumnsByRange(columns_by_range_request),
-                        request_id: AppRequestId::Sync(SyncRequestId::RangeBlockAndBlobs { id }),
+                let columns_by_range_request_ids = self
+                    .group_columns_by_range_requests(&custody_indexes)?
+                    .into_iter()
+                    .map(|(peer_id, peer_columns)| {
+                        self.send_data_columns_by_range_request(
+                            peer_id,
+                            DataColumnsByRangeRequest {
+                                start_slot: *request.start_slot(),
+                                count: *request.count(),
+                                columns: peer_columns,
+                            },
+                        )
                     })
-                    .map_err(|_| RpcRequestSendError::NetworkSendError)?;
+                    .collect::<Result<Vec<_>, _>>()?;
 
-                    num_of_custody_column_req += 1;
-                }
-
-                (Some(custody_indexes), Some(num_of_custody_column_req))
+                (Some(custody_indexes), Some(columns_by_range_request_ids))
             } else {
                 (None, None)
             };
@@ -425,7 +414,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let info = RangeBlockComponentsRequest::new(
             expected_blobs,
             expects_custody_columns,
-            num_of_custody_column_req,
+            columns_by_range_request_ids,
             requested_peers,
         );
         self.range_block_components_requests
@@ -433,12 +422,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         Ok(id)
     }
 
-    fn make_columns_by_range_requests(
+    fn group_columns_by_range_requests(
         &self,
-        request: BlocksByRangeRequest,
         custody_indexes: &Vec<ColumnIndex>,
-    ) -> Result<HashMap<PeerId, DataColumnsByRangeRequest>, RpcRequestSendError> {
-        let mut peer_id_to_request_map = HashMap::new();
+    ) -> Result<HashMap<PeerId, Vec<ColumnIndex>>, RpcRequestSendError> {
+        let mut peer_id_to_columns_map = HashMap::<PeerId, Vec<ColumnIndex>>::new();
 
         for column_index in custody_indexes {
             // TODO(das): The peer selection logic here needs to be improved - we should probably
@@ -453,18 +441,41 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 return Err(RpcRequestSendError::NoCustodyPeers);
             };
 
-            let columns_by_range_request = peer_id_to_request_map
+            peer_id_to_columns_map
                 .entry(custody_peer)
-                .or_insert_with(|| DataColumnsByRangeRequest {
-                    start_slot: *request.start_slot(),
-                    count: *request.count(),
-                    columns: vec![],
-                });
-
-            columns_by_range_request.columns.push(*column_index);
+                .or_default()
+                .push(*column_index);
         }
 
-        Ok(peer_id_to_request_map)
+        Ok(peer_id_to_columns_map)
+    }
+
+    fn send_data_columns_by_range_request(
+        &mut self,
+        peer_id: PeerId,
+        request: DataColumnsByRangeRequest,
+    ) -> Result<Id, RpcRequestSendError> {
+        debug!(
+            self.log,
+            "Sending DataColumnsByRange requests";
+            "method" => "DataColumnsByRange",
+            "count" => request.count,
+            "epoch" => Slot::new(request.start_slot).epoch(T::EthSpec::slots_per_epoch()),
+            "columns" => ?request.columns,
+            "peer" => %peer_id,
+        );
+
+        let id = self.next_id();
+        self.send_network_msg(NetworkMessage::SendRequest {
+            peer_id,
+            request: Request::DataColumnsByRange(request.clone()),
+            request_id: AppRequestId::Sync(SyncRequestId::RangeBlockAndBlobs { id }),
+        })
+        .map_err(|_| RpcRequestSendError::NetworkSendError)?;
+
+        self.data_columns_by_range_requests
+            .insert(id, ActiveDataColumnsByRangeRequest::new(request, peer_id));
+        Ok(id)
     }
 
     pub fn range_request_failed(&mut self, request_id: Id) -> Option<RangeRequestId> {
@@ -919,40 +930,23 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub fn on_single_block_response(
         &mut self,
-        request_id: SingleLookupReqId,
+        id: SingleLookupReqId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<Arc<SignedBeaconBlock<T::EthSpec>>>> {
-        let Entry::Occupied(mut request) = self.blocks_by_root_requests.entry(request_id) else {
-            metrics::inc_counter_vec(&metrics::SYNC_UNKNOWN_NETWORK_REQUESTS, &["blocks_by_root"]);
-            return None;
-        };
-
-        let resp = match rpc_event {
-            RpcEvent::Response(block, seen_timestamp) => {
-                match request.get_mut().add_response(block) {
-                    Ok(block) => Ok((block, seen_timestamp)),
-                    Err(e) => {
-                        // The request must be dropped after receiving an error.
-                        request.remove();
-                        Err(e.into())
-                    }
-                }
-            }
-            RpcEvent::StreamTermination => match request.remove().terminate() {
-                Ok(_) => return None,
-                Err(e) => Err(e.into()),
-            },
-            RpcEvent::RPCError(e) => {
-                request.remove();
-                Err(e.into())
-            }
-        };
-
-        if let Err(RpcResponseError::VerifyError(e)) = &resp {
+        let r = self.blocks_by_root_requests.on_response(id, rpc_event);
+        if let Some(Err(RpcResponseError::VerifyError(e))) = &r {
             self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
         }
-        Some(resp)
+        r.map(|r| {
+            r.map(|(mut blocks, seen_timestamp)| {
+                (
+                    // Must have exactly one element
+                    blocks.remove(0),
+                    seen_timestamp,
+                )
+            })
+        })
     }
 
     pub fn on_single_blob_response(
@@ -1013,6 +1007,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         rpc_event: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>> {
         let Entry::Occupied(mut request) = self.data_columns_by_root_requests.entry(id) else {
+            metrics::inc_counter_vec(
+                &metrics::SYNC_UNKNOWN_NETWORK_REQUESTS,
+                &["data_columns_by_root"],
+            );
             return None;
         };
 
@@ -1053,6 +1051,22 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 }
             }
         }
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn on_data_columns_by_range_response(
+        &mut self,
+        id: Id,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
+    ) -> Option<RpcResponseResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>> {
+        let r = self
+            .data_columns_by_range_requests
+            .on_response(id, rpc_event);
+        if let Some(Err(RpcResponseError::VerifyError(e))) = &r {
+            self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
+        }
+        r
     }
 
     /// Insert a downloaded column into an active custody request. Then make progress on the

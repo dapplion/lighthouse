@@ -387,6 +387,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     peer_id,
                     RpcEvent::RPCError(error),
                 ),
+            SyncRequestId::DataColumnsByRange(id) => {
+                self.on_data_columns_by_range_response(id, peer_id, RpcEvent::RPCError(error))
+            }
             SyncRequestId::RangeBlockAndBlobs { id } => {
                 if let Some(sender_id) = self.network.range_request_failed(id) {
                     match sender_id {
@@ -1071,6 +1074,20 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     }
                 }
             }
+        }
+    }
+
+    fn on_data_columns_by_range_response(
+        &mut self,
+        id: Id,
+        peer_id: PeerId,
+        data_column: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
+    ) {
+        if let Some(_resp) =
+            self.network
+                .on_data_columns_by_range_response(id, peer_id, data_column)
+        {
+            todo!();
         }
     }
 

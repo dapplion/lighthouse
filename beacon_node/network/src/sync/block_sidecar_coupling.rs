@@ -1,7 +1,7 @@
 use beacon_chain::{
     block_verification_types::RpcBlock, data_column_verification::CustodyDataColumn, get_block_root,
 };
-use lighthouse_network::PeerId;
+use lighthouse_network::{service::api_types::Id, PeerId};
 use ssz_types::VariableList;
 use std::{
     collections::{HashMap, VecDeque},
@@ -28,7 +28,7 @@ pub struct RangeBlockComponentsRequest<E: EthSpec> {
     expects_custody_columns: Option<Vec<ColumnIndex>>,
     /// Used to determine if the number of data columns stream termination this accumulator should
     /// wait for. This may be less than the number of `expects_custody_columns` due to request batching.
-    num_custody_column_requests: Option<usize>,
+    custody_column_request_ids: Option<Vec<Id>>,
     /// The peers the request was made to.
     pub(crate) peer_ids: Vec<PeerId>,
 }
@@ -37,7 +37,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
     pub fn new(
         expects_blobs: bool,
         expects_custody_columns: Option<Vec<ColumnIndex>>,
-        num_custody_column_requests: Option<usize>,
+        custody_column_request_ids: Option<Vec<Id>>,
         peer_ids: Vec<PeerId>,
     ) -> Self {
         Self {
@@ -49,7 +49,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
             custody_columns_streams_terminated: 0,
             expects_blobs,
             expects_custody_columns,
-            num_custody_column_requests,
+            custody_column_request_ids,
             peer_ids,
         }
     }
@@ -224,8 +224,8 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         if self.expects_blobs && !self.is_sidecars_stream_terminated {
             return false;
         }
-        if let Some(expects_custody_column_responses) = self.num_custody_column_requests {
-            if self.custody_columns_streams_terminated < expects_custody_column_responses {
+        if let Some(custody_column_request_ids) = &self.custody_column_request_ids {
+            if self.custody_columns_streams_terminated < custody_column_request_ids.len() {
                 return false;
             }
         }
@@ -294,10 +294,11 @@ mod tests {
     fn rpc_block_with_custody_columns() {
         let spec = test_spec::<E>();
         let expects_custody_columns = vec![1, 2, 3, 4];
+        let custody_column_request_ids = vec![0, 1, 2, 3];
         let mut info = RangeBlockComponentsRequest::<E>::new(
             false,
             Some(expects_custody_columns.clone()),
-            Some(expects_custody_columns.len()),
+            Some(custody_column_request_ids),
             vec![PeerId::random()],
         );
         let mut rng = XorShiftRng::from_seed([42; 16]);
@@ -354,11 +355,12 @@ mod tests {
     fn rpc_block_with_custody_columns_batched() {
         let spec = test_spec::<E>();
         let expects_custody_columns = vec![1, 2, 3, 4];
-        let num_of_data_column_requests = 2;
+        let custody_column_request_ids = vec![0, 1];
+        let num_of_data_column_requests = custody_column_request_ids.len();
         let mut info = RangeBlockComponentsRequest::<E>::new(
             false,
             Some(expects_custody_columns.clone()),
-            Some(num_of_data_column_requests),
+            Some(custody_column_request_ids),
             vec![PeerId::random()],
         );
         let mut rng = XorShiftRng::from_seed([42; 16]);

@@ -45,6 +45,8 @@ pub enum SyncRequestId {
     DataColumnsByRoot(DataColumnsByRootRequestId, DataColumnsByRootRequester),
     /// Range request that is composed by both a block range request and a blob range request.
     RangeBlockAndBlobs { id: Id },
+    /// Data columns by range request
+    DataColumnsByRange(Id),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
