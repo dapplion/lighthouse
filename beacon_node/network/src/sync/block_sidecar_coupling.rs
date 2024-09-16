@@ -119,9 +119,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
 
         for block in blocks {
             let block_root = get_block_root(&block);
-            let blobs = blobs_by_block
-                .remove(&block_root)
-                .map(|blobs| VariableList::from(blobs));
+            let blobs = blobs_by_block.remove(&block_root).map(VariableList::from);
             rpc_blocks.push(RpcBlock::new_unchecked(block_root, block, blobs, None));
         }
 

@@ -45,7 +45,9 @@ use super::chain_collection::ChainCollection;
 use super::sync_type::RangeSyncType;
 use crate::metrics;
 use crate::status::ToStatusMessage;
-use crate::sync::block_sidecar_coupling::RangeBlockComponentsResponse;
+use crate::sync::block_sidecar_coupling::{
+    RangeBlockComponentsPeers, RangeBlockComponentsResponse,
+};
 use crate::sync::network_context::SyncNetworkContext;
 use crate::sync::BatchProcessResult;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
@@ -390,7 +392,7 @@ mod tests {
     use crate::NetworkMessage;
 
     use super::*;
-    use crate::sync::network_context::{BlockOrBlob, RangeRequestId, RangeRequester};
+    use crate::sync::network_context::BlockOrBlob;
     use beacon_chain::builder::Witness;
     use beacon_chain::eth1_chain::CachingEth1Backend;
     use beacon_chain::parking_lot::RwLock;
@@ -398,7 +400,7 @@ mod tests {
     use beacon_chain::validator_monitor::timestamp_now;
     use beacon_chain::EngineState;
     use beacon_processor::WorkEvent as BeaconWorkEvent;
-    use lighthouse_network::service::api_types::SyncRequestId;
+    use lighthouse_network::service::api_types::{RangeRequestId, RangeRequester, SyncRequestId};
     use lighthouse_network::{
         rpc::StatusMessage, service::api_types::AppRequestId, NetworkGlobals,
     };
@@ -820,7 +822,14 @@ mod tests {
         rig.cx.update_execution_engine_state(EngineState::Offline);
 
         // send the response to the request
-        range.blocks_by_range_response(&mut rig.cx, peer1, chain1, batch1, id1, vec![]);
+        range.blocks_by_range_response(
+            &mut rig.cx,
+            peer1,
+            chain1,
+            batch1,
+            id1,
+            empty_range_block_components_response(peer1),
+        );
 
         // the beacon processor shouldn't have received any work
         rig.expect_empty_processor();
@@ -834,7 +843,14 @@ mod tests {
             rig.complete_range_block_and_blobs_response(block_req, blob_req_opt);
 
         // send the response to the request
-        range.blocks_by_range_response(&mut rig.cx, peer2, chain2, batch2, id2, vec![]);
+        range.blocks_by_range_response(
+            &mut rig.cx,
+            peer2,
+            chain2,
+            batch2,
+            id2,
+            empty_range_block_components_response(peer2),
+        );
 
         // the beacon processor shouldn't have received any work
         rig.expect_empty_processor();
@@ -847,5 +863,19 @@ mod tests {
 
         rig.expect_chain_segment();
         rig.expect_chain_segment();
+    }
+}
+
+fn empty_range_block_components_response<E: EthSpec>(
+    peer: PeerId,
+) -> RangeBlockComponentsResponse<E> {
+    RangeBlockComponentsResponse {
+        rpc_blocks: vec![],
+        peers: RangeBlockComponentsPeers {
+            block_peer: peer,
+            blob_peer: None,
+            data_columns_peer_group: None,
+            peer_by_data_column: <_>::default(),
+        },
     }
 }
