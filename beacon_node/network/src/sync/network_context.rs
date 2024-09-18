@@ -334,6 +334,17 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         }
     }
 
+    /// Return the set of imported custody column indexes for `block_root`. Returns None if there is
+    /// no block component for `block_root`.
+    pub fn imported_custody_column_indexes(
+        &self,
+        block_root: &Hash256,
+    ) -> Option<Vec<ColumnIndex>> {
+        self.chain
+            .data_availability_checker
+            .imported_custody_column_indexes(block_root)
+    }
+
     /// A blocks by range request sent by the range sync algorithm
     pub fn block_components_by_range_request(
         &mut self,
@@ -688,7 +699,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         requester: DataColumnsByRootRequester,
         peer_id: PeerId,
         request: DataColumnsByRootSingleBlockRequest,
-    ) -> Result<LookupRequestResult<DataColumnsByRootRequestId>, &'static str> {
+    ) -> Result<DataColumnsByRootRequestId, &'static str> {
+        // No need to check if the block has data, as this function is only called after
+        // `custody_lookup_request` ensures that the block has data.
+
+        // We check against the `data_availability_checker` in the caller of this function. Because
+        // we batch requests for a selection of column indicies it's simpler to the checks outside
+        // this function.
+
         let req_id = DataColumnsByRootRequestId(self.next_id());
         debug!(
             self.log,
@@ -712,7 +730,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             ActiveDataColumnsByRootRequest::new(request, peer_id, requester),
         );
 
-        Ok(LookupRequestResult::RequestSent(req_id))
+        Ok(req_id)
     }
 
     /// Request to fetch all needed custody columns of a specific block. This function may not send

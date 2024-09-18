@@ -15,8 +15,8 @@ use std::time::Duration;
 use task_executor::TaskExecutor;
 use types::blob_sidecar::{BlobIdentifier, BlobSidecar, FixedBlobSidecarList};
 use types::{
-    BlobSidecarList, ChainSpec, DataColumnIdentifier, DataColumnSidecar, DataColumnSidecarList,
-    Epoch, EthSpec, Hash256, RuntimeVariableList, SignedBeaconBlock, Slot,
+    BlobSidecarList, ChainSpec, ColumnIndex, DataColumnIdentifier, DataColumnSidecar,
+    DataColumnSidecarList, Epoch, EthSpec, Hash256, RuntimeVariableList, SignedBeaconBlock, Slot,
 };
 
 mod error;
@@ -159,7 +159,10 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
 
     /// Return the set of imported custody column indexes for `block_root`. Returns None if there is
     /// no block component for `block_root`.
-    pub fn imported_custody_column_indexes(&self, block_root: &Hash256) -> Option<Vec<u64>> {
+    pub fn imported_custody_column_indexes(
+        &self,
+        block_root: &Hash256,
+    ) -> Option<Vec<ColumnIndex>> {
         self.availability_cache
             .peek_pending_components(block_root, |components| {
                 components.map(|components| components.get_cached_data_columns_indices())

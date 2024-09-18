@@ -10,11 +10,15 @@ use lru_cache::LRUTimeCache;
 use rand::Rng;
 use slog::{debug, warn};
 use std::time::Duration;
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+    sync::Arc,
+};
 use types::EthSpec;
 use types::{data_column_sidecar::ColumnIndex, DataColumnSidecar, Hash256};
 
-use super::{LookupRequestResult, PeerGroup, RpcResponseResult, SyncNetworkContext};
+use super::{PeerGroup, RpcResponseResult, SyncNetworkContext};
 
 const FAILED_PEERS_CACHE_EXPIRY_SECONDS: u64 = 5;
 
@@ -194,18 +198,21 @@ impl<T: BeaconChainTypes> ActiveCustodyRequest<T> {
         &mut self,
         cx: &mut SyncNetworkContext<T>,
     ) -> CustodyRequestResult<T::EthSpec> {
-        if self.column_requests.values().all(|r| r.is_downloaded()) {
+        if self.column_requests.values().all(|r| r.is_completed()) {
             // All requests have completed successfully.
             let mut peers = HashMap::<PeerId, Vec<usize>>::new();
             let columns = std::mem::take(&mut self.column_requests)
                 .into_values()
-                .map(|request| {
-                    let (peer, data_column) = request.complete()?;
-                    peers
-                        .entry(peer)
-                        .or_default()
-                        .push(data_column.index as usize);
-                    Ok(data_column)
+                .filter_map(|request| match request.complete() {
+                    Ok(Some((peer, data_column))) => {
+                        peers
+                            .entry(peer)
+                            .or_default()
+                            .push(data_column.index as usize);
+                        Some(Ok(data_column))
+                    }
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -214,6 +221,15 @@ impl<T: BeaconChainTypes> ActiveCustodyRequest<T> {
         }
 
         let mut columns_to_request_by_peer = HashMap::<PeerId, Vec<ColumnIndex>>::new();
+
+        // TODO(das): Should also check if the block is already imported. Only do this checks if
+        // there's at least one request is awaiting download state to make repeated calls to this
+        // function cheap.
+        let imported_custody_indices: HashSet<ColumnIndex> = HashSet::from_iter(
+            cx.imported_custody_column_indexes(&self.block_root)
+                .unwrap_or_default()
+                .into_iter(),
+        );
 
         // Need to:
         // - track how many active requests a peer has for load balancing
@@ -224,6 +240,11 @@ impl<T: BeaconChainTypes> ActiveCustodyRequest<T> {
             if request.is_awaiting_download() {
                 if request.download_failures > MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS {
                     return Err(Error::TooManyFailures);
+                }
+
+                if imported_custody_indices.contains(column_index) {
+                    request.on_already_imported()?;
+                    continue;
                 }
 
                 // TODO: When is a fork and only a subset of your peers know about a block, we should only
@@ -271,7 +292,7 @@ impl<T: BeaconChainTypes> ActiveCustodyRequest<T> {
         }
 
         for (peer_id, indices) in columns_to_request_by_peer.into_iter() {
-            let request_result = cx
+            let req_id = cx
                 .data_column_lookup_request(
                     DataColumnsByRootRequester::Custody(self.custody_id),
                     peer_id,
@@ -282,23 +303,17 @@ impl<T: BeaconChainTypes> ActiveCustodyRequest<T> {
                 )
                 .map_err(Error::SendFailed)?;
 
-            match request_result {
-                LookupRequestResult::RequestSent(req_id) => {
-                    for column_index in &indices {
-                        let column_request = self
-                            .column_requests
-                            .get_mut(column_index)
-                            .ok_or(Error::BadState("unknown column_index".to_owned()))?;
+            for column_index in &indices {
+                let column_request = self
+                    .column_requests
+                    .get_mut(column_index)
+                    .ok_or(Error::BadState("unknown column_index".to_owned()))?;
 
-                        column_request.on_download_start(req_id)?;
-                    }
-
-                    self.active_batch_columns_requests
-                        .insert(req_id, ActiveBatchColumnsRequest { indices, peer_id });
-                }
-                LookupRequestResult::NoRequestNeeded(_) => unreachable!(),
-                LookupRequestResult::Pending(_) => unreachable!(),
+                column_request.on_download_start(req_id)?;
             }
+
+            self.active_batch_columns_requests
+                .insert(req_id, ActiveBatchColumnsRequest { indices, peer_id });
         }
 
         Ok(None)
@@ -318,6 +333,7 @@ enum Status<E: EthSpec> {
     NotStarted,
     Downloading(DataColumnsByRootRequestId),
     Downloaded(PeerId, Arc<DataColumnSidecar<E>>),
+    AlreadyImported,
 }
 
 impl<E: EthSpec> ColumnRequest<E> {
@@ -331,14 +347,16 @@ impl<E: EthSpec> ColumnRequest<E> {
     fn is_awaiting_download(&self) -> bool {
         match self.status {
             Status::NotStarted => true,
-            Status::Downloading { .. } | Status::Downloaded { .. } => false,
+            Status::Downloading { .. } | Status::Downloaded { .. } | Status::AlreadyImported => {
+                false
+            }
         }
     }
 
-    fn is_downloaded(&self) -> bool {
+    fn is_completed(&self) -> bool {
         match self.status {
             Status::NotStarted | Status::Downloading { .. } => false,
-            Status::Downloaded { .. } => true,
+            Status::Downloaded { .. } | Status::AlreadyImported => true,
         }
     }
 
@@ -404,9 +422,22 @@ impl<E: EthSpec> ColumnRequest<E> {
         }
     }
 
-    fn complete(self) -> Result<(PeerId, Arc<DataColumnSidecar<E>>), Error> {
+    fn on_already_imported(&mut self) -> Result<(), Error> {
+        match &self.status {
+            Status::NotStarted => {
+                self.status = Status::AlreadyImported;
+                Ok(())
+            }
+            other => Err(Error::BadState(format!(
+                "bad state on_already_imported expected NotStarted got {other:?}"
+            ))),
+        }
+    }
+
+    fn complete(self) -> Result<Option<(PeerId, Arc<DataColumnSidecar<E>>)>, Error> {
         match self.status {
-            Status::Downloaded(peer_id, data_column) => Ok((peer_id, data_column)),
+            Status::Downloaded(peer_id, data_column) => Ok(Some((peer_id, data_column))),
+            Status::AlreadyImported => Ok(None),
             other => Err(Error::BadState(format!(
                 "bad state complete expected Downloaded got {other:?}"
             ))),

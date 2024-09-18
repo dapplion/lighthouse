@@ -111,8 +111,8 @@ impl<E: EthSpec> PendingComponents<E> {
     /// Returns:
     /// - `true` if a data column for the given index exists.
     /// - `false` otherwise.
-    fn data_column_exists(&self, data_column_index: u64) -> bool {
-        self.get_cached_data_column(data_column_index).is_some()
+    fn data_column_exists(&self, column_index: ColumnIndex) -> bool {
+        self.get_cached_data_column(column_index).is_some()
     }
 
     /// Returns the number of data columns that have been received and are stored in the cache.
