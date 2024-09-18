@@ -1,5 +1,5 @@
 use crate::{
-    metrics,
+    metrics::{self, register_process_result_metrics},
     network_beacon_processor::{InvalidBlockStorage, NetworkBeaconProcessor},
     service::NetworkMessage,
     sync::SyncMessage,
@@ -940,11 +940,10 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         let blob_index = verified_blob.id().index;
 
         let result = self.chain.process_gossip_blob(verified_blob).await;
+        register_process_result_metrics(&result, "gossip_blob");
 
         match &result {
             Ok(AvailabilityProcessingStatus::Imported(block_root)) => {
-                // Note: Reusing block imported metric here
-                metrics::inc_counter(&metrics::BEACON_PROCESSOR_GOSSIP_BLOCK_IMPORTED_TOTAL);
                 info!(
                     self.log,
                     "Gossipsub blob processed, imported fully available block";
@@ -1014,20 +1013,18 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         let data_column_slot = verified_data_column.slot();
         let data_column_index = verified_data_column.id().index;
 
-        match self
+        let result = self
             .chain
             .process_gossip_data_columns(vec![verified_data_column])
-            .await
-        {
+            .await;
+        register_process_result_metrics(result, "gossip_data_column");
+
+        match result {
             Ok((availability, data_columns_to_publish)) => {
                 self.handle_data_columns_to_publish(data_columns_to_publish);
 
                 match availability {
                     AvailabilityProcessingStatus::Imported(block_root) => {
-                        // Note: Reusing block imported metric here
-                        metrics::inc_counter(
-                            &metrics::BEACON_PROCESSOR_GOSSIP_BLOCK_IMPORTED_TOTAL,
-                        );
                         info!(
                             self.log,
                             "Gossipsub data column processed, imported fully available block";
@@ -1477,11 +1474,10 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 NotifyExecutionLayer::Yes,
             )
             .await;
+        register_process_result_metrics(&result, "gossip_block");
 
         match &result {
             Ok(AvailabilityProcessingStatus::Imported(block_root)) => {
-                metrics::inc_counter(&metrics::BEACON_PROCESSOR_GOSSIP_BLOCK_IMPORTED_TOTAL);
-
                 if reprocess_tx
                     .try_send(ReprocessQueueMessage::BlockImported {
                         block_root: *block_root,

@@ -97,6 +97,7 @@ use std::fs;
 use std::io::Write;
 use std::sync::Arc;
 use store::{Error as DBError, HotStateSummary, KeyValueStore, StoreOp};
+use strum::AsRefStr;
 use task_executor::JoinHandle;
 use types::data_column_sidecar::DataColumnSidecarError;
 use types::{
@@ -144,7 +145,7 @@ const WRITE_BLOCK_PROCESSING_SSZ: bool = cfg!(feature = "write_ssz_files");
 ///
 /// - The block is malformed/invalid (indicated by all results other than `BeaconChainError`.
 /// - We encountered an error whilst trying to verify the block (a `BeaconChainError`).
-#[derive(Debug)]
+#[derive(Debug, AsRefStr)]
 pub enum BlockError {
     /// The parent block was unknown.
     ///

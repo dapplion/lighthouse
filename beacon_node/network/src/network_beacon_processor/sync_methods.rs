@@ -1,4 +1,4 @@
-use crate::metrics;
+use crate::metrics::{self, register_process_result_metrics};
 use crate::network_beacon_processor::{NetworkBeaconProcessor, FUTURE_SLOT_TOLERANCE};
 use crate::sync::BatchProcessResult;
 use crate::sync::{
@@ -162,8 +162,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 NotifyExecutionLayer::Yes,
             )
             .await;
-
-        metrics::inc_counter(&metrics::BEACON_PROCESSOR_RPC_BLOCK_IMPORTED_TOTAL);
+        register_process_result_metrics(&result, "rpc_block");
 
         // RPC block imported, regardless of process type
         if let &Ok(AvailabilityProcessingStatus::Imported(hash)) = &result {
@@ -274,6 +273,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         }
 
         let result = self.chain.process_rpc_blobs(slot, block_root, blobs).await;
+        register_process_result_metrics(&result, "rpc_blobs");
 
         match &result {
             Ok(AvailabilityProcessingStatus::Imported(hash)) => {
@@ -331,6 +331,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             .chain
             .process_rpc_custody_columns(custody_columns)
             .await;
+        register_process_result_metrics(&result, "rpc_custody_columns");
 
         match &result {
             Ok((availability, data_columns_to_publish)) => {
