@@ -348,6 +348,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             .assert_sampling_request_status(block_root, ongoing, no_peers);
     }
 
+    #[cfg(test)]
+    pub(crate) fn range_sync_state(&self) -> super::range_sync::SyncChainStatus {
+        self.range_sync.state()
+    }
+
     fn network_globals(&self) -> &NetworkGlobals<T::EthSpec> {
         self.network.network_globals()
     }

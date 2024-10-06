@@ -1,96 +1,56 @@
 use crate::network_beacon_processor::NetworkBeaconProcessor;
-use crate::sync::manager::{BlockProcessType, SyncManager};
-use crate::sync::peer_sampling::SamplingConfig;
-use crate::sync::{SamplingId, SyncMessage};
+use crate::sync::block_lookups::{
+    BlockLookupSummary, PARENT_DEPTH_TOLERANCE, SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS,
+};
+use crate::sync::{
+    manager::{BlockProcessType, BlockProcessingResult, SyncManager},
+    peer_sampling::SamplingConfig,
+    SamplingId, SyncMessage,
+};
 use crate::NetworkMessage;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::*;
 
 use crate::sync::block_lookups::common::ResponseType;
-use beacon_chain::blob_verification::GossipVerifiedBlob;
-use beacon_chain::block_verification_types::BlockImportData;
-use beacon_chain::builder::Witness;
-use beacon_chain::data_availability_checker::Availability;
-use beacon_chain::eth1_chain::CachingEth1Backend;
-use beacon_chain::test_utils::{
-    build_log, generate_rand_block_and_blobs, generate_rand_block_and_data_columns, test_spec,
-    BeaconChainHarness, EphemeralHarnessType, LoggerType, NumBlobs,
-};
-use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::{
-    AvailabilityPendingExecutedBlock, PayloadVerificationOutcome, PayloadVerificationStatus,
+    blob_verification::GossipVerifiedBlob,
+    block_verification_types::BlockImportData,
+    builder::Witness,
+    data_availability_checker::Availability,
+    eth1_chain::CachingEth1Backend,
+    test_utils::{
+        build_log, generate_rand_block_and_blobs, generate_rand_block_and_data_columns, test_spec,
+        BeaconChainHarness, EphemeralHarnessType, LoggerType, NumBlobs,
+    },
+    validator_monitor::timestamp_now,
+    AvailabilityPendingExecutedBlock, AvailabilityProcessingStatus, BlockError,
+    PayloadVerificationOutcome, PayloadVerificationStatus,
 };
 use beacon_processor::WorkEvent;
-use lighthouse_network::rpc::{RPCError, RequestType, RpcErrorResponse};
-use lighthouse_network::service::api_types::{
-    AppRequestId, DataColumnsByRootRequester, Id, SamplingRequester, SingleLookupReqId,
-    SyncRequestId,
+use lighthouse_network::{
+    rpc::{RPCError, RequestType, RpcErrorResponse},
+    service::api_types::{
+        AppRequestId, DataColumnsByRootRequester, Id, SamplingRequester, SingleLookupReqId,
+        SyncRequestId,
+    },
+    types::SyncState,
+    NetworkConfig, NetworkGlobals, PeerId,
 };
-use lighthouse_network::types::SyncState;
-use lighthouse_network::NetworkConfig;
-use lighthouse_network::NetworkGlobals;
 use slog::info;
 use slot_clock::{ManualSlotClock, SlotClock, TestingSlotClock};
 use store::MemoryStore;
 use tokio::sync::mpsc;
-use types::data_column_sidecar::ColumnIndex;
-use types::test_utils::TestRandom;
 use types::{
-    test_utils::{SeedableRng, XorShiftRng},
-    BlobSidecar, ForkName, MinimalEthSpec as E, SignedBeaconBlock, Slot,
+    data_column_sidecar::ColumnIndex,
+    test_utils::{SeedableRng, TestRandom, XorShiftRng},
+    BeaconState, BeaconStateBase, BlobSidecar, DataColumnSidecar, Epoch, EthSpec, ForkName,
+    Hash256, MinimalEthSpec as E, SignedBeaconBlock, Slot,
 };
-use types::{BeaconState, BeaconStateBase};
-use types::{DataColumnSidecar, Epoch};
 
 type T = Witness<ManualSlotClock, CachingEth1Backend<E>, E, MemoryStore<E>, MemoryStore<E>>;
 
-/// This test utility enables integration testing of Lighthouse sync components.
-///
-/// It covers the following:
-/// 1. Sending `SyncMessage` to `SyncManager` to trigger `RangeSync`, `BackFillSync` and `BlockLookups` behaviours.
-/// 2. Making assertions on `WorkEvent`s received from sync
-/// 3. Making assertion on `NetworkMessage` received from sync (Outgoing RPC requests).
-///
-/// The test utility covers testing the interactions from and to `SyncManager`. In diagram form:
-///                      +-----------------+
-///                      | BeaconProcessor |
-///                      +---------+-------+
-///                             ^  |
-///                             |  |
-///                   WorkEvent |  | SyncMsg
-///                             |  | (Result)
-///                             |  v
-/// +--------+            +-----+-----------+             +----------------+
-/// | Router +----------->|  SyncManager    +------------>| NetworkService |
-/// +--------+  SyncMsg   +-----------------+ NetworkMsg  +----------------+
-///           (RPC resp)  |  - RangeSync    |  (RPC req)
-///                       +-----------------+
-///                       |  - BackFillSync |
-///                       +-----------------+
-///                       |  - BlockLookups |
-///                       +-----------------+
-struct TestRig {
-    /// Receiver for `BeaconProcessor` events (e.g. block processing results).
-    beacon_processor_rx: mpsc::Receiver<WorkEvent<E>>,
-    beacon_processor_rx_queue: Vec<WorkEvent<E>>,
-    /// Receiver for `NetworkMessage` (e.g. outgoing RPC requests from sync)
-    network_rx: mpsc::UnboundedReceiver<NetworkMessage<E>>,
-    /// Stores all `NetworkMessage`s received from `network_recv`. (e.g. outgoing RPC requests)
-    network_rx_queue: Vec<NetworkMessage<E>>,
-    /// To send `SyncMessage`. For sending RPC responses or block processing results to sync.
-    sync_manager: SyncManager<T>,
-    /// To manipulate sync state and peer connection status
-    network_globals: Arc<NetworkGlobals<E>>,
-    /// Beacon chain harness
-    harness: BeaconChainHarness<EphemeralHarnessType<E>>,
-    /// `rng` for generating test blocks and blobs.
-    rng: XorShiftRng,
-    fork_name: ForkName,
-    log: Logger,
-}
-
-const D: Duration = Duration::new(0, 0);
 const PARENT_FAIL_TOLERANCE: u8 = SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS;
 const SAMPLING_REQUIRED_SUCCESSES: usize = 2;
 
@@ -186,7 +146,7 @@ impl TestRig {
         }
     }
 
-    fn test_setup() -> Self {
+    pub fn test_setup() -> Self {
         Self::test_setup_with_config(None)
     }
 
@@ -210,11 +170,11 @@ impl TestRig {
         }
     }
 
-    fn log(&self, msg: &str) {
+    pub fn log(&self, msg: &str) {
         info!(self.log, "TEST_RIG"; "msg" => msg);
     }
 
-    fn after_deneb(&self) -> bool {
+    pub fn after_deneb(&self) -> bool {
         matches!(self.fork_name, ForkName::Deneb | ForkName::Electra)
     }
 
@@ -273,7 +233,7 @@ impl TestRig {
         (parent, block, parent_root, block_root)
     }
 
-    fn send_sync_message(&mut self, sync_message: SyncMessage<E>) {
+    pub fn send_sync_message(&mut self, sync_message: SyncMessage<E>) {
         self.sync_manager.handle_message(sync_message);
     }
 
@@ -400,7 +360,7 @@ impl TestRig {
         self.expect_empty_network();
     }
 
-    fn new_connected_peer(&mut self) -> PeerId {
+    pub fn new_connected_peer(&mut self) -> PeerId {
         self.network_globals
             .peers
             .write()
@@ -841,7 +801,7 @@ impl TestRig {
         }
     }
 
-    fn peer_disconnected(&mut self, peer_id: PeerId) {
+    pub fn peer_disconnected(&mut self, peer_id: PeerId) {
         self.send_sync_message(SyncMessage::Disconnect(peer_id));
     }
 
@@ -857,7 +817,7 @@ impl TestRig {
         }
     }
 
-    fn pop_received_network_event<T, F: Fn(&NetworkMessage<E>) -> Option<T>>(
+    pub fn pop_received_network_event<T, F: Fn(&NetworkMessage<E>) -> Option<T>>(
         &mut self,
         predicate_transform: F,
     ) -> Result<T, String> {
@@ -877,7 +837,7 @@ impl TestRig {
         }
     }
 
-    fn pop_received_processor_event<T, F: Fn(&WorkEvent<E>) -> Option<T>>(
+    pub fn pop_received_processor_event<T, F: Fn(&WorkEvent<E>) -> Option<T>>(
         &mut self,
         predicate_transform: F,
     ) -> Result<T, String> {
@@ -898,6 +858,16 @@ impl TestRig {
                 self.beacon_processor_rx_queue
             )
             .to_string())
+        }
+    }
+
+    pub fn expect_empty_processor(&mut self) {
+        self.drain_processor_rx();
+        if !self.beacon_processor_rx_queue.is_empty() {
+            panic!(
+                "Expected processor to be empty, but has events: {:?}",
+                self.beacon_processor_rx_queue
+            );
         }
     }
 
@@ -2149,7 +2119,8 @@ fn custody_lookup_happy_path() {
 mod deneb_only {
     use super::*;
     use beacon_chain::{
-        block_verification_types::RpcBlock, data_availability_checker::AvailabilityCheckError,
+        block_verification_types::{AsBlock, RpcBlock},
+        data_availability_checker::AvailabilityCheckError,
     };
     use ssz_types::VariableList;
     use std::collections::VecDeque;
