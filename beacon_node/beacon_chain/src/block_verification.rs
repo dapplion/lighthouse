@@ -91,7 +91,7 @@ use std::fmt::Debug;
 use std::fs;
 use std::io::Write;
 use std::sync::Arc;
-use store::{Error as DBError, HotStateSummary, KeyValueStore, StoreOp};
+use store::{Error as DBError, KeyValueStore, StoreOp};
 use strum::AsRefStr;
 use task_executor::JoinHandle;
 use types::{
@@ -1455,52 +1455,49 @@ impl<T: BeaconChainTypes> ExecutionPendingBlock<T> {
 
         let distance = block.slot().as_u64().saturating_sub(state.slot().as_u64());
         for _ in 0..distance {
-            let state_root = if parent.beacon_block.slot() == state.slot() {
-                // If it happens that `pre_state` has *not* already been advanced forward a single
-                // slot, then there is no need to compute the state root for this
-                // `per_slot_processing` call since that state root is already stored in the parent
-                // block.
-                parent.beacon_block.state_root()
-            } else {
-                // This is a new state we've reached, so stage it for storage in the DB.
-                // Computing the state root here is time-equivalent to computing it during slot
-                // processing, but we get early access to it.
-                let state_root = state.update_tree_hash_cache()?;
-
-                // Store the state immediately, marking it as temporary, and staging the deletion
-                // of its temporary status as part of the larger atomic operation.
-                let txn_lock = chain.store.hot_db.begin_rw_transaction();
-                let state_already_exists =
-                    chain.store.load_hot_state_summary(&state_root)?.is_some();
-
-                let state_batch = if state_already_exists {
-                    // If the state exists, it could be temporary or permanent, but in neither case
-                    // should we rewrite it or store a new temporary flag for it. We *will* stage
-                    // the temporary flag for deletion because it's OK to double-delete the flag,
-                    // and we don't mind if another thread gets there first.
-                    vec![]
+            let state_root =
+                if parent.beacon_block.slot() == state.slot() {
+                    // If it happens that `pre_state` has *not* already been advanced forward a single
+                    // slot, then there is no need to compute the state root for this
+                    // `per_slot_processing` call since that state root is already stored in the parent
+                    // block.
+                    parent.beacon_block.state_root()
                 } else {
-                    vec![
-                        if state.slot() % T::EthSpec::slots_per_epoch() == 0 {
-                            StoreOp::PutState(state_root, &state)
-                        } else {
-                            StoreOp::PutStateSummary(
-                                state_root,
-                                HotStateSummary::new(&state_root, &state)?,
-                            )
-                        },
-                        StoreOp::PutStateTemporaryFlag(state_root),
-                    ]
+                    // This is a new state we've reached, so stage it for storage in the DB.
+                    // Computing the state root here is time-equivalent to computing it during slot
+                    // processing, but we get early access to it.
+                    let state_root = state.update_tree_hash_cache()?;
+
+                    // Store the state immediately, marking it as temporary, and staging the deletion
+                    // of its temporary status as part of the larger atomic operation.
+                    // TODO(hdiff): Is it necessary to do this read tx now? Also why is it necessary to
+                    // check that the summary exists at all? Are double writes common? Can this txn
+                    // lock deadlock with the `do_atomically` call?
+                    let txn_lock = chain.store.hot_db.begin_rw_transaction();
+                    let state_already_exists =
+                        chain.store.load_hot_state_summary(&state_root)?.is_some();
+
+                    if state_already_exists {
+                        // If the state exists, it could be temporary or permanent, but in neither case
+                        // should we rewrite it or store a new temporary flag for it. We *will* stage
+                        // the temporary flag for deletion because it's OK to double-delete the flag,
+                        // and we don't mind if another thread gets there first.
+                    } else {
+                        let mut ops = vec![];
+                        // Recycle store codepath to create a state summary and store the state / diff
+                        chain.store.store_hot_state(&state_root, &state, &mut ops)?;
+                        // Additionally write a temporary flag as part of the atomic write
+                        ops.extend(chain.store.convert_to_kv_batch(vec![
+                            StoreOp::PutStateTemporaryFlag(state_root),
+                        ])?);
+                        chain.store.hot_db.do_atomically(ops)?;
+                    }
+                    drop(txn_lock);
+
+                    confirmed_state_roots.push(state_root);
+
+                    state_root
                 };
-                chain
-                    .store
-                    .do_atomically_with_block_and_blobs_cache(state_batch)?;
-                drop(txn_lock);
-
-                confirmed_state_roots.push(state_root);
-
-                state_root
-            };
 
             if let Some(summary) = per_slot_processing(&mut state, Some(state_root), &chain.spec)? {
                 // Expose Prometheus metrics.

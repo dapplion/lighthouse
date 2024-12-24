@@ -1,23 +1,8 @@
 use crate::*;
-use ssz::{DecodeError, Encode};
+use ssz::DecodeError;
 use ssz_derive::Encode;
 
-pub fn store_full_state<E: EthSpec>(
-    state_root: &Hash256,
-    state: &BeaconState<E>,
-    ops: &mut Vec<KeyValueStoreOp>,
-) -> Result<(), Error> {
-    let bytes = {
-        let _overhead_timer = metrics::start_timer(&metrics::BEACON_STATE_WRITE_OVERHEAD_TIMES);
-        StorageContainer::new(state).as_ssz_bytes()
-    };
-    metrics::inc_counter_by(&metrics::BEACON_STATE_WRITE_BYTES, bytes.len() as u64);
-    metrics::inc_counter(&metrics::BEACON_STATE_WRITE_COUNT);
-    let key = get_key_for_col(DBColumn::BeaconState.into(), state_root.as_slice());
-    ops.push(KeyValueStoreOp::PutKeyValue(key, bytes));
-    Ok(())
-}
-
+// FIXME(tree-states): delete/move to migration
 pub fn get_full_state<KV: KeyValueStore<E>, E: EthSpec>(
     db: &KV,
     state_root: &Hash256,

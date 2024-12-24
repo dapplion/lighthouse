@@ -1,0 +1,196 @@
+use crate::{
+    beacon_chain::BeaconChainTypes,
+    summaries_dag::{DAGStateSummaryV22, StateSummariesDAG},
+};
+use slog::{info, Logger};
+use ssz::Decode;
+use ssz_derive::{Decode, Encode};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use store::{
+    get_full_state_v22, get_key_for_col, hdiff::StorageStrategy, hot_cold_store::DiffBaseStateRoot,
+    DBColumn, Error, HotColdDB, HotStateSummary, KeyValueStore, KeyValueStoreOp, StoreItem,
+};
+use types::{EthSpec, Hash256, Slot};
+
+#[derive(Debug, Clone, Copy, Encode, Decode)]
+pub struct HotStateSummaryV22 {
+    slot: Slot,
+    latest_block_root: Hash256,
+    epoch_boundary_state_root: Hash256,
+}
+
+pub fn upgrade_to_v23<T: BeaconChainTypes>(
+    db: Arc<HotColdDB<T::EthSpec, T::HotStore, T::ColdStore>>,
+    log: Logger,
+) -> Result<Vec<KeyValueStoreOp>, Error> {
+    info!(log, "Upgrading from v22 to v23");
+
+    let split = db.get_split_info();
+
+    // Update anchor_slot to the current finalized state
+    // TODO(hdiff): Is the anchor loaded already at this point? Should be set to split slot or to
+    // the finalized state slot?
+    let anchor_info = db.get_anchor_info();
+    let mut new_anchor_info = anchor_info.clone();
+    new_anchor_info.anchor_slot = split.slot;
+    db.compare_and_set_anchor_info_with_write(anchor_info, new_anchor_info)?;
+
+    let state_summaries_dag = new_dag::<T>(&db, split.state_root)?;
+
+    // Sort summaries by slot so we have their ancestor diffs already stored when we store them.
+    // If the summaries are sorted topologically we can insert them into the DB like if they were a
+    // new state, re-using existing code. As states are likely to be sequential the diff cache
+    // should kick in making the migration more efficient. If we just iterate the column of
+    // summaries we may get distance state of each iteration.
+    let summaries_by_slot = state_summaries_dag.summaries_by_slot_ascending();
+
+    // Upgrade all hot DB state summaries to the new type:
+    // - Set all summaries of boundary states as `Snapshot` type
+    // - Set all others are `Replay` pointing to `epoch_boundary_state_root`
+
+    let mut migrate_ops = vec![];
+    let mut diffs_written = 0;
+    let mut summaries_written = 0;
+    let mut last_log_time = Instant::now();
+
+    for (slot, old_hot_state_summaries) in summaries_by_slot {
+        for (state_root, old_summary) in old_hot_state_summaries {
+            // 1. Store snapshot or diff at this slot (if required).
+            // TODO(hdiff): make sure lowest hot hierarchy config is >= 5 to prevent having to
+            // reconstruct states.
+            let storage_strategy = db.hot_storage_strategy(slot)?;
+            match storage_strategy {
+                StorageStrategy::DiffFrom(_) | StorageStrategy::Snapshot => {
+                    // Load the full state and re-store it as a snapshot or diff.
+                    let state = get_full_state_v22(&db.hot_db, &state_root, &db.spec)?
+                        .ok_or_else(|| Error::MissingState(state_root))?;
+
+                    // Store immediately so that future diffs can load and diff from it.
+                    let mut ops = vec![];
+                    db.store_hot_state_diffs(&state_root, &state, &mut ops)?;
+                    db.hot_db.do_atomically(ops)?;
+                    diffs_written += 1;
+                }
+                StorageStrategy::ReplayFrom(_) => {
+                    // No need to store diffs for states that will be reconstructed by replaying
+                    // blocks.
+                }
+            }
+
+            // 2. Convert the summary to the new format.
+            let latest_block_root = old_summary.latest_block_root;
+            let previous_state_root = if state_root == split.state_root {
+                Hash256::ZERO
+            } else {
+                state_summaries_dag
+                    .previous_state_root(state_root)
+                    .map_err(|e| {
+                        Error::MigrationError(format!("error computing previous_state_root {e:?}"))
+                    })?
+            };
+
+            let diff_base_state_root =
+                if let Some(diff_base_slot) = storage_strategy.diff_base_slot() {
+                    DiffBaseStateRoot::new(
+                        diff_base_slot,
+                        state_summaries_dag
+                            .ancestor_state_root_at_slot(state_root, diff_base_slot)
+                            .map_err(|e| {
+                                Error::MigrationError(format!(
+                                    "error computing ancestor_state_root_at_slot {e:?}"
+                                ))
+                            })?,
+                    )
+                } else {
+                    DiffBaseStateRoot::zero()
+                };
+
+            let new_summary = HotStateSummary {
+                slot,
+                latest_block_root,
+                previous_state_root,
+                diff_base_state_root,
+            };
+            // Overwrite the summaries atomically as part of the migration.
+            migrate_ops.push(new_summary.as_kv_store_op(state_root));
+
+            // 3. Stage old data for deletion.
+            if slot % T::EthSpec::slots_per_epoch() == 0 {
+                let state_key =
+                    get_key_for_col(DBColumn::BeaconState.into(), state_root.as_slice());
+                migrate_ops.push(KeyValueStoreOp::DeleteKey(state_key));
+            }
+
+            summaries_written += 1;
+            if last_log_time.elapsed() > Duration::from_secs(5) {
+                last_log_time = Instant::now();
+                // TODO(hdiff): Display the slot distance between head and finalized, and head-tracker count
+                info!(
+                    log,
+                    "Hot state migration in progress";
+                    "diff_written" => diffs_written,
+                    "summaries_written" => summaries_written,
+                );
+            }
+        }
+    }
+
+    // TODO(hdiff): Should run hot DB compaction after deleting potentially a lot of states. Or should wait
+    // for the next finality event?
+    info!(log, "Hot state migration complete");
+
+    Ok(migrate_ops)
+}
+
+pub fn downgrade_to_v22<T: BeaconChainTypes>(
+    _db: Arc<HotColdDB<T::EthSpec, T::HotStore, T::ColdStore>>,
+    _log: Logger,
+) -> Result<Vec<KeyValueStoreOp>, Error> {
+    panic!("downgrade not supported");
+}
+
+fn new_dag<T: BeaconChainTypes>(
+    db: &HotColdDB<T::EthSpec, T::HotStore, T::ColdStore>,
+    split_state_root: Hash256,
+) -> Result<StateSummariesDAG, Error> {
+    // Collect all sumaries for unfinalized states
+    let state_summaries_v22 = db
+        .hot_db
+        .iter_column::<Hash256>(DBColumn::BeaconStateSummary)
+        .map(|res| {
+            let (key, value) = res?;
+            let state_root: Hash256 = key;
+            let summary = HotStateSummaryV22::from_ssz_bytes(&value)?;
+            Ok((
+                state_root,
+                DAGStateSummaryV22 {
+                    slot: summary.slot,
+                    latest_block_root: summary.latest_block_root,
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+
+    let block_roots = HashSet::<Hash256>::from_iter(
+        state_summaries_v22
+            .iter()
+            .map(|(_, summary)| summary.latest_block_root),
+    );
+
+    // Construct block root to parent block root mapping.
+    let mut parent_block_roots = HashMap::new();
+    for block_root in block_roots {
+        let blinded_block = db
+            .get_blinded_block(&block_root)?
+            .ok_or_else(|| Error::MissingBlock(block_root))?;
+        let parent_root = blinded_block.parent_root();
+        parent_block_roots.insert(block_root, parent_root);
+    }
+
+    StateSummariesDAG::new_from_v22(state_summaries_v22, parent_block_roots, split_state_root)
+        .map_err(|e| Error::MigrationError(format!("error computing states summaries dag {e:?}")))
+}

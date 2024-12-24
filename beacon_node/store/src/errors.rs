@@ -45,6 +45,8 @@ pub enum Error {
         expected: Hash256,
         computed: Hash256,
     },
+    MissingState(Hash256),
+    MissingHotStateSummary(Hash256),
     MissingGenesisState,
     MissingSnapshot(Slot),
     BlockReplayError(BlockReplayError),
@@ -69,6 +71,11 @@ pub enum Error {
     RandaoMixOutOfBounds,
     GenesisStateUnknown,
     ArithError(safe_arith::ArithError),
+    MissmatchDiffBaseStateRoot {
+        expected_slot: Slot,
+        stored_slot: Slot,
+    },
+    MigrationError(String),
 }
 
 pub trait HandleUnavailable<T> {

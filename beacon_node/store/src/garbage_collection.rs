@@ -20,6 +20,7 @@ where
             self.iter_temporary_state_roots()
                 .try_fold(vec![], |mut ops, state_root| {
                     let state_root = state_root?;
+                    // This states will never be used, safe to delete the hot diffs
                     ops.push(StoreOp::DeleteState(state_root, None));
                     Result::<_, Error>::Ok(ops)
                 })?;

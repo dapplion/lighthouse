@@ -35,7 +35,10 @@ pub use self::leveldb_store::LevelDB;
 pub use self::memory_store::MemoryStore;
 pub use crate::metadata::BlobInfo;
 pub use errors::Error;
-pub use impls::beacon_state::StorageContainer as BeaconStateStorageContainer;
+pub use impls::{
+    beacon_state::get_full_state as get_full_state_v22,
+    beacon_state::StorageContainer as BeaconStateStorageContainer,
+};
 pub use metadata::AnchorInfo;
 pub use metrics::scrape_for_metrics;
 use parking_lot::MutexGuard;
@@ -262,8 +265,20 @@ pub enum DBColumn {
     #[strum(serialize = "bdc")]
     BeaconDataColumn,
     /// For full `BeaconState`s in the hot database (finalized or fork-boundary states).
+    ///
+    /// DEPRECATED.
     #[strum(serialize = "ste")]
     BeaconState,
+    /// For compact `BeaconStateDiff`'s in the hot DB.
+    ///
+    /// hsd = Hot State Diff.
+    #[strum(serialize = "hsd")]
+    BeaconStateHotDiff,
+    /// For beacon state snapshots in the hot DB.
+    ///
+    /// hsn = Hot Snapshot.
+    #[strum(serialize = "hsn")]
+    BeaconStateHotSnapshot,
     /// For beacon state snapshots in the freezer DB.
     #[strum(serialize = "bsn")]
     BeaconStateSnapshot,
@@ -377,6 +392,8 @@ impl DBColumn {
             | Self::BeaconState
             | Self::BeaconBlob
             | Self::BeaconStateSummary
+            | Self::BeaconStateHotDiff
+            | Self::BeaconStateHotSnapshot
             | Self::BeaconColdStateSummary
             | Self::BeaconStateTemporary
             | Self::ExecPayload

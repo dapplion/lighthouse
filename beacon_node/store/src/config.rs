@@ -53,7 +53,7 @@ pub struct StoreConfig {
 
 /// Variant of `StoreConfig` that gets written to disk. Contains immutable configuration params.
 #[superstruct(
-    variants(V1, V22),
+    variants(V1, V22, V23),
     variant_attributes(derive(Debug, Clone, PartialEq, Eq, Encode, Decode))
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,10 +61,11 @@ pub struct OnDiskStoreConfig {
     #[superstruct(only(V1))]
     pub slots_per_restore_point: u64,
     /// Prefix byte to future-proof versions of the `OnDiskStoreConfig` post V1
-    #[superstruct(only(V22))]
+    #[superstruct(only(V22, V23))]
     version_byte: u8,
-    #[superstruct(only(V22))]
+    #[superstruct(only(V22, V23))]
     pub hierarchy_config: HierarchyConfig,
+    // TODO(hdiff): Should persist the hot hierarchy_config too?
 }
 
 impl OnDiskStoreConfigV22 {
@@ -210,6 +211,7 @@ impl StoreItem for OnDiskStoreConfig {
         match self {
             OnDiskStoreConfig::V1(value) => value.as_ssz_bytes(),
             OnDiskStoreConfig::V22(value) => value.as_ssz_bytes(),
+            OnDiskStoreConfig::V23(value) => value.as_ssz_bytes(),
         }
     }
 
@@ -220,6 +222,8 @@ impl StoreItem for OnDiskStoreConfig {
         if let Ok(value) = OnDiskStoreConfigV1::from_ssz_bytes(bytes) {
             return Ok(Self::V1(value));
         }
+
+        // TODO(hdiff): handle V23 conversion
 
         Ok(Self::V22(OnDiskStoreConfigV22::from_ssz_bytes(bytes)?))
     }
