@@ -81,6 +81,7 @@ pub enum Error {
     LoadBlobInfo(Box<Error>),
     LoadDataColumnInfo(Box<Error>),
     LoadConfig(Box<Error>),
+    LoadHotStateSummary(Box<Error>),
 }
 
 pub trait HandleUnavailable<T> {
