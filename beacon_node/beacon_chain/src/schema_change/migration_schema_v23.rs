@@ -2,7 +2,7 @@ use crate::{
     beacon_chain::BeaconChainTypes,
     summaries_dag::{DAGStateSummaryV22, StateSummariesDAG},
 };
-use slog::{info, Logger};
+use slog::{debug, info, Logger};
 use ssz::Decode;
 use ssz_derive::{Decode, Encode};
 use std::{
@@ -27,8 +27,6 @@ pub fn upgrade_to_v23<T: BeaconChainTypes>(
     db: Arc<HotColdDB<T::EthSpec, T::HotStore, T::ColdStore>>,
     log: Logger,
 ) -> Result<Vec<KeyValueStoreOp>, Error> {
-    info!(log, "Upgrading from v22 to v23");
-
     let split = db.get_split_info();
 
     // Update anchor_slot to the current finalized state
@@ -47,6 +45,12 @@ pub fn upgrade_to_v23<T: BeaconChainTypes>(
     // should kick in making the migration more efficient. If we just iterate the column of
     // summaries we may get distance state of each iteration.
     let summaries_by_slot = state_summaries_dag.summaries_by_slot_ascending();
+    debug!(
+        log,
+        "Starting hot states migration";
+        "summaries_count" => state_summaries_dag.summaries_count(),
+        "slots_count" => summaries_by_slot.len(),
+    );
 
     // Upgrade all hot DB state summaries to the new type:
     // - Set all summaries of boundary states as `Snapshot` type
@@ -131,7 +135,7 @@ pub fn upgrade_to_v23<T: BeaconChainTypes>(
                 // TODO(hdiff): Display the slot distance between head and finalized, and head-tracker count
                 info!(
                     log,
-                    "Hot state migration in progress";
+                    "Hot states migration in progress";
                     "diff_written" => diffs_written,
                     "summaries_written" => summaries_written,
                 );
@@ -141,7 +145,12 @@ pub fn upgrade_to_v23<T: BeaconChainTypes>(
 
     // TODO(hdiff): Should run hot DB compaction after deleting potentially a lot of states. Or should wait
     // for the next finality event?
-    info!(log, "Hot state migration complete");
+    info!(
+        log,
+        "Hot states migration complete";
+        "diff_written" => diffs_written,
+        "summaries_written" => summaries_written,
+    );
 
     Ok(migrate_ops)
 }

@@ -314,7 +314,6 @@ impl<E: EthSpec> HotColdDB<E, LevelDB<E>, LevelDB<E>> {
         // Open separate blobs directory if configured and same configuration was used on previous
         // run.
         let blob_info = db.load_blob_info()?;
-        debug!(db.log, "Loaded blob info"; "blob_info" => ?blob_info);
         let deneb_fork_slot = db
             .spec
             .deneb_fork_epoch
@@ -345,7 +344,6 @@ impl<E: EthSpec> HotColdDB<E, LevelDB<E>, LevelDB<E>> {
         db.compare_and_set_blob_info_with_write(<_>::default(), new_blob_info.clone())?;
 
         let data_column_info = db.load_data_column_info()?;
-        debug!(db.log, "Loaded data column info"; "data_column_info" => ?data_column_info);
         let eip7594_fork_slot = db
             .spec
             .eip7594_fork_epoch
@@ -2664,9 +2662,13 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             Some(mut split) => {
                 debug!(self.log, "Loaded split partial"; "split" => ?split);
                 // Load the hot state summary to get the block root.
-                let summary = self.load_hot_state_summary(&split.state_root)?.ok_or(
-                    HotColdDBError::MissingSplitState(split.state_root, split.slot),
-                )?;
+                let summary = self
+                    .load_hot_state_summary(&split.state_root)
+                    .map_err(|e| Error::LoadHotStateSummaryForSplit(e.into()))?
+                    .ok_or(HotColdDBError::MissingSplitState(
+                        split.state_root,
+                        split.slot,
+                    ))?;
                 split.block_root = summary.latest_block_root;
                 Ok(Some(split))
             }
@@ -2694,7 +2696,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     ) -> Result<Option<HotStateSummary>, Error> {
         self.hot_db
             .get(state_root)
-            .map_err(|e| Error::LoadHotStateSummary(e.into()))
+            .map_err(|e| Error::LoadHotStateSummary(*state_root, e.into()))
     }
 
     /// Load the temporary flag for a state root, if one exists.
