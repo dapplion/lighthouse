@@ -93,7 +93,7 @@ pub trait KeyValueStore<E: EthSpec>: Sync + Send + Sized + 'static {
         // i.e. entries being created and deleted.
         for column in [
             DBColumn::BeaconState,
-            DBColumn::BeaconStateSummary,
+            DBColumn::BeaconStateHotSummary,
             DBColumn::BeaconBlock,
         ] {
             self.compact_column(column)?;
@@ -285,12 +285,20 @@ pub enum DBColumn {
     /// For compact `BeaconStateDiff`s in the freezer DB.
     #[strum(serialize = "bsd")]
     BeaconStateDiff,
-    /// Mapping from state root to `HotStateSummary` in the hot DB.
+    /// DEPRECATED
+    ///
+    /// Mapping from state root to `HotStateSummaryV22` in the hot DB.
     ///
     /// Previously this column also served a role in the freezer DB, mapping state roots to
     /// `ColdStateSummary`. However that role is now filled by `BeaconColdStateSummary`.
     #[strum(serialize = "bss")]
     BeaconStateSummary,
+    /// Mapping from state root to `HotStateSummaryV23` in the hot DB.
+    ///
+    /// This column is populated after DB schema version 23 superseding `BeaconStateSummary`. The
+    /// new column is necessary to have a safe migration without data loss.
+    #[strum(serialize = "bs3")]
+    BeaconStateHotSummary,
     /// Mapping from state root to `ColdStateSummary` in the cold DB.
     #[strum(serialize = "bcs")]
     BeaconColdStateSummary,
@@ -394,6 +402,7 @@ impl DBColumn {
             | Self::BeaconStateSummary
             | Self::BeaconStateHotDiff
             | Self::BeaconStateHotSnapshot
+            | Self::BeaconStateHotSummary
             | Self::BeaconColdStateSummary
             | Self::BeaconStateTemporary
             | Self::ExecPayload

@@ -1241,8 +1241,10 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 
                 StoreOp::DeleteState(state_root, slot) => {
                     // Delete the hot state summary.
-                    let state_summary_key =
-                        get_key_for_col(DBColumn::BeaconStateSummary.into(), state_root.as_slice());
+                    let state_summary_key = get_key_for_col(
+                        DBColumn::BeaconStateHotSummary.into(),
+                        state_root.as_slice(),
+                    );
                     key_value_batch.push(KeyValueStoreOp::DeleteKey(state_summary_key));
 
                     // Delete the state temporary flag (if any). Temporary flags are commonly
@@ -1635,14 +1637,10 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         }) = self.load_hot_state_summary(&state_root)?
         else {
             let mut existing_summaries = self
-                .hot_db
-                .iter_column::<Hash256>(DBColumn::BeaconStateSummary)
-                .map(|res| {
-                    let (state_root, value) = res?;
-                    let summary = HotStateSummary::from_ssz_bytes(&value)?;
-                    Ok((state_root, summary.slot))
-                })
-                .collect::<Result<Vec<(Hash256, Slot)>, Error>>()?;
+                .load_hot_state_summaries()?
+                .into_iter()
+                .map(|(state_root, summary)| (state_root, summary.slot))
+                .collect::<Vec<(Hash256, Slot)>>();
             existing_summaries.sort_by(|a, b| a.1.cmp(&b.1));
             // Hot summaries should never be missing, dump the current list of summaries to ease debug
             debug!(
@@ -2704,6 +2702,18 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             .map_err(|e| Error::LoadHotStateSummary(*state_root, e.into()))
     }
 
+    /// Load all hot state summaries present in the hot DB
+    pub fn load_hot_state_summaries(&self) -> Result<Vec<(Hash256, HotStateSummary)>, Error> {
+        self.hot_db
+            .iter_column::<Hash256>(DBColumn::BeaconStateHotSummary)
+            .map(|res| {
+                let (state_root, value) = res?;
+                let summary = HotStateSummary::from_ssz_bytes(&value)?;
+                Ok((state_root, summary))
+            })
+            .collect()
+    }
+
     /// Load the temporary flag for a state root, if one exists.
     ///
     /// Returns `Some` if the state is temporary, or `None` if the state is permanent or does not
@@ -3120,6 +3130,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         let mut cold_ops = vec![];
 
         let current_schema_columns = vec![
+            DBColumn::BeaconStateHotSummary,
             DBColumn::BeaconColdStateSummary,
             DBColumn::BeaconStateSnapshot,
             DBColumn::BeaconStateDiff,
@@ -3409,7 +3420,7 @@ impl DiffBaseStateRoot {
 
 impl StoreItem for HotStateSummary {
     fn db_column() -> DBColumn {
-        DBColumn::BeaconStateSummary
+        DBColumn::BeaconStateHotSummary
     }
 
     fn as_store_bytes(&self) -> Vec<u8> {

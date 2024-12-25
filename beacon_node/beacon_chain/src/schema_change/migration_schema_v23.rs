@@ -85,52 +85,65 @@ pub fn upgrade_to_v23<T: BeaconChainTypes>(
 
                     // Store immediately so that future diffs can load and diff from it.
                     let mut ops = vec![];
+                    // We must commit the hot state summary immediatelly, otherwise we can't diff
+                    // against it and future writes will fail. That's why we write the new hot
+                    // summaries in a different column to have both new and old data present at
+                    // once. Otherwise if the process crashes during the migration the database will
+                    // be broken.
+                    db.store_hot_state_summary(&state_root, &state, &mut ops)?;
                     db.store_hot_state_diffs(&state_root, &state, &mut ops)?;
                     db.hot_db.do_atomically(ops)?;
                     diffs_written += 1;
                 }
                 StorageStrategy::ReplayFrom(_) => {
+                    // Optimization: instead of having to load the state of each summary we load x32
+                    // less states by manually computing the HotStateSummary roots using the
+                    // computed state dag.
+                    //
                     // No need to store diffs for states that will be reconstructed by replaying
                     // blocks.
-                }
-            }
-
-            // 2. Convert the summary to the new format.
-            let latest_block_root = old_summary.latest_block_root;
-            let previous_state_root = if state_root == split.state_root {
-                Hash256::ZERO
-            } else {
-                state_summaries_dag
-                    .previous_state_root(state_root)
-                    .map_err(|e| {
-                        Error::MigrationError(format!("error computing previous_state_root {e:?}"))
-                    })?
-            };
-
-            let diff_base_state_root =
-                if let Some(diff_base_slot) = storage_strategy.diff_base_slot() {
-                    DiffBaseStateRoot::new(
-                        diff_base_slot,
+                    // 2. Convert the summary to the new format.
+                    let latest_block_root = old_summary.latest_block_root;
+                    let previous_state_root = if state_root == split.state_root {
+                        Hash256::ZERO
+                    } else {
                         state_summaries_dag
-                            .ancestor_state_root_at_slot(state_root, diff_base_slot)
+                            .previous_state_root(state_root)
                             .map_err(|e| {
                                 Error::MigrationError(format!(
-                                    "error computing ancestor_state_root_at_slot {e:?}"
+                                    "error computing previous_state_root {e:?}"
                                 ))
-                            })?,
-                    )
-                } else {
-                    DiffBaseStateRoot::zero()
-                };
+                            })?
+                    };
 
-            let new_summary = HotStateSummary {
-                slot,
-                latest_block_root,
-                previous_state_root,
-                diff_base_state_root,
-            };
-            // Overwrite the summaries atomically as part of the migration.
-            migrate_ops.push(new_summary.as_kv_store_op(state_root));
+                    let diff_base_state_root =
+                        if let Some(diff_base_slot) = storage_strategy.diff_base_slot() {
+                            DiffBaseStateRoot::new(
+                                diff_base_slot,
+                                state_summaries_dag
+                                    .ancestor_state_root_at_slot(state_root, diff_base_slot)
+                                    .map_err(|e| {
+                                        Error::MigrationError(format!(
+                                            "error computing ancestor_state_root_at_slot {e:?}"
+                                        ))
+                                    })?,
+                            )
+                        } else {
+                            DiffBaseStateRoot::zero()
+                        };
+
+                    let new_summary = HotStateSummary {
+                        slot,
+                        latest_block_root,
+                        previous_state_root,
+                        diff_base_state_root,
+                    };
+                    let op = new_summary.as_kv_store_op(state_root);
+                    // It's not ncessary to immediately commit the summaries of states that are
+                    // ReplayFrom. However we do so for simplicity.
+                    db.hot_db.do_atomically(vec![op])?;
+                }
+            }
 
             // 3. Stage old data for deletion.
             if slot % T::EthSpec::slots_per_epoch() == 0 {
@@ -138,6 +151,11 @@ pub fn upgrade_to_v23<T: BeaconChainTypes>(
                     get_key_for_col(DBColumn::BeaconState.into(), state_root.as_slice());
                 migrate_ops.push(KeyValueStoreOp::DeleteKey(state_key));
             }
+
+            // Delete previous summaries
+            let state_summary_key =
+                get_key_for_col(DBColumn::BeaconStateSummary.into(), state_root.as_slice());
+            migrate_ops.push(KeyValueStoreOp::DeleteKey(state_summary_key));
 
             summaries_written += 1;
             if last_log_time.elapsed() > Duration::from_secs(5) {
@@ -179,6 +197,7 @@ fn new_dag<T: BeaconChainTypes>(
     // Collect all sumaries for unfinalized states
     let state_summaries_v22 = db
         .hot_db
+        // Collect summaries from the legacy V22 column BeaconStateSummary
         .iter_column::<Hash256>(DBColumn::BeaconStateSummary)
         .map(|res| {
             let (key, value) = res?;

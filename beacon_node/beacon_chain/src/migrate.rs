@@ -4,14 +4,13 @@ use crate::summaries_dag::{
 };
 use parking_lot::Mutex;
 use slog::{debug, error, info, warn, Logger};
-use ssz::Decode;
 use std::collections::HashSet;
 use std::mem;
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use store::hot_cold_store::{migrate_database, HotColdDBError};
-use store::{DBColumn, Error, HotStateSummary, ItemStore, StoreOp};
+use store::{Error, ItemStore, StoreOp};
 pub use store::{HotColdDB, MemoryStore};
 use types::{BeaconState, BeaconStateHash, Checkpoint, Epoch, EthSpec, Hash256, Slot};
 
@@ -491,14 +490,10 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
 
         let (state_summaries_dag, block_summaries_dag) = {
             let state_summaries = store
-                .hot_db
-                .iter_column::<Hash256>(DBColumn::BeaconStateSummary)
-                .map(|res| {
-                    let (state_root, value) = res?;
-                    let summary = HotStateSummary::from_ssz_bytes(&value)?;
-                    Ok((state_root, summary.into()))
-                })
-                .collect::<Result<Vec<(Hash256, DAGStateSummary)>, Error>>()?;
+                .load_hot_state_summaries()?
+                .into_iter()
+                .map(|(state_root, summary)| (state_root, summary.into()))
+                .collect::<Vec<(Hash256, DAGStateSummary)>>();
 
             // De-duplicate block roots to reduce block reads below
             let summary_block_roots = HashSet::<Hash256>::from_iter(
