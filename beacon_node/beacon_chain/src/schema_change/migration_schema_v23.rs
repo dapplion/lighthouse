@@ -50,6 +50,8 @@ pub fn upgrade_to_v23<T: BeaconChainTypes>(
         "Starting hot states migration";
         "summaries_count" => state_summaries_dag.summaries_count(),
         "slots_count" => summaries_by_slot.len(),
+        "min_slot" => ?summaries_by_slot.first_key_value().map(|(slot, _)| slot),
+        "max_slot" => ?summaries_by_slot.last_key_value().map(|(slot, _)| slot),
     );
 
     // Upgrade all hot DB state summaries to the new type:
@@ -67,6 +69,14 @@ pub fn upgrade_to_v23<T: BeaconChainTypes>(
             // TODO(hdiff): make sure lowest hot hierarchy config is >= 5 to prevent having to
             // reconstruct states.
             let storage_strategy = db.hot_storage_strategy(slot)?;
+            debug!(
+                log,
+                "Migrating state summary";
+                "slot" => slot,
+                "state_root" => ?state_root,
+                "storage_strategy" => ?storage_strategy,
+            );
+
             match storage_strategy {
                 StorageStrategy::DiffFrom(_) | StorageStrategy::Snapshot => {
                     // Load the full state and re-store it as a snapshot or diff.

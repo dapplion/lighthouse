@@ -387,7 +387,12 @@ impl<E: EthSpec> HotColdDB<E, LevelDB<E>, LevelDB<E>> {
                 "from_version" => schema_version.as_u64(),
                 "to_version" => CURRENT_SCHEMA_VERSION.as_u64(),
             );
-            migrate_schema(db.clone(), schema_version, CURRENT_SCHEMA_VERSION)?;
+            migrate_schema(db.clone(), schema_version, CURRENT_SCHEMA_VERSION).map_err(|e| {
+                Error::MigrationError(format!(
+                    "Migrating from {:?} to {:?}: {:?}",
+                    schema_version, CURRENT_SCHEMA_VERSION, e
+                ))
+            })?;
         } else {
             db.store_schema_version(CURRENT_SCHEMA_VERSION)?;
         }
