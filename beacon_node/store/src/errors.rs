@@ -76,6 +76,11 @@ pub enum Error {
         stored_slot: Slot,
     },
     MigrationError(String),
+    LoadAnchorInfo(Box<Error>),
+    LoadSplit(Box<Error>),
+    LoadBlobInfo(Box<Error>),
+    LoadDataColumnInfo(Box<Error>),
+    LoadConfig(Box<Error>),
 }
 
 pub trait HandleUnavailable<T> {

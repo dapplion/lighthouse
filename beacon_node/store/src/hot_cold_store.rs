@@ -2432,7 +2432,8 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     /// Load the anchor info from disk.
     fn load_anchor_info(hot_db: &Hot) -> Result<AnchorInfo, Error> {
         Ok(hot_db
-            .get(&ANCHOR_INFO_KEY)?
+            .get(&ANCHOR_INFO_KEY)
+            .map_err(|e| Error::LoadAnchorInfo(e.into()))?
             .unwrap_or(ANCHOR_UNINITIALIZED))
     }
 
@@ -2515,7 +2516,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 
     /// Load the blob info from disk, but do not set `self.blob_info`.
     fn load_blob_info(&self) -> Result<Option<BlobInfo>, Error> {
-        self.hot_db.get(&BLOB_INFO_KEY)
+        self.hot_db
+            .get(&BLOB_INFO_KEY)
+            .map_err(|e| Error::LoadBlobInfo(e.into()))
     }
 
     /// Store the given `blob_info` to disk.
@@ -2560,7 +2563,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 
     /// Load the blob info from disk, but do not set `self.data_column_info`.
     fn load_data_column_info(&self) -> Result<Option<DataColumnInfo>, Error> {
-        self.hot_db.get(&DATA_COLUMN_INFO_KEY)
+        self.hot_db
+            .get(&DATA_COLUMN_INFO_KEY)
+            .map_err(|e| Error::LoadDataColumnInfo(e.into()))
     }
 
     /// Store the given `data_column_info` to disk.
@@ -2619,7 +2624,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 
     /// Load previously-stored config from disk.
     fn load_config(&self) -> Result<Option<OnDiskStoreConfig>, Error> {
-        self.hot_db.get(&CONFIG_KEY)
+        self.hot_db
+            .get(&CONFIG_KEY)
+            .map_err(|e| Error::LoadConfig(e.into()))
     }
 
     /// Write the config to disk.
@@ -2629,7 +2636,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 
     /// Load the split point from disk, sans block root.
     fn load_split_partial(&self) -> Result<Option<Split>, Error> {
-        self.hot_db.get(&SPLIT_KEY)
+        self.hot_db
+            .get(&SPLIT_KEY)
+            .map_err(|e| Error::LoadSplit(e.into()))
     }
 
     /// Load the split point from disk, including block root.
