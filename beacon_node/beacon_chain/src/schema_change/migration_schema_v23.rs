@@ -67,7 +67,7 @@ pub fn upgrade_to_v23<T: BeaconChainTypes>(
                 StorageStrategy::DiffFrom(_) | StorageStrategy::Snapshot => {
                     // Load the full state and re-store it as a snapshot or diff.
                     let state = get_full_state_v22(&db.hot_db, &state_root, &db.spec)?
-                        .ok_or_else(|| Error::MissingState(state_root))?;
+                        .ok_or(Error::MissingState(state_root))?;
 
                     // Store immediately so that future diffs can load and diff from it.
                     let mut ops = vec![];
@@ -186,7 +186,7 @@ fn new_dag<T: BeaconChainTypes>(
     for block_root in block_roots {
         let blinded_block = db
             .get_blinded_block(&block_root)?
-            .ok_or_else(|| Error::MissingBlock(block_root))?;
+            .ok_or(Error::MissingBlock(block_root))?;
         let parent_root = blinded_block.parent_root();
         parent_block_roots.insert(block_root, parent_root);
     }
