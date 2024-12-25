@@ -296,7 +296,11 @@ impl<E: EthSpec> HotColdDB<E, LevelDB<E>, LevelDB<E>> {
         // Load the previous split slot from the database (if any). This ensures we can
         // stop and restart correctly. This needs to occur *before* running any migrations
         // because some migrations load states and depend on the split.
-        if let Some(split) = db.load_split()? {
+        //
+        // V23: `load_split` needs to load a hot state summary, which need to be migrated from V22
+        // to V23. Attempting to `load_split` here before the migration will trigger an SSZ decode
+        // error. Instead we load the partial split, and load the full split after the migration.
+        if let Some(split) = db.load_split_partial()? {
             *db.split.write() = split;
 
             info!(
@@ -388,6 +392,14 @@ impl<E: EthSpec> HotColdDB<E, LevelDB<E>, LevelDB<E>> {
             migrate_schema(db.clone(), schema_version, CURRENT_SCHEMA_VERSION)?;
         } else {
             db.store_schema_version(CURRENT_SCHEMA_VERSION)?;
+        }
+
+        // Load the full split after the migration to set the `split.block_root` to the correct
+        // value.
+        if let Some(split) = db.load_split()? {
+            *db.split.write() = split;
+
+            debug!(db.log, "Hot-Cold DB split initialized"; "split" => ?split);
         }
 
         // Ensure that any on-disk config is compatible with the supplied config.
