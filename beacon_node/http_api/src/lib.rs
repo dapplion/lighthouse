@@ -3636,10 +3636,7 @@ pub fn serve<T: BeaconChainTypes>(
                     let subscriptions: std::collections::BTreeSet<_> = subscriptions
                         .iter()
                         .map(|subscription| {
-                            chain
-                                .validator_monitor
-                                .write()
-                                .auto_register_local_validator(subscription.validator_index);
+                            chain.register_validator(subscription.validator_index);
                             api_types::ValidatorSubscription {
                                 attestation_committee_index: subscription.committee_index,
                                 slot: subscription.slot,
@@ -3927,10 +3924,7 @@ pub fn serve<T: BeaconChainTypes>(
              | {
                 task_spawner.blocking_json_task(Priority::P0, move || {
                     for subscription in subscriptions {
-                        chain
-                            .validator_monitor
-                            .write()
-                            .auto_register_local_validator(subscription.validator_index);
+                            chain.register_validator(subscription.validator_index);
 
                         let message = ValidatorSubscriptionMessage::SyncCommitteeSubscribe {
                                 subscriptions: vec![subscription],

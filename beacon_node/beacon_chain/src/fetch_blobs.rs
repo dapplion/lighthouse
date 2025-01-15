@@ -254,7 +254,9 @@ fn spawn_compute_and_publish_data_columns_task<T: BeaconChainTypes>(
 
             // Check indices from cache before sending the columns, to make sure we don't
             // publish components already seen on gossip.
-            let is_supernode = chain_cloned.data_availability_checker.is_supernode();
+            let is_supernode = chain_cloned
+                .data_availability_checker
+                .is_supernode(block.slot());
 
             // At the moment non supernodes are not required to publish any columns.
             // TODO(das): we could experiment with having full nodes publish their custodied

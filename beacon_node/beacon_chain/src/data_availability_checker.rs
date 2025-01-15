@@ -18,7 +18,7 @@ use task_executor::TaskExecutor;
 use types::blob_sidecar::{BlobIdentifier, BlobSidecar, FixedBlobSidecarList};
 use types::{
     BlobSidecarList, ChainSpec, DataColumnIdentifier, DataColumnSidecar, DataColumnSidecarList,
-    Epoch, EthSpec, Hash256, RuntimeVariableList, SignedBeaconBlock,
+    Epoch, EthSpec, Hash256, RuntimeVariableList, SignedBeaconBlock, Slot,
 };
 
 mod error;
@@ -142,12 +142,16 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         })
     }
 
-    pub fn get_sampling_column_count(&self) -> usize {
-        self.availability_cache.sampling_column_count()
+    pub fn get_sampling_column_count(&self, block_slot: Slot) -> usize {
+        self.availability_cache.sampling_column_count(block_slot)
     }
 
-    pub(crate) fn is_supernode(&self) -> bool {
-        self.get_sampling_column_count() == self.spec.number_of_columns
+    pub(crate) fn is_supernode(&self, block_slot: Slot) -> bool {
+        self.get_sampling_column_count(block_slot) == self.spec.number_of_columns
+    }
+
+    pub fn register_validator(&self, validator_index: u64) {
+        self.availability_cache.register_validator(validator_index)
     }
 
     /// Checks if the block root is currenlty in the availability cache awaiting import because

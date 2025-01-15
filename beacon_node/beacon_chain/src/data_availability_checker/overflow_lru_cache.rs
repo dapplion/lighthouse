@@ -15,7 +15,7 @@ use std::sync::Arc;
 use types::blob_sidecar::BlobIdentifier;
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnIdentifier, DataColumnSidecar, Epoch, EthSpec,
-    Hash256, RuntimeFixedVector, RuntimeVariableList, SignedBeaconBlock,
+    Hash256, RuntimeFixedVector, RuntimeVariableList, SignedBeaconBlock, Slot,
 };
 
 /// This represents the components of a partially available block
@@ -319,30 +319,44 @@ impl<E: EthSpec> PendingComponents<E> {
         )))
     }
 
-    /// Returns the epoch of the block if it is cached, otherwise returns the epoch of the first blob.
-    pub fn epoch(&self) -> Option<Epoch> {
+    /// Returns the slot of the block if it is cached, otherwise returns the slot of the first blob.
+    pub fn slot(&self) -> Option<Slot> {
         self.executed_block
             .as_ref()
-            .map(|pending_block| pending_block.as_block().epoch())
+            .map(|pending_block| pending_block.as_block().slot())
             .or_else(|| {
                 for maybe_blob in self.verified_blobs.iter() {
                     if maybe_blob.is_some() {
-                        return maybe_blob.as_ref().map(|kzg_verified_blob| {
-                            kzg_verified_blob
-                                .as_blob()
-                                .slot()
-                                .epoch(E::slots_per_epoch())
-                        });
+                        return maybe_blob
+                            .as_ref()
+                            .map(|kzg_verified_blob| kzg_verified_blob.as_blob().slot());
                     }
                 }
 
                 if let Some(kzg_verified_data_column) = self.verified_data_columns.first() {
-                    let epoch = kzg_verified_data_column.as_data_column().epoch();
-                    return Some(epoch);
+                    let slot = kzg_verified_data_column.as_data_column().slot();
+                    return Some(slot);
                 }
 
                 None
             })
+    }
+
+    /// Returns the epoch of the block if it is cached, otherwise returns the epoch of the first blob.
+    pub fn epoch(&self) -> Option<Epoch> {
+        self.slot().map(|slot| slot.epoch(E::slots_per_epoch()))
+    }
+}
+
+struct SamplingCount {}
+
+impl SamplingCount {
+    fn get(&self, block_slot: Slot) -> usize {
+        todo!();
+    }
+
+    fn add(&mut self, validator_index: u64) {
+        todo!();
     }
 }
 
@@ -355,7 +369,7 @@ pub struct DataAvailabilityCheckerInner<T: BeaconChainTypes> {
     /// from disk when necessary. This is necessary until we merge tree-states
     state_cache: StateLRUCache<T>,
     /// The number of data columns the node is sampling via subnet sampling.
-    sampling_column_count: usize,
+    sampling_column_count: RwLock<SamplingCount>,
     spec: Arc<ChainSpec>,
 }
 
@@ -378,13 +392,17 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         Ok(Self {
             critical: RwLock::new(LruCache::new(capacity)),
             state_cache: StateLRUCache::new(beacon_store, spec.clone()),
-            sampling_column_count,
+            sampling_column_count: RwLock::new(SamplingCount {}),
             spec,
         })
     }
 
-    pub fn sampling_column_count(&self) -> usize {
-        self.sampling_column_count
+    pub fn register_validator(&self, validator_index: u64) {
+        self.sampling_column_count.write().add(validator_index)
+    }
+
+    pub fn sampling_column_count(&self, block_slot: Slot) -> usize {
+        self.sampling_column_count.read().get(block_slot)
     }
 
     /// Returns true if the block root is known, without altering the LRU ordering
@@ -452,14 +470,15 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
         let mut kzg_verified_blobs = kzg_verified_blobs.into_iter().peekable();
 
-        let Some(epoch) = kzg_verified_blobs
+        let Some(slot) = kzg_verified_blobs
             .peek()
-            .map(|verified_blob| verified_blob.as_blob().epoch())
+            .map(|verified_blob| verified_blob.as_blob().slot())
         else {
             // Verified blobs list should be non-empty.
             return Err(AvailabilityCheckError::Unexpected);
         };
 
+        let epoch = slot.epoch(T::EthSpec::slots_per_epoch());
         let mut fixed_blobs =
             RuntimeFixedVector::new(vec![None; self.spec.max_blobs_per_block(epoch) as usize]);
 
@@ -482,7 +501,8 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         // Merge in the blobs.
         pending_components.merge_blobs(fixed_blobs);
 
-        if pending_components.is_available(self.sampling_column_count, log) {
+        let sampling_column_count = self.sampling_column_count.read().get(slot);
+        if pending_components.is_available(sampling_column_count, log) {
             write_lock.put(block_root, pending_components.clone());
             // No need to hold the write lock anymore
             drop(write_lock);
@@ -505,13 +525,14 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         log: &Logger,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
         let mut kzg_verified_data_columns = kzg_verified_data_columns.into_iter().peekable();
-        let Some(epoch) = kzg_verified_data_columns
+        let Some(slot) = kzg_verified_data_columns
             .peek()
-            .map(|verified_blob| verified_blob.as_data_column().epoch())
+            .map(|verified_blob| verified_blob.as_data_column().slot())
         else {
             // Verified data_columns list should be non-empty.
             return Err(AvailabilityCheckError::Unexpected);
         };
+        let epoch = slot.epoch(T::EthSpec::slots_per_epoch());
 
         let mut write_lock = self.critical.write();
 
@@ -526,7 +547,8 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         // Merge in the data columns.
         pending_components.merge_data_columns(kzg_verified_data_columns)?;
 
-        if pending_components.is_available(self.sampling_column_count, log) {
+        let sampling_column_count = self.sampling_column_count.read().get(slot);
+        if pending_components.is_available(sampling_column_count, log) {
             write_lock.put(block_root, pending_components.clone());
             // No need to hold the write lock anymore
             drop(write_lock);
@@ -559,7 +581,8 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         };
 
         // If we're sampling all columns, it means we must be custodying all columns.
-        let custody_column_count = self.sampling_column_count();
+        let block_slot = pending_components.slot().expect("TODO");
+        let custody_column_count = self.sampling_column_count(block_slot);
         let total_column_count = self.spec.number_of_columns;
         let received_column_count = pending_components.verified_data_columns.len();
 
@@ -598,7 +621,8 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         log: &Logger,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
         let mut write_lock = self.critical.write();
-        let epoch = executed_block.as_block().epoch();
+        let slot = executed_block.as_block().slot();
+        let epoch = slot.epoch(T::EthSpec::slots_per_epoch());
         let block_root = executed_block.import_data.block_root;
 
         // register the block to get the diet block
@@ -618,7 +642,8 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         pending_components.merge_block(diet_executed_block);
 
         // Check if we have all components and entire set is consistent.
-        if pending_components.is_available(self.sampling_column_count, log) {
+        let sampling_column_count = self.sampling_column_count.read().get(slot);
+        if pending_components.is_available(sampling_column_count, log) {
             write_lock.put(block_root, pending_components.clone());
             // No need to hold the write lock anymore
             drop(write_lock);
