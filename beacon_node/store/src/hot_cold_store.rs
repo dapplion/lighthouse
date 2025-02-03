@@ -3132,6 +3132,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         // delete the payload for the finalized block itself, but that's OK as we only guarantee
         // that payloads are present for slots >= the split slot. The payload fetching code is also
         // forgiving of missing payloads.
+        // TODO(tree-states): move to pruning code?
         if store.config.prune_payloads {
             hot_db_ops.push(StoreOp::DeleteExecutionPayload(block_root));
         }
@@ -3159,14 +3160,10 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
             non_checkpoint_block_roots.remove(&block_root);
         }
 
-        // Delete the old summary, and the full state if we lie on an epoch boundary.
-        hot_db_ops.push(StoreOp::DeleteState(state_root, Some(slot)));
-
         // Do not try to store states if a restore point is yet to be stored, or will never be
         // stored (see `STATE_UPPER_LIMIT_NO_RETAIN`). Make an exception for the genesis state
         // which always needs to be copied from the hot DB to the freezer and should not be deleted.
         if slot != 0 && slot < anchor_info.state_upper_limit {
-            debug!(store.log, "Pruning finalized state"; "slot" => slot);
             continue;
         }
 
@@ -3254,7 +3251,8 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         *split_guard = split;
     }
 
-    // Delete the blocks and states from the hot database if we got this far.
+    // Delete execution payloads and sync committee branches from the hot database if we got this
+    // far.
     store.do_atomically_with_block_and_blobs_cache(hot_db_ops)?;
 
     // Update the cache's view of the finalized state.
