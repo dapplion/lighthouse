@@ -5,7 +5,7 @@ use self::custody::{ActiveCustodyRequest, Error as CustodyRequestError};
 pub use self::requests::{BlocksByRootSingleRequest, DataColumnsByRootSingleBlockRequest};
 use super::block_sidecar_coupling::RangeBlockComponentsRequest;
 use super::manager::BlockProcessType;
-use super::range_sync::ByRangeRequestType;
+use super::range_sync::{BatchId, BatchPeers, ByRangeRequestType};
 use super::SyncMessage;
 use crate::metrics;
 use crate::network_beacon_processor::NetworkBeaconProcessor;
@@ -453,8 +453,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     pub fn range_block_component_response(
         &mut self,
         id: ComponentsByRangeRequestId,
+        peer_id: PeerId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
-    ) -> Option<Result<Vec<RpcBlock<T::EthSpec>>, RpcResponseError>> {
+    ) -> Option<Result<(Vec<RpcBlock<T::EthSpec>>, BatchPeers), RpcResponseError>> {
         let Entry::Occupied(mut entry) = self.components_by_range_requests.entry(id) else {
             metrics::inc_counter_vec(&metrics::SYNC_UNKNOWN_NETWORK_REQUESTS, &["range_blocks"]);
             return None;
@@ -464,13 +465,13 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             let request = entry.get_mut();
             match range_block_component {
                 RangeBlockComponent::Block(resp) => resp.map(|(blocks, _)| {
-                    request.add_blocks(blocks);
+                    request.add_blocks(blocks, peer_id);
                 }),
                 RangeBlockComponent::Blob(resp) => resp.map(|(blobs, _)| {
                     request.add_blobs(blobs);
                 }),
                 RangeBlockComponent::CustodyColumns(resp) => resp.map(|(custody_columns, _)| {
-                    request.add_custody_columns(custody_columns);
+                    request.add_custody_columns(custody_columns, peer_id);
                 }),
             }
         } {
@@ -481,10 +482,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         if entry.get_mut().is_finished() {
             // If the request is finished, dequeue everything
             let request = entry.remove();
-            let blocks = request
-                .into_responses(&self.chain.spec)
-                .map_err(RpcResponseError::BlockComponentCouplingError);
-            Some(blocks)
+            Some(
+                request
+                    .into_responses(&self.chain.spec)
+                    .map_err(RpcResponseError::BlockComponentCouplingError),
+            )
         } else {
             None
         }

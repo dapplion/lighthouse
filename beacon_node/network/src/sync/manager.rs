@@ -1255,17 +1255,18 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         peer_id: PeerId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
     ) {
-        if let Some(resp) = self
-            .network
-            .range_block_component_response(range_request_id, range_block_component)
-        {
+        if let Some(resp) = self.network.range_block_component_response(
+            range_request_id,
+            peer_id,
+            range_block_component,
+        ) {
             match resp {
-                Ok(blocks) => {
+                Ok((blocks, peers)) => {
                     match range_request_id.requester {
                         RangeRequestId::RangeSync { chain_id, batch_id } => {
                             self.range_sync.blocks_by_range_response(
                                 &mut self.network,
-                                peer_id,
+                                peers,
                                 chain_id,
                                 batch_id,
                                 range_request_id.id,
@@ -1277,7 +1278,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             match self.backfill_sync.on_block_response(
                                 &mut self.network,
                                 batch_id,
-                                &peer_id,
+                                peers,
                                 range_request_id.id,
                                 blocks,
                             ) {

@@ -1,4 +1,4 @@
-use super::batch::{BatchInfo, BatchProcessingResult, BatchState};
+use super::batch::{BatchInfo, BatchPeers, BatchProcessingResult, BatchState};
 use super::RangeSyncType;
 use crate::metrics;
 use crate::metrics::PEERS_PER_COLUMN_SUBNET;
@@ -240,7 +240,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         &mut self,
         network: &mut SyncNetworkContext<T>,
         batch_id: BatchId,
-        peer_id: &PeerId,
+        peers: &BatchPeers,
         request_id: Id,
         blocks: Vec<RpcBlock<T::EthSpec>>,
     ) -> ProcessingResult {
@@ -286,7 +286,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 Err(result) => {
                     let (expected_boundary, received_boundary, outcome) = result?;
                     warn!(self.log, "Batch received out of range blocks"; "expected_boundary" => expected_boundary, "received_boundary" => received_boundary,
-                        "peer_id" => %peer_id, batch);
+                        batch);
 
                     if let BatchOperationOutcome::Failed { blacklist } = outcome {
                         return Err(RemoveChain::ChainFailed {
@@ -489,16 +489,18 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             }
         };
 
-        let peer = batch.current_peer().cloned().ok_or_else(|| {
+        let block_peer = batch.processing_block_peer().cloned().ok_or_else(|| {
             RemoveChain::WrongBatchState(format!(
                 "Processing target is in wrong state: {:?}",
                 batch.state(),
             ))
         })?;
 
+        // TODO(das): okay to log only the block peer? Consider logging the client_type on the
+        // failures after locating which peer is at fault
         // Log the process result and the batch for debugging purposes.
         debug!(self.log, "Batch processing result"; "result" => ?result, &batch,
-            "batch_epoch" => batch_id, "client" => %network.client_type(&peer), "batch_state" => batch_state);
+            "batch_epoch" => batch_id, "client" => %network.client_type(&block_peer), "batch_state" => batch_state);
 
         // We consider three cases. Batch was successfully processed, Batch failed processing due
         // to a faulty peer, or batch failed processing but the peer can't be deemed faulty.
@@ -668,16 +670,16 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                         // The validated batch has been re-processed
                         if attempt.hash != processed_attempt.hash {
                             // The re-downloaded version was different
-                            if processed_attempt.peer_id != attempt.peer_id {
+                            if processed_attempt.peers.block_peer != attempt.peers.block_peer {
                                 // A different peer sent the correct batch, the previous peer did not
                                 // We negatively score the original peer.
                                 let action = PeerAction::LowToleranceError;
-                                debug!(self.log, "Re-processed batch validated. Scoring original peer";
+                                debug!(self.log, "Re-processed batch validated. Scoring original block peer";
                                     "batch_epoch" => id, "score_adjustment" => %action,
-                                    "original_peer" => %attempt.peer_id, "new_peer" => %processed_attempt.peer_id
+                                    "original_peer" => %attempt.peers.block_peer, "new_peer" => %processed_attempt.peers.block_peer
                                 );
                                 network.report_peer(
-                                    attempt.peer_id,
+                                    attempt.peers.block_peer,
                                     action,
                                     "batch_reprocessed_original_peer",
                                 );
@@ -685,12 +687,12 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                                 // The same peer corrected it's previous mistake. There was an error, so we
                                 // negative score the original peer.
                                 let action = PeerAction::MidToleranceError;
-                                debug!(self.log, "Re-processed batch validated by the same peer";
+                                debug!(self.log, "Re-processed batch validated by the same block peer";
                                     "batch_epoch" => id, "score_adjustment" => %action,
-                                    "original_peer" => %attempt.peer_id, "new_peer" => %processed_attempt.peer_id
+                                    "original_peer" => %attempt.peers.block_peer, "new_peer" => %processed_attempt.peers.block_peer
                                 );
                                 network.report_peer(
-                                    attempt.peer_id,
+                                    attempt.peers.block_peer,
                                     action,
                                     "batch_reprocessed_same_peer",
                                 );

@@ -39,6 +39,7 @@
 //!  Each chain is downloaded in batches of blocks. The batched blocks are processed sequentially
 //!  and further batches are requested as current blocks are being processed.
 
+use super::batch::BatchPeers;
 use super::chain::{BatchId, ChainId, RemoveChain, SyncingChain};
 use super::chain_collection::{ChainCollection, SyncChainStatus};
 use super::sync_type::RangeSyncType;
@@ -202,7 +203,7 @@ where
     pub fn blocks_by_range_response(
         &mut self,
         network: &mut SyncNetworkContext<T>,
-        peer_id: PeerId,
+        peers: BatchPeers,
         chain_id: ChainId,
         batch_id: BatchId,
         request_id: Id,
@@ -210,7 +211,7 @@ where
     ) {
         // check if this chunk removes the chain
         match self.chains.call_by_id(chain_id, |chain| {
-            chain.on_block_response(network, batch_id, &peer_id, request_id, blocks)
+            chain.on_block_response(network, batch_id, &peers, request_id, blocks)
         }) {
             Ok((removed_chain, sync_type)) => {
                 if let Some((removed_chain, remove_reason)) = removed_chain {

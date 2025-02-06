@@ -2,12 +2,12 @@ use beacon_chain::block_verification_types::RpcBlock;
 use lighthouse_network::rpc::methods::BlocksByRangeRequest;
 use lighthouse_network::service::api_types::Id;
 use lighthouse_network::PeerId;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Sub;
 use std::time::{Duration, Instant};
 use strum::Display;
-use types::{Epoch, EthSpec, Slot};
+use types::{ColumnIndex, Epoch, EthSpec, Slot};
 
 /// The number of times to retry a batch before it is considered failed.
 const MAX_BATCH_DOWNLOAD_ATTEMPTS: u8 = 5;
@@ -113,14 +113,22 @@ pub struct BatchInfo<E: EthSpec, B: BatchConfig = RangeSyncBatchConfig> {
     marker: std::marker::PhantomData<B>,
 }
 
+#[derive(PartialEq, Debug, Clone)]
+pub struct BatchPeers {
+    /// Peer that we fetch block and maybe blobs
+    pub block_peer: PeerId,
+    /// Peers that we fetch custody columns (empty pre-PeerDAS)
+    pub column_peers: HashMap<PeerId, Vec<ColumnIndex>>,
+}
+
 /// Current state of a batch
 pub enum BatchState<E: EthSpec> {
     /// The batch has failed either downloading or processing, but can be requested again.
     AwaitingDownload,
     /// The batch is being downloaded.
-    Downloading(PeerId, Id),
+    Downloading(Id),
     /// The batch has been completely downloaded and is ready for processing.
-    AwaitingProcessing(PeerId, Vec<RpcBlock<E>>, Instant),
+    AwaitingProcessing(BatchPeers, Vec<RpcBlock<E>>, Instant),
     /// The batch is being processed.
     Processing(Attempt),
     /// The batch was successfully processed and is waiting to be validated.
@@ -208,13 +216,12 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
     }
 
     /// Returns the peer that is currently responsible for progressing the state of the batch.
-    pub fn current_peer(&self) -> Option<&PeerId> {
+    pub fn processing_block_peer(&self) -> Option<&PeerId> {
         match &self.state {
-            BatchState::AwaitingDownload | BatchState::Failed => None,
-            BatchState::Downloading(peer_id, _)
-            | BatchState::AwaitingProcessing(peer_id, _, _)
-            | BatchState::Processing(Attempt { peer_id, .. })
-            | BatchState::AwaitingValidation(Attempt { peer_id, .. }) => Some(peer_id),
+            BatchState::AwaitingDownload | BatchState::Failed | BatchState::Downloading(..) => None,
+            BatchState::AwaitingProcessing(peers, _, _)
+            | BatchState::Processing(Attempt { peers, .. })
+            | BatchState::AwaitingValidation(Attempt { peers, .. }) => Some(&peers.block_peer),
             BatchState::Poisoned => unreachable!("Poisoned batch"),
         }
     }
@@ -271,6 +278,7 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
     pub fn download_completed(
         &mut self,
         blocks: Vec<RpcBlock<E>>,
+        peers: BatchPeers,
     ) -> Result<
         usize, /* Received blocks */
         Result<(Slot, Slot, BatchOperationOutcome), WrongState>,
@@ -278,16 +286,16 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
         match self.state.poison() {
             BatchState::Downloading(peer, _request_id) => {
                 let received = blocks.len();
-                self.state = BatchState::AwaitingProcessing(peer, blocks, Instant::now());
+                self.state = BatchState::AwaitingProcessing(peers, blocks, Instant::now());
                 Ok(received)
             }
             BatchState::Poisoned => unreachable!("Poisoned batch"),
             other => {
                 self.state = other;
-                Err(Err(WrongState(format!(
+                Err(WrongState(format!(
                     "Download completed for batch in wrong state {:?}",
                     self.state
-                ))))
+                )))
             }
         }
     }
@@ -447,15 +455,15 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
 #[derive(PartialEq, Debug)]
 pub struct Attempt {
     /// The peer that made the attempt.
-    pub peer_id: PeerId,
+    pub peers: BatchPeers,
     /// The hash of the blocks of the attempt.
     pub hash: u64,
 }
 
 impl Attempt {
-    fn new<B: BatchConfig, E: EthSpec>(peer_id: PeerId, blocks: &[RpcBlock<E>]) -> Self {
+    fn new<B: BatchConfig, E: EthSpec>(peers: BatchPeers, blocks: &[RpcBlock<E>]) -> Self {
         let hash = B::batch_attempt_hash(blocks);
-        Attempt { peer_id, hash }
+        Attempt { peers, hash }
     }
 }
 
@@ -495,18 +503,21 @@ impl<E: EthSpec, B: BatchConfig> slog::KV for BatchInfo<E, B> {
 impl<E: EthSpec> std::fmt::Debug for BatchState<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BatchState::Processing(Attempt {
-                ref peer_id,
-                hash: _,
-            }) => write!(f, "Processing({})", peer_id),
-            BatchState::AwaitingValidation(Attempt {
-                ref peer_id,
-                hash: _,
-            }) => write!(f, "AwaitingValidation({})", peer_id),
+            BatchState::Processing(Attempt { ref peers, hash: _ }) => {
+                write!(f, "Processing({})", peers.block_peer)
+            }
+            BatchState::AwaitingValidation(Attempt { ref peers, hash: _ }) => {
+                write!(f, "AwaitingValidation({})", peers.block_peer)
+            }
             BatchState::AwaitingDownload => f.write_str("AwaitingDownload"),
             BatchState::Failed => f.write_str("Failed"),
-            BatchState::AwaitingProcessing(ref peer, ref blocks, _) => {
-                write!(f, "AwaitingProcessing({}, {} blocks)", peer, blocks.len())
+            BatchState::AwaitingProcessing(ref peers, ref blocks, _) => {
+                write!(
+                    f,
+                    "AwaitingProcessing({}, {} blocks)",
+                    peers.block_peer,
+                    blocks.len()
+                )
             }
             BatchState::Downloading(peer, request_id) => {
                 write!(f, "Downloading({}, {})", peer, request_id)

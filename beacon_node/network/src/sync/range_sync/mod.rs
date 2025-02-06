@@ -8,7 +8,7 @@ mod range;
 mod sync_type;
 
 pub use batch::{
-    BatchConfig, BatchInfo, BatchOperationOutcome, BatchProcessingResult, BatchState,
+    BatchConfig, BatchInfo, BatchOperationOutcome, BatchPeers, BatchProcessingResult, BatchState,
     ByRangeRequestType,
 };
 pub use chain::{BatchId, ChainId, EPOCHS_PER_BATCH};

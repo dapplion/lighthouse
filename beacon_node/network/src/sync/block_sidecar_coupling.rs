@@ -1,6 +1,7 @@
 use beacon_chain::{
     block_verification_types::RpcBlock, data_column_verification::CustodyDataColumn, get_block_root,
 };
+use lighthouse_network::PeerId;
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -10,17 +11,15 @@ use types::{
     SignedBeaconBlock,
 };
 
+use super::range_sync::BatchPeers;
+
 #[derive(Debug)]
 pub struct RangeBlockComponentsRequest<E: EthSpec> {
     /// Blocks we have received awaiting for their corresponding sidecar.
-    blocks: VecDeque<Arc<SignedBeaconBlock<E>>>,
+    blocks: Option<(Vec<Arc<SignedBeaconBlock<E>>>, PeerId)>,
     /// Sidecars we have received awaiting for their corresponding block.
-    blobs: VecDeque<Arc<BlobSidecar<E>>>,
+    blobs: Option<Vec<Arc<BlobSidecar<E>>>>,
     data_columns: VecDeque<Arc<DataColumnSidecar<E>>>,
-    /// Whether the individual RPC request for blocks is finished or not.
-    is_blocks_stream_terminated: bool,
-    /// Whether the individual RPC request for sidecars is finished or not.
-    is_sidecars_stream_terminated: bool,
     custody_columns_streams_terminated: usize,
     /// Used to determine if this accumulator should wait for a sidecars stream termination
     expects_blobs: bool,
@@ -37,11 +36,9 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         num_custody_column_requests: Option<usize>,
     ) -> Self {
         Self {
-            blocks: <_>::default(),
-            blobs: <_>::default(),
+            blocks: None,
+            blobs: None,
             data_columns: <_>::default(),
-            is_blocks_stream_terminated: false,
-            is_sidecars_stream_terminated: false,
             custody_columns_streams_terminated: 0,
             expects_blobs,
             expects_custody_columns,
@@ -49,21 +46,19 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         }
     }
 
-    pub fn add_blocks(&mut self, blocks: Vec<Arc<SignedBeaconBlock<E>>>) {
-        for block in blocks {
-            self.blocks.push_back(block);
-        }
-        self.is_blocks_stream_terminated = true;
+    pub fn add_blocks(&mut self, blocks: Vec<Arc<SignedBeaconBlock<E>>>, block_peer: PeerId) {
+        self.blocks = Some((blocks, block_peer));
     }
 
     pub fn add_blobs(&mut self, blobs: Vec<Arc<BlobSidecar<E>>>) {
-        for blob in blobs {
-            self.blobs.push_back(blob);
-        }
-        self.is_sidecars_stream_terminated = true;
+        self.blobs = Some(blobs);
     }
 
-    pub fn add_custody_columns(&mut self, columns: Vec<Arc<DataColumnSidecar<E>>>) {
+    pub fn add_custody_columns(
+        &mut self,
+        columns: Vec<Arc<DataColumnSidecar<E>>>,
+        _peer_id: PeerId,
+    ) {
         for column in columns {
             self.data_columns.push_back(column);
         }
@@ -73,7 +68,10 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         self.custody_columns_streams_terminated += 1;
     }
 
-    pub fn into_responses(self, spec: &ChainSpec) -> Result<Vec<RpcBlock<E>>, String> {
+    pub fn into_responses(
+        self,
+        spec: &ChainSpec,
+    ) -> Result<(Vec<RpcBlock<E>>, BatchPeers), String> {
         if let Some(expects_custody_columns) = self.expects_custody_columns.clone() {
             self.into_responses_with_custody_columns(expects_custody_columns, spec)
         } else {
