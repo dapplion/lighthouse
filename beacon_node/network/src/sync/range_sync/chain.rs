@@ -700,7 +700,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                         }
                     }
                 }
-                BatchState::Downloading(peer, ..) => {
+                BatchState::Downloading(id) => {
                     // remove this batch from the peer's active requests
                     if let Some(active_batches) = self.peers.get_mut(peer) {
                         active_batches.remove(&id);

@@ -231,12 +231,14 @@ mod tests {
     use beacon_chain::test_utils::{
         generate_rand_block_and_blobs, generate_rand_block_and_data_columns, test_spec, NumBlobs,
     };
+    use lighthouse_network::PeerId;
     use rand::SeedableRng;
     use std::sync::Arc;
     use types::{test_utils::XorShiftRng, ForkName, MinimalEthSpec as E, SignedBeaconBlock};
 
     #[test]
     fn no_blobs_into_responses() {
+        let peer = PeerId::random();
         let spec = test_spec::<E>();
         let mut rng = XorShiftRng::from_seed([42; 16]);
         let blocks = (0..4)
@@ -249,7 +251,7 @@ mod tests {
         let mut info = RangeBlockComponentsRequest::<E>::new(false, None, None);
 
         // Send blocks and complete terminate response
-        info.add_blocks(blocks);
+        info.add_blocks(blocks, peer);
 
         // Assert response is finished and RpcBlocks can be constructed
         assert!(info.is_finished());
@@ -258,6 +260,7 @@ mod tests {
 
     #[test]
     fn empty_blobs_into_responses() {
+        let peer = PeerId::random();
         let spec = test_spec::<E>();
         let mut rng = XorShiftRng::from_seed([42; 16]);
         let blocks = (0..4)
@@ -276,7 +279,7 @@ mod tests {
         let mut info = RangeBlockComponentsRequest::<E>::new(true, None, None);
 
         // Send blocks and complete terminate response
-        info.add_blocks(blocks);
+        info.add_blocks(blocks, peer);
         // Expect no blobs returned
         info.add_blobs(vec![]);
 
@@ -289,6 +292,7 @@ mod tests {
 
     #[test]
     fn rpc_block_with_custody_columns() {
+        let peer = PeerId::random();
         let spec = test_spec::<E>();
         let expects_custody_columns = vec![1, 2, 3, 4];
         let mut rng = XorShiftRng::from_seed([42; 16]);
@@ -308,7 +312,7 @@ mod tests {
             Some(expects_custody_columns.len()),
         );
         // Send blocks and complete terminate response
-        info.add_blocks(blocks.iter().map(|b| b.0.clone().into()).collect());
+        info.add_blocks(blocks.iter().map(|b| b.0.clone().into()).collect(), peer);
         // Assert response is not finished
         assert!(!info.is_finished());
 
@@ -319,6 +323,7 @@ mod tests {
                     .iter()
                     .flat_map(|b| b.1.iter().filter(|d| d.index == column_index).cloned())
                     .collect(),
+                peer,
             );
 
             if i < expects_custody_columns.len() - 1 {
@@ -340,6 +345,7 @@ mod tests {
 
     #[test]
     fn rpc_block_with_custody_columns_batched() {
+        let peer = PeerId::random();
         let spec = test_spec::<E>();
         let batched_column_requests = [vec![1_u64, 2], vec![3, 4]];
         let expects_custody_columns = batched_column_requests
@@ -370,7 +376,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Send blocks and complete terminate response
-        info.add_blocks(blocks.iter().map(|b| b.0.clone().into()).collect());
+        info.add_blocks(blocks.iter().map(|b| b.0.clone().into()).collect(), peer);
         // Assert response is not finished
         assert!(!info.is_finished());
 
@@ -385,6 +391,7 @@ mod tests {
                             .cloned()
                     })
                     .collect::<Vec<_>>(),
+                peer,
             );
 
             if i < num_of_data_column_requests - 1 {
