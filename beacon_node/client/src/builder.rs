@@ -204,6 +204,11 @@ where
             Kzg::new_from_trusted_setup_no_precomp(trusted_setup).map_err(kzg_err_msg)?
         };
 
+        // TODO(das): read from store the last sampling_column_count and ensure it's compatible with
+        // the current flags. If the previous value was high due to validator custody keep it high.
+        // TODO(das): Should the node actually remember connected validators for some time? Or after
+        // start assume it's connected to zero validators?
+
         let builder = BeaconChainBuilder::new(eth_spec_instance, Arc::new(kzg))
             .logger(context.log().clone())
             .store(store)
@@ -216,7 +221,7 @@ where
             .beacon_graffiti(beacon_graffiti)
             .event_handler(event_handler)
             .execution_layer(execution_layer)
-            .import_all_data_columns(config.network.subscribe_all_data_column_subnets)
+            .sampling_column_count(config.network.subscribe_all_data_column_subnets)
             .validator_monitor_config(config.validator_monitor.clone());
 
         let builder = if let Some(slasher) = self.slasher.clone() {

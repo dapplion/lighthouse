@@ -21,6 +21,7 @@ use lighthouse_network::{
 };
 use logging::test_logger;
 use network::{NetworkReceivers, NetworkSenders};
+use parking_lot::RwLock;
 use sensitive_url::SensitiveUrl;
 use slog::Logger;
 use std::future::Future;
@@ -177,6 +178,8 @@ pub async fn create_api_server_with_config<T: BeaconChainTypes>(
         &log,
         network_config,
         chain.spec.clone(),
+        Arc::new(RwLock::new(0)),
+        // TODO(das): we could get the mutex from chain.data_availability_checker
     ));
 
     // Only a peer manager can add peers, so we create a dummy manager.

@@ -7,6 +7,7 @@ use crate::data_availability_checker::overflow_lru_cache::{
 };
 use crate::{metrics, BeaconChain, BeaconChainTypes, BeaconStore};
 use kzg::Kzg;
+use parking_lot::RwLock;
 use slog::{debug, error, Logger};
 use slot_clock::SlotClock;
 use std::fmt;
@@ -113,20 +114,14 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         slot_clock: T::SlotClock,
         kzg: Arc<Kzg>,
         store: BeaconStore<T>,
-        import_all_data_columns: bool,
+        sampling_column_count: Arc<RwLock<usize>>,
         spec: Arc<ChainSpec>,
         log: Logger,
     ) -> Result<Self, AvailabilityCheckError> {
-        let custody_group_count = spec.custody_group_count(import_all_data_columns);
-        // This should only panic if the chain spec contains invalid values.
-        let sampling_size = spec
-            .sampling_size(custody_group_count)
-            .expect("should compute node sampling size from valid chain spec");
-
         let inner = DataAvailabilityCheckerInner::new(
             OVERFLOW_LRU_CAPACITY,
             store,
-            sampling_size as usize,
+            sampling_column_count,
             spec.clone(),
         )?;
         Ok(Self {

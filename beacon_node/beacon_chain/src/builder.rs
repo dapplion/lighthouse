@@ -105,7 +105,7 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     kzg: Arc<Kzg>,
     task_executor: Option<TaskExecutor>,
     validator_monitor_config: Option<ValidatorMonitorConfig>,
-    import_all_data_columns: bool,
+    sampling_column_count: Option<Arc<RwLock<usize>>>,
 }
 
 impl<TSlotClock, TEth1Backend, E, THotStore, TColdStore>
@@ -147,7 +147,7 @@ where
             kzg,
             task_executor: None,
             validator_monitor_config: None,
-            import_all_data_columns: false,
+            sampling_column_count: None,
         }
     }
 
@@ -654,8 +654,11 @@ where
     }
 
     /// Sets whether to require and import all data columns when importing block.
-    pub fn import_all_data_columns(mut self, import_all_data_columns: bool) -> Self {
-        self.import_all_data_columns = import_all_data_columns;
+    pub fn sampling_column_count(
+        mut self,
+        sampling_column_count: Option<Arc<RwLock<usize>>>,
+    ) -> Self {
+        self.sampling_column_count = sampling_column_count;
         self
     }
 
@@ -1008,7 +1011,8 @@ where
                     slot_clock,
                     self.kzg.clone(),
                     store,
-                    self.import_all_data_columns,
+                    self.sampling_column_count
+                        .ok_or("Cannot build without a sampling_column_count")?,
                     self.spec,
                     log.new(o!("service" => "data_availability_checker")),
                 )

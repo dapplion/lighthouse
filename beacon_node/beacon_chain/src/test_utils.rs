@@ -37,8 +37,8 @@ use kzg::trusted_setup::get_trusted_setup;
 use kzg::{Kzg, TrustedSetup};
 use merkle_proof::MerkleTree;
 use operation_pool::ReceivedPreCapella;
-use parking_lot::Mutex;
 use parking_lot::RwLockWriteGuard;
+use parking_lot::{Mutex, RwLock};
 use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
@@ -233,7 +233,7 @@ pub struct Builder<T: BeaconChainTypes> {
     testing_slot_clock: Option<TestingSlotClock>,
     validator_monitor_config: Option<ValidatorMonitorConfig>,
     genesis_state_builder: Option<InteropGenesisBuilder<T::EthSpec>>,
-    import_all_data_columns: bool,
+    sampling_column_count: Option<Arc<RwLock<usize>>>,
     runtime: TestRuntime,
     log: Logger,
 }
@@ -389,7 +389,7 @@ where
             testing_slot_clock: None,
             validator_monitor_config: None,
             genesis_state_builder: None,
-            import_all_data_columns: false,
+            sampling_column_count: None,
             runtime,
             log,
         }
@@ -482,8 +482,11 @@ where
         self
     }
 
-    pub fn import_all_data_columns(mut self, import_all_data_columns: bool) -> Self {
-        self.import_all_data_columns = import_all_data_columns;
+    pub fn sampling_column_count(
+        mut self,
+        sampling_column_count: Option<Arc<RwLock<usize>>>,
+    ) -> Self {
+        self.sampling_column_count = sampling_column_count;
         self
     }
 
@@ -613,7 +616,7 @@ where
             .expect("should build dummy backend")
             .shutdown_sender(shutdown_tx)
             .chain_config(chain_config)
-            .import_all_data_columns(self.import_all_data_columns)
+            .sampling_column_count(self.sampling_column_count)
             .event_handler(Some(ServerSentEventHandler::new_with_capacity(
                 log.clone(),
                 5,

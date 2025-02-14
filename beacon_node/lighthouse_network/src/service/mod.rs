@@ -32,6 +32,7 @@ use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::upnp::tokio::Behaviour as Upnp;
 use libp2p::{identify, PeerId, SwarmBuilder};
+use parking_lot::RwLock;
 use slog::{crit, debug, info, o, trace, warn};
 use std::num::{NonZeroU8, NonZeroUsize};
 use std::path::PathBuf;
@@ -212,6 +213,8 @@ impl<E: EthSpec> Network<E> {
             &log,
             config.clone(),
             ctx.chain_spec.clone(),
+            // TODO(das): initial value?
+            Arc::new(RwLock::new(0)),
         );
         let network_globals = Arc::new(globals);
 

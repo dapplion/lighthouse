@@ -6,7 +6,7 @@ use crate::types::{BackFillState, SyncState};
 use crate::{Client, Enr, EnrExt, GossipTopic, Multiaddr, NetworkConfig, PeerId};
 use parking_lot::RwLock;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use types::data_column_custody_group::{
     compute_columns_for_custody_group, compute_subnets_from_custody_group, get_custody_groups,
 };
@@ -40,7 +40,7 @@ pub struct NetworkGlobals<E: EthSpec> {
     /// Ethereum chain configuration. Immutable after initialization.
     pub spec: Arc<ChainSpec>,
     /// The current CGC value of this node
-    cgc: Arc<Mutex<u64>>,
+    cgc: Arc<RwLock<u64>>,
 }
 
 impl<E: EthSpec> NetworkGlobals<E> {
@@ -52,7 +52,7 @@ impl<E: EthSpec> NetworkGlobals<E> {
         log: &slog::Logger,
         config: Arc<NetworkConfig>,
         spec: Arc<ChainSpec>,
-        cgc: Arc<Mutex<u64>>,
+        cgc: Arc<RwLock<u64>>,
     ) -> Self {
         let (all_sampling_subnets, all_sampling_columns) = if spec.is_peer_das_scheduled() {
             let node_id = enr.node_id().raw();
@@ -206,8 +206,8 @@ impl<E: EthSpec> NetworkGlobals<E> {
     }
 
     fn cgc(&self, _block_slot: Slot) -> u64 {
-        // TODO(das): depends on block_slot?
-        todo!();
+        // TODO(das): depends on block_slot
+        *self.cgc.read()
     }
 
     /// TESTING ONLY. Build a dummy NetworkGlobals instance.
@@ -246,7 +246,7 @@ impl<E: EthSpec> NetworkGlobals<E> {
             config,
             spec,
             // TODO(das): is it okay to default to zero here?
-            Arc::new(Mutex::new(0)),
+            Arc::new(RwLock::new(0)),
         )
     }
 }
