@@ -433,9 +433,12 @@ impl<T: BeaconChainTypes> NetworkService<T> {
                         metrics::update_gossip_metrics::<T::EthSpec>(
                             self.libp2p.gossipsub(),
                             &self.network_globals,
-                            );
+                        );
+                        // Current slot informs what CGC value to select for metrics. It's not
+                        // essential so we can just default to 0 in the rare event of a clock err
+                        let current_slot = self.beacon_chain.slot().unwrap_or(Slot::new(0));
                         // update sync metrics
-                        metrics::update_sync_metrics(&self.network_globals);
+                        metrics::update_sync_metrics(&self.network_globals, current_slot);
                     }
 
                     _ = self.gossipsub_parameter_update.tick() => self.update_gossipsub_parameters(),
@@ -704,10 +707,13 @@ impl<T: BeaconChainTypes> NetworkService<T> {
                     return;
                 }
 
+                // TODO(das): What do in the case of a clock error?
+                let current_slot = self.beacon_chain.slot().unwrap_or(Slot::new(0));
+
                 let mut subscribed_topics: Vec<GossipTopic> = vec![];
                 for topic_kind in core_topics_to_subscribe::<T::EthSpec>(
                     self.fork_context.current_fork(),
-                    &self.network_globals.as_topic_config(),
+                    &self.network_globals.as_topic_config(current_slot),
                     &self.fork_context.spec,
                 ) {
                     for fork_digest in self.required_gossip_fork_digests() {
@@ -864,7 +870,9 @@ impl<T: BeaconChainTypes> NetworkService<T> {
     fn subscribed_core_topics(&self) -> bool {
         let core_topics = core_topics_to_subscribe::<T::EthSpec>(
             self.fork_context.current_fork(),
-            &self.network_globals.as_topic_config(),
+            // TODO(das): we should record state of if subscribed or not, because this subscriptions
+            // change with time.
+            &self.network_globals.as_topic_config(Slot::new(0)),
             &self.fork_context.spec,
         );
         let core_topics: HashSet<&GossipKind> = HashSet::from_iter(&core_topics);

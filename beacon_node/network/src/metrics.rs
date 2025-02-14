@@ -16,6 +16,7 @@ use strum::AsRefStr;
 use strum::IntoEnumIterator;
 use types::DataColumnSubnetId;
 use types::EthSpec;
+use types::Slot;
 
 pub const SUCCESS: &str = "SUCCESS";
 pub const FAILURE: &str = "FAILURE";
@@ -742,7 +743,10 @@ pub fn update_gossip_metrics<E: EthSpec>(
     }
 }
 
-pub fn update_sync_metrics<E: EthSpec>(network_globals: &Arc<NetworkGlobals<E>>) {
+pub fn update_sync_metrics<E: EthSpec>(
+    network_globals: &Arc<NetworkGlobals<E>>,
+    current_slot: Slot,
+) {
     // reset the counts
     if PEERS_PER_SYNC_TYPE
         .as_ref()
@@ -771,7 +775,7 @@ pub fn update_sync_metrics<E: EthSpec>(network_globals: &Arc<NetworkGlobals<E>>)
 
     let all_column_subnets =
         (0..network_globals.spec.data_column_sidecar_subnet_count).map(DataColumnSubnetId::new);
-    let custody_column_subnets = network_globals.sampling_subnets.iter();
+    let custody_column_subnets = network_globals.get_sampling_subnets(current_slot);
 
     // Iterate all subnet values to set to zero the empty entries in peers_per_column_subnet
     for subnet in all_column_subnets {

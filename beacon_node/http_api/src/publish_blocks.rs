@@ -20,6 +20,7 @@ use network::NetworkMessage;
 use rand::prelude::SliceRandom;
 use slog::{debug, error, info, warn, Logger};
 use slot_clock::SlotClock;
+use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -27,7 +28,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tree_hash::TreeHash;
 use types::{
-    AbstractExecPayload, BeaconBlockRef, BlobSidecar, BlobsList, BlockImportSource,
+    AbstractExecPayload, BeaconBlockRef, BlobSidecar, BlobsList, BlockImportSource, ColumnIndex,
     DataColumnSubnetId, EthSpec, ExecPayload, ExecutionBlockHash, ForkName, FullPayload,
     FullPayloadBellatrix, Hash256, KzgProofs, SignedBeaconBlock, SignedBlindedBeaconBlock,
 };
@@ -210,7 +211,11 @@ pub async fn publish_block<T: BeaconChainTypes, B: IntoGossipVerifiedBlock<T>>(
         publish_column_sidecars(network_tx, &gossip_verified_columns, &chain).map_err(|_| {
             warp_utils::reject::custom_server_error("unable to publish data column sidecars".into())
         })?;
-        let sampling_columns_indices = &network_globals.sampling_columns;
+
+        // Only import the columns we have to custody
+        let sampling_columns_indices = HashSet::<ColumnIndex>::from_iter(
+            network_globals.get_sampling_columns(slot).iter().copied(),
+        );
         let sampling_columns = gossip_verified_columns
             .into_iter()
             .flatten()

@@ -5,16 +5,17 @@ use crate::rpc::{MetaData, MetaDataV3};
 use crate::types::{BackFillState, SyncState};
 use crate::{Client, Enr, EnrExt, GossipTopic, Multiaddr, NetworkConfig, PeerId};
 use parking_lot::RwLock;
-use slog::error;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use types::data_column_custody_group::{
     compute_columns_for_custody_group, compute_subnets_from_custody_group, get_custody_groups,
 };
-use types::{ChainSpec, ColumnIndex, DataColumnSubnetId, EthSpec};
+use types::{ChainSpec, ColumnIndex, DataColumnSubnetId, EthSpec, Slot};
 
 pub struct NetworkGlobals<E: EthSpec> {
     /// The current local ENR.
+    // TODO(das): We need to update the ENR when the advertised CGC matures, and make sure to sync
+    // it with the instance in discv5
     pub local_enr: RwLock<Enr>,
     /// The local peer_id.
     pub peer_id: RwLock<PeerId>,
@@ -23,6 +24,7 @@ pub struct NetworkGlobals<E: EthSpec> {
     /// The collection of known peers.
     pub peers: RwLock<PeerDB<E>>,
     // The local meta data of our node.
+    // TODO(das): Need to update this metadata with advertised CGC matures
     pub local_metadata: RwLock<MetaData<E>>,
     /// The current gossipsub topic subscriptions.
     pub gossipsub_subscriptions: RwLock<HashSet<GossipTopic>>,
@@ -31,12 +33,14 @@ pub struct NetworkGlobals<E: EthSpec> {
     /// The current state of the backfill sync.
     pub backfill_state: RwLock<BackFillState>,
     /// The computed sampling subnets and columns is stored to avoid re-computing.
-    pub sampling_subnets: HashSet<DataColumnSubnetId>,
-    pub sampling_columns: HashSet<ColumnIndex>,
+    all_sampling_subnets: Vec<DataColumnSubnetId>,
+    all_sampling_columns: Vec<ColumnIndex>,
     /// Network-related configuration. Immutable after initialization.
     pub config: Arc<NetworkConfig>,
     /// Ethereum chain configuration. Immutable after initialization.
     pub spec: Arc<ChainSpec>,
+    /// The current CGC value of this node
+    cgc: Arc<Mutex<u64>>,
 }
 
 impl<E: EthSpec> NetworkGlobals<E> {
@@ -48,38 +52,30 @@ impl<E: EthSpec> NetworkGlobals<E> {
         log: &slog::Logger,
         config: Arc<NetworkConfig>,
         spec: Arc<ChainSpec>,
+        cgc: Arc<Mutex<u64>>,
     ) -> Self {
-        let (sampling_subnets, sampling_columns) = if spec.is_peer_das_scheduled() {
+        let (all_sampling_subnets, all_sampling_columns) = if spec.is_peer_das_scheduled() {
             let node_id = enr.node_id().raw();
 
-            let custody_group_count = match local_metadata.custody_group_count() {
-                Ok(&cgc) if cgc <= spec.number_of_custody_groups => cgc,
-                _ => {
-                    error!(
-                        log,
-                        "custody_group_count from metadata is either invalid or not set. This is a bug!";
-                        "info" => "falling back to default custody requirement"
-                    );
-                    spec.custody_requirement
-                }
-            };
+            let max_custody_group_count = spec.number_of_custody_groups;
+            // TODO(das): check where local_metadata is used for stale CGC
 
             // The below `expect` calls will panic on start up if the chain spec config values used
             // are invalid
             let sampling_size = spec
-                .sampling_size(custody_group_count)
+                .sampling_size(max_custody_group_count)
                 .expect("should compute node sampling size from valid chain spec");
             let custody_groups = get_custody_groups(node_id, sampling_size, &spec)
                 .expect("should compute node custody groups");
 
-            let mut sampling_subnets = HashSet::new();
+            let mut sampling_subnets = vec![];
             for custody_index in &custody_groups {
                 let subnets = compute_subnets_from_custody_group(*custody_index, &spec)
                     .expect("should compute custody subnets for node");
                 sampling_subnets.extend(subnets);
             }
 
-            let mut sampling_columns = HashSet::new();
+            let mut sampling_columns = vec![];
             for custody_index in &custody_groups {
                 let columns = compute_columns_for_custody_group(*custody_index, &spec)
                     .expect("should compute custody columns for node");
@@ -88,7 +84,7 @@ impl<E: EthSpec> NetworkGlobals<E> {
 
             (sampling_subnets, sampling_columns)
         } else {
-            (HashSet::new(), HashSet::new())
+            (vec![], vec![])
         };
 
         NetworkGlobals {
@@ -100,10 +96,11 @@ impl<E: EthSpec> NetworkGlobals<E> {
             gossipsub_subscriptions: RwLock::new(HashSet::new()),
             sync_state: RwLock::new(SyncState::Stalled),
             backfill_state: RwLock::new(BackFillState::Paused),
-            sampling_subnets,
-            sampling_columns,
+            all_sampling_subnets,
+            all_sampling_columns,
             config,
             spec,
+            cgc,
         }
     }
 
@@ -185,13 +182,32 @@ impl<E: EthSpec> NetworkGlobals<E> {
     }
 
     /// Returns the TopicConfig to compute the set of Gossip topics for a given fork
-    pub fn as_topic_config(&self) -> TopicConfig {
+    pub fn as_topic_config(&self, block_slot: Slot) -> TopicConfig {
         TopicConfig {
             enable_light_client_server: self.config.enable_light_client_server,
             subscribe_all_subnets: self.config.subscribe_all_subnets,
             subscribe_all_data_column_subnets: self.config.subscribe_all_data_column_subnets,
-            sampling_subnets: &self.sampling_subnets,
+            // TODO(das): what slot to consider here?
+            sampling_subnets: self.get_sampling_subnets(block_slot),
         }
+    }
+
+    pub fn get_sampling_subnets(&self, block_slot: Slot) -> &[DataColumnSubnetId] {
+        self.all_sampling_subnets
+            .get(0..self.cgc(block_slot) as usize)
+            .expect("cgc is always less than number_of_custody_groups")
+    }
+
+    pub fn get_sampling_columns(&self, block_slot: Slot) -> &[ColumnIndex] {
+        self.all_sampling_columns
+            // TODO(das): convert cgc to column count
+            .get(0..self.cgc(block_slot) as usize)
+            .expect("cgc is always less than number_of_custody_groups")
+    }
+
+    fn cgc(&self, _block_slot: Slot) -> u64 {
+        // TODO(das): depends on block_slot?
+        todo!();
     }
 
     /// TESTING ONLY. Build a dummy NetworkGlobals instance.
@@ -221,7 +237,17 @@ impl<E: EthSpec> NetworkGlobals<E> {
         let keypair = libp2p::identity::secp256k1::Keypair::generate();
         let enr_key: discv5::enr::CombinedKey = discv5::enr::CombinedKey::from_secp256k1(&keypair);
         let enr = discv5::enr::Enr::builder().build(&enr_key).unwrap();
-        NetworkGlobals::new(enr, metadata, trusted_peers, false, log, config, spec)
+        NetworkGlobals::new(
+            enr,
+            metadata,
+            trusted_peers,
+            false,
+            log,
+            config,
+            spec,
+            // TODO(das): is it okay to default to zero here?
+            Arc::new(Mutex::new(0)),
+        )
     }
 }
 

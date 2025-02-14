@@ -3965,7 +3965,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         match self.get_blobs_or_columns_store_op(
             block_root,
-            signed_block.epoch(),
+            signed_block.slot(),
             blobs,
             data_columns,
             data_column_recv,
@@ -6249,6 +6249,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         Ok(Some(head_root))
     }
 
+    /// Register a validator as connected to this beacon node
+    pub fn register_validator(self: &Arc<Self>, validator_index: u64) {
+        self.validator_monitor
+            .write()
+            .auto_register_local_validator(validator_index);
+
+        self.data_availability_checker
+            .register_validator(validator_index);
+    }
+
     pub async fn update_execution_engine_forkchoice(
         self: &Arc<Self>,
         current_slot: Slot,
@@ -7221,15 +7231,20 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     fn get_blobs_or_columns_store_op(
         &self,
         block_root: Hash256,
-        block_epoch: Epoch,
+        block_slot: Slot,
         blobs: Option<BlobSidecarList<T::EthSpec>>,
         data_columns: Option<DataColumnSidecarList<T::EthSpec>>,
         data_column_recv: Option<oneshot::Receiver<DataColumnSidecarList<T::EthSpec>>>,
     ) -> Result<Option<StoreOp<T::EthSpec>>, String> {
-        if self.spec.is_peer_das_enabled_for_epoch(block_epoch) {
+        if self
+            .spec
+            .is_peer_das_enabled_for_epoch(block_slot.epoch(T::EthSpec::slots_per_epoch()))
+        {
             // TODO(das) we currently store all subnet sampled columns. Tracking issue to exclude non
             // custody columns: https://github.com/sigp/lighthouse/issues/6465
-            let custody_columns_count = self.data_availability_checker.get_sampling_column_count();
+            let custody_columns_count = self
+                .data_availability_checker
+                .get_sampling_column_count(block_slot);
 
             let custody_columns_available = data_columns
                 .as_ref()

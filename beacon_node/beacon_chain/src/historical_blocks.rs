@@ -90,15 +90,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             );
         }
 
-        if blocks_to_import.is_empty() {
+        let first_block_slot = if let Some(first_block) = blocks_to_import.first() {
+            first_block.block().slot()
+        } else {
+            // empty blocks to import
             return Ok(0);
-        }
+        };
 
         // Blobs are stored per block, and data columns are each stored individually
         let n_blob_ops_per_block = if self.spec.is_peer_das_scheduled() {
             // TODO(das): `available_block includes all sampled columns, but we only need to store
             // custody columns. To be clarified in spec PR.
-            self.data_availability_checker.get_sampling_column_count()
+            self.data_availability_checker
+                .get_sampling_column_count(first_block_slot)
         } else {
             1
         };

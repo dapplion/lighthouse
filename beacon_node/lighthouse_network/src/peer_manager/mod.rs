@@ -105,7 +105,7 @@ pub struct PeerManager<E: EthSpec> {
     /// committee subnet peers.
     sync_committee_subnets: HashMap<SyncSubnetId, Instant>,
     /// A mapping of all custody groups to column subnets to avoid re-computation.
-    subnets_by_custody_group: HashMap<u64, Vec<DataColumnSubnetId>>,
+    subnets_by_custody_group_cache: HashMap<u64, Vec<DataColumnSubnetId>>,
     /// The heartbeat interval to perform routine maintenance.
     heartbeat: tokio::time::Interval,
     /// Keeps track of whether the discovery service is enabled or not.
@@ -166,7 +166,7 @@ impl<E: EthSpec> PeerManager<E> {
         let heartbeat = tokio::time::interval(tokio::time::Duration::from_secs(HEARTBEAT_INTERVAL));
 
         // Compute subnets for all custody groups
-        let subnets_by_custody_group = if network_globals.spec.is_peer_das_scheduled() {
+        let subnets_by_custody_group_cache = if network_globals.spec.is_peer_das_scheduled() {
             (0..network_globals.spec.number_of_custody_groups)
                 .map(|custody_index| {
                     let subnets =
@@ -190,7 +190,7 @@ impl<E: EthSpec> PeerManager<E> {
             target_peers: target_peer_count,
             temporary_banned_peers: LRUTimeCache::new(PEER_RECONNECTION_TIMEOUT),
             sync_committee_subnets: Default::default(),
-            subnets_by_custody_group,
+            subnets_by_custody_group_cache,
             heartbeat,
             discovery_enabled,
             metrics_enabled,
@@ -744,7 +744,7 @@ impl<E: EthSpec> PeerManager<E> {
                             let custody_subnets = custody_groups
                                 .into_iter()
                                 .flat_map(|custody_index| {
-                                    self.subnets_by_custody_group
+                                    self.subnets_by_custody_group_cache
                                         .get(&custody_index)
                                         .cloned()
                                         .unwrap_or_else(|| {

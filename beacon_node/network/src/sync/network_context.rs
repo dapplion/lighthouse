@@ -384,7 +384,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         let (expects_columns, data_column_requests) =
             if matches!(batch_type, ByRangeRequestType::BlocksAndColumns) {
-                let column_indexes = self.network_globals().sampling_columns.clone();
+                let column_indexes = self
+                    .network_globals()
+                    .get_sampling_columns(Slot::new(*request.start_slot()))
+                    .to_vec();
 
                 let data_column_requests = self
                     .make_columns_by_range_requests(request, &column_indexes)?
@@ -399,7 +402,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     .collect::<Result<Vec<_>, _>>()?;
 
                 (
-                    Some(column_indexes.into_iter().collect::<Vec<_>>()),
+                    Some(column_indexes.iter().copied().collect::<Vec<_>>()),
                     Some(data_column_requests),
                 )
             } else {
@@ -420,7 +423,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     fn make_columns_by_range_requests(
         &self,
         request: BlocksByRangeRequest,
-        custody_indexes: &HashSet<ColumnIndex>,
+        custody_indexes: &[ColumnIndex],
     ) -> Result<HashMap<PeerId, DataColumnsByRangeRequest>, RpcRequestSendError> {
         let mut peer_id_to_request_map = HashMap::new();
 
@@ -712,6 +715,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         &mut self,
         lookup_id: SingleLookupId,
         block_root: Hash256,
+        block_slot: Slot,
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Result<LookupRequestResult, RpcRequestSendError> {
         let custody_indexes_imported = self
@@ -723,10 +727,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         // Include only the blob indexes not yet imported (received through gossip)
         let custody_indexes_to_fetch = self
             .network_globals()
-            .sampling_columns
-            .clone()
+            .get_sampling_columns(block_slot)
             .into_iter()
             .filter(|index| !custody_indexes_imported.contains(index))
+            .copied()
             .collect::<Vec<_>>();
 
         if custody_indexes_to_fetch.is_empty() {

@@ -223,7 +223,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     );
                 } else if cx.chain.should_fetch_custody_columns(block_epoch) {
                     self.component_requests = ComponentRequests::ActiveCustodyRequest(
-                        CustodyRequestState::new(self.block_root),
+                        CustodyRequestState::new(self.block_root, block.slot()),
                     );
                 } else {
                     self.component_requests = ComponentRequests::NotNeeded("outside da window");
@@ -380,13 +380,15 @@ impl<E: EthSpec> BlobRequestState<E> {
 pub struct CustodyRequestState<E: EthSpec> {
     #[derivative(Debug = "ignore")]
     pub block_root: Hash256,
+    pub block_slot: Slot,
     pub state: SingleLookupRequestState<DataColumnSidecarList<E>>,
 }
 
 impl<E: EthSpec> CustodyRequestState<E> {
-    pub fn new(block_root: Hash256) -> Self {
+    pub fn new(block_root: Hash256, block_slot: Slot) -> Self {
         Self {
             block_root,
+            block_slot,
             state: SingleLookupRequestState::new(),
         }
     }

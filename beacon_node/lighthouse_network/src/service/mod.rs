@@ -725,10 +725,18 @@ impl<E: EthSpec> Network<E> {
             }
         }
 
+        let fork_epoch = self
+            .fork_context
+            .spec
+            .fork_epoch(new_fork)
+            .expect("If new_fork is activating now, it must have a fork_epoch in the spec");
+
         // Subscribe to core topics for the new fork
         for kind in core_topics_to_subscribe::<E>(
             new_fork,
-            &self.network_globals.as_topic_config(),
+            &self
+                .network_globals
+                .as_topic_config(fork_epoch.start_slot(E::slots_per_epoch())),
             &self.fork_context.spec,
         ) {
             let topic = GossipTopic::new(kind, GossipEncoding::default(), new_fork_digest);

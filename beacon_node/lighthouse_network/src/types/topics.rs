@@ -1,6 +1,5 @@
 use gossipsub::{IdentTopic as Topic, TopicHash};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use strum::AsRefStr;
 use types::{ChainSpec, DataColumnSubnetId, EthSpec, ForkName, SubnetId, SyncSubnetId, Unsigned};
 
@@ -30,7 +29,7 @@ pub struct TopicConfig<'a> {
     pub enable_light_client_server: bool,
     pub subscribe_all_subnets: bool,
     pub subscribe_all_data_column_subnets: bool,
-    pub sampling_subnets: &'a HashSet<DataColumnSubnetId>,
+    pub sampling_subnets: &'a [DataColumnSubnetId],
 }
 
 /// Returns all the topics the node should subscribe at `fork_name`
@@ -121,7 +120,7 @@ pub fn is_fork_non_core_topic(topic: &GossipTopic, _fork_name: ForkName) -> bool
 
 pub fn all_topics_at_fork<E: EthSpec>(fork: ForkName, spec: &ChainSpec) -> Vec<GossipKind> {
     // Compute the worst case of all forks
-    let sampling_subnets = HashSet::from_iter(spec.all_data_column_sidecar_subnets());
+    let sampling_subnets = spec.all_data_column_sidecar_subnets().collect::<Vec<_>>();
     let opts = TopicConfig {
         enable_light_client_server: true,
         subscribe_all_subnets: true,

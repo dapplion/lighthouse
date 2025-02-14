@@ -17,7 +17,7 @@ use types::blob_sidecar::BlobIdentifier;
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnIdentifier, DataColumnSidecar,
     DataColumnSidecarList, Epoch, EthSpec, Hash256, RuntimeFixedVector, RuntimeVariableList,
-    SignedBeaconBlock,
+    SignedBeaconBlock, Slot,
 };
 
 /// This represents the components of a partially available block
@@ -394,8 +394,16 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         })
     }
 
-    pub fn sampling_column_count(&self) -> usize {
+    pub fn get_sampling_column_count(&self, _block_slot: Slot) -> usize {
         self.sampling_column_count
+    }
+
+    pub(crate) fn is_supernode(&self, block_slot: Slot) -> bool {
+        self.get_sampling_column_count(block_slot) == self.spec.number_of_columns as usize
+    }
+
+    pub fn register_validator(&self, _validator_index: u64) {
+        todo!();
     }
 
     /// Returns true if the block root is known, without altering the LRU ordering
@@ -586,21 +594,28 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         };
 
         // If we're sampling all columns, it means we must be custodying all columns.
-        let custody_column_count = self.sampling_column_count();
         let total_column_count = self.spec.number_of_columns as usize;
         let received_column_count = pending_components.verified_data_columns.len();
 
         if pending_components.reconstruction_started {
             return ReconstructColumnsDecision::No("already started");
         }
-        if custody_column_count != total_column_count {
-            return ReconstructColumnsDecision::No("not required for full node");
-        }
         if received_column_count >= total_column_count {
             return ReconstructColumnsDecision::No("all columns received");
         }
         if received_column_count < total_column_count / 2 {
             return ReconstructColumnsDecision::No("not enough columns");
+        }
+
+        let block_slot =
+            if let Some(first_column) = pending_components.verified_data_columns.first() {
+                first_column.as_data_column().slot()
+            } else {
+                return ReconstructColumnsDecision::No("zero columns");
+            };
+
+        if !self.is_supernode(block_slot) {
+            return ReconstructColumnsDecision::No("not required for full node");
         }
 
         pending_components.reconstruction_started = true;
