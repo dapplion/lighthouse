@@ -169,7 +169,6 @@ impl<E: EthSpec> PendingComponents<E> {
     /// reconstructed from disk. Ensure you are not holding any write locks while calling this.
     pub fn make_available<R>(
         &mut self,
-        custody_column_count: usize,
         spec: &Arc<ChainSpec>,
         recover: R,
     ) -> Result<Option<AvailableExecutedBlock<E>>, AvailabilityCheckError>
@@ -188,7 +187,15 @@ impl<E: EthSpec> PendingComponents<E> {
         let available_data = if num_expected_blobs == 0 {
             Some(AvailableBlockData::NoData)
         } else if spec.is_peer_das_enabled_for_epoch(block.epoch()) {
-            match self.verified_data_columns.len().cmp(&custody_column_count) {
+            let Some(first_column) = self.verified_data_columns.first() else {
+                // We have zero columns, and we are always expecting > 0
+                return Ok(None);
+            };
+            match self
+                .verified_data_columns
+                .len()
+                .cmp(&first_column.custody_column_count())
+            {
                 Ordering::Greater => {
                     // Should never happen
                     return Err(AvailabilityCheckError::Unexpected("too many columns"));
@@ -317,14 +324,14 @@ impl<E: EthSpec> PendingComponents<E> {
             })
     }
 
-    pub fn status_str(
-        &self,
-        block_epoch: Epoch,
-        sampling_column_count: usize,
-        spec: &ChainSpec,
-    ) -> String {
+    pub fn status_str(&self, block_epoch: Epoch, spec: &ChainSpec) -> String {
         let block_count = if self.executed_block.is_some() { 1 } else { 0 };
         if spec.is_peer_das_enabled_for_epoch(block_epoch) {
+            let expected = if let Some(first_column) = self.verified_data_columns.first() {
+                first_column.custody_column_count().to_string()
+            } else {
+                "-".to_owned()
+            };
             let data_column_recv_count = if self.data_column_recv.is_some() {
                 1
             } else {
@@ -334,7 +341,7 @@ impl<E: EthSpec> PendingComponents<E> {
                 "block {} data_columns {}/{} data_columns_recv {}",
                 block_count,
                 self.verified_data_columns.len(),
-                sampling_column_count,
+                expected,
                 data_column_recv_count,
             )
         } else {
@@ -361,8 +368,6 @@ pub struct DataAvailabilityCheckerInner<T: BeaconChainTypes> {
     /// This cache holds a limited number of states in memory and reconstructs them
     /// from disk when necessary. This is necessary until we merge tree-states
     state_cache: StateLRUCache<T>,
-    /// The number of data columns the node is sampling via subnet sampling.
-    sampling_column_count: usize,
     spec: Arc<ChainSpec>,
 }
 
@@ -379,19 +384,13 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
     pub fn new(
         capacity: NonZeroUsize,
         beacon_store: BeaconStore<T>,
-        sampling_column_count: usize,
         spec: Arc<ChainSpec>,
     ) -> Result<Self, AvailabilityCheckError> {
         Ok(Self {
             critical: RwLock::new(LruCache::new(capacity)),
             state_cache: StateLRUCache::new(beacon_store, spec.clone()),
-            sampling_column_count,
             spec,
         })
-    }
-
-    pub fn sampling_column_count(&self) -> usize {
-        self.sampling_column_count
     }
 
     /// Returns true if the block root is known, without altering the LRU ordering
@@ -493,14 +492,12 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         debug!(log, "Component added to data availability checker";
             "component" => "blobs",
             "block_root" => ?block_root,
-            "status" => pending_components.status_str(epoch, self.sampling_column_count, &self.spec),
+            "status" => pending_components.status_str(epoch,  &self.spec),
         );
 
-        if let Some(available_block) =
-            pending_components.make_available(self.sampling_column_count, &self.spec, |block| {
-                self.state_cache.recover_pending_executed_block(block)
-            })?
-        {
+        if let Some(available_block) = pending_components.make_available(&self.spec, |block| {
+            self.state_cache.recover_pending_executed_block(block)
+        })? {
             // We keep the pending components in the availability cache during block import (#5845).
             // `data_column_recv` is returned as part of the available block and is no longer needed here.
             write_lock.put(block_root, pending_components);
@@ -546,14 +543,12 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         debug!(log, "Component added to data availability checker";
             "component" => "data_columns",
             "block_root" => ?block_root,
-            "status" => pending_components.status_str(epoch, self.sampling_column_count, &self.spec),
+            "status" => pending_components.status_str(epoch,  &self.spec),
         );
 
-        if let Some(available_block) =
-            pending_components.make_available(self.sampling_column_count, &self.spec, |block| {
-                self.state_cache.recover_pending_executed_block(block)
-            })?
-        {
+        if let Some(available_block) = pending_components.make_available(&self.spec, |block| {
+            self.state_cache.recover_pending_executed_block(block)
+        })? {
             // We keep the pending components in the availability cache during block import (#5845).
             // `data_column_recv` is returned as part of the available block and is no longer needed here.
             write_lock.put(block_root, pending_components);
@@ -596,14 +591,12 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         debug!(log, "Component added to data availability checker";
             "component" => "data_columns_recv",
             "block_root" => ?block_root,
-            "status" => pending_components.status_str(block_epoch, self.sampling_column_count, &self.spec),
+            "status" => pending_components.status_str(block_epoch,  &self.spec),
         );
 
-        if let Some(available_block) =
-            pending_components.make_available(self.sampling_column_count, &self.spec, |block| {
-                self.state_cache.recover_pending_executed_block(block)
-            })?
-        {
+        if let Some(available_block) = pending_components.make_available(&self.spec, |block| {
+            self.state_cache.recover_pending_executed_block(block)
+        })? {
             // We keep the pending components in the availability cache during block import (#5845).
             // `data_column_recv` is returned as part of the available block and is no longer needed here.
             write_lock.put(block_root, pending_components);
@@ -635,19 +628,16 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         };
 
         // If we're sampling all columns, it means we must be custodying all columns.
-        let custody_column_count = self.sampling_column_count();
         let total_column_count = self.spec.number_of_columns as usize;
         let received_column_count = pending_components.verified_data_columns.len();
 
         if pending_components.reconstruction_started {
             return ReconstructColumnsDecision::No("already started");
         }
-        if custody_column_count != total_column_count {
-            return ReconstructColumnsDecision::No("not required for full node");
-        }
         if received_column_count >= total_column_count {
             return ReconstructColumnsDecision::No("all columns received");
         }
+        // Only supernodes receive >= 50% of columns
         if received_column_count < total_column_count / 2 {
             return ReconstructColumnsDecision::No("not enough columns");
         }
@@ -696,15 +686,13 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         debug!(log, "Component added to data availability checker";
             "component" => "block",
             "block_root" => ?block_root,
-            "status" => pending_components.status_str(epoch, self.sampling_column_count, &self.spec),
+            "status" => pending_components.status_str(epoch,  &self.spec),
         );
 
         // Check if we have all components and entire set is consistent.
-        if let Some(available_block) =
-            pending_components.make_available(self.sampling_column_count, &self.spec, |block| {
-                self.state_cache.recover_pending_executed_block(block)
-            })?
-        {
+        if let Some(available_block) = pending_components.make_available(&self.spec, |block| {
+            self.state_cache.recover_pending_executed_block(block)
+        })? {
             // We keep the pending components in the availability cache during block import (#5845).
             // `data_column_recv` is returned as part of the available block and is no longer needed here.
             write_lock.put(block_root, pending_components);

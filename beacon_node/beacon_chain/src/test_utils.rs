@@ -913,6 +913,10 @@ where
         state.get_block_root(slot).unwrap() == state.get_block_root(slot - 1).unwrap()
     }
 
+    fn get_sampling_column_count(&self) -> usize {
+        todo!();
+    }
+
     pub async fn make_blinded_block(
         &self,
         state: BeaconState<E>,
@@ -2390,10 +2394,7 @@ where
         blob_items: Option<(KzgProofs<E>, BlobsList<E>)>,
     ) -> Result<RpcBlock<E>, BlockError> {
         Ok(if self.spec.is_peer_das_enabled_for_epoch(block.epoch()) {
-            let sampling_column_count = self
-                .chain
-                .data_availability_checker
-                .get_sampling_column_count();
+            let sampling_column_count = self.get_sampling_column_count();
 
             if blob_items.is_some_and(|(_, blobs)| !blobs.is_empty()) {
                 // Note: this method ignores the actual custody columns and just take the first
@@ -3105,10 +3106,7 @@ where
         let is_peerdas_enabled = self.chain.spec.is_peer_das_enabled_for_epoch(block.epoch());
         if is_peerdas_enabled {
             let custody_columns = custody_columns_opt.unwrap_or_else(|| {
-                let sampling_column_count = self
-                    .chain
-                    .data_availability_checker
-                    .get_sampling_column_count() as u64;
+                let sampling_column_count = self.get_sampling_column_count() as u64;
                 (0..sampling_column_count).collect()
             });
 

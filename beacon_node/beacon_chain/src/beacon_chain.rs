@@ -7226,7 +7226,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     ) -> Result<Option<StoreOp<T::EthSpec>>, String> {
         // TODO(das) we currently store all subnet sampled columns. Tracking issue to exclude non
         // custody columns: https://github.com/sigp/lighthouse/issues/6465
-        let _custody_columns_count = self.data_availability_checker.get_sampling_column_count();
 
         match block_data {
             AvailableBlockData::NoData => Ok(None),

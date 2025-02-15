@@ -184,6 +184,10 @@ impl<E: EthSpec> NetworkGlobals<E> {
             .collect::<Vec<_>>()
     }
 
+    pub fn is_supernode(&self) -> bool {
+        todo!();
+    }
+
     /// Returns the TopicConfig to compute the set of Gossip topics for a given fork
     pub fn as_topic_config(&self) -> TopicConfig {
         TopicConfig {

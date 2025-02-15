@@ -112,22 +112,10 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         slot_clock: T::SlotClock,
         kzg: Arc<Kzg>,
         store: BeaconStore<T>,
-        import_all_data_columns: bool,
         spec: Arc<ChainSpec>,
         log: Logger,
     ) -> Result<Self, AvailabilityCheckError> {
-        let custody_group_count = spec.custody_group_count(import_all_data_columns);
-        // This should only panic if the chain spec contains invalid values.
-        let sampling_size = spec
-            .sampling_size(custody_group_count)
-            .expect("should compute node sampling size from valid chain spec");
-
-        let inner = DataAvailabilityCheckerInner::new(
-            OVERFLOW_LRU_CAPACITY,
-            store,
-            sampling_size as usize,
-            spec.clone(),
-        )?;
+        let inner = DataAvailabilityCheckerInner::new(OVERFLOW_LRU_CAPACITY, store, spec.clone())?;
         Ok(Self {
             availability_cache: Arc::new(inner),
             slot_clock,
@@ -135,14 +123,6 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
             spec,
             log,
         })
-    }
-
-    pub fn get_sampling_column_count(&self) -> usize {
-        self.availability_cache.sampling_column_count()
-    }
-
-    pub(crate) fn is_supernode(&self) -> bool {
-        self.get_sampling_column_count() == self.spec.number_of_columns as usize
     }
 
     /// Checks if the block root is currenlty in the availability cache awaiting import because

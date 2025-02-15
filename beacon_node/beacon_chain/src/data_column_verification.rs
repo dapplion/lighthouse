@@ -346,6 +346,10 @@ impl<E: EthSpec> KzgVerifiedCustodyDataColumn<E> {
             .collect::<Vec<_>>())
     }
 
+    pub fn custody_column_count(&self) -> usize {
+        todo!();
+    }
+
     pub fn into_inner(self) -> Arc<DataColumnSidecar<E>> {
         self.data
     }
