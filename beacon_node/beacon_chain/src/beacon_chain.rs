@@ -24,7 +24,9 @@ use crate::data_availability_checker::{
     Availability, AvailabilityCheckError, AvailableBlock, AvailableBlockData,
     DataAvailabilityChecker, DataColumnReconstructionResult,
 };
-use crate::data_column_verification::{GossipDataColumnError, GossipVerifiedDataColumn};
+use crate::data_column_verification::{
+    CustodyDataColumnList, GossipDataColumnError, GossipVerifiedDataColumn,
+};
 use crate::early_attester_cache::EarlyAttesterCache;
 use crate::errors::{BeaconChainError as Error, BlockProductionError};
 use crate::eth1_chain::{Eth1Chain, Eth1ChainBackend};
@@ -3098,6 +3100,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 slot,
                 block_root,
                 data_columns,
+                custody_column_count,
                 publish_fn,
             )
             .await;
@@ -3209,7 +3212,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// imported or errors.
     pub async fn process_rpc_custody_columns(
         self: &Arc<Self>,
-        custody_columns: DataColumnSidecarList<T::EthSpec>,
+        custody_columns: CustodyDataColumnList<T::EthSpec>,
     ) -> Result<AvailabilityProcessingStatus, BlockError> {
         let Ok((slot, block_root)) = custody_columns
             .iter()
@@ -3579,6 +3582,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         slot: Slot,
         block_root: Hash256,
         data_columns: Vec<GossipVerifiedDataColumn<T>>,
+        custody_column_count: usize,
         publish_fn: impl FnOnce() -> Result<(), BlockError>,
     ) -> Result<AvailabilityProcessingStatus, BlockError> {
         if let Some(slasher) = self.slasher.as_ref() {
@@ -3587,9 +3591,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             }
         }
 
-        let availability = self
-            .data_availability_checker
-            .put_gossip_data_columns(block_root, data_columns)?;
+        let availability = self.data_availability_checker.put_gossip_data_columns(
+            block_root,
+            data_columns,
+            custody_column_count,
+        )?;
 
         self.process_availability(slot, availability, publish_fn)
             .await
@@ -3664,7 +3670,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         self: &Arc<Self>,
         slot: Slot,
         block_root: Hash256,
-        custody_columns: DataColumnSidecarList<T::EthSpec>,
+        custody_columns: CustodyDataColumnList<T::EthSpec>,
     ) -> Result<AvailabilityProcessingStatus, BlockError> {
         // Need to scope this to ensure the lock is dropped before calling `process_availability`
         // Even an explicit drop is not enough to convince the borrow checker.
@@ -3672,7 +3678,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             let mut slashable_cache = self.observed_slashable.write();
             // Assumes all items in custody_columns are for the same block_root
             if let Some(column) = custody_columns.first() {
-                let header = &column.signed_block_header;
+                let header = &column.as_data_column().signed_block_header;
                 if verify_header_signature::<T, BlockError>(self, header).is_ok() {
                     slashable_cache
                         .observe_slashable(

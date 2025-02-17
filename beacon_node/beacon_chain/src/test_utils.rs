@@ -2376,7 +2376,7 @@ where
             let columns = self.chain.get_data_columns(&block_root).unwrap().unwrap();
             let custody_columns = columns
                 .into_iter()
-                .map(CustodyDataColumn::from_asserted_custody)
+                .map(|c| CustodyDataColumn::from_asserted_custody(c, todo!()))
                 .collect::<Vec<_>>();
             RpcBlock::new_with_custody_columns(Some(block_root), block, custody_columns, &self.spec)
                 .unwrap()
@@ -2403,7 +2403,7 @@ where
                 let columns = generate_data_column_sidecars_from_block(&block, &self.spec)
                     .into_iter()
                     .take(sampling_column_count)
-                    .map(CustodyDataColumn::from_asserted_custody)
+                    .map(|c| CustodyDataColumn::from_asserted_custody(c, sampling_column_count))
                     .collect::<Vec<_>>();
                 RpcBlock::new_with_custody_columns(Some(block_root), block, columns, &self.spec)?
             } else {

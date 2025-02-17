@@ -168,6 +168,7 @@ impl From<BeaconStateError> for GossipDataColumnError {
 pub struct GossipVerifiedDataColumn<T: BeaconChainTypes, O: ObservationStrategy = Observe> {
     block_root: Hash256,
     data_column: KzgVerifiedDataColumn<T::EthSpec>,
+    custody_column_count: usize,
     _phantom: PhantomData<O>,
 }
 
@@ -270,18 +271,28 @@ impl<E: EthSpec> KzgVerifiedDataColumn<E> {
 pub type CustodyDataColumnList<E> = RuntimeVariableList<CustodyDataColumn<E>>;
 
 /// Data column that we must custody
-#[derive(Debug, Derivative, Clone, Encode, Decode)]
+#[derive(Debug, Derivative, Clone)]
 #[derivative(PartialEq, Eq, Hash(bound = "E: EthSpec"))]
-#[ssz(struct_behaviour = "transparent")]
 pub struct CustodyDataColumn<E: EthSpec> {
     data: Arc<DataColumnSidecar<E>>,
+    custody_column_count: usize,
 }
 
 impl<E: EthSpec> CustodyDataColumn<E> {
     /// Mark a column as custody column. Caller must ensure that our current custody requirements
     /// include this column
-    pub fn from_asserted_custody(data: Arc<DataColumnSidecar<E>>) -> Self {
-        Self { data }
+    pub fn from_asserted_custody(
+        data: Arc<DataColumnSidecar<E>>,
+        custody_column_count: usize,
+    ) -> Self {
+        Self {
+            data,
+            custody_column_count,
+        }
+    }
+
+    pub fn custody_column_count(&self) -> usize {
+        todo!();
     }
 
     pub fn into_inner(self) -> Arc<DataColumnSidecar<E>> {
@@ -300,27 +311,36 @@ impl<E: EthSpec> CustodyDataColumn<E> {
 }
 
 /// Data column that we must custody and has completed kzg verification
-#[derive(Debug, Derivative, Clone, Encode, Decode)]
+#[derive(Debug, Derivative, Clone)]
 #[derivative(PartialEq, Eq)]
-#[ssz(struct_behaviour = "transparent")]
 pub struct KzgVerifiedCustodyDataColumn<E: EthSpec> {
     data: Arc<DataColumnSidecar<E>>,
+    custody_column_count: usize,
 }
 
 impl<E: EthSpec> KzgVerifiedCustodyDataColumn<E> {
     /// Mark a column as custody column. Caller must ensure that our current custody requirements
     /// include this column
-    pub fn from_asserted_custody(kzg_verified: KzgVerifiedDataColumn<E>) -> Self {
+    pub fn from_asserted_custody(
+        kzg_verified: KzgVerifiedDataColumn<E>,
+        custody_column_count: usize,
+    ) -> Self {
         Self {
             data: kzg_verified.to_data_column(),
+            custody_column_count,
         }
     }
 
     /// Verify a column already marked as custody column
-    pub fn new(data_column: CustodyDataColumn<E>, kzg: &Kzg) -> Result<Self, KzgError> {
+    pub fn new(
+        data_column: CustodyDataColumn<E>,
+        kzg: &Kzg,
+        custody_column_count: usize,
+    ) -> Result<Self, KzgError> {
         verify_kzg_for_data_column(data_column.clone_arc(), kzg)?;
         Ok(Self {
             data: data_column.data,
+            custody_column_count,
         })
     }
 
@@ -338,12 +358,27 @@ impl<E: EthSpec> KzgVerifiedCustodyDataColumn<E> {
             spec,
         )?;
 
+        let custody_column_count = partial_set_of_columns
+            .first()
+            .expect("must not be empty")
+            .custody_column_count();
+
         Ok(all_data_columns
             .into_iter()
             .map(|data| {
-                KzgVerifiedCustodyDataColumn::from_asserted_custody(KzgVerifiedDataColumn { data })
+                KzgVerifiedCustodyDataColumn::from_asserted_custody(
+                    KzgVerifiedDataColumn { data },
+                    custody_column_count,
+                )
             })
             .collect::<Vec<_>>())
+    }
+
+    pub fn from_batch(
+        _data_columns: CustodyDataColumnList<E>,
+        _kzg: &Kzg,
+    ) -> Result<Vec<Self>, Vec<(ColumnIndex, KzgError)>> {
+        todo!();
     }
 
     pub fn custody_column_count(&self) -> usize {

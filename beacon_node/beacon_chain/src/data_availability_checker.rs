@@ -27,8 +27,8 @@ mod overflow_lru_cache;
 mod state_lru_cache;
 
 use crate::data_column_verification::{
-    verify_kzg_for_data_column_list_with_scoring, CustodyDataColumn, GossipVerifiedDataColumn,
-    KzgVerifiedCustodyDataColumn, KzgVerifiedDataColumn,
+    verify_kzg_for_data_column_list_with_scoring, CustodyDataColumn, CustodyDataColumnList,
+    GossipVerifiedDataColumn, KzgVerifiedCustodyDataColumn, KzgVerifiedDataColumn,
 };
 use crate::metrics::{
     KZG_DATA_COLUMN_RECONSTRUCTION_ATTEMPTS, KZG_DATA_COLUMN_RECONSTRUCTION_FAILURES,
@@ -207,16 +207,12 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
     pub fn put_rpc_custody_columns(
         &self,
         block_root: Hash256,
-        custody_columns: DataColumnSidecarList<T::EthSpec>,
+        custody_columns: CustodyDataColumnList<T::EthSpec>,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
         // Attributes fault to the specific peer that sent an invalid column
-        let kzg_verified_columns = KzgVerifiedDataColumn::from_batch(custody_columns, &self.kzg)
-            .map_err(AvailabilityCheckError::InvalidColumn)?;
-
-        let verified_custody_columns = kzg_verified_columns
-            .into_iter()
-            .map(KzgVerifiedCustodyDataColumn::from_asserted_custody)
-            .collect::<Vec<_>>();
+        let verified_custody_columns =
+            KzgVerifiedCustodyDataColumn::from_batch(custody_columns, &self.kzg)
+                .map_err(AvailabilityCheckError::InvalidColumn)?;
 
         self.availability_cache.put_kzg_verified_data_columns(
             block_root,
@@ -283,10 +279,16 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         &self,
         block_root: Hash256,
         gossip_data_columns: Vec<GossipVerifiedDataColumn<T>>,
+        custody_column_count: usize,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
         let custody_columns = gossip_data_columns
             .into_iter()
-            .map(|c| KzgVerifiedCustodyDataColumn::from_asserted_custody(c.into_inner()))
+            .map(|c| {
+                KzgVerifiedCustodyDataColumn::from_asserted_custody(
+                    c.into_inner(),
+                    custody_column_count,
+                )
+            })
             .collect::<Vec<_>>();
 
         self.availability_cache.put_kzg_verified_data_columns(
