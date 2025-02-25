@@ -11,7 +11,7 @@ use std::sync::Arc;
 use types::data_column_custody_group::{
     compute_columns_for_custody_group, compute_subnets_from_custody_group, get_custody_groups,
 };
-use types::{ChainSpec, ColumnIndex, DataColumnSubnetId, EthSpec};
+use types::{ChainSpec, ColumnIndex, DataColumnSubnetId, Epoch, EthSpec};
 
 pub struct NetworkGlobals<E: EthSpec> {
     /// The current local ENR.
@@ -33,6 +33,8 @@ pub struct NetworkGlobals<E: EthSpec> {
     /// The computed sampling subnets and columns is stored to avoid re-computing.
     pub sampling_subnets: HashSet<DataColumnSubnetId>,
     pub sampling_columns: HashSet<ColumnIndex>,
+    /// List of updates of CGC value
+    cgc_updates: RwLock<Vec<(Epoch, u64)>>,
     /// Network-related configuration. Immutable after initialization.
     pub config: Arc<NetworkConfig>,
     /// Ethereum chain configuration. Immutable after initialization.
@@ -102,6 +104,8 @@ impl<E: EthSpec> NetworkGlobals<E> {
             backfill_state: RwLock::new(BackFillState::Paused),
             sampling_subnets,
             sampling_columns,
+            // TODO(das): populate with the updates persisted in disk
+            cgc_updates: RwLock::new(vec![]),
             config,
             spec,
         }
@@ -151,6 +155,21 @@ impl<E: EthSpec> NetworkGlobals<E> {
     /// Returns the current backfill state.
     pub fn backfill_state(&self) -> BackFillState {
         self.backfill_state.read().clone()
+    }
+
+    /// Returns the custody group count at a given epoch
+    pub fn custody_group_count(&self, requested_epoch: Epoch) -> u64 {
+        for (epoch, cgc) in self.cgc_updates.read().iter() {
+            if requested_epoch > *epoch {
+                return *cgc;
+            }
+        }
+        // TODO: Should ensure there's always at least one update, or return the initial CGC
+        todo!();
+    }
+
+    pub fn insert_cgc_update(&self, epoch: Epoch, cgc: u64) {
+        self.cgc_updates.write().push((epoch, cgc));
     }
 
     /// Returns a `Client` type if one is known for the `PeerId`.

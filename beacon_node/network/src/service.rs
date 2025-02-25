@@ -24,6 +24,7 @@ use lighthouse_network::{
     types::{core_topics_to_subscribe, GossipEncoding, GossipTopic},
     MessageId, NetworkEvent, NetworkGlobals, PeerId,
 };
+use lru_cache::LRUTimeCache;
 use slog::{crit, debug, error, info, o, trace, warn};
 use std::collections::BTreeSet;
 use std::{collections::HashSet, pin::Pin, sync::Arc, time::Duration};
@@ -32,6 +33,7 @@ use strum::IntoStaticStr;
 use task_executor::ShutdownReason;
 use tokio::sync::mpsc;
 use tokio::time::Sleep;
+use types::Epoch;
 use types::{
     ChainSpec, EthSpec, ForkContext, Slot, SubnetId, SyncCommitteeSubscription, SyncSubnetId,
     Unsigned, ValidatorSubscription,
@@ -48,6 +50,10 @@ const UNSUBSCRIBE_DELAY_EPOCHS: u64 = 2;
 /// Size of the queue for validator subnet subscriptions. The number is chosen so that we may be
 /// able to run tens of thousands of validators on one BN.
 const VALIDATOR_SUBSCRIPTION_MESSAGE_QUEUE_SIZE: usize = 65_536;
+/// The interval (in seconds) that the network service will re-calculate the CGC
+const CGC_UPDATE_INTERVAL_SECONDS: u64 = 60;
+/// Time a validator is retained in the known validators cache
+const VALIDATOR_REGISTRATION_EXPIRY_SECONDS: u64 = 60 * 60;
 
 /// Types of messages that the network service can receive.
 #[derive(Debug, IntoStaticStr)]
@@ -164,6 +170,8 @@ pub struct NetworkService<T: BeaconChainTypes> {
     libp2p: Network<T::EthSpec>,
     /// An attestation and sync committee subnet manager service.
     subnet_service: SubnetService<T>,
+    /// Cache of known validators that have interacted with this node
+    known_validators: LRUTimeCache<u64>,
     /// The receiver channel for lighthouse to communicate with the network service.
     network_recv: mpsc::UnboundedReceiver<NetworkMessage<T::EthSpec>>,
     /// The receiver channel for lighthouse to send validator subscription requests.
@@ -189,6 +197,8 @@ pub struct NetworkService<T: BeaconChainTypes> {
     metrics_update: tokio::time::Interval,
     /// gossipsub_parameter_update timer
     gossipsub_parameter_update: tokio::time::Interval,
+    /// PeerDAS custody group count (CGC) update
+    cgc_update_interval: tokio::time::Interval,
     /// The logger for the network service.
     fork_context: Arc<ForkContext>,
     log: slog::Logger,
@@ -335,6 +345,9 @@ impl<T: BeaconChainTypes> NetworkService<T> {
             beacon_chain,
             libp2p,
             subnet_service,
+            known_validators: LRUTimeCache::new(Duration::from_secs(
+                VALIDATOR_REGISTRATION_EXPIRY_SECONDS,
+            )),
             network_recv,
             validator_subscription_recv,
             router_send,
@@ -347,6 +360,9 @@ impl<T: BeaconChainTypes> NetworkService<T> {
             metrics_enabled: config.metrics_enabled,
             metrics_update,
             gossipsub_parameter_update,
+            cgc_update_interval: tokio::time::interval(Duration::from_secs(
+                CGC_UPDATE_INTERVAL_SECONDS,
+            )),
             fork_context,
             log: network_log,
         };
@@ -439,6 +455,8 @@ impl<T: BeaconChainTypes> NetworkService<T> {
                     }
 
                     _ = self.gossipsub_parameter_update.tick() => self.update_gossipsub_parameters(),
+
+                    _ = self.cgc_update_interval.tick() => self.update_cgc(),
 
                     // handle a message sent to the network
                     Some(msg) = self.network_recv.recv() => self.on_network_msg(msg, &mut shutdown_sender).await,
@@ -754,10 +772,16 @@ impl<T: BeaconChainTypes> NetworkService<T> {
     async fn on_validator_subscription_msg(&mut self, msg: ValidatorSubscriptionMessage) {
         match msg {
             ValidatorSubscriptionMessage::AttestationSubscribe { subscriptions } => {
+                for s in &subscriptions {
+                    self.register_validator(s.validator_index);
+                }
                 let subscriptions = subscriptions.into_iter().map(Subscription::Attestation);
                 self.subnet_service.validator_subscriptions(subscriptions)
             }
             ValidatorSubscriptionMessage::SyncCommitteeSubscribe { subscriptions } => {
+                for s in &subscriptions {
+                    self.register_validator(s.validator_index);
+                }
                 let subscriptions = subscriptions.into_iter().map(Subscription::SyncCommittee);
                 self.subnet_service.validator_subscriptions(subscriptions)
             }
@@ -793,6 +817,73 @@ impl<T: BeaconChainTypes> NetworkService<T> {
                 );
             }
         }
+    }
+
+    fn update_cgc(&mut self) {
+        // Retrieve the last registered CGC
+        let prev_cgc = self.network_globals.custody_group_count(Epoch::max_value());
+        let next_cgc = self.compute_cgc();
+
+        // TODO(das): check the backfilled CGC and potentially update the network globals state
+
+        if next_cgc != prev_cgc {
+            // If the CGC changes due to a change in validators
+            let Ok(epoch) = self.beacon_chain.epoch() else {
+                // If the system times goes backwards, it's okay to disable validator custody
+                return;
+            };
+
+            // TODO(das): Should we consider the case where the clock is almost at the end of the epoch?
+            // If I/O is slow we may update the in-memory map for an epoch that's already
+            // progressing.
+            let next_epoch = epoch + 1;
+
+            // Persist the entry to the store
+            if let Err(e) = self
+                .beacon_chain
+                .persist_custody_group_count_update(next_epoch, next_cgc)
+            {
+                // Do not update the memory value unless it's persisted to disk
+                error!(self.log, "Unable to persist CGC to disk"; "error" => ?e);
+                return;
+            }
+
+            // Add a new entry to the network globals
+            self.network_globals.insert_cgc_update(next_epoch, next_cgc);
+
+            // Schedule an advertise CGC update for later
+            // TODO(das)
+
+            // Update the gossip subscriptions
+            // TODO(das)
+        }
+
+        // Increasing CGC:
+        // - Immediately increase the internal CGC for the next clock epoch
+        // Decreasing CGC:
+        // - What to do?
+    }
+
+    fn compute_cgc(&mut self) -> u64 {
+        let cached_head = self.beacon_chain.canonical_head.cached_head();
+        let head_state = &cached_head.snapshot.beacon_state;
+
+        // LRUTimeCache::keys() prunes expired entries
+        let known_validators_balance = self
+            .known_validators
+            .keys()
+            .map(|&validator_index| {
+                // Gracefully handle bad validator indices. A bad validator client may register indices
+                // that are too high.
+                head_state
+                    .get_balance(validator_index as usize)
+                    .unwrap_or(0)
+            })
+            .sum::<u64>();
+
+        self.beacon_chain
+            .spec
+            .custody_group_by_balance(known_validators_balance)
     }
 
     fn on_subnet_service_msg(&mut self, msg: SubnetServiceMessage) {
@@ -873,6 +964,10 @@ impl<T: BeaconChainTypes> NetworkService<T> {
             subscriptions.iter().map(|topic| topic.kind()).collect();
 
         core_topics.is_subset(&subscribed_topics)
+    }
+
+    fn register_validator(&mut self, validator_index: u64) {
+        self.known_validators.raw_insert(validator_index);
     }
 }
 

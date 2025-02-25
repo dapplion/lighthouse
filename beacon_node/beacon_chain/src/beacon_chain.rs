@@ -7188,6 +7188,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .is_peer_das_enabled_for_epoch(slot.epoch(T::EthSpec::slots_per_epoch()))
     }
 
+    pub fn persist_custody_group_count_update(&self, epoch: Epoch, cgc: u64) -> Result<(), Error> {
+        // Write in DB bucket
+        todo!();
+    }
+
     pub fn logger(&self) -> &Logger {
         &self.log
     }

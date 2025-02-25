@@ -3679,6 +3679,7 @@ pub fn serve<T: BeaconChainTypes>(
                                 slot: subscription.slot,
                                 committee_count_at_slot: subscription.committees_at_slot,
                                 is_aggregator: subscription.is_aggregator,
+                                validator_index: subscription.validator_index,
                             }
                         })
                         .collect();
