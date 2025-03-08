@@ -8,6 +8,7 @@ pub mod manager;
 mod network_context;
 mod peer_sampling;
 mod peer_sync_info;
+mod peers;
 mod range_sync;
 #[cfg(test)]
 mod tests;

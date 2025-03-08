@@ -40,6 +40,7 @@ use super::network_context::{
 };
 use super::peer_sampling::{Sampling, SamplingConfig, SamplingResult};
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
+use super::peers::PeersRestatusResult;
 use super::range_sync::{RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
 use crate::network_beacon_processor::{ChainSegmentProcessId, NetworkBeaconProcessor};
 use crate::service::NetworkMessage;
@@ -48,6 +49,7 @@ use crate::sync::block_lookups::{
     BlobRequestState, BlockComponent, BlockRequestState, CustodyRequestState, DownloadResult,
 };
 use crate::sync::network_context::PeerGroup;
+use crate::sync::peers::PeersRestatus;
 use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::{
@@ -56,9 +58,10 @@ use beacon_chain::{
 use futures::StreamExt;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
-    BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRootRequestId, DataColumnsByRootRequester, Id,
-    SamplingId, SamplingRequester, SingleLookupReqId, SyncRequestId,
+    BlobsByRangeRequestId, BlocksByRangeRequestId, BlocksByRangeRequester,
+    ComponentsByRangeRequestId, CustodyRequester, DataColumnsByRangeRequestId,
+    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, SamplingId, SamplingRequester,
+    SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::SyncInfo;
@@ -247,6 +250,8 @@ pub struct SyncManager<T: BeaconChainTypes> {
 
     sampling: Sampling<T>,
 
+    peers_restatus: PeersRestatus,
+
     /// The logger for the import manager.
     log: Logger,
 }
@@ -319,6 +324,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS,
             )),
             sampling: Sampling::new(sampling_config, log.new(o!("service" => "sampling"))),
+            peers_restatus: PeersRestatus::new(log.new(o!("service" => "restatus"))),
             log: log.clone(),
         }
     }
@@ -416,8 +422,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             match sync_type {
                 PeerSyncType::Behind => {} // Do nothing
                 PeerSyncType::Advanced => {
-                    self.range_sync
+                    self.peers_restatus
                         .add_peer(&mut self.network, local, peer_id, remote);
+                    // Do not add the peer to range_sync yet
                 }
                 PeerSyncType::FullySynced => {
                     // Sync considers this peer close enough to the head to not trigger range sync.
@@ -1171,11 +1178,23 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
         if let Some(resp) = self.network.on_blocks_by_range_response(id, peer_id, block) {
-            self.on_range_components_response(
-                id.parent_request_id,
-                peer_id,
-                RangeBlockComponent::Block(resp),
-            );
+            match id.requester {
+                BlocksByRangeRequester::ComponentsByRange(parent_request_id) => {
+                    self.on_range_components_response(
+                        parent_request_id,
+                        peer_id,
+                        RangeBlockComponent::Block(resp),
+                    );
+                }
+                BlocksByRangeRequester::PeerStatus(peer_status_id) => {
+                    if let Some(result) =
+                        self.peers_restatus
+                            .on_response(&mut self.network, resp, peer_status_id, id)
+                    {
+                        self.on_peer_restatus_result(peer_id, result);
+                    }
+                }
+            }
         }
     }
 
@@ -1210,6 +1229,10 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 RangeBlockComponent::CustodyColumns(resp),
             );
         }
+    }
+
+    fn on_peer_restatus_result(&mut self, peer_id: PeerId, result: PeersRestatusResult) {
+        self.range_sync.add_peer(self, (), peer_id, ());
     }
 
     fn on_custody_by_root_result(

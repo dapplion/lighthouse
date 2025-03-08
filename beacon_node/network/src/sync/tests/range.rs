@@ -15,8 +15,8 @@ use lighthouse_network::rpc::methods::{
 };
 use lighthouse_network::rpc::{RequestType, StatusMessage};
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, DataColumnsByRangeRequestId,
-    SyncRequestId,
+    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, BlocksByRangeRequester,
+    DataColumnsByRangeRequestId, SyncRequestId,
 };
 use lighthouse_network::{PeerId, SyncInfo};
 use std::time::Duration;
@@ -319,7 +319,11 @@ impl TestRig {
             }
         }
 
-        blocks_req_id.parent_request_id.requester
+        if let BlocksByRangeRequester::ComponentsByRange(id) = blocks_req_id.requester {
+            id.requester
+        } else {
+            panic!("Not a ComponentsByRange request: {blocks_req_id:?}");
+        }
     }
 
     fn find_and_complete_processing_chain_segment(&mut self, id: ChainSegmentProcessId) {

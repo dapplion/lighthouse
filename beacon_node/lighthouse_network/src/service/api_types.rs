@@ -51,7 +51,7 @@ pub struct BlocksByRangeRequestId {
     /// Id to identify this attempt at a blocks_by_range request for `parent_request_id`
     pub id: Id,
     /// The Id of the overall By Range request for block components.
-    pub parent_request_id: ComponentsByRangeRequestId,
+    pub requester: BlocksByRangeRequester,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -86,6 +86,15 @@ pub struct ComponentsByRangeRequestId {
 pub enum RangeRequestId {
     RangeSync { chain_id: Id, batch_id: Epoch },
     BackfillSync { batch_id: Epoch },
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct PeerStatusId(pub Id);
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum BlocksByRangeRequester {
+    PeerStatus(PeerStatusId),
+    ComponentsByRange(ComponentsByRangeRequestId),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -247,7 +256,7 @@ macro_rules! impl_display {
 // Since each request Id is deeply nested with various types, if rendered with Debug on logs they
 // take too much visual space. This custom Display implementations make the overall Id short while
 // not losing information
-impl_display!(BlocksByRangeRequestId, "{}/{}", id, parent_request_id);
+impl_display!(BlocksByRangeRequestId, "{}/{}", id, requester);
 impl_display!(BlobsByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(DataColumnsByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
@@ -255,6 +264,16 @@ impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
 impl_display!(CustodyId, "{}", requester);
 impl_display!(SamplingId, "{}/{}", sampling_request_id, id);
+
+impl Display for BlocksByRangeRequester {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PeerStatus(id) => write!(f, "PeerStatus/{}", id.0),
+            // Print the id without prefix to match the other IDs in blobs by range
+            Self::ComponentsByRange(id) => write!(f, "{id}"),
+        }
+    }
+}
 
 impl Display for DataColumnsByRootRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -335,6 +354,21 @@ mod tests {
                     batch_id: Epoch::new(0),
                 },
             },
+        };
+        assert_eq!(format!("{id}"), "123/122/RangeSync/0/54");
+    }
+
+    #[test]
+    fn display_id_blocks_by_range() {
+        let id = BlocksByRangeRequestId {
+            id: 123,
+            requester: BlocksByRangeRequester::ComponentsByRange(ComponentsByRangeRequestId {
+                id: 122,
+                requester: RangeRequestId::RangeSync {
+                    chain_id: 54,
+                    batch_id: Epoch::new(0),
+                },
+            }),
         };
         assert_eq!(format!("{id}"), "123/122/RangeSync/0/54");
     }

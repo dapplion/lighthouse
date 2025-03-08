@@ -21,9 +21,9 @@ use lighthouse_network::rpc::methods::{BlobsByRangeRequest, DataColumnsByRangeRe
 use lighthouse_network::rpc::{BlocksByRangeRequest, GoodbyeReason, RPCError, RequestType};
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyId, CustodyRequester, DataColumnsByRangeRequestId, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, SingleLookupReqId, SyncRequestId,
+    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, BlocksByRangeRequester,
+    ComponentsByRangeRequestId, CustodyId, CustodyRequester, DataColumnsByRangeRequestId,
+    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
@@ -367,7 +367,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             requester,
         };
 
-        let _blocks_req_id = self.send_blocks_by_range_request(peer_id, request.clone(), id)?;
+        let _blocks_req_id = self.send_blocks_by_range_request(
+            peer_id,
+            request.clone(),
+            BlocksByRangeRequester::ComponentsByRange(id),
+        )?;
 
         let blobs_req_id = if matches!(batch_type, ByRangeRequestType::BlocksAndBlobs) {
             Some(self.send_blobs_by_range_request(
@@ -769,15 +773,15 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         }
     }
 
-    fn send_blocks_by_range_request(
+    pub fn send_blocks_by_range_request(
         &mut self,
         peer_id: PeerId,
         request: BlocksByRangeRequest,
-        parent_request_id: ComponentsByRangeRequestId,
+        requester: BlocksByRangeRequester,
     ) -> Result<BlocksByRangeRequestId, RpcRequestSendError> {
         let id = BlocksByRangeRequestId {
             id: self.next_id(),
-            parent_request_id,
+            requester,
         };
         self.network_send
             .send(NetworkMessage::SendRequest {
