@@ -307,6 +307,7 @@ pub enum Encoding {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SupportedProtocol {
     StatusV1,
+    StatusV1_9999,
     GoodbyeV1,
     BlocksByRangeV1,
     BlocksByRangeV2,
@@ -330,6 +331,7 @@ impl SupportedProtocol {
     pub fn version_string(&self) -> &'static str {
         match self {
             SupportedProtocol::StatusV1 => "1",
+            SupportedProtocol::StatusV1_9999 => "1_9999",
             SupportedProtocol::GoodbyeV1 => "1",
             SupportedProtocol::BlocksByRangeV1 => "1",
             SupportedProtocol::BlocksByRangeV2 => "2",
@@ -353,6 +355,7 @@ impl SupportedProtocol {
     pub fn protocol(&self) -> Protocol {
         match self {
             SupportedProtocol::StatusV1 => Protocol::Status,
+            SupportedProtocol::StatusV1_9999 => Protocol::Status,
             SupportedProtocol::GoodbyeV1 => Protocol::Goodbye,
             SupportedProtocol::BlocksByRangeV1 => Protocol::BlocksByRange,
             SupportedProtocol::BlocksByRangeV2 => Protocol::BlocksByRange,
@@ -377,6 +380,7 @@ impl SupportedProtocol {
 
     fn currently_supported(fork_context: &ForkContext) -> Vec<ProtocolId> {
         let mut supported = vec![
+            ProtocolId::new(Self::StatusV1_9999, Encoding::SSZSnappy),
             ProtocolId::new(Self::StatusV1, Encoding::SSZSnappy),
             ProtocolId::new(Self::GoodbyeV1, Encoding::SSZSnappy),
             // V2 variants have higher preference then V1
@@ -498,11 +502,11 @@ impl AsRef<str> for ProtocolId {
 
 impl ProtocolId {
     /// Returns min and max size for messages of given protocol id requests.
-    pub fn rpc_request_limits(&self, spec: &ChainSpec) -> RpcLimits {
+    pub fn rpc_request_limits<E: EthSpec>(&self, spec: &ChainSpec) -> RpcLimits {
         match self.versioned_protocol.protocol() {
             Protocol::Status => RpcLimits::new(
-                <StatusMessage as Encode>::ssz_fixed_len(),
-                <StatusMessage as Encode>::ssz_fixed_len(),
+                StatusMessage::<E>::ssz_min_len(),
+                StatusMessage::<E>::ssz_max_len(),
             ),
             Protocol::Goodbye => RpcLimits::new(
                 <GoodbyeReason as Encode>::ssz_fixed_len(),
@@ -546,8 +550,8 @@ impl ProtocolId {
     pub fn rpc_response_limits<E: EthSpec>(&self, fork_context: &ForkContext) -> RpcLimits {
         match self.versioned_protocol.protocol() {
             Protocol::Status => RpcLimits::new(
-                <StatusMessage as Encode>::ssz_fixed_len(),
-                <StatusMessage as Encode>::ssz_fixed_len(),
+                StatusMessage::<E>::ssz_min_len(),
+                StatusMessage::<E>::ssz_max_len(),
             ),
             Protocol::Goodbye => RpcLimits::new(0, 0), // Goodbye request has no response
             Protocol::BlocksByRange => rpc_block_limits_by_fork(fork_context.current_fork()),
@@ -598,6 +602,7 @@ impl ProtocolId {
             | SupportedProtocol::LightClientFinalityUpdateV1
             | SupportedProtocol::LightClientUpdatesByRangeV1 => true,
             SupportedProtocol::StatusV1
+            | SupportedProtocol::StatusV1_9999
             | SupportedProtocol::BlocksByRootV1
             | SupportedProtocol::BlocksByRangeV1
             | SupportedProtocol::PingV1
@@ -720,7 +725,7 @@ where
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RequestType<E: EthSpec> {
-    Status(StatusMessage),
+    Status(StatusMessage<E>),
     Goodbye(GoodbyeReason),
     BlocksByRange(OldBlocksByRangeRequest),
     BlocksByRoot(BlocksByRootRequest),

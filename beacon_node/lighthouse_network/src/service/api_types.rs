@@ -148,7 +148,7 @@ pub enum RequestId {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Response<E: EthSpec> {
     /// A Status message.
-    Status(StatusMessage),
+    Status(StatusMessage<E>),
     /// A response to a get BLOCKS_BY_RANGE request. A None response signals the end of the batch.
     BlocksByRange(Option<Arc<SignedBeaconBlock<E>>>),
     /// A response to a get BLOBS_BY_RANGE request. A None response signals the end of the batch.

@@ -64,8 +64,13 @@ impl Display for ErrorType {
 /* Requests */
 
 /// The STATUS request/response handshake message.
-#[derive(Encode, Decode, Clone, Debug, PartialEq)]
-pub struct StatusMessage {
+#[superstruct(
+    variants(V1, V1_9999),
+    variant_attributes(derive(Encode, Decode, Clone, Debug, PartialEq))
+)]
+#[derive(Clone, Debug, PartialEq)]
+#[serde(bound = "E: EthSpec")]
+pub struct StatusMessage<E: EthSpec> {
     /// The fork version of the chain we are broadcasting.
     pub fork_digest: [u8; 4],
 
@@ -80,6 +85,30 @@ pub struct StatusMessage {
 
     /// The slot associated with the latest block root.
     pub head_slot: Slot,
+
+    /// Ancestor roots between finalized and head
+    #[superstruct(only(V1_9999))]
+    pub ancestor_roots: VariableList<Hash256, E::MaxStatusRoots>,
+}
+
+impl<E: EthSpec> StatusMessage<E> {
+    pub fn ssz_min_len() -> usize {
+        StatusMessageV1::<E>::ssz_fixed_len()
+    }
+
+    pub fn ssz_max_len() -> usize {
+        StatusMessageV1_9999::<E> {
+            fork_digest: [0; 4],
+            finalized_root: Hash256::ZERO,
+            finalized_epoch: Epoch::new(0),
+            head_root: Hash256::ZERO,
+            head_slot: Slot::new(0),
+            ancestor_roots: VariableList::new(vec![Hash256::ZERO; E::max_status_roots()])
+                .expect("len is MaxStatusRoots"),
+        }
+        .as_ssz_bytes()
+        .len()
+    }
 }
 
 /// The PING request/response message.
@@ -541,7 +570,7 @@ impl LightClientUpdatesByRangeRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RpcSuccessResponse<E: EthSpec> {
     /// A HELLO message.
-    Status(StatusMessage),
+    Status(StatusMessage<E>),
 
     /// A response to a get BLOCKS_BY_RANGE request. A None response signifies the end of the
     /// batch.
@@ -722,9 +751,12 @@ impl std::fmt::Display for RpcErrorResponse {
     }
 }
 
-impl std::fmt::Display for StatusMessage {
+impl<E: EthSpec> std::fmt::Display for StatusMessage<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Status Message: Fork Digest: {:?}, Finalized Root: {}, Finalized Epoch: {}, Head Root: {}, Head Slot: {}", self.fork_digest, self.finalized_root, self.finalized_epoch, self.head_root, self.head_slot)
+        write!(f,
+            "Status Message: Fork Digest: {:?}, Finalized Root: {}, Finalized Epoch: {}, Head Root: {}, Head Slot: {}",
+            self.fork_digest(), self.finalized_root(), self.finalized_epoch(), self.head_root(), self.head_slot()
+        )
     }
 }
 
@@ -865,18 +897,23 @@ impl std::fmt::Display for DataColumnsByRootRequest {
     }
 }
 
-impl slog::KV for StatusMessage {
+impl<E: EthSpec> slog::KV for StatusMessage<E> {
     fn serialize(
         &self,
         record: &slog::Record,
         serializer: &mut dyn slog::Serializer,
     ) -> slog::Result {
         use slog::Value;
-        serializer.emit_arguments("fork_digest", &format_args!("{:?}", self.fork_digest))?;
-        Value::serialize(&self.finalized_epoch, record, "finalized_epoch", serializer)?;
-        serializer.emit_arguments("finalized_root", &format_args!("{}", self.finalized_root))?;
-        Value::serialize(&self.head_slot, record, "head_slot", serializer)?;
-        serializer.emit_arguments("head_root", &format_args!("{}", self.head_root))?;
+        serializer.emit_arguments("fork_digest", &format_args!("{:?}", self.fork_digest()))?;
+        Value::serialize(
+            &self.finalized_epoch(),
+            record,
+            "finalized_epoch",
+            serializer,
+        )?;
+        serializer.emit_arguments("finalized_root", &format_args!("{}", self.finalized_root()))?;
+        Value::serialize(&self.head_slot(), record, "head_slot", serializer)?;
+        serializer.emit_arguments("head_root", &format_args!("{}", self.head_root()))?;
         slog::Result::Ok(())
     }
 }

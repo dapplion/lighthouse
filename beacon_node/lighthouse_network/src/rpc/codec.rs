@@ -66,7 +66,10 @@ impl<E: EthSpec> SSZSnappyInboundCodec<E> {
     ) -> Result<(), RPCError> {
         let bytes = match &item {
             RpcResponse::Success(resp) => match &resp {
-                RpcSuccessResponse::Status(res) => res.as_ssz_bytes(),
+                RpcSuccessResponse::Status(res) => match res {
+                    StatusMessage::V1(res) => res.as_ssz_bytes(),
+                    StatusMessage::V1_9999(res) => res.as_ssz_bytes(),
+                },
                 RpcSuccessResponse::BlocksByRange(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::BlocksByRoot(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::BlobsByRange(res) => res.as_ssz_bytes(),
@@ -162,7 +165,11 @@ impl<E: EthSpec> Decoder for SSZSnappyInboundCodec<E> {
 
         // Should not attempt to decode rpc chunks with `length > max_packet_size` or not within bounds of
         // packet size for ssz container corresponding to `self.protocol`.
-        let ssz_limits = self.protocol.rpc_request_limits(&self.fork_context.spec);
+        // TODO: rpc_request_limits is expensive as it has to allocate the max size payload to check
+        // the size
+        let ssz_limits = self
+            .protocol
+            .rpc_request_limits::<E>(&self.fork_context.spec);
         if ssz_limits.is_out_of_bounds(length, self.max_packet_size) {
             return Err(RPCError::InvalidData(format!(
                 "RPC request length for protocol {:?} is out of bounds, length {}",
@@ -328,7 +335,10 @@ impl<E: EthSpec> Encoder<RequestType<E>> for SSZSnappyOutboundCodec<E> {
 
     fn encode(&mut self, item: RequestType<E>, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let bytes = match item {
-            RequestType::Status(req) => req.as_ssz_bytes(),
+            RequestType::Status(r) => match r {
+                StatusMessage::V1(req) => req.as_ssz_bytes(),
+                StatusMessage::V1_9999(req) => req.as_ssz_bytes(),
+            },
             RequestType::Goodbye(req) => req.as_ssz_bytes(),
             RequestType::BlocksByRange(r) => match r {
                 OldBlocksByRangeRequest::V1(req) => req.as_ssz_bytes(),
@@ -552,9 +562,12 @@ fn handle_rpc_request<E: EthSpec>(
     spec: &ChainSpec,
 ) -> Result<Option<RequestType<E>>, RPCError> {
     match versioned_protocol {
-        SupportedProtocol::StatusV1 => Ok(Some(RequestType::Status(
-            StatusMessage::from_ssz_bytes(decoded_buffer)?,
-        ))),
+        SupportedProtocol::StatusV1 => Ok(Some(RequestType::Status(StatusMessage::V1(
+            StatusMessageV1::<E>::from_ssz_bytes(decoded_buffer)?,
+        )))),
+        SupportedProtocol::StatusV1_9999 => Ok(Some(RequestType::Status(StatusMessage::V1_9999(
+            StatusMessageV1_9999::from_ssz_bytes(decoded_buffer)?,
+        )))),
         SupportedProtocol::GoodbyeV1 => Ok(Some(RequestType::Goodbye(
             GoodbyeReason::from_ssz_bytes(decoded_buffer)?,
         ))),
@@ -663,8 +676,11 @@ fn handle_rpc_response<E: EthSpec>(
     fork_name: Option<ForkName>,
 ) -> Result<Option<RpcSuccessResponse<E>>, RPCError> {
     match versioned_protocol {
-        SupportedProtocol::StatusV1 => Ok(Some(RpcSuccessResponse::Status(
-            StatusMessage::from_ssz_bytes(decoded_buffer)?,
+        SupportedProtocol::StatusV1 => Ok(Some(RpcSuccessResponse::Status(StatusMessage::V1(
+            StatusMessageV1::<E>::from_ssz_bytes(decoded_buffer)?,
+        )))),
+        SupportedProtocol::StatusV1_9999 => Ok(Some(RpcSuccessResponse::Status(
+            StatusMessage::V1_9999(StatusMessageV1_9999::from_ssz_bytes(decoded_buffer)?),
         ))),
         // This case should be unreachable as `Goodbye` has no response.
         SupportedProtocol::GoodbyeV1 => Err(RPCError::InvalidData(
@@ -1039,14 +1055,14 @@ mod tests {
         SignedBeaconBlock::from_block(block, Signature::empty())
     }
 
-    fn status_message() -> StatusMessage {
-        StatusMessage {
+    fn status_message() -> StatusMessage<Spec> {
+        StatusMessage::V1(StatusMessageV1::<Spec> {
             fork_digest: [0; 4],
             finalized_root: Hash256::zero(),
             finalized_epoch: Epoch::new(1),
             head_root: Hash256::zero(),
             head_slot: Slot::new(1),
-        }
+        })
     }
 
     fn bbrange_request_v1() -> OldBlocksByRangeRequest {
@@ -1952,7 +1968,7 @@ mod tests {
         let malicious_padding: &'static [u8] = b"\xFE\x00\x00\x00";
 
         // Status message is 84 bytes uncompressed. `max_compressed_len` is 32 + 84 + 84/6 = 130.
-        let status_message_bytes = StatusMessage {
+        let status_message_bytes = StatusMessageV1::<Spec> {
             fork_digest: [0; 4],
             finalized_root: Hash256::zero(),
             finalized_epoch: Epoch::new(1),
@@ -2075,7 +2091,7 @@ mod tests {
         assert_eq!(stream_identifier.len(), 10);
 
         // Status message is 84 bytes uncompressed. `max_compressed_len` is 32 + 84 + 84/6 = 130.
-        let status_message_bytes = StatusMessage {
+        let status_message_bytes = StatusMessageV1::<Spec> {
             fork_digest: [0; 4],
             finalized_root: Hash256::zero(),
             finalized_epoch: Epoch::new(1),
@@ -2219,7 +2235,7 @@ mod tests {
         ));
 
         // Request limits
-        let limit = protocol_id.rpc_request_limits(&fork_context.spec);
+        let limit = protocol_id.rpc_request_limits::<Spec>(&fork_context.spec);
         let mut max = encode_len(limit.max + 1);
         let mut codec = SSZSnappyOutboundCodec::<Spec>::new(
             protocol_id.clone(),
