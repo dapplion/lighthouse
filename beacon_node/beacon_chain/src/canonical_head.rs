@@ -58,8 +58,6 @@ use store::{iter::StateRootsIterator, KeyValueStoreOp, StoreItem};
 use task_executor::{JoinHandle, ShutdownReason};
 use types::*;
 
-const EPOCH_MOD: Epoch = Epoch::new(8);
-
 /// Simple wrapper around `RwLock` that uses private visibility to prevent any other modules from
 /// accessing the contained lock without it being explicitly noted in this module.
 pub struct CanonicalHeadRwLock<T>(RwLock<T>);
@@ -263,6 +261,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     pub fn new(
         fork_choice: BeaconForkChoice<T>,
         snapshot: Arc<BeaconSnapshot<T::EthSpec>>,
+        spec: &ChainSpec,
     ) -> Self {
         let head_chain_roots_desc = fork_choice
             .proto_array()
@@ -276,6 +275,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             head_chain_roots_desc,
             fork_choice_view.finalized_checkpoint.epoch,
             snapshot.beacon_block.slot(),
+            spec,
         );
 
         let cached_head = CachedHead {
@@ -348,6 +348,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 head_chain_roots_desc,
                 fork_choice_view.finalized_checkpoint.epoch,
                 beacon_block_slot,
+                spec,
             ),
         };
 
@@ -726,6 +727,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     head_chain_roots_desc,
                     new_view.finalized_checkpoint.epoch,
                     head_block_slot,
+                    &self.spec,
                 ),
             };
 
@@ -1344,12 +1346,14 @@ fn compute_ancestor_roots<E: EthSpec>(
     head_chain_roots_desc: Vec<(Hash256, Slot)>,
     finalized_epoch: Epoch,
     head_slot: Slot,
+    spec: &ChainSpec,
 ) -> Vec<Hash256> {
-    let mut next_epoch_idx = finalized_epoch / EPOCH_MOD;
+    let mut next_epoch_idx = finalized_epoch.as_u64() / spec.epochs_per_status_ancestor_root;
     let mut ancestor_roots = vec![];
 
     for (root, slot) in head_chain_roots_desc.into_iter().rev() {
-        let epoch_idx = slot.epoch(E::slots_per_epoch()) / EPOCH_MOD;
+        let epoch_idx =
+            slot.epoch(E::slots_per_epoch()).as_u64() / spec.epochs_per_status_ancestor_root;
         match epoch_idx.cmp(&next_epoch_idx) {
             Ordering::Less => {} // Already appended block root for this epoch idx
             Ordering::Equal => {
@@ -1358,7 +1362,7 @@ fn compute_ancestor_roots<E: EthSpec>(
             }
             Ordering::Greater => {
                 // There are no roots for at least one epoch index
-                for _ in 0..epoch_idx.as_u64() - next_epoch_idx.as_u64() {
+                for _ in 0..epoch_idx - next_epoch_idx {
                     ancestor_roots.push(Hash256::ZERO);
                 }
                 ancestor_roots.push(root);
@@ -1368,8 +1372,9 @@ fn compute_ancestor_roots<E: EthSpec>(
     }
 
     // Fill in remaining empty epochs up to head epoch index
-    let end_epoch_idx = head_slot.epoch(E::slots_per_epoch()) / EPOCH_MOD;
-    for _ in 0..end_epoch_idx.as_u64() - next_epoch_idx.as_u64() {
+    let end_epoch_idx =
+        head_slot.epoch(E::slots_per_epoch()).as_u64() / spec.epochs_per_status_ancestor_root;
+    for _ in 0..end_epoch_idx - next_epoch_idx {
         ancestor_roots.push(Hash256::ZERO);
     }
 

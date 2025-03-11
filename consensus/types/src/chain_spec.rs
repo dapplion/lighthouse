@@ -223,6 +223,7 @@ pub struct ChainSpec {
     pub subnets_per_node: u8,
     pub attestation_subnet_count: u64,
     pub attestation_subnet_prefix_bits: u8,
+    pub epochs_per_status_ancestor_root: u64,
 
     /*
      * Networking Deneb
@@ -939,6 +940,7 @@ impl ChainSpec {
             message_domain_valid_snappy: default_message_domain_valid_snappy(),
             attestation_subnet_prefix_bits: default_attestation_subnet_prefix_bits(),
             max_request_blocks: default_max_request_blocks(),
+            epochs_per_status_ancestor_root: default_epochs_per_status_ancestor_root(),
 
             /*
              * Networking Deneb Specific
@@ -1269,6 +1271,7 @@ impl ChainSpec {
             message_domain_valid_snappy: default_message_domain_valid_snappy(),
             max_request_blocks: default_max_request_blocks(),
             attestation_subnet_prefix_bits: default_attestation_subnet_prefix_bits(),
+            epochs_per_status_ancestor_root: default_epochs_per_status_ancestor_root(),
 
             /*
              * Networking Deneb Specific
@@ -1610,6 +1613,10 @@ const fn default_message_domain_valid_snappy() -> [u8; 4] {
 
 const fn default_max_request_blocks() -> u64 {
     1024
+}
+
+const fn default_epochs_per_status_ancestor_root() -> u64 {
+    8
 }
 
 const fn default_max_request_blocks_deneb() -> u64 {
