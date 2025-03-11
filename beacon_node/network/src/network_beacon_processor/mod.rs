@@ -641,7 +641,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     pub fn send_status_message(
         self: &Arc<Self>,
         peer_id: PeerId,
-        message: StatusMessage,
+        message: StatusMessage<T::EthSpec>,
     ) -> Result<(), Error<T::EthSpec>> {
         let processor = self.clone();
         let process_fn = move || processor.process_status(peer_id, message);

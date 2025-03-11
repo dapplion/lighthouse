@@ -194,11 +194,11 @@ impl<T: BeaconChainTypes> Router<T> {
     /* RPC - Related functionality */
 
     /// A new RPC request has been received from the network.
-    fn handle_rpc_request<E: EthSpec>(
+    fn handle_rpc_request(
         &mut self,
         peer_id: PeerId,
         request_id: PeerRequestId,
-        rpc_request: rpc::Request<E>,
+        rpc_request: rpc::Request<T::EthSpec>,
     ) {
         if !self.network_globals.peers.read().is_connected(&peer_id) {
             debug!(self.log, "Dropping request of disconnected peer"; "peer_id" => %peer_id, "request" => ?rpc_request);
@@ -596,7 +596,7 @@ impl<T: BeaconChainTypes> Router<T> {
         connection_id: ConnectionId,
         substream_id: SubstreamId,
         request_id: RequestId,
-        status: StatusMessage,
+        status: StatusMessage<T::EthSpec>,
     ) {
         debug!(self.log, "Received Status Request"; "peer_id" => %peer_id, &status);
 

@@ -31,7 +31,7 @@ pub use protocol::RequestType;
 pub use handler::SubstreamId;
 pub use methods::{
     BlocksByRangeRequest, BlocksByRootRequest, GoodbyeReason, LightClientBootstrapRequest,
-    ResponseTermination, RpcErrorResponse, StatusMessage,
+    ResponseTermination, RpcErrorResponse, StatusMessage, StatusMessageV1, StatusMessageV1_9999,
 };
 pub use protocol::{max_rpc_size, Protocol, RPCError};
 

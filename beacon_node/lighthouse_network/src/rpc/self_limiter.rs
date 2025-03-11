@@ -102,6 +102,7 @@ impl<Id: ReqId, E: EthSpec> SelfRateLimiter<Id, E> {
     /// Auxiliary function to deal with self rate limiting outcomes. If the rate limiter allows the
     /// request, the [`ToSwarm`] that should be emitted is returned. If the request
     /// should be delayed, it's returned with the duration to wait.
+    #[allow(clippy::result_large_err)]
     fn try_send_request(
         limiter: &mut RateLimiter,
         peer_id: PeerId,

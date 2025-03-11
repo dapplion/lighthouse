@@ -10,7 +10,7 @@ use super::SyncMessage;
 use crate::metrics;
 use crate::network_beacon_processor::NetworkBeaconProcessor;
 use crate::service::NetworkMessage;
-use crate::status::ToStatusMessage;
+use crate::status::status_message;
 use crate::sync::block_lookups::SingleLookupId;
 use crate::sync::network_context::requests::BlobsByRootSingleBlockRequest;
 use beacon_chain::block_verification_types::RpcBlock;
@@ -329,18 +329,18 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .unwrap_or_default()
     }
 
-    pub fn status_peers<C: ToStatusMessage>(&self, chain: &C, peers: impl Iterator<Item = PeerId>) {
-        let status_message = chain.status_message();
+    pub fn status_peers(&self, peers: impl Iterator<Item = PeerId>) {
+        let status_message = status_message(&self.chain);
         for peer_id in peers {
             debug!(
                 self.log,
                 "Sending Status Request";
                 "peer" => %peer_id,
-                "fork_digest" => ?status_message.fork_digest,
-                "finalized_root" => ?status_message.finalized_root,
-                "finalized_epoch" => ?status_message.finalized_epoch,
-                "head_root" => %status_message.head_root,
-                "head_slot" => %status_message.head_slot,
+                "fork_digest" => ?status_message.fork_digest(),
+                "finalized_root" => ?status_message.finalized_root(),
+                "finalized_epoch" => ?status_message.finalized_epoch(),
+                "head_root" => %status_message.head_root(),
+                "head_slot" => %status_message.head_slot(),
             );
 
             let request = RequestType::Status(status_message.clone());

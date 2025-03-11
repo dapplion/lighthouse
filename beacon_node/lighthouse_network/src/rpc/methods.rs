@@ -69,7 +69,6 @@ impl Display for ErrorType {
     variant_attributes(derive(Encode, Decode, Clone, Debug, PartialEq))
 )]
 #[derive(Clone, Debug, PartialEq)]
-#[serde(bound = "E: EthSpec")]
 pub struct StatusMessage<E: EthSpec> {
     /// The fork version of the chain we are broadcasting.
     pub fork_digest: [u8; 4],
@@ -87,7 +86,8 @@ pub struct StatusMessage<E: EthSpec> {
     pub head_slot: Slot,
 
     /// Ancestor roots between finalized and head
-    #[superstruct(only(V1_9999))]
+    // #[superstruct(only(V1_9999))]
+    // TODO: How to deal with one variant being generic and another not?
     pub ancestor_roots: VariableList<Hash256, E::MaxStatusRoots>,
 }
 

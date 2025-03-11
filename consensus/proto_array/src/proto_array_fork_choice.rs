@@ -860,6 +860,14 @@ impl ProtoArrayForkChoice {
         self.proto_array.iter_nodes(block_root)
     }
 
+    /// See `ProtoArray::iter_block_roots`
+    pub fn iter_block_roots(
+        &self,
+        block_root: &Hash256,
+    ) -> impl Iterator<Item = (Hash256, Slot)> + use<'_> {
+        self.proto_array.iter_block_roots(block_root)
+    }
+
     pub fn as_bytes(&self) -> Vec<u8> {
         SszContainer::from(self).as_ssz_bytes()
     }

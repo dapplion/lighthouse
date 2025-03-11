@@ -1,6 +1,6 @@
 use super::*;
 use crate::network_beacon_processor::ChainSegmentProcessId;
-use crate::status::ToStatusMessage;
+use crate::status::status_message;
 use crate::sync::manager::SLOT_IMPORT_TOLERANCE;
 use crate::sync::network_context::RangeRequestId;
 use crate::sync::range_sync::RangeSyncType;
@@ -13,7 +13,7 @@ use lighthouse_network::rpc::methods::{
     BlobsByRangeRequest, DataColumnsByRangeRequest, OldBlocksByRangeRequest,
     OldBlocksByRangeRequestV2,
 };
-use lighthouse_network::rpc::{RequestType, StatusMessage};
+use lighthouse_network::rpc::RequestType;
 use lighthouse_network::service::api_types::{
     AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, DataColumnsByRangeRequestId,
     SyncRequestId,
@@ -113,19 +113,7 @@ impl TestRig {
     }
 
     fn local_info(&self) -> SyncInfo {
-        let StatusMessage {
-            fork_digest: _,
-            finalized_root,
-            finalized_epoch,
-            head_root,
-            head_slot,
-        } = self.harness.chain.status_message();
-        SyncInfo {
-            head_slot,
-            head_root,
-            finalized_epoch,
-            finalized_root,
-        }
+        SyncInfo::from_status(status_message(&self.harness.chain))
     }
 
     fn add_random_peer_not_supernode(&mut self, remote_info: SyncInfo) -> PeerId {

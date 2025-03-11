@@ -1,7 +1,9 @@
 //! Handles individual sync status for peers.
 
 use serde::Serialize;
-use types::{Epoch, Hash256, Slot};
+use types::{Epoch, EthSpec, Hash256, Slot};
+
+use crate::rpc::StatusMessage;
 
 #[derive(Clone, Debug, Serialize)]
 /// The current sync status of the peer.
@@ -25,6 +27,17 @@ pub struct SyncInfo {
     pub head_root: Hash256,
     pub finalized_epoch: Epoch,
     pub finalized_root: Hash256,
+}
+
+impl SyncInfo {
+    pub fn from_status<E: EthSpec>(status: StatusMessage<E>) -> Self {
+        Self {
+            head_slot: *status.head_slot(),
+            head_root: *status.head_root(),
+            finalized_epoch: *status.finalized_epoch(),
+            finalized_root: *status.finalized_root(),
+        }
+    }
 }
 
 impl std::cmp::PartialEq for SyncStatus {

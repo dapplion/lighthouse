@@ -1062,6 +1062,7 @@ mod tests {
             finalized_epoch: Epoch::new(1),
             head_root: Hash256::zero(),
             head_slot: Slot::new(1),
+            ancestor_roots: VariableList::empty(),
         })
     }
 
@@ -1974,6 +1975,7 @@ mod tests {
             finalized_epoch: Epoch::new(1),
             head_root: Hash256::zero(),
             head_slot: Slot::new(1),
+            ancestor_roots: VariableList::empty(),
         }
         .as_ssz_bytes();
 
@@ -2097,6 +2099,7 @@ mod tests {
             finalized_epoch: Epoch::new(1),
             head_root: Hash256::zero(),
             head_slot: Slot::new(1),
+            ancestor_roots: VariableList::empty(),
         }
         .as_ssz_bytes();
 

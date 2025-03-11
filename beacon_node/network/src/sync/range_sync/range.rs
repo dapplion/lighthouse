@@ -43,7 +43,7 @@ use super::chain::{BatchId, ChainId, RemoveChain, SyncingChain};
 use super::chain_collection::{ChainCollection, SyncChainStatus};
 use super::sync_type::RangeSyncType;
 use crate::metrics;
-use crate::status::ToStatusMessage;
+use crate::status::status_message;
 use crate::sync::network_context::SyncNetworkContext;
 use crate::sync::BatchProcessResult;
 use beacon_chain::block_verification_types::RpcBlock;
@@ -353,15 +353,10 @@ where
             chain.pending_blocks() as u64,
         );
 
-        network.status_peers(self.beacon_chain.as_ref(), chain.peers());
+        network.status_peers(chain.peers());
 
-        let status = self.beacon_chain.status_message();
-        let local = SyncInfo {
-            head_slot: status.head_slot,
-            head_root: status.head_root,
-            finalized_epoch: status.finalized_epoch,
-            finalized_root: status.finalized_root,
-        };
+        let status = status_message(self.beacon_chain.as_ref());
+        let local = SyncInfo::from_status(status);
 
         // update the state of the collection
         self.chains

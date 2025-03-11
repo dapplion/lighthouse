@@ -1,6 +1,6 @@
 use crate::network_beacon_processor::{NetworkBeaconProcessor, FUTURE_SLOT_TOLERANCE};
 use crate::service::NetworkMessage;
-use crate::status::ToStatusMessage;
+use crate::status::status_message;
 use crate::sync::SyncMessage;
 use beacon_chain::{BeaconChainError, BeaconChainTypes, WhenSlotSkipped};
 use itertools::process_results;
@@ -70,19 +70,19 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     /// irrelevant the reason is returned.
     fn check_peer_relevance(
         &self,
-        remote: &StatusMessage,
+        remote: &StatusMessage<T::EthSpec>,
     ) -> Result<Option<String>, BeaconChainError> {
-        let local = self.chain.status_message();
+        let local = status_message(&self.chain);
         let start_slot = |epoch: Epoch| epoch.start_slot(T::EthSpec::slots_per_epoch());
 
-        let irrelevant_reason = if local.fork_digest != remote.fork_digest {
+        let irrelevant_reason = if local.fork_digest() != remote.fork_digest() {
             // The node is on a different network/fork
             Some(format!(
                 "Incompatible forks Ours:{} Theirs:{}",
-                hex::encode(local.fork_digest),
-                hex::encode(remote.fork_digest)
+                hex::encode(local.fork_digest()),
+                hex::encode(remote.fork_digest())
             ))
-        } else if remote.head_slot
+        } else if *remote.head_slot()
             > self
                 .chain
                 .slot()
@@ -93,13 +93,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             // current slot. This could be because they are using a different genesis time, or that
             // their or our system's clock is incorrect.
             Some("Different system clocks or genesis time".to_string())
-        } else if remote.finalized_epoch <= local.finalized_epoch
-            && remote.finalized_root != Hash256::zero()
-            && local.finalized_root != Hash256::zero()
+        } else if remote.finalized_epoch() <= local.finalized_epoch()
+            && remote.finalized_root() != &Hash256::zero()
+            && local.finalized_root() != &Hash256::zero()
             && self
                 .chain
-                .block_root_at_slot(start_slot(remote.finalized_epoch), WhenSlotSkipped::Prev)
-                .map(|root_opt| root_opt != Some(remote.finalized_root))?
+                .block_root_at_slot(start_slot(*remote.finalized_epoch()), WhenSlotSkipped::Prev)
+                .map(|root_opt| root_opt != Some(*remote.finalized_root()))?
         {
             // The remote's finalized epoch is less than or equal to ours, but the block root is
             // different to the one in our chain. Therefore, the node is on a different chain and we
@@ -112,19 +112,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         Ok(irrelevant_reason)
     }
 
-    pub fn process_status(&self, peer_id: PeerId, status: StatusMessage) {
+    pub fn process_status(&self, peer_id: PeerId, status: StatusMessage<T::EthSpec>) {
         match self.check_peer_relevance(&status) {
             Ok(Some(irrelevant_reason)) => {
                 debug!(self.log, "Handshake Failure"; "peer" => %peer_id, "reason" => irrelevant_reason);
                 self.goodbye_peer(peer_id, GoodbyeReason::IrrelevantNetwork);
             }
             Ok(None) => {
-                let info = SyncInfo {
-                    head_slot: status.head_slot,
-                    head_root: status.head_root,
-                    finalized_epoch: status.finalized_epoch,
-                    finalized_root: status.finalized_root,
-                };
+                let info = SyncInfo::from_status(status);
                 self.send_sync_message(SyncMessage::AddPeer(peer_id, info));
             }
             Err(e) => error!(self.log, "Could not process status message";

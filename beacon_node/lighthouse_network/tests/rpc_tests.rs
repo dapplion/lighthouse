@@ -75,22 +75,24 @@ fn test_tcp_status_rpc() {
         .await;
 
         // Dummy STATUS RPC message
-        let rpc_request = RequestType::Status(StatusMessage {
+        let rpc_request = RequestType::Status(StatusMessage::V1(StatusMessageV1::<E> {
             fork_digest: [0; 4],
             finalized_root: Hash256::zero(),
             finalized_epoch: Epoch::new(1),
             head_root: Hash256::zero(),
             head_slot: Slot::new(1),
-        });
+            ancestor_roots: VariableList::empty(),
+        }));
 
         // Dummy STATUS RPC message
-        let rpc_response = Response::Status(StatusMessage {
+        let rpc_response = Response::Status(StatusMessage::V1(StatusMessageV1::<E> {
             fork_digest: [0; 4],
             finalized_root: Hash256::zero(),
             finalized_epoch: Epoch::new(1),
             head_root: Hash256::zero(),
             head_slot: Slot::new(1),
-        });
+            ancestor_roots: VariableList::empty(),
+        }));
 
         // build the sender future
         let sender_future = async {

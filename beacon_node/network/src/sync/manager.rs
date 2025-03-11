@@ -43,7 +43,7 @@ use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
 use crate::network_beacon_processor::{ChainSegmentProcessId, NetworkBeaconProcessor};
 use crate::service::NetworkMessage;
-use crate::status::ToStatusMessage;
+use crate::status::status_message;
 use crate::sync::block_lookups::{
     BlobRequestState, BlockComponent, BlockRequestState, CustodyRequestState, DownloadResult,
 };
@@ -400,13 +400,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     /// ours that we consider it fully sync'd with respect to our current chain.
     fn add_peer(&mut self, peer_id: PeerId, remote: SyncInfo) {
         // ensure the beacon chain still exists
-        let status = self.chain.status_message();
-        let local = SyncInfo {
-            head_slot: status.head_slot,
-            head_root: status.head_root,
-            finalized_epoch: status.finalized_epoch,
-            finalized_root: status.finalized_root,
-        };
+        let local = SyncInfo::from_status(status_message(&self.chain));
 
         let sync_type = remote_sync_type(&local, &remote, &self.chain);
 
@@ -452,13 +446,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         head_root: Hash256,
         head_slot: Option<Slot>,
     ) {
-        let status = self.chain.status_message();
-        let local = SyncInfo {
-            head_slot: status.head_slot,
-            head_root: status.head_root,
-            finalized_epoch: status.finalized_epoch,
-            finalized_root: status.finalized_root,
-        };
+        let local = SyncInfo::from_status(status_message(&self.chain));
 
         let head_slot = head_slot.unwrap_or_else(|| {
             debug!(self.log,
