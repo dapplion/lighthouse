@@ -166,9 +166,10 @@ impl<E: EthSpec> PendingComponents<E> {
     pub fn make_available<R>(
         &mut self,
         custody_column_count: usize,
+        block_root: Hash256,
         spec: &Arc<ChainSpec>,
         recover: R,
-    ) -> Result<Option<AvailableExecutedBlock<E>>, AvailabilityCheckError>
+    ) -> Result<Availability<E>, AvailabilityCheckError>
     where
         R: FnOnce(
             DietAvailabilityPendingExecutedBlock<E>,
@@ -176,15 +177,19 @@ impl<E: EthSpec> PendingComponents<E> {
     {
         let Some(block) = &self.executed_block else {
             // Block not available yet
-            return Ok(None);
+            return Ok(Availability::MissingComponents(
+                block_root,
+                "NoBlock".to_owned(),
+            ));
         };
 
         let num_expected_blobs = block.num_blobs_expected();
 
         let blob_data = if num_expected_blobs == 0 {
-            Some(AvailableBlockData::NoData)
+            AvailableBlockData::NoData
         } else if spec.is_peer_das_enabled_for_epoch(block.epoch()) {
-            match self.verified_data_columns.len().cmp(&custody_column_count) {
+            let received_data_columns = self.verified_data_columns.len();
+            match received_data_columns.cmp(&custody_column_count) {
                 Ordering::Greater => {
                     // Should never happen
                     return Err(AvailabilityCheckError::Unexpected("too many columns"));
@@ -196,16 +201,24 @@ impl<E: EthSpec> PendingComponents<E> {
                         .iter()
                         .map(|d| d.clone().into_inner())
                         .collect::<Vec<_>>();
-                    Some(AvailableBlockData::DataColumns(data_columns))
+                    AvailableBlockData::DataColumns(data_columns)
                 }
                 Ordering::Less => {
                     // The data_columns_recv is an infallible promise that we will receive all expected
                     // columns, so we consider the block available.
                     // We take the receiver as it can't be cloned, and make_available should never
                     // be called again once it returns `Some`.
-                    self.data_column_recv
-                        .take()
-                        .map(AvailableBlockData::DataColumnsRecv)
+                    if let Some(data_column_recv) = self.data_column_recv.take() {
+                        AvailableBlockData::DataColumnsRecv(data_column_recv)
+                    } else {
+                        return Ok(Availability::MissingComponents(
+                            block_root,
+                            format!(
+                                "MissingDataColumns({}/{})",
+                                received_data_columns, custody_column_count
+                            ),
+                        ));
+                    }
                 }
             }
         } else {
@@ -226,18 +239,19 @@ impl<E: EthSpec> PendingComponents<E> {
                         .collect::<Vec<_>>();
                     let blobs = RuntimeVariableList::new(blobs_vec, max_blobs)
                         .map_err(|_| AvailabilityCheckError::Unexpected("over max_blobs"))?;
-                    Some(AvailableBlockData::Blobs(blobs))
+                    AvailableBlockData::Blobs(blobs)
                 }
                 Ordering::Less => {
                     // Not enough blobs received yet
-                    None
+                    return Ok(Availability::MissingComponents(
+                        block_root,
+                        format!(
+                            "MissingBlobs({}/{})",
+                            num_received_blobs, num_expected_blobs
+                        ),
+                    ));
                 }
             }
-        };
-
-        // Block's data not available yet
-        let Some(blob_data) = blob_data else {
-            return Ok(None);
         };
 
         // Block is available, construct `AvailableExecutedBlock`
@@ -268,10 +282,9 @@ impl<E: EthSpec> PendingComponents<E> {
             blobs_available_timestamp,
             spec: spec.clone(),
         };
-        Ok(Some(AvailableExecutedBlock::new(
-            available_block,
-            import_data,
-            payload_verification_outcome,
+
+        Ok(Availability::Available(Box::new(
+            AvailableExecutedBlock::new(available_block, import_data, payload_verification_outcome),
         )))
     }
 
@@ -492,20 +505,18 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
             "status" => pending_components.status_str(epoch, self.sampling_column_count, &self.spec),
         );
 
-        if let Some(available_block) =
-            pending_components.make_available(self.sampling_column_count, &self.spec, |block| {
-                self.state_cache.recover_pending_executed_block(block)
-            })?
-        {
-            // We keep the pending components in the availability cache during block import (#5845).
-            // `data_column_recv` is returned as part of the available block and is no longer needed here.
-            write_lock.put(block_root, pending_components);
-            drop(write_lock);
-            Ok(Availability::Available(Box::new(available_block)))
-        } else {
-            write_lock.put(block_root, pending_components);
-            Ok(Availability::MissingComponents(block_root))
-        }
+        let availability = pending_components.make_available(
+            self.sampling_column_count,
+            block_root,
+            &self.spec,
+            |block| self.state_cache.recover_pending_executed_block(block),
+        )?;
+
+        // We keep the pending components in the availability cache during block import (#5845).
+        // `data_column_recv` is returned as part of the available block and is no longer needed here.
+        write_lock.put(block_root, pending_components);
+
+        Ok(availability)
     }
 
     #[allow(clippy::type_complexity)]
@@ -545,20 +556,17 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
             "status" => pending_components.status_str(epoch, self.sampling_column_count, &self.spec),
         );
 
-        if let Some(available_block) =
-            pending_components.make_available(self.sampling_column_count, &self.spec, |block| {
-                self.state_cache.recover_pending_executed_block(block)
-            })?
-        {
-            // We keep the pending components in the availability cache during block import (#5845).
-            // `data_column_recv` is returned as part of the available block and is no longer needed here.
-            write_lock.put(block_root, pending_components);
-            drop(write_lock);
-            Ok(Availability::Available(Box::new(available_block)))
-        } else {
-            write_lock.put(block_root, pending_components);
-            Ok(Availability::MissingComponents(block_root))
-        }
+        let availability = pending_components.make_available(
+            self.sampling_column_count,
+            block_root,
+            &self.spec,
+            |block| self.state_cache.recover_pending_executed_block(block),
+        )?;
+
+        // We keep the pending components in the availability cache during block import (#5845).
+        // `data_column_recv` is returned as part of the available block and is no longer needed here.
+
+        Ok(availability)
     }
 
     /// The `data_column_recv` parameter is a `Receiver` for data columns that are computed
@@ -595,20 +603,18 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
             "status" => pending_components.status_str(block_epoch, self.sampling_column_count, &self.spec),
         );
 
-        if let Some(available_block) =
-            pending_components.make_available(self.sampling_column_count, &self.spec, |block| {
-                self.state_cache.recover_pending_executed_block(block)
-            })?
-        {
-            // We keep the pending components in the availability cache during block import (#5845).
-            // `data_column_recv` is returned as part of the available block and is no longer needed here.
-            write_lock.put(block_root, pending_components);
-            drop(write_lock);
-            Ok(Availability::Available(Box::new(available_block)))
-        } else {
-            write_lock.put(block_root, pending_components);
-            Ok(Availability::MissingComponents(block_root))
-        }
+        let availability = pending_components.make_available(
+            self.sampling_column_count,
+            block_root,
+            &self.spec,
+            |block| self.state_cache.recover_pending_executed_block(block),
+        )?;
+
+        // We keep the pending components in the availability cache during block import (#5845).
+        // `data_column_recv` is returned as part of the available block and is no longer needed here.
+        write_lock.put(block_root, pending_components);
+
+        Ok(availability)
     }
 
     /// Check whether data column reconstruction should be attempted.
@@ -696,20 +702,18 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         );
 
         // Check if we have all components and entire set is consistent.
-        if let Some(available_block) =
-            pending_components.make_available(self.sampling_column_count, &self.spec, |block| {
-                self.state_cache.recover_pending_executed_block(block)
-            })?
-        {
-            // We keep the pending components in the availability cache during block import (#5845).
-            // `data_column_recv` is returned as part of the available block and is no longer needed here.
-            write_lock.put(block_root, pending_components);
-            drop(write_lock);
-            Ok(Availability::Available(Box::new(available_block)))
-        } else {
-            write_lock.put(block_root, pending_components);
-            Ok(Availability::MissingComponents(block_root))
-        }
+        let availability = pending_components.make_available(
+            self.sampling_column_count,
+            block_root,
+            &self.spec,
+            |block| self.state_cache.recover_pending_executed_block(block),
+        )?;
+
+        // We keep the pending components in the availability cache during block import (#5845).
+        // `data_column_recv` is returned as part of the available block and is no longer needed here.
+        write_lock.put(block_root, pending_components);
+
+        Ok(availability)
     }
 
     pub fn remove_pending_components(&self, block_root: Hash256) {
@@ -1024,7 +1028,7 @@ mod test {
             );
         } else {
             assert!(
-                matches!(availability, Availability::MissingComponents(_)),
+                matches!(availability, Availability::MissingComponents(..)),
                 "should be pending blobs"
             );
             assert_eq!(
@@ -1047,7 +1051,7 @@ mod test {
             if blob_index == blobs_expected - 1 {
                 assert!(matches!(availability, Availability::Available(_)));
             } else {
-                assert!(matches!(availability, Availability::MissingComponents(_)));
+                assert!(matches!(availability, Availability::MissingComponents(..)));
                 assert_eq!(cache.critical.read().len(), 1);
             }
         }
@@ -1073,7 +1077,7 @@ mod test {
                 .put_kzg_verified_blobs(root, kzg_verified_blobs.clone(), harness.logger())
                 .expect("should put blob");
             assert!(
-                matches!(availability, Availability::MissingComponents(_)),
+                matches!(availability, Availability::MissingComponents(..)),
                 "should be pending block"
             );
             assert_eq!(cache.critical.read().len(), 1);
@@ -1166,7 +1170,7 @@ mod test {
 
             // should be unavailable since we made sure all blocks had blobs
             assert!(
-                matches!(availability, Availability::MissingComponents(_)),
+                matches!(availability, Availability::MissingComponents(..)),
                 "should be pending blobs"
             );
 

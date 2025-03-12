@@ -1110,13 +1110,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     processing_start_time.elapsed().as_millis() as i64,
                 );
             }
-            Ok(AvailabilityProcessingStatus::MissingComponents(slot, block_root)) => {
+            Ok(AvailabilityProcessingStatus::MissingComponents(slot, block_root, reason)) => {
                 debug!(
                     self.log,
                     "Processed gossip blob - waiting for other components";
                     "slot" => %slot,
                     "blob_index" => %blob_index,
                     "block_root" => %block_root,
+                    "reason" => reason,
                 );
             }
             Err(BlockError::DuplicateFullyImported(_)) => {
@@ -1188,13 +1189,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         processing_start_time.elapsed().as_millis() as i64,
                     );
                 }
-                AvailabilityProcessingStatus::MissingComponents(slot, block_root) => {
+                AvailabilityProcessingStatus::MissingComponents(slot, block_root, reason) => {
                     trace!(
                         self.log,
                         "Processed data column, waiting for other components";
                         "slot" => %slot,
                         "data_column_index" => %data_column_index,
                         "block_root" => %block_root,
+                        "reason" => reason,
                     );
 
                     self.attempt_data_column_reconstruction(block_root).await;
@@ -1665,12 +1667,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     processing_start_time.elapsed().as_millis() as i64,
                 );
             }
-            Ok(AvailabilityProcessingStatus::MissingComponents(slot, block_root)) => {
+            Ok(AvailabilityProcessingStatus::MissingComponents(slot, block_root, reason)) => {
                 trace!(
                     self.log,
                     "Processed block, waiting for other components";
                     "slot" => slot,
                     "block_root" => %block_root,
+                    "reason" => reason,
                 );
             }
             Err(BlockError::ParentUnknown { .. }) => {

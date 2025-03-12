@@ -970,11 +970,12 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     );
                     self.chain.recompute_head_at_current_slot().await;
                 }
-                AvailabilityProcessingStatus::MissingComponents(_, _) => {
+                AvailabilityProcessingStatus::MissingComponents(_, _, reason) => {
                     debug!(
                         self.log,
                         "Still missing blobs after engine blobs processed successfully";
                         "block_root" => %block_root,
+                        "reason" => reason,
                     );
                 }
             },
@@ -1029,12 +1030,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         );
                         self.chain.recompute_head_at_current_slot().await;
                     }
-                    AvailabilityProcessingStatus::MissingComponents(_, _) => {
+                    AvailabilityProcessingStatus::MissingComponents(_, _, reason) => {
                         debug!(
                             self.log,
                             "Block components still missing block after reconstruction";
                             "result" => "imported all custody columns",
                             "block_hash" => %block_root,
+                            "reason" => reason,
                         );
                     }
                 }

@@ -610,8 +610,11 @@ async fn post_block_import_logging_and_response<T: BeaconChainTypes>(
             }
             Ok(warp::reply().into_response())
         }
-        Ok(AvailabilityProcessingStatus::MissingComponents(_, block_root)) => {
-            let msg = format!("Missing parts of block with root {:?}", block_root);
+        Ok(AvailabilityProcessingStatus::MissingComponents(_, block_root, reason)) => {
+            let msg = format!(
+                "Missing parts of block with root {:?} {}",
+                block_root, reason
+            );
             if let BroadcastValidation::Gossip = validation_level {
                 Err(warp_utils::reject::broadcast_without_import(msg))
             } else {

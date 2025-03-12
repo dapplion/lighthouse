@@ -557,7 +557,9 @@ impl TestRig {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(block_root))
             } else {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
-                    block_slot, block_root,
+                    block_slot,
+                    block_root,
+                    "TestReason".to_owned(),
                 ))
             },
         );
@@ -583,6 +585,7 @@ impl TestRig {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
                     Slot::new(0),
                     block_root,
+                    "TestReason".to_owned(),
                 ))
             },
         )
@@ -672,7 +675,9 @@ impl TestRig {
             id.lookup_id,
             if missing_components {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
-                    slot, block_root,
+                    slot,
+                    block_root,
+                    "TestReason".to_owned(),
                 ))
             } else {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(block_root))
@@ -763,6 +768,7 @@ impl TestRig {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
                     first_column.slot(),
                     first_column.block_root(),
+                    "TestReason".to_owned(),
                 ))
             } else {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(
@@ -1227,7 +1233,7 @@ impl TestRig {
             .unwrap()
         {
             Availability::Available(_) => panic!("block removed from da_checker, available"),
-            Availability::MissingComponents(block_root) => {
+            Availability::MissingComponents(block_root, _) => {
                 self.log(&format!("inserted block to da_checker {block_root:?}"))
             }
         };
@@ -1242,7 +1248,7 @@ impl TestRig {
             .unwrap()
         {
             Availability::Available(_) => panic!("blob removed from da_checker, available"),
-            Availability::MissingComponents(block_root) => {
+            Availability::MissingComponents(block_root, _) => {
                 self.log(&format!("inserted blob to da_checker {block_root:?}"))
             }
         };
@@ -2474,6 +2480,7 @@ mod deneb_only {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
                     self.block.slot(),
                     self.block_root,
+                    "TestReason".to_owned(),
                 )),
             );
             self.rig.expect_empty_network();
@@ -2528,6 +2535,7 @@ mod deneb_only {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
                     Slot::new(0),
                     parent_root,
+                    "TestReason".to_owned(),
                 )),
             );
             self.rig.expect_no_requests_for(parent_root);
@@ -2608,6 +2616,7 @@ mod deneb_only {
                 BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
                     self.slot,
                     self.block_root,
+                    "TestReason".to_owned(),
                 )),
             );
             // Add block to da_checker so blobs request can continue

@@ -174,9 +174,9 @@ pub enum WhenSlotSkipped {
     Prev,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AvailabilityProcessingStatus {
-    MissingComponents(Slot, Hash256),
+    MissingComponents(Slot, Hash256, /* reason */ String),
     Imported(Hash256),
 }
 
@@ -2934,9 +2934,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                                 // The block was imported successfully.
                                 imported_blocks.push((block_root, block_slot));
                             }
-                            AvailabilityProcessingStatus::MissingComponents(slot, block_root) => {
+                            AvailabilityProcessingStatus::MissingComponents(
+                                slot,
+                                block_root,
+                                reason,
+                            ) => {
                                 warn!(self.log, "Blobs missing in response to range request";
-                                    "block_root" => ?block_root, "slot" => slot);
+                                    "block_root" => ?block_root, "slot" => slot, "reason" => reason);
                                 return ChainSegmentResult::Failed {
                                     imported_blocks,
                                     error: BlockError::AvailabilityCheck(
@@ -3314,7 +3318,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         r: Result<AvailabilityProcessingStatus, BlockError>,
     ) -> Result<AvailabilityProcessingStatus, BlockError> {
         let has_missing_components =
-            matches!(r, Ok(AvailabilityProcessingStatus::MissingComponents(_, _)));
+            matches!(r, Ok(AvailabilityProcessingStatus::MissingComponents(..)));
         if !has_missing_components {
             self.reqresp_pre_import_cache.write().remove(block_root);
         }
@@ -3440,12 +3444,15 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
                 Ok(status)
             }
-            Ok(status @ AvailabilityProcessingStatus::MissingComponents(slot, block_root)) => {
+            Ok(
+                status @ AvailabilityProcessingStatus::MissingComponents(slot, block_root, reason),
+            ) => {
                 debug!(
                     self.log,
                     "Beacon block awaiting blobs";
                     "block_root" => ?block_root,
                     "block_slot" => slot,
+                    "reason" => reaosn,
                 );
 
                 Ok(status)
@@ -3709,8 +3716,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 // Block is fully available, import into fork choice
                 self.import_available_block(block).await
             }
-            Availability::MissingComponents(block_root) => Ok(
-                AvailabilityProcessingStatus::MissingComponents(slot, block_root),
+            Availability::MissingComponents(block_root, reason) => Ok(
+                AvailabilityProcessingStatus::MissingComponents(slot, block_root, reason),
             ),
         }
     }

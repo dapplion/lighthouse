@@ -298,12 +298,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 );
                 self.chain.recompute_head_at_current_slot().await;
             }
-            Ok(AvailabilityProcessingStatus::MissingComponents(_, _)) => {
+            Ok(AvailabilityProcessingStatus::MissingComponents(_, _, reason)) => {
                 debug!(
                     self.log,
                     "Missing components over rpc";
                     "block_hash" => %block_root,
                     "slot" => %slot,
+                    "reason" => reason,
                 );
             }
             Err(BlockError::DuplicateFullyImported(_)) => {
@@ -378,11 +379,12 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     );
                     self.chain.recompute_head_at_current_slot().await;
                 }
-                AvailabilityProcessingStatus::MissingComponents(_, _) => {
+                AvailabilityProcessingStatus::MissingComponents(_, _, reason) => {
                     debug!(
                         self.log,
                         "Missing components over rpc";
                         "block_hash" => %block_root,
+                        "reason" => reason,
                     );
                     // Attempt reconstruction here before notifying sync, to avoid sending out more requests
                     // that we may no longer need.

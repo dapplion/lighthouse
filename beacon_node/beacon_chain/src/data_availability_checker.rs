@@ -92,15 +92,15 @@ pub enum DataColumnReconstructionResult<E: EthSpec> {
 /// Indicates if the block is fully `Available` or if we need blobs or blocks
 ///  to "complete" the requirements for an `AvailableBlock`.
 pub enum Availability<E: EthSpec> {
-    MissingComponents(Hash256),
+    MissingComponents(Hash256, /* reason */ String),
     Available(Box<AvailableExecutedBlock<E>>),
 }
 
 impl<E: EthSpec> Debug for Availability<E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::MissingComponents(block_root) => {
-                write!(f, "MissingComponents({})", block_root)
+            Self::MissingComponents(block_root, _) => {
+                write!(f, "MissingComponents({block_root:?}))")
             }
             Self::Available(block) => write!(f, "Available({:?})", block.import_data.block_root),
         }
