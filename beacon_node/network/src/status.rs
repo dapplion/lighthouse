@@ -1,5 +1,5 @@
 use beacon_chain::{BeaconChain, BeaconChainTypes};
-use types::{EthSpec, FixedBytesExtended, Hash256, VariableList};
+use types::{EthSpec, FixedBytesExtended, Hash256};
 
 use lighthouse_network::rpc::{StatusMessage, StatusMessageV1_9999};
 
@@ -18,13 +18,12 @@ pub(crate) fn status_message<T: BeaconChainTypes>(
         finalized_checkpoint.root = Hash256::zero();
     }
 
-    let ancestor_roots = cached_head.head_chain_ancestor_roots().to_vec();
-
-    let ancestor_roots_bounded = if ancestor_roots.len() > T::EthSpec::max_status_roots() {
-        ancestor_roots[ancestor_roots.len() - T::EthSpec::max_status_roots()..].to_vec()
-    } else {
-        ancestor_roots
-    };
+    let ancestor_roots = StatusMessage::<T::EthSpec>::new_ancestor_roots_from_roots(
+        cached_head.head_chain_roots().to_vec(),
+        finalized_checkpoint.epoch,
+        cached_head.head_slot(),
+        &beacon_chain.spec,
+    );
 
     StatusMessage::V1_9999(StatusMessageV1_9999 {
         fork_digest,
@@ -32,7 +31,6 @@ pub(crate) fn status_message<T: BeaconChainTypes>(
         finalized_epoch: finalized_checkpoint.epoch,
         head_root: cached_head.head_block_root(),
         head_slot: cached_head.head_slot(),
-        ancestor_roots: VariableList::new(ancestor_roots_bounded)
-            .expect("ancestor_roots_max_len has len <= MAX_STATUS_ROOTS"),
+        ancestor_roots,
     })
 }

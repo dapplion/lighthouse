@@ -6,6 +6,7 @@ use serde::Serialize;
 use ssz::Encode;
 use ssz_derive::{Decode, Encode};
 use ssz_types::{typenum::U256, VariableList};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -109,6 +110,65 @@ impl<E: EthSpec> StatusMessage<E> {
         .as_ssz_bytes()
         .len()
     }
+
+    pub fn new_ancestor_roots_from_roots(
+        head_chain_roots_desc: Vec<(Hash256, Slot)>,
+        finalized_epoch: Epoch,
+        head_slot: Slot,
+        spec: &ChainSpec,
+    ) -> VariableList<Hash256, E::MaxStatusRoots> {
+        let mut next_epoch_idx =
+            finalized_epoch.as_u64() / spec.epochs_per_status_ancestor_root + 1;
+        let mut ancestor_roots = vec![];
+
+        for (root, slot) in head_chain_roots_desc.into_iter().rev() {
+            let epoch = slot.epoch(E::slots_per_epoch());
+            if epoch >= finalized_epoch {
+                let epoch_idx = epoch.as_u64() / spec.epochs_per_status_ancestor_root;
+                match epoch_idx.cmp(&next_epoch_idx) {
+                    Ordering::Less => {} // Already appended block root for this epoch idx
+                    Ordering::Equal => {
+                        ancestor_roots.push(root);
+                        next_epoch_idx = epoch_idx + 1;
+                    }
+                    Ordering::Greater => {
+                        // There are no roots for at least one epoch index
+                        for _ in 0..epoch_idx - next_epoch_idx {
+                            ancestor_roots.push(Hash256::ZERO);
+                        }
+                        ancestor_roots.push(root);
+                        next_epoch_idx = epoch_idx + 1;
+                    }
+                }
+            }
+        }
+
+        // Fill in remaining empty epochs up to head epoch index
+        let end_epoch_idx =
+            head_slot.epoch(E::slots_per_epoch()).as_u64() / spec.epochs_per_status_ancestor_root;
+        for _ in 0..end_epoch_idx - next_epoch_idx {
+            ancestor_roots.push(Hash256::ZERO);
+        }
+
+        let ancestor_roots_bounded = if ancestor_roots.len() > E::max_status_roots() {
+            ancestor_roots[ancestor_roots.len() - E::max_status_roots()..].to_vec()
+        } else {
+            ancestor_roots
+        };
+
+        VariableList::new(ancestor_roots_bounded)
+            .expect("ancestor_roots_max_len has len <= MAX_STATUS_ROOTS")
+    }
+}
+
+pub fn epoch_of_ancestor_root_offset(
+    finalized_epoch: Epoch,
+    epoch_index_offset: usize,
+    spec: &ChainSpec,
+) -> Epoch {
+    let base_epoch_idx = finalized_epoch.as_u64() / spec.epochs_per_status_ancestor_root + 1;
+    let epoch_idx = base_epoch_idx + epoch_index_offset as u64;
+    Epoch::new(epoch_idx * spec.epochs_per_status_ancestor_root)
 }
 
 /// The PING request/response message.

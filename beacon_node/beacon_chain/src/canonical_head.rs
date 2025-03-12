@@ -51,7 +51,6 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use slog::{crit, debug, error, info, warn, Logger};
 use slot_clock::SlotClock;
 use state_processing::AllCaches;
-use std::cmp::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use store::{iter::StateRootsIterator, KeyValueStoreOp, StoreItem};
@@ -107,8 +106,8 @@ pub struct CachedHead<E: EthSpec> {
     justified_hash: Option<ExecutionBlockHash>,
     /// The `execution_payload.block_hash` of the finalized block. Set to `None` before Bellatrix.
     finalized_hash: Option<ExecutionBlockHash>,
-    /// head chain roots at epoch intervals
-    head_chain_ancestor_roots: Vec<Hash256>,
+    /// head chain roots in descending order
+    head_chain_roots: Vec<(Hash256, Slot)>,
 }
 
 impl<E: EthSpec> CachedHead<E> {
@@ -154,9 +153,9 @@ impl<E: EthSpec> CachedHead<E> {
         Ok(root)
     }
 
-    /// Returns the head chain ancestor roots
-    pub fn head_chain_ancestor_roots(&self) -> &[Hash256] {
-        &self.head_chain_ancestor_roots
+    /// Returns the head chain as roots
+    pub fn head_chain_roots(&self) -> &[(Hash256, Slot)] {
+        &self.head_chain_roots
     }
 
     /// Returns the randao mix for the parent of the block at the head of the chain.
@@ -261,22 +260,14 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     pub fn new(
         fork_choice: BeaconForkChoice<T>,
         snapshot: Arc<BeaconSnapshot<T::EthSpec>>,
-        spec: &ChainSpec,
     ) -> Self {
-        let head_chain_roots_desc = fork_choice
+        let head_chain_roots = fork_choice
             .proto_array()
             .iter_block_roots(&snapshot.beacon_block_root)
             .collect();
 
         let fork_choice_view = fork_choice.cached_fork_choice_view();
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
-
-        let head_chain_ancestor_roots = compute_ancestor_roots::<T::EthSpec>(
-            head_chain_roots_desc,
-            fork_choice_view.finalized_checkpoint.epoch,
-            snapshot.beacon_block.slot(),
-            spec,
-        );
 
         let cached_head = CachedHead {
             snapshot,
@@ -285,7 +276,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             head_hash: forkchoice_update_params.head_hash,
             justified_hash: forkchoice_update_params.justified_hash,
             finalized_hash: forkchoice_update_params.finalized_hash,
-            head_chain_ancestor_roots,
+            head_chain_roots,
         };
 
         Self {
@@ -319,7 +310,6 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let beacon_block = store
             .get_full_block(&beacon_block_root)?
             .ok_or(Error::MissingBeaconBlock(beacon_block_root))?;
-        let beacon_block_slot = beacon_block.slot();
         let current_slot = fork_choice.fc_store().get_current_slot();
         let (_, beacon_state) = store
             .get_advanced_hot_state(beacon_block_root, current_slot, beacon_block.state_root())?
@@ -331,7 +321,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             beacon_state,
         };
 
-        let head_chain_roots_desc = fork_choice_write_lock
+        let head_chain_roots = fork_choice_write_lock
             .proto_array()
             .iter_block_roots(&beacon_block_root)
             .collect();
@@ -344,12 +334,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             head_hash: forkchoice_update_params.head_hash,
             justified_hash: forkchoice_update_params.justified_hash,
             finalized_hash: forkchoice_update_params.finalized_hash,
-            head_chain_ancestor_roots: compute_ancestor_roots::<T::EthSpec>(
-                head_chain_roots_desc,
-                fork_choice_view.finalized_checkpoint.epoch,
-                beacon_block_slot,
-                spec,
-            ),
+            head_chain_roots,
         };
 
         *fork_choice_write_lock = fork_choice;
@@ -674,7 +659,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let new_forkchoice_update_parameters =
             fork_choice_read_lock.get_forkchoice_update_parameters();
 
-        let head_chain_roots_desc = fork_choice_read_lock
+        let head_chain_roots = fork_choice_read_lock
             .proto_array()
             .iter_block_roots(&new_view.head_block_root)
             .collect();
@@ -714,7 +699,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // Regardless of where we got the state from, attempt to build all the
             // caches except the tree hash cache.
             new_snapshot.beacon_state.build_all_caches(&self.spec)?;
-            let head_block_slot = new_snapshot.beacon_block.slot();
 
             let new_cached_head = CachedHead {
                 snapshot: Arc::new(new_snapshot),
@@ -723,12 +707,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 head_hash: new_forkchoice_update_parameters.head_hash,
                 justified_hash: new_forkchoice_update_parameters.justified_hash,
                 finalized_hash: new_forkchoice_update_parameters.finalized_hash,
-                head_chain_ancestor_roots: compute_ancestor_roots::<T::EthSpec>(
-                    head_chain_roots_desc,
-                    new_view.finalized_checkpoint.epoch,
-                    head_block_slot,
-                    &self.spec,
-                ),
+                head_chain_roots,
             };
 
             let new_head = {
@@ -756,7 +735,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 head_hash: new_forkchoice_update_parameters.head_hash,
                 justified_hash: new_forkchoice_update_parameters.justified_hash,
                 finalized_hash: new_forkchoice_update_parameters.finalized_hash,
-                head_chain_ancestor_roots: old_cached_head.head_chain_ancestor_roots.clone(),
+                head_chain_roots: old_cached_head.head_chain_roots.clone(),
             };
 
             let mut cached_head_write_lock = self.canonical_head.cached_head_write_lock();
@@ -1340,45 +1319,6 @@ pub fn find_reorg_slot<E: EthSpec>(
         .finalized_checkpoint()
         .epoch
         .start_slot(E::slots_per_epoch()))
-}
-
-fn compute_ancestor_roots<E: EthSpec>(
-    head_chain_roots_desc: Vec<(Hash256, Slot)>,
-    finalized_epoch: Epoch,
-    head_slot: Slot,
-    spec: &ChainSpec,
-) -> Vec<Hash256> {
-    let mut next_epoch_idx = finalized_epoch.as_u64() / spec.epochs_per_status_ancestor_root;
-    let mut ancestor_roots = vec![];
-
-    for (root, slot) in head_chain_roots_desc.into_iter().rev() {
-        let epoch_idx =
-            slot.epoch(E::slots_per_epoch()).as_u64() / spec.epochs_per_status_ancestor_root;
-        match epoch_idx.cmp(&next_epoch_idx) {
-            Ordering::Less => {} // Already appended block root for this epoch idx
-            Ordering::Equal => {
-                ancestor_roots.push(root);
-                next_epoch_idx = epoch_idx + 1;
-            }
-            Ordering::Greater => {
-                // There are no roots for at least one epoch index
-                for _ in 0..epoch_idx - next_epoch_idx {
-                    ancestor_roots.push(Hash256::ZERO);
-                }
-                ancestor_roots.push(root);
-                next_epoch_idx = epoch_idx + 1;
-            }
-        }
-    }
-
-    // Fill in remaining empty epochs up to head epoch index
-    let end_epoch_idx =
-        head_slot.epoch(E::slots_per_epoch()).as_u64() / spec.epochs_per_status_ancestor_root;
-    for _ in 0..end_epoch_idx - next_epoch_idx {
-        ancestor_roots.push(Hash256::ZERO);
-    }
-
-    ancestor_roots
 }
 
 fn observe_head_block_delays<E: EthSpec, S: SlotClock>(

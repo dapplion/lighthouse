@@ -1,9 +1,8 @@
 //! Handles individual sync status for peers.
 
+use crate::rpc::{methods::epoch_of_ancestor_root_offset, StatusMessage};
 use serde::Serialize;
-use types::{Epoch, EthSpec, Hash256, Slot};
-
-use crate::rpc::StatusMessage;
+use types::{ChainSpec, Epoch, EthSpec, Hash256, Slot};
 
 #[derive(Clone, Debug, Serialize)]
 /// The current sync status of the peer.
@@ -27,6 +26,7 @@ pub struct SyncInfo {
     pub head_root: Hash256,
     pub finalized_epoch: Epoch,
     pub finalized_root: Hash256,
+    pub ancestor_roots: Option<Vec<Hash256>>,
 }
 
 impl SyncInfo {
@@ -36,6 +36,82 @@ impl SyncInfo {
             head_root: *status.head_root(),
             finalized_epoch: *status.finalized_epoch(),
             finalized_root: *status.finalized_root(),
+            ancestor_roots: Some(status.ancestor_roots().to_vec()),
+        }
+    }
+
+    pub fn is_same_finalized_checkpoint(&self, other: &Self) -> bool {
+        self.finalized_epoch == other.finalized_epoch && self.finalized_root == other.finalized_root
+    }
+
+    pub fn last_known_ancestor_root(
+        &self,
+        other: &Self,
+        spec: &ChainSpec,
+    ) -> Option<(Epoch, Hash256)> {
+        if !self.is_same_finalized_checkpoint(other) {
+            return None;
+        }
+
+        let (Some(self_ancestor_roots), Some(remote_ancestor_roots)) =
+            (self.ancestor_roots.as_ref(), other.ancestor_roots.as_ref())
+        else {
+            return Some((self.finalized_epoch, self.finalized_root));
+        };
+
+        for (i, (self_root, other_root)) in self_ancestor_roots
+            .iter()
+            .zip(remote_ancestor_roots.iter())
+            .enumerate()
+        {
+            if self_root != other_root {
+                // Found the first unknown root
+                return if i == 0 {
+                    // If the root at the first index is unknown return the common
+                    // finalized checkpoint
+                    Some((self.finalized_epoch, self.finalized_root))
+                } else {
+                    // The prior index is the last known root
+                    let last_known_index = i - 1;
+                    let root = self_ancestor_roots
+                        .get(last_known_index)
+                        .expect("get within bounds of self_ancestor_roots len");
+                    let epoch =
+                        epoch_of_ancestor_root_offset(self.finalized_epoch, last_known_index, spec);
+                    Some((epoch, *root))
+                };
+            }
+        }
+
+        // Case `local.len() < remote.len()`
+        // local  [a,b,c]   <- last known is `c`
+        // remote [a,b,c,d]
+        //
+        // Case `local.len() == remote.len()`
+        // local  [a,b,c]   <- last known is `c`
+        // remote [a,b,c]
+        //
+        // Case `local.len() > remote.len()`
+        // > Note this case should not happen as then this peer is not advanced and we won't
+        // sync from it. For sanity we return None
+        // local  [a,b,c,d]
+        // remote [a,b,c]
+
+        // If reach here the common section of both ancestor roots arrays are the same.
+        if self_ancestor_roots.len() <= remote_ancestor_roots.len() {
+            if self_ancestor_roots.is_empty() {
+                Some((self.finalized_epoch, self.finalized_root))
+            } else {
+                let last_item_index = self_ancestor_roots.len();
+                let root = remote_ancestor_roots
+                    .get(last_item_index)
+                    .expect("remote_ancestor_roots len is > self_ancestor_roots len");
+                let epoch =
+                    epoch_of_ancestor_root_offset(self.finalized_epoch, last_item_index, spec);
+                Some((epoch, *root))
+            }
+        } else {
+            None
         }
     }
 }

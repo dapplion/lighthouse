@@ -207,12 +207,7 @@ impl<T: BeaconChainTypes> ChainCollection<T> {
 
         if !matches!(self.state, RangeSyncState::Finalized(_)) {
             // Handle head syncing chains if there are no finalized chains left.
-            self.update_head_chains(
-                network,
-                local.finalized_epoch,
-                local_head_epoch,
-                awaiting_head_peers,
-            );
+            self.update_head_chains(network, local, local_head_epoch, awaiting_head_peers);
         }
     }
 
@@ -324,17 +319,25 @@ impl<T: BeaconChainTypes> ChainCollection<T> {
     fn update_head_chains(
         &mut self,
         network: &mut SyncNetworkContext<T>,
-        local_epoch: Epoch,
+        local_info: &SyncInfo,
         local_head_epoch: Epoch,
         awaiting_head_peers: &mut HashMap<PeerId, SyncInfo>,
     ) {
         // Include the awaiting head peers
-        for (peer_id, peer_sync_info) in awaiting_head_peers.drain() {
+        for (peer_id, remote_info) in awaiting_head_peers.drain() {
+            let start_epoch = if let Some(last_known_ancestor) =
+                local_info.last_known_ancestor_root(&remote_info, network.spec())
+            {
+                last_known_ancestor.0
+            } else {
+                local_info.finalized_epoch
+            };
+
             debug!(self.log, "including head peer");
             self.add_peer_or_create_chain(
-                local_epoch,
-                peer_sync_info.head_root,
-                peer_sync_info.head_slot,
+                start_epoch,
+                remote_info.head_root,
+                remote_info.head_slot,
                 peer_id,
                 RangeSyncType::Head,
                 network,
@@ -365,7 +368,7 @@ impl<T: BeaconChainTypes> ChainCollection<T> {
                     debug!(self.log, "New head chain started syncing"; &chain);
                 }
                 if let Err(remove_reason) =
-                    chain.start_syncing(network, local_epoch, local_head_epoch)
+                    chain.start_syncing(network, local_info.finalized_epoch, local_head_epoch)
                 {
                     self.head_chains.remove(&id);
                     if remove_reason.is_critical() {

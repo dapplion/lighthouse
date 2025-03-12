@@ -184,8 +184,15 @@ where
                 // The new peer has the same finalized (earlier filters should prevent a peer with an
                 // earlier finalized chain from reaching here).
 
-                let start_epoch = std::cmp::min(local_info.head_slot, remote_finalized_slot)
-                    .epoch(T::EthSpec::slots_per_epoch());
+                let start_epoch = if let Some(last_known_ancestor) =
+                    local_info.last_known_ancestor_root(&remote_info, network.spec())
+                {
+                    last_known_ancestor.0
+                } else {
+                    std::cmp::min(local_info.head_slot, remote_finalized_slot)
+                        .epoch(T::EthSpec::slots_per_epoch())
+                };
+
                 self.chains.add_peer_or_create_chain(
                     start_epoch,
                     remote_info.head_root,

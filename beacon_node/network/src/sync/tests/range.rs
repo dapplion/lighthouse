@@ -98,6 +98,7 @@ impl TestRig {
             finalized_root,
             head_slot: finalized_epoch.start_slot(E::slots_per_epoch()),
             head_root: Hash256::random(),
+            ancestor_roots: None,
         })
     }
 
@@ -109,6 +110,7 @@ impl TestRig {
             finalized_root: Hash256::random(),
             head_slot: finalized_epoch.start_slot(E::slots_per_epoch()),
             head_root: Hash256::random(),
+            ancestor_roots: None,
         }
     }
 

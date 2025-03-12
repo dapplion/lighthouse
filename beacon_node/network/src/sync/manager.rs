@@ -463,6 +463,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             // Set finalized to same as local to trigger Head sync
             finalized_epoch: local.finalized_epoch,
             finalized_root: local.finalized_root,
+            // TODO: We want to use this feature here potentially
+            ancestor_roots: None,
         };
 
         for peer_id in peers {
