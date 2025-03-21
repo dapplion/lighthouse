@@ -961,7 +961,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .epoch
             .start_slot(T::EthSpec::slots_per_epoch());
         let new_finalized_state_root = process_results(
-            StateRootsIterator::new(&self.store, &new_snapshot.beacon_state),
+            StateRootsIterator::new(&self.store, new_snapshot.beacon_state_root()),
             |mut iter| {
                 iter.find_map(|(state_root, slot)| {
                     if slot == new_finalized_slot {

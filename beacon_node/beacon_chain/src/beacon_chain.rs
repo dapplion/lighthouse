@@ -783,14 +783,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// - Iterator returns `(Hash256, Slot)`.
     /// - As this iterator starts at the `head` of the chain (viz., the best block), the first slot
     ///     returned may be earlier than the wall-clock slot.
-    pub fn rev_iter_state_roots_from<'a>(
-        &'a self,
+    pub fn rev_iter_state_roots_from(
+        &self,
         state_root: Hash256,
-        state: &'a BeaconState<T::EthSpec>,
-    ) -> impl Iterator<Item = Result<(Hash256, Slot), Error>> + 'a {
-        std::iter::once(Ok((state_root, state.slot())))
-            .chain(StateRootsIterator::new(&self.store, state))
-            .map(|result| result.map_err(Into::into))
+    ) -> impl Iterator<Item = Result<(Hash256, Slot), Error>> + '_ {
+        StateRootsIterator::new(&self.store, state_root).map(|result| result.map_err(Into::into))
     }
 
     /// Iterates across all `(state_root, slot)` pairs from `start_slot`

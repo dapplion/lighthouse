@@ -100,6 +100,11 @@ pub enum Error {
         from_state_slot: Slot,
         target_slot: Slot,
     },
+    CircularStateSummaries {
+        state_root: Hash256,
+        state_slot: Slot,
+        previous_slot: Slot,
+    },
 }
 
 pub trait HandleUnavailable<T> {

@@ -20,7 +20,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         if column == DBColumn::BeaconBlockRoots {
             self.forwards_iter_block_roots_using_state(start_slot, end_state, end_root)
         } else if column == DBColumn::BeaconStateRoots {
-            self.forwards_iter_state_roots_using_state(start_slot, end_state, end_root)
+            self.forwards_iter_state_roots_using_state(start_slot, end_root)
         } else {
             Err(Error::ForwardsIterInvalidColumn(column))
         }
@@ -47,18 +47,13 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     fn forwards_iter_state_roots_using_state(
         &self,
         start_slot: Slot,
-        end_state: BeaconState<E>,
         end_state_root: Hash256,
     ) -> Result<SimpleForwardsIterator> {
         // Iterate backwards from the end state, stopping at the start slot.
-        let values = process_results(
-            std::iter::once(Ok((end_state_root, end_state.slot())))
-                .chain(StateRootsIterator::owned(self, end_state)),
-            |iter| {
-                iter.take_while(|(_, slot)| *slot >= start_slot)
-                    .collect::<Vec<_>>()
-            },
-        )?;
+        let values = process_results(StateRootsIterator::new(self, end_state_root), |iter| {
+            iter.take_while(|(_, slot)| *slot >= start_slot)
+                .collect::<Vec<_>>()
+        })?;
         Ok(SimpleForwardsIterator { values })
     }
 

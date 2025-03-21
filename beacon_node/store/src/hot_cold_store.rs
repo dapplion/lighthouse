@@ -3,7 +3,7 @@ use crate::database::interface::BeaconNodeBackend;
 use crate::forwards_iter::{HybridForwardsBlockRootsIterator, HybridForwardsStateRootsIterator};
 use crate::hdiff::{HDiff, HDiffBuffer, HierarchyModuli, StorageStrategy};
 use crate::historic_state_cache::HistoricStateCache;
-use crate::iter::{BlockRootsIterator, ParentRootBlockIterator, RootsIterator};
+use crate::iter::{BlockRootsIterator, ParentRootBlockIterator, StateRootsIterator};
 use crate::memory_store::MemoryStore;
 use crate::metadata::{
     AnchorInfo, BlobInfo, CompactionTimestamp, DataColumnInfo, SchemaVersion,
@@ -3216,21 +3216,32 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     let mut cold_db_block_ops = vec![];
 
     // Iterate in descending order until the current split slot
-    let state_roots: Vec<_> =
-        process_results(RootsIterator::new(&store, finalized_state), |iter| {
-            iter.take_while(|(_, _, slot)| *slot >= current_split.slot)
+    let state_roots: Vec<_> = process_results(
+        StateRootsIterator::new(&store, finalized_state_root),
+        |iter| {
+            iter.take_while(|(_, slot)| *slot >= current_split.slot)
+                .collect()
+        },
+    )?;
+
+    let block_roots: Vec<_> =
+        process_results(BlockRootsIterator::new(&store, finalized_state), |iter| {
+            iter.take_while(|(_, slot)| *slot >= current_split.slot)
                 .collect()
         })?;
 
     // Then, iterate states in slot ascending order, as they are stored wrt previous states.
-    for (block_root, state_root, slot) in state_roots.into_iter().rev() {
+    for (block_root, slot) in block_roots.into_iter().rev() {
         // Store the slot to block root mapping.
         cold_db_block_ops.push(KeyValueStoreOp::PutKeyValue(
             DBColumn::BeaconBlockRoots,
             slot.as_u64().to_be_bytes().to_vec(),
             block_root.as_slice().to_vec(),
         ));
+    }
 
+    // Then, iterate states in slot ascending order, as they are stored wrt previous states.
+    for (state_root, slot) in state_roots.into_iter().rev() {
         // Do not try to store states if a restore point is yet to be stored, or will never be
         // stored (see `STATE_UPPER_LIMIT_NO_RETAIN`). Make an exception for the genesis state
         // which always needs to be copied from the hot DB to the freezer and should not be deleted.

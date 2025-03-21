@@ -35,22 +35,11 @@ impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
     }
 }
 
-impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
-    AncestorIter<'a, E, Hot, Cold, StateRootsIterator<'a, E, Hot, Cold>> for BeaconState<E>
-{
-    /// Iterates across all available prior state roots of `self`, starting at the most recent and ending
-    /// at genesis.
-    fn try_iter_ancestor_roots(
-        &self,
-        store: &'a HotColdDB<E, Hot, Cold>,
-    ) -> Option<StateRootsIterator<'a, E, Hot, Cold>> {
-        // The `self.clone()` here is wasteful.
-        Some(StateRootsIterator::owned(store, self.clone()))
-    }
-}
-
+// TODO: Current implementation covers only un-finalized states
 pub struct StateRootsIterator<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
-    inner: RootsIterator<'a, E, Hot, Cold>,
+    store: &'a HotColdDB<E, Hot, Cold>,
+    next_state_root: Hash256,
+    previous_slot: Option<Slot>,
 }
 
 impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> Clone
@@ -58,21 +47,19 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> Clone
 {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            store: self.store,
+            next_state_root: self.next_state_root,
+            previous_slot: self.previous_slot,
         }
     }
 }
 
 impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> StateRootsIterator<'a, E, Hot, Cold> {
-    pub fn new(store: &'a HotColdDB<E, Hot, Cold>, beacon_state: &'a BeaconState<E>) -> Self {
+    pub fn new(store: &'a HotColdDB<E, Hot, Cold>, initial_state_root: Hash256) -> Self {
         Self {
-            inner: RootsIterator::new(store, beacon_state),
-        }
-    }
-
-    pub fn owned(store: &'a HotColdDB<E, Hot, Cold>, beacon_state: BeaconState<E>) -> Self {
-        Self {
-            inner: RootsIterator::owned(store, beacon_state),
+            store,
+            next_state_root: initial_state_root,
+            previous_slot: None,
         }
     }
 }
@@ -80,12 +67,32 @@ impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> StateRootsIterator<'
 impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> Iterator
     for StateRootsIterator<'_, E, Hot, Cold>
 {
+    // (state_root, state_slot)
     type Item = Result<(Hash256, Slot), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner
-            .next()
-            .map(|result| result.map(|(_, state_root, slot)| (state_root, slot)))
+        let state_root = self.next_state_root;
+        match self.store.load_hot_state_summary(&state_root) {
+            Err(e) => Some(Err(e)),
+            Ok(None) => {
+                // TODO: check if we reached the anchor slot, else error with missing state summary
+                None
+            }
+            Ok(Some(summary)) => {
+                if let Some(previous_slot) = self.previous_slot {
+                    if summary.slot >= previous_slot {
+                        return Some(Err(Error::CircularStateSummaries {
+                            state_root,
+                            state_slot: summary.slot,
+                            previous_slot,
+                        }));
+                    }
+                }
+                self.previous_slot = Some(summary.slot);
+                self.next_state_root = summary.previous_state_root;
+                Some(Ok((state_root, summary.slot)))
+            }
+        }
     }
 }
 
@@ -149,7 +156,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> Iterator
 }
 
 /// Iterator over state and block roots that backtracks using the vectors from a `BeaconState`.
-pub struct RootsIterator<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
+struct RootsIterator<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
     store: &'a HotColdDB<E, Hot, Cold>,
     beacon_state: Cow<'a, BeaconState<E>>,
     slot: Slot,
@@ -497,7 +504,7 @@ mod test {
         store.put_state(&state_a_root, &state_a).unwrap();
         store.put_state(&state_b_root, &state_b).unwrap();
 
-        let iter = StateRootsIterator::new(&store, &state_b);
+        let iter = StateRootsIterator::new(&store, state_b_root);
 
         assert!(
             iter.clone()
