@@ -677,7 +677,8 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             }
             BatchProcessResult::FaultyFailure {
                 imported_blocks,
-                penalty,
+                peer_action,
+                error,
             } => {
                 match batch.processing_completed(BatchProcessingResult::FaultyFailure) {
                     Err(e) => {

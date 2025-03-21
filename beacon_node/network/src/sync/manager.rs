@@ -41,7 +41,9 @@ use super::network_context::{
 use super::peer_sampling::{Sampling, SamplingConfig, SamplingResult};
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
-use crate::network_beacon_processor::{ChainSegmentProcessId, NetworkBeaconProcessor};
+use crate::network_beacon_processor::{
+    ChainSegmentFailed, ChainSegmentProcessId, NetworkBeaconProcessor, PeerGroupAction,
+};
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::block_lookups::{
@@ -61,8 +63,8 @@ use lighthouse_network::service::api_types::{
     SamplingId, SamplingRequester, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
+use lighthouse_network::PeerId;
 use lighthouse_network::SyncInfo;
-use lighthouse_network::{PeerAction, PeerId};
 use logging::crit;
 use lru_cache::LRUTimeCache;
 use std::ops::Sub;
@@ -215,7 +217,8 @@ pub enum BatchProcessResult {
     /// The batch processing failed. It carries whether the processing imported any block.
     FaultyFailure {
         imported_blocks: usize,
-        penalty: PeerAction,
+        peer_action: PeerGroupAction,
+        error: String,
     },
     NonFaultyFailure,
 }
@@ -1251,10 +1254,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         peer_id: PeerId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
     ) {
-        if let Some(resp) = self
-            .network
-            .range_block_component_response(range_request_id, range_block_component)
-        {
+        if let Some(resp) = self.network.range_block_component_response(
+            range_request_id,
+            peer_id,
+            range_block_component,
+        ) {
             match resp {
                 Ok(blocks) => {
                     match range_request_id.requester {

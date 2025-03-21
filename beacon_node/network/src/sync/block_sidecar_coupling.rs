@@ -1,13 +1,19 @@
 use beacon_chain::{
     block_verification_types::RpcBlock, data_column_verification::CustodyDataColumn, get_block_root,
 };
-use lighthouse_network::service::api_types::{
-    BlobsByRangeRequestId, BlocksByRangeRequestId, DataColumnsByRangeRequestId,
+use lighthouse_network::{
+    service::api_types::{
+        BlobsByRangeRequestId, BlocksByRangeRequestId, DataColumnsByRangeRequestId,
+    },
+    PeerId,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, EthSpec,
-    Hash256, RuntimeVariableList, SignedBeaconBlock,
+    Hash256, RuntimeVariableList, SignedBeaconBlock, Slot,
 };
 
 pub struct RangeBlockComponentsRequest<E: EthSpec> {
@@ -19,7 +25,7 @@ pub struct RangeBlockComponentsRequest<E: EthSpec> {
 
 enum ByRangeRequest<I: PartialEq + std::fmt::Display, T> {
     Active(I),
-    Complete(T),
+    Complete(T, PeerId),
 }
 
 enum RangeBlockDataRequest<E: EthSpec> {
@@ -30,7 +36,7 @@ enum RangeBlockDataRequest<E: EthSpec> {
             DataColumnsByRangeRequestId,
             ByRangeRequest<DataColumnsByRangeRequestId, DataColumnSidecarList<E>>,
         >,
-        expected_custody_columns: Vec<ColumnIndex>,
+        expected_column_to_peer: HashMap<ColumnIndex, PeerId>,
     },
 }
 
@@ -38,17 +44,20 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
     pub fn new(
         blocks_req_id: BlocksByRangeRequestId,
         blobs_req_id: Option<BlobsByRangeRequestId>,
-        data_columns: Option<(Vec<DataColumnsByRangeRequestId>, Vec<ColumnIndex>)>,
+        data_columns: Option<(
+            Vec<DataColumnsByRangeRequestId>,
+            HashMap<ColumnIndex, PeerId>,
+        )>,
     ) -> Self {
         let block_data_request = if let Some(blobs_req_id) = blobs_req_id {
             RangeBlockDataRequest::Blobs(ByRangeRequest::Active(blobs_req_id))
-        } else if let Some((requests, expected_custody_columns)) = data_columns {
+        } else if let Some((requests, expected_column_to_peer)) = data_columns {
             RangeBlockDataRequest::DataColumns {
                 requests: requests
                     .into_iter()
                     .map(|id| (id, ByRangeRequest::Active(id)))
                     .collect(),
-                expected_custody_columns,
+                expected_column_to_peer,
             }
         } else {
             RangeBlockDataRequest::NoData
@@ -64,18 +73,20 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         &mut self,
         req_id: BlocksByRangeRequestId,
         blocks: Vec<Arc<SignedBeaconBlock<E>>>,
+        peer_id: PeerId,
     ) -> Result<(), String> {
-        self.blocks_request.finish(req_id, blocks)
+        self.blocks_request.finish(req_id, blocks, peer_id)
     }
 
     pub fn add_blobs(
         &mut self,
         req_id: BlobsByRangeRequestId,
         blobs: Vec<Arc<BlobSidecar<E>>>,
+        peer_id: PeerId,
     ) -> Result<(), String> {
         match &mut self.block_data_request {
             RangeBlockDataRequest::NoData => Err("received blobs but expected no data".to_owned()),
-            RangeBlockDataRequest::Blobs(ref mut req) => req.finish(req_id, blobs),
+            RangeBlockDataRequest::Blobs(ref mut req) => req.finish(req_id, blobs, peer_id),
             RangeBlockDataRequest::DataColumns { .. } => {
                 Err("received blobs but expected data columns".to_owned())
             }
@@ -86,6 +97,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         &mut self,
         req_id: DataColumnsByRangeRequestId,
         columns: Vec<Arc<DataColumnSidecar<E>>>,
+        peer_id: PeerId,
     ) -> Result<(), String> {
         match &mut self.block_data_request {
             RangeBlockDataRequest::NoData => {
@@ -100,13 +112,13 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
                 let req = requests
                     .get_mut(&req_id)
                     .ok_or(format!("unknown data columns by range req_id {req_id}"))?;
-                req.finish(req_id, columns)
+                req.finish(req_id, columns, peer_id)
             }
         }
     }
 
     pub fn responses(&self, spec: &ChainSpec) -> Option<Result<Vec<RpcBlock<E>>, String>> {
-        let Some(blocks) = self.blocks_request.to_finished() else {
+        let Some((blocks, _block_peer)) = self.blocks_request.to_finished() else {
             return None;
         };
 
@@ -115,7 +127,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
                 Some(Self::responses_with_blobs(blocks.to_vec(), vec![], spec))
             }
             RangeBlockDataRequest::Blobs(request) => {
-                let Some(blobs) = request.to_finished() else {
+                let Some((blobs, _peer_id)) = request.to_finished() else {
                     return None;
                 };
                 Some(Self::responses_with_blobs(
@@ -126,11 +138,11 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
             }
             RangeBlockDataRequest::DataColumns {
                 requests,
-                expected_custody_columns,
+                expected_column_to_peer,
             } => {
                 let mut data_columns = vec![];
                 for req in requests.values() {
-                    let Some(data) = req.to_finished() else {
+                    let Some((data, _peer_id)) = req.to_finished() else {
                         return None;
                     };
                     data_columns.extend(data.clone())
@@ -139,7 +151,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
                 Some(Self::responses_with_custody_columns(
                     blocks.to_vec(),
                     data_columns,
-                    expected_custody_columns,
+                    expected_column_to_peer.clone(),
                     spec,
                 ))
             }
@@ -199,75 +211,74 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
     fn responses_with_custody_columns(
         blocks: Vec<Arc<SignedBeaconBlock<E>>>,
         data_columns: DataColumnSidecarList<E>,
-        expects_custody_columns: &[ColumnIndex],
+        expected_custody_columns: HashMap<ColumnIndex, PeerId>,
         spec: &ChainSpec,
     ) -> Result<Vec<RpcBlock<E>>, String> {
         // Group data columns by block_root and index
-        let mut data_columns_by_block =
-            HashMap::<Hash256, HashMap<ColumnIndex, Arc<DataColumnSidecar<E>>>>::new();
+        let mut custody_columns_by_block = HashMap::<Hash256, Vec<CustodyDataColumn<E>>>::new();
+        let mut block_roots_by_slot = HashMap::<Slot, HashSet<Hash256>>::new();
+        let expected_custody_indices = expected_custody_columns.keys().cloned().collect::<Vec<_>>();
 
         for column in data_columns {
             let block_root = column.block_root();
             let index = column.index;
-            if data_columns_by_block
-                .entry(block_root)
+
+            block_roots_by_slot
+                .entry(column.slot())
                 .or_default()
-                .insert(index, column)
-                .is_some()
-            {
+                .insert(block_root);
+
+            // Sanity check before casting to `CustodyDataColumn`. But this should never happen
+            if !expected_custody_columns.contains_key(&index) {
                 return Err(format!(
-                    "Repeated column block_root {block_root:?} index {index}"
+                    "Received column not in expected custody indices {index}"
                 ));
             }
+
+            custody_columns_by_block
+                .entry(block_root)
+                .or_default()
+                .push(CustodyDataColumn::from_asserted_custody(column));
         }
 
         // Now iterate all blocks ensuring that the block roots of each block and data column match,
         // plus we have columns for our custody requirements
-        let mut rpc_blocks = Vec::with_capacity(blocks.len());
+        let rpc_blocks = blocks
+            .into_iter()
+            .map(|block| {
+                let block_root = get_block_root(&block);
+                block_roots_by_slot
+                    .entry(block.slot())
+                    .or_default()
+                    .insert(block_root);
 
-        for block in blocks {
-            let block_root = get_block_root(&block);
-            rpc_blocks.push(if block.num_expected_blobs() > 0 {
-                let Some(mut data_columns_by_index) = data_columns_by_block.remove(&block_root)
-                else {
-                    // This PR ignores the fix from https://github.com/sigp/lighthouse/pull/5675
-                    // which allows blobs to not match blocks.
-                    // TODO(das): on the initial version of PeerDAS the beacon chain does not check
-                    // rpc custody requirements and dropping this check can allow the block to have
-                    // an inconsistent DB.
-                    return Err(format!("No columns for block {block_root:?} with data"));
-                };
+                let custody_columns = custody_columns_by_block
+                    .remove(&block_root)
+                    .unwrap_or_default();
 
-                let mut custody_columns = vec![];
-                for index in expects_custody_columns {
-                    let Some(data_column) = data_columns_by_index.remove(index) else {
-                        return Err(format!("No column for block {block_root:?} index {index}"));
-                    };
-                    // Safe to convert to `CustodyDataColumn`: we have asserted that the index of
-                    // this column is in the set of `expects_custody_columns` and with the expected
-                    // block root, so for the expected epoch of this batch.
-                    custody_columns.push(CustodyDataColumn::from_asserted_custody(data_column));
-                }
-
-                // Assert that there are no columns left
-                if !data_columns_by_index.is_empty() {
-                    let remaining_indices = data_columns_by_index.keys().collect::<Vec<_>>();
-                    return Err(format!(
-                        "Not all columns consumed for block {block_root:?}: {remaining_indices:?}"
-                    ));
-                }
-
-                RpcBlock::new_with_custody_columns(Some(block_root), block, custody_columns, spec)
-                    .map_err(|e| format!("{e:?}"))?
-            } else {
-                RpcBlock::new_without_blobs(Some(block_root), block)
-            });
-        }
+                RpcBlock::new_with_custody_columns(
+                    Some(block_root),
+                    block,
+                    custody_columns,
+                    expected_custody_indices.clone(),
+                    spec,
+                )
+                .map_err(|e| format!("{e:?}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Assert that there are no columns left for other blocks
-        if !data_columns_by_block.is_empty() {
-            let remaining_roots = data_columns_by_block.keys().collect::<Vec<_>>();
+        if !custody_columns_by_block.is_empty() {
+            let remaining_roots = custody_columns_by_block.keys().collect::<Vec<_>>();
             return Err(format!("Not all columns consumed: {remaining_roots:?}"));
+        }
+
+        for (_slot, block_roots) in block_roots_by_slot {
+            if block_roots.len() > 1 {
+                // TODO: Some peer(s) are faulty or malicious. This batch will fail processing but
+                // we want to send it to the process to better attribute fault. Maybe warn log for
+                // now and track it in a metric?
+            }
         }
 
         Ok(rpc_blocks)
@@ -275,23 +286,23 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
 }
 
 impl<I: PartialEq + std::fmt::Display, T> ByRangeRequest<I, T> {
-    fn finish(&mut self, id: I, data: T) -> Result<(), String> {
+    fn finish(&mut self, id: I, data: T, peer_id: PeerId) -> Result<(), String> {
         match self {
             Self::Active(expected_id) => {
                 if expected_id != &id {
                     return Err(format!("unexpected req_id expected {expected_id} got {id}"));
                 }
-                *self = Self::Complete(data);
+                *self = Self::Complete(data, peer_id);
                 Ok(())
             }
-            Self::Complete(_) => Err("request already complete".to_owned()),
+            Self::Complete(_, _) => Err("request already complete".to_owned()),
         }
     }
 
-    fn to_finished(&self) -> Option<&T> {
+    fn to_finished(&self) -> Option<(&T, &PeerId)> {
         match self {
             Self::Active(_) => None,
-            Self::Complete(data) => Some(data),
+            Self::Complete(data, peer_id) => Some((data, peer_id)),
         }
     }
 }
@@ -302,12 +313,15 @@ mod tests {
     use beacon_chain::test_utils::{
         generate_rand_block_and_blobs, generate_rand_block_and_data_columns, test_spec, NumBlobs,
     };
-    use lighthouse_network::service::api_types::{
-        BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-        DataColumnsByRangeRequestId, Id, RangeRequestId,
+    use lighthouse_network::{
+        service::api_types::{
+            BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
+            DataColumnsByRangeRequestId, Id, RangeRequestId,
+        },
+        PeerId,
     };
     use rand::SeedableRng;
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
     use types::{test_utils::XorShiftRng, Epoch, ForkName, MinimalEthSpec as E, SignedBeaconBlock};
 
     fn components_id() -> ComponentsByRangeRequestId {
@@ -352,6 +366,7 @@ mod tests {
     #[test]
     fn no_blobs_into_responses() {
         let spec = test_spec::<E>();
+        let peer = PeerId::random();
         let mut rng = XorShiftRng::from_seed([42; 16]);
         let blocks = (0..4)
             .map(|_| {
@@ -365,7 +380,7 @@ mod tests {
         let mut info = RangeBlockComponentsRequest::<E>::new(blocks_req_id, None, None);
 
         // Send blocks and complete terminate response
-        info.add_blocks(blocks_req_id, blocks).unwrap();
+        info.add_blocks(blocks_req_id, blocks, peer).unwrap();
 
         // Assert response is finished and RpcBlocks can be constructed
         info.responses(&test_spec::<E>()).unwrap().unwrap();
@@ -374,6 +389,7 @@ mod tests {
     #[test]
     fn empty_blobs_into_responses() {
         let spec = test_spec::<E>();
+        let peer = PeerId::random();
         let mut rng = XorShiftRng::from_seed([42; 16]);
         let blocks = (0..4)
             .map(|_| {
@@ -396,9 +412,9 @@ mod tests {
             RangeBlockComponentsRequest::<E>::new(blocks_req_id, Some(blobs_req_id), None);
 
         // Send blocks and complete terminate response
-        info.add_blocks(blocks_req_id, blocks).unwrap();
+        info.add_blocks(blocks_req_id, blocks, peer).unwrap();
         // Expect no blobs returned
-        info.add_blobs(blobs_req_id, vec![]).unwrap();
+        info.add_blobs(blobs_req_id, vec![], peer).unwrap();
 
         // Assert response is finished and RpcBlocks can be constructed, even if blobs weren't returned.
         // This makes sure we don't expect blobs here when they have expired. Checking this logic should
@@ -409,6 +425,7 @@ mod tests {
     #[test]
     fn rpc_block_with_custody_columns() {
         let spec = test_spec::<E>();
+        let peer = PeerId::random();
         let expects_custody_columns = vec![1, 2, 3, 4];
         let mut rng = XorShiftRng::from_seed([42; 16]);
         let blocks = (0..4)
@@ -429,15 +446,22 @@ mod tests {
             .enumerate()
             .map(|(i, _)| columns_id(i as Id, components_id))
             .collect::<Vec<_>>();
+
+        let column_to_peer = expects_custody_columns
+            .iter()
+            .map(|index| (*index, peer))
+            .collect::<HashMap<_, _>>();
+
         let mut info = RangeBlockComponentsRequest::<E>::new(
             blocks_req_id,
             None,
-            Some((columns_req_id.clone(), expects_custody_columns.clone())),
+            Some((columns_req_id.clone(), column_to_peer)),
         );
         // Send blocks and complete terminate response
         info.add_blocks(
             blocks_req_id,
             blocks.iter().map(|b| b.0.clone().into()).collect(),
+            peer,
         )
         .unwrap();
         // Assert response is not finished
@@ -451,6 +475,7 @@ mod tests {
                     .iter()
                     .flat_map(|b| b.1.iter().filter(|d| d.index == column_index).cloned())
                     .collect(),
+                peer,
             )
             .unwrap();
 
@@ -469,12 +494,13 @@ mod tests {
     #[test]
     fn rpc_block_with_custody_columns_batched() {
         let spec = test_spec::<E>();
+        let peer = PeerId::random();
         let batched_column_requests = [vec![1_u64, 2], vec![3, 4]];
         let expects_custody_columns = batched_column_requests
             .iter()
             .flatten()
-            .cloned()
-            .collect::<Vec<_>>();
+            .map(|index| (*index, peer))
+            .collect::<HashMap<_, _>>();
         let custody_column_request_ids =
             (0..batched_column_requests.len() as u32).collect::<Vec<_>>();
         let num_of_data_column_requests = custody_column_request_ids.len();
@@ -509,6 +535,7 @@ mod tests {
         info.add_blocks(
             blocks_req_id,
             blocks.iter().map(|b| b.0.clone().into()).collect(),
+            peer,
         )
         .unwrap();
         // Assert response is not finished
@@ -526,6 +553,7 @@ mod tests {
                             .cloned()
                     })
                     .collect::<Vec<_>>(),
+                peer,
             )
             .unwrap();
 

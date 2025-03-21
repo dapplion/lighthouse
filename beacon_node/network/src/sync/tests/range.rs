@@ -449,7 +449,15 @@ fn build_rpc_block(
             RpcBlock::new(None, block, Some(blobs.clone())).unwrap()
         }
         Some(DataSidecars::DataColumns(columns)) => {
-            RpcBlock::new_with_custody_columns(None, block, columns.clone(), spec).unwrap()
+            let expected_custody_indices = columns.iter().map(|d| d.index()).collect::<Vec<_>>();
+            RpcBlock::new_with_custody_columns(
+                None,
+                block,
+                columns.clone(),
+                expected_custody_indices,
+                spec,
+            )
+            .unwrap()
         }
         None => RpcBlock::new_without_blobs(None, block),
     }

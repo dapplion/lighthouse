@@ -397,9 +397,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         // Compute custody column peers before sending the blocks_by_range request. If we don't have
         // enough peers, error here.
-        let data_column_requests = if matches!(batch_type, ByRangeRequestType::BlocksAndColumns) {
+        let columns_by_peer = if matches!(batch_type, ByRangeRequestType::BlocksAndColumns) {
             let column_indexes = self.network_globals().sampling_columns.clone();
-            Some(self.make_columns_by_range_requests(request.clone(), &column_indexes)?)
+            Some(self.select_peers_for_columns_by_range_request(&column_indexes)?)
         } else {
             None
         };
@@ -419,22 +419,30 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             None
         };
 
-        let data_columns = if let Some(data_column_requests) = data_column_requests {
-            let data_column_requests = data_column_requests
-                .into_iter()
-                .map(|(peer_id, columns_by_range_request)| {
-                    self.send_data_columns_by_range_request(peer_id, columns_by_range_request, id)
+        let data_columns = if let Some(columns_by_peer) = columns_by_peer {
+            let data_column_requests = columns_by_peer
+                .iter()
+                .map(|(peer_id, columns)| {
+                    self.send_data_columns_by_range_request(
+                        *peer_id,
+                        DataColumnsByRangeRequest {
+                            start_slot: *request.start_slot(),
+                            count: *request.count(),
+                            columns: columns.clone(),
+                        },
+                        id,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            Some((
-                data_column_requests,
-                self.network_globals()
-                    .sampling_columns
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            ))
+            let expected_column_to_peer_map: HashMap<ColumnIndex, PeerId> = columns_by_peer
+                .into_iter()
+                .flat_map(|(peer_id, columns)| {
+                    columns.into_iter().map(move |column| (column, peer_id))
+                })
+                .collect();
+
+            Some((data_column_requests, expected_column_to_peer_map))
         } else {
             None
         };
@@ -445,12 +453,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         Ok(id.id)
     }
 
-    fn make_columns_by_range_requests(
+    fn select_peers_for_columns_by_range_request(
         &self,
-        request: BlocksByRangeRequest,
         custody_indexes: &HashSet<ColumnIndex>,
-    ) -> Result<HashMap<PeerId, DataColumnsByRangeRequest>, RpcRequestSendError> {
-        let mut peer_id_to_request_map = HashMap::new();
+    ) -> Result<HashMap<PeerId, Vec<ColumnIndex>>, RpcRequestSendError> {
+        let mut peer_id_to_request_map = HashMap::<PeerId, Vec<ColumnIndex>>::new();
 
         for column_index in custody_indexes {
             // TODO(das): The peer selection logic here needs to be improved - we should probably
@@ -465,15 +472,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 return Err(RpcRequestSendError::NoCustodyPeers);
             };
 
-            let columns_by_range_request = peer_id_to_request_map
+            peer_id_to_request_map
                 .entry(custody_peer)
-                .or_insert_with(|| DataColumnsByRangeRequest {
-                    start_slot: *request.start_slot(),
-                    count: *request.count(),
-                    columns: vec![],
-                });
-
-            columns_by_range_request.columns.push(*column_index);
+                .or_default()
+                .push(*column_index);
         }
 
         Ok(peer_id_to_request_map)
@@ -484,6 +486,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     pub fn range_block_component_response(
         &mut self,
         id: ComponentsByRangeRequestId,
+        peer_id: PeerId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
     ) -> Option<Result<Vec<RpcBlock<T::EthSpec>>, RpcResponseError>> {
         let Entry::Occupied(mut entry) = self.components_by_range_requests.entry(id) else {
@@ -496,18 +499,18 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             match range_block_component {
                 RangeBlockComponent::Block(req_id, resp) => resp.and_then(|(blocks, _)| {
                     request
-                        .add_blocks(req_id, blocks)
+                        .add_blocks(req_id, blocks, peer_id)
                         .map_err(RpcResponseError::BlockComponentCouplingError)
                 }),
                 RangeBlockComponent::Blob(req_id, resp) => resp.and_then(|(blobs, _)| {
                     request
-                        .add_blobs(req_id, blobs)
+                        .add_blobs(req_id, blobs, peer_id)
                         .map_err(RpcResponseError::BlockComponentCouplingError)
                 }),
                 RangeBlockComponent::CustodyColumns(req_id, resp) => {
                     resp.and_then(|(custody_columns, _)| {
                         request
-                            .add_custody_columns(req_id, custody_columns)
+                            .add_custody_columns(req_id, custody_columns, peer_id)
                             .map_err(RpcResponseError::BlockComponentCouplingError)
                     })
                 }

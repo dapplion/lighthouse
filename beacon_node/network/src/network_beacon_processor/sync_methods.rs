@@ -18,6 +18,7 @@ use beacon_processor::{
     AsyncFn, BlockingFn, DuplicateCache,
 };
 use lighthouse_network::PeerAction;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use store::KzgCommitment;
@@ -25,7 +26,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use types::beacon_block_body::format_kzg_commitments;
 use types::blob_sidecar::FixedBlobSidecarList;
-use types::{BlockImportSource, DataColumnSidecar, DataColumnSidecarList, Epoch, Hash256};
+use types::{
+    BlockImportSource, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Epoch, Hash256,
+};
 
 /// Id associated to a batch processing request, either a sync batch or a parent lookup.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,11 +40,36 @@ pub enum ChainSegmentProcessId {
 }
 
 /// Returned when a chain segment import fails.
-struct ChainSegmentFailed {
+#[derive(Debug)]
+pub struct ChainSegmentFailed {
     /// To be displayed in logs.
-    message: String,
+    pub message: String,
     /// Used to penalize peers.
-    peer_action: Option<PeerAction>,
+    pub peer_action: Option<PeerGroupAction>,
+}
+
+#[derive(Debug)]
+pub struct PeerGroupAction {
+    pub block_peer: Option<PeerAction>,
+    pub column_peer: HashMap<ColumnIndex, PeerAction>,
+}
+
+impl PeerGroupAction {
+    fn block_peer(action: PeerAction) -> Self {
+        Self {
+            block_peer: Some(action),
+            column_peer: <_>::default(),
+        }
+    }
+
+    fn column_peers(columns: &[ColumnIndex], action: PeerAction) -> Self {
+        Self {
+            block_peer: None,
+            column_peer: Some(HashMap::from_iter(
+                columns.iter().map(|index| (index, action)),
+            )),
+        }
+    }
 }
 
 impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
@@ -476,7 +504,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         match e.peer_action {
                             Some(penalty) => BatchProcessResult::FaultyFailure {
                                 imported_blocks,
-                                penalty,
+                                peer_action: penalty,
+                                error: e.message,
                             },
                             None => BatchProcessResult::NonFaultyFailure,
                         }
@@ -713,7 +742,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 Err(ChainSegmentFailed {
                     message: format!("Block has an unknown parent: {}", parent_root),
                     // Peers are faulty if they send non-sequential blocks.
-                    peer_action: Some(PeerAction::LowToleranceError),
+                    peer_action: Some(PeerGroupAction::block_peer(PeerAction::LowToleranceError)),
                 })
             }
             BlockError::DuplicateFullyImported(_)
@@ -751,7 +780,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         block_slot, present_slot
                     ),
                     // Peers are faulty if they send blocks from the future.
-                    peer_action: Some(PeerAction::LowToleranceError),
+                    peer_action: Some(PeerGroupAction::block_peer(PeerAction::LowToleranceError)),
                 })
             }
             BlockError::WouldRevertFinalizedSlot { .. } => {
@@ -773,6 +802,42 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     message: format!("Internal error whilst processing block: {:?}", e),
                     // Do not penalize peers for internal errors.
                     peer_action: None,
+                })
+            }
+            BlockError::AvailabilityCheck(e) => {
+                let peer_group_action = match e {
+                    AvailabilityCheckError::InvalidBlobs(e) => {
+                        Some(PeerGroupAction::block_peer(PeerAction::LowToleranceError))
+                    }
+                    AvailabilityCheckError::InvalidColumn(errors) => {
+                        Some(PeerGroupAction::column_peers(
+                            &errors.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+                            PeerAction::LowToleranceError,
+                        ))
+                    }
+                    AvailabilityCheckError::ReconstructColumnsError(_) => None, // internal error
+                    AvailabilityCheckError::KzgCommitmentMismatch(..) => None, // should never happen after checking inclusion proof
+                    AvailabilityCheckError::Unexpected(_) => None,             // internal
+                    AvailabilityCheckError::SszTypes(_) => None,               // ??
+                    AvailabilityCheckError::MissingBlobs => None, // TODO(das) internal for now
+                    AvailabilityCheckError::MissingCustodyColumns(columns) => Some(
+                        PeerGroupAction::column_peers(&columns, PeerAction::LowToleranceError),
+                    ),
+                    AvailabilityCheckError::MissingAllCustodyColumns => todo!(),
+                    AvailabilityCheckError::BlobIndexInvalid(_) => {
+                        Some(PeerGroupAction::block_peer(PeerAction::LowToleranceError))
+                    }
+                    AvailabilityCheckError::DataColumnIndexInvalid(_) => None, // unreachable
+                    AvailabilityCheckError::StoreError(_) => None,             // unreachable
+                    AvailabilityCheckError::DecodeError(_) => None,            // ??
+                    AvailabilityCheckError::ParentStateMissing(_) => None,     // ??
+                    AvailabilityCheckError::BlockReplayError(_) => None,       // un-reachable ??
+                    AvailabilityCheckError::RebuildingStateCaches(_) => None,  // ??
+                    AvailabilityCheckError::SlotClockError => None,            // internal error
+                };
+                Err(ChainSegmentFailed {
+                    message: format!("Availability check error {:?}", e),
+                    peer_action: peer_group_action,
                 })
             }
             ref err @ BlockError::ExecutionPayloadError(ref epe) => {
@@ -799,7 +864,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             "Peer sent a block containing invalid execution payload. Reason: {:?}",
                             err
                         ),
-                        peer_action: Some(PeerAction::LowToleranceError),
+                        peer_action: Some(PeerGroupAction::block_peer(
+                            PeerAction::LowToleranceError,
+                        )),
                     })
                 }
             }
@@ -814,7 +881,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     // We need to penalise harshly in case this represents an actual attack. In case
                     // of a faulty EL it will usually require manual intervention to fix anyway, so
                     // it's not too bad if we drop most of our peers.
-                    peer_action: Some(PeerAction::LowToleranceError),
+                    peer_action: Some(PeerGroupAction::block_peer(PeerAction::LowToleranceError)),
                 })
             }
             other => {

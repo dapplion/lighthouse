@@ -561,10 +561,17 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             }
             BatchProcessResult::FaultyFailure {
                 imported_blocks,
-                penalty,
+                peer_action,
+                error,
             } => {
-                // Penalize the peer appropiately.
-                network.report_peer(peer, *penalty, "faulty_batch");
+                if let Some(peer_action) = peer_action.block_peer {
+                    // Penalize the peer appropiately.
+                    network.report_peer(peer, *penalty, "faulty_batch");
+                }
+                for (column_index, peer_action) in peer_action.column_peer {
+                    // TODO(das): map column index to peer and penalize
+                    todo!("map column index to peer and penalize");
+                }
 
                 // Check if this batch is allowed to continue
                 match batch.processing_completed(BatchProcessingResult::FaultyFailure)? {

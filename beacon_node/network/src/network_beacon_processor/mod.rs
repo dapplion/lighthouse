@@ -34,7 +34,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, error, trace, warn, Instrument};
 use types::*;
 
-pub use sync_methods::ChainSegmentProcessId;
+pub use sync_methods::{ChainSegmentFailed, ChainSegmentProcessId, PeerGroupAction};
 use types::blob_sidecar::FixedBlobSidecarList;
 
 pub type Error<T> = TrySendError<BeaconWorkEvent<T>>;

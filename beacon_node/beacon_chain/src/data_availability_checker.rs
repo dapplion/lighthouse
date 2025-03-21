@@ -8,6 +8,7 @@ use crate::data_availability_checker::overflow_lru_cache::{
 use crate::{metrics, BeaconChain, BeaconChainTypes, BeaconStore};
 use kzg::Kzg;
 use slot_clock::SlotClock;
+use std::collections::HashSet;
 use std::fmt;
 use std::fmt::Debug;
 use std::num::NonZeroUsize;
@@ -18,8 +19,8 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info_span, Instrument};
 use types::blob_sidecar::{BlobIdentifier, BlobSidecar, FixedBlobSidecarList};
 use types::{
-    BlobSidecarList, ChainSpec, DataColumnIdentifier, DataColumnSidecar, DataColumnSidecarList,
-    Epoch, EthSpec, Hash256, RuntimeVariableList, SignedBeaconBlock,
+    BlobSidecarList, ChainSpec, ColumnIndex, DataColumnIdentifier, DataColumnSidecar,
+    DataColumnSidecarList, Epoch, EthSpec, Hash256, RuntimeVariableList, SignedBeaconBlock,
 };
 
 mod error;
@@ -343,7 +344,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
             };
         }
         if self.data_columns_required_for_block(&block) {
-            return if let Some(data_column_list) = data_columns.as_ref() {
+            return if let Some((data_column_list, _)) = data_columns.as_ref() {
                 verify_kzg_for_data_column_list_with_scoring(
                     data_column_list
                         .iter()
@@ -420,6 +421,7 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                 .map_err(AvailabilityCheckError::InvalidColumn)?;
         }
 
+        // TODO(das): we could do the matching first before spending CPU cycles on KZG verification
         for block in blocks {
             let (block_root, block, blobs, data_columns) = block.deconstruct();
 
@@ -436,7 +438,21 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                     MaybeAvailableBlock::AvailabilityPending { block_root, block }
                 }
             } else if self.data_columns_required_for_block(&block) {
-                if let Some(data_columns) = data_columns {
+                if let Some((data_columns, expected_custody_indices)) = data_columns {
+                    let received_indices =
+                        HashSet::<ColumnIndex>::from_iter(data_columns.iter().map(|d| d.index()));
+
+                    let missing_custody_columns = expected_custody_indices
+                        .into_iter()
+                        .filter(|index| !received_indices.contains(index))
+                        .collect::<Vec<_>>();
+
+                    if !missing_custody_columns.is_empty() {
+                        return Err(AvailabilityCheckError::MissingCustodyColumns(
+                            missing_custody_columns,
+                        ));
+                    }
+
                     MaybeAvailableBlock::Available(AvailableBlock {
                         block_root,
                         block,
@@ -447,7 +463,8 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
                         spec: self.spec.clone(),
                     })
                 } else {
-                    MaybeAvailableBlock::AvailabilityPending { block_root, block }
+                    // Note: strictly asserts blocks to be available instead of returning MaybeAvailableBlock
+                    return Err(AvailabilityCheckError::MissingAllCustodyColumns);
                 }
             } else {
                 MaybeAvailableBlock::Available(AvailableBlock {
