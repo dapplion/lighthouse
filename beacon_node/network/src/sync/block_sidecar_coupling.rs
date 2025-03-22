@@ -426,7 +426,7 @@ mod tests {
     fn rpc_block_with_custody_columns() {
         let spec = test_spec::<E>();
         let peer = PeerId::random();
-        let expects_custody_columns = vec![1, 2, 3, 4];
+        let expects_custody_columns = [1, 2, 3, 4];
         let mut rng = XorShiftRng::from_seed([42; 16]);
         let blocks = (0..4)
             .map(|_| {

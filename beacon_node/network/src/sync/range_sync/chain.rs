@@ -562,15 +562,16 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             BatchProcessResult::FaultyFailure {
                 imported_blocks,
                 peer_action,
-                error,
+                // TODO: propagate error in logs
+                error: _,
             } => {
-                if let Some(peer_action) = peer_action.block_peer {
+                if let Some(penalty) = peer_action.block_peer {
                     // Penalize the peer appropiately.
-                    network.report_peer(peer, *penalty, "faulty_batch");
+                    network.report_peer(peer, penalty, "faulty_batch");
                 }
-                for (column_index, peer_action) in peer_action.column_peer {
+                for (column_index, penalty) in &peer_action.column_peer {
                     // TODO(das): map column index to peer and penalize
-                    todo!("map column index to peer and penalize");
+                    todo!("map column index to peer and penalize {column_index} {penalty}");
                 }
 
                 // Check if this batch is allowed to continue
@@ -587,6 +588,11 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                         self.handle_invalid_batch(network, batch_id)
                     }
                     BatchOperationOutcome::Failed { blacklist } => {
+                        // TODO(das): what peer action should we apply to the rest of
+                        // peers? Say a batch repeatedly fails because a custody peer is not
+                        // sending us its custody columns
+                        let penalty = PeerAction::LowToleranceError;
+
                         // Check that we have not exceeded the re-process retry counter,
                         // If a batch has exceeded the invalid batch lookup attempts limit, it means
                         // that it is likely all peers in this chain are are sending invalid batches
@@ -601,7 +607,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                         );
 
                         for (peer, _) in self.peers.drain() {
-                            network.report_peer(peer, *penalty, "faulty_chain");
+                            network.report_peer(peer, penalty, "faulty_chain");
                         }
                         Err(RemoveChain::ChainFailed {
                             blacklist,

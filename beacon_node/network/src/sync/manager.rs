@@ -42,7 +42,7 @@ use super::peer_sampling::{Sampling, SamplingConfig, SamplingResult};
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
 use super::range_sync::{RangeSync, RangeSyncType, EPOCHS_PER_BATCH};
 use crate::network_beacon_processor::{
-    ChainSegmentFailed, ChainSegmentProcessId, NetworkBeaconProcessor, PeerGroupAction,
+    ChainSegmentProcessId, NetworkBeaconProcessor, PeerGroupAction,
 };
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;

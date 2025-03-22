@@ -132,6 +132,7 @@ pub enum BatchState<E: EthSpec> {
     /// The batch has failed either downloading or processing, but can be requested again.
     AwaitingDownload,
     /// The batch is being downloaded.
+    /// TODO: Change to PeerGroup
     Downloading(PeerId, Id),
     /// The batch has been completely downloaded and is ready for processing.
     AwaitingProcessing(PeerId, Vec<RpcBlock<E>>, Instant),

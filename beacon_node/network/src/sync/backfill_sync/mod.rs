@@ -680,6 +680,16 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 peer_action,
                 error,
             } => {
+                // TODO: De-dup between back and forwards sync
+                if let Some(penalty) = peer_action.block_peer {
+                    // Penalize the peer appropiately.
+                    network.report_peer(*peer, penalty, "faulty_batch");
+                }
+                for (column_index, penalty) in &peer_action.column_peer {
+                    // TODO(das): map column index to peer and penalize
+                    todo!("map column index to peer and penalize {column_index} {penalty}");
+                }
+
                 match batch.processing_completed(BatchProcessingResult::FaultyFailure) {
                     Err(e) => {
                         // Batch was in the wrong state
@@ -687,6 +697,11 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                             .map(|_| ProcessResult::Successful)
                     }
                     Ok(BatchOperationOutcome::Failed { blacklist: _ }) => {
+                        // TODO(das): what peer action should we apply to the rest of
+                        // peers? Say a batch repeatedly fails because a custody peer is not
+                        // sending us its custody columns
+                        let penalty = PeerAction::LowToleranceError;
+
                         // check that we have not exceeded the re-process retry counter
                         // If a batch has exceeded the invalid batch lookup attempts limit, it means
                         // that it is likely all peers are sending invalid batches
@@ -695,11 +710,12 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                         warn!(
                             score_adjustment = %penalty,
                             batch_epoch = %batch_id,
+                            error,
                             "Backfill batch failed to download. Penalizing peers"
                         );
 
                         for peer in self.participating_peers.drain() {
-                            network.report_peer(peer, *penalty, "backfill_batch_failed");
+                            network.report_peer(peer, penalty, "backfill_batch_failed");
                         }
                         self.fail_sync(BackFillError::BatchProcessingFailed(batch_id))
                             .map(|_| ProcessResult::Successful)
