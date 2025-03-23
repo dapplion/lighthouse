@@ -1,4 +1,4 @@
-use super::batch::{BatchInfo, BatchProcessingResult, BatchState};
+use super::batch::{BatchInfo, BatchPeerGroup, BatchProcessingResult, BatchState};
 use super::RangeSyncType;
 use crate::metrics;
 use crate::network_beacon_processor::ChainSegmentProcessId;
@@ -209,27 +209,10 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
     #[instrument(parent = None,level = "info", fields(chain = self.id , service = "range_sync"), skip_all)]
     pub fn remove_peer(
         &mut self,
-        peer_id: &PeerId,
-        network: &mut SyncNetworkContext<T>,
+        _peer_id: &PeerId,
+        _network: &mut SyncNetworkContext<T>,
     ) -> ProcessingResult {
-        if let Some(batch_ids) = self.peers.remove(peer_id) {
-            // fail the batches.
-            for id in batch_ids {
-                if let Some(batch) = self.batches.get_mut(&id) {
-                    if let BatchOperationOutcome::Failed { blacklist } =
-                        batch.download_failed(true)?
-                    {
-                        return Err(RemoveChain::ChainFailed {
-                            blacklist,
-                            failing_batch: id,
-                        });
-                    }
-                    self.retry_batch_download(network, id)?;
-                } else {
-                    debug!(%peer_id, batch = ?id, "Batch not found while removing peer")
-                }
-            }
-        }
+        // Wait for https://github.com/sigp/lighthouse/pull/6922
 
         if self.peers.is_empty() {
             Err(RemoveChain::EmptyPeerPool)
@@ -254,7 +237,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         &mut self,
         network: &mut SyncNetworkContext<T>,
         batch_id: BatchId,
-        peer_id: &PeerId,
+        peer: BatchPeerGroup,
         request_id: Id,
         blocks: Vec<RpcBlock<T::EthSpec>>,
     ) -> ProcessingResult {
@@ -281,11 +264,8 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
 
         // A stream termination has been sent. This batch has ended. Process a completed batch.
         // Remove the request from the peer's active batches
-        self.peers
-            .get_mut(peer_id)
-            .map(|active_requests| active_requests.remove(&batch_id));
 
-        let received = batch.download_completed(blocks)?;
+        let received = batch.download_completed(blocks, peer)?;
         let awaiting_batches = batch_id
             .saturating_sub(self.optimistic_start.unwrap_or(self.processing_target))
             / EPOCHS_PER_BATCH;
@@ -720,11 +700,12 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                         }
                     }
                 }
-                BatchState::Downloading(peer, ..) => {
+                BatchState::Downloading(_peer, ..) => {
                     // remove this batch from the peer's active requests
-                    if let Some(active_batches) = self.peers.get_mut(peer) {
-                        active_batches.remove(&id);
-                    }
+                    // Wait for https://github.com/sigp/lighthouse/pull/6922
+                    // if let Some(active_batches) = self.peers.get_mut(peer) {
+                    //    active_batches.remove(&id);
+                    // }
                 }
                 BatchState::Failed | BatchState::Poisoned | BatchState::AwaitingDownload => {
                     crit!("batch indicates inconsistent chain state while advancing chain")
@@ -923,7 +904,9 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             if let Some(active_requests) = self.peers.get_mut(peer_id) {
                 active_requests.remove(&batch_id);
             }
-            if let BatchOperationOutcome::Failed { blacklist } = batch.download_failed(true)? {
+            if let BatchOperationOutcome::Failed { blacklist } =
+                batch.download_failed(Some(*peer_id))?
+            {
                 return Err(RemoveChain::ChainFailed {
                     blacklist,
                     failing_batch: batch_id,
@@ -1002,7 +985,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             ) {
                 Ok(request_id) => {
                     // inform the batch about the new request
-                    batch.start_downloading_from_peer(peer, request_id)?;
+                    batch.start_downloading(request_id)?;
                     if self
                         .optimistic_start
                         .map(|epoch| epoch == batch_id)
@@ -1031,11 +1014,11 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                     // NOTE: under normal conditions this shouldn't happen but we handle it anyway
                     warn!(%batch_id, error = %e, %batch, "Could not send batch request");
                     // register the failed download and check if the batch can be retried
-                    batch.start_downloading_from_peer(peer, 1)?; // fake request_id is not relevant
+                    batch.start_downloading(1)?; // fake request_id is not relevant
                     self.peers
                         .get_mut(&peer)
                         .map(|request| request.remove(&batch_id));
-                    match batch.download_failed(true)? {
+                    match batch.download_failed(Some(peer))? {
                         BatchOperationOutcome::Failed { blacklist } => {
                             return Err(RemoveChain::ChainFailed {
                                 blacklist,
