@@ -302,7 +302,7 @@ mod test {
         }));
         let split = Split::default();
         let anchor = AnchorInfo {
-            anchor_slot: Slot::new(0),
+            hot_hdiff_start_slot: Slot::new(0),
             oldest_block_slot: Slot::new(0),
             oldest_block_parent: Hash256::ZERO,
             state_upper_limit: STATE_UPPER_LIMIT_NO_RETAIN,

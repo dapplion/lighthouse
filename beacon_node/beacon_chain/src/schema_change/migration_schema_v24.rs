@@ -52,7 +52,7 @@ pub fn upgrade_to_v24<T: BeaconChainTypes>(
     {
         let anchor_info = db.get_anchor_info();
         let mut new_anchor_info = anchor_info.clone();
-        new_anchor_info.anchor_slot = hot_hdiff_start_slot;
+        new_anchor_info.hot_hdiff_start_slot = hot_hdiff_start_slot;
         // Update the anchor in disk atomically if migration is successful
         migrate_ops.push(db.compare_and_set_anchor_info(anchor_info, new_anchor_info)?);
     }

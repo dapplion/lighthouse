@@ -24,7 +24,7 @@ pub const STATE_UPPER_LIMIT_NO_RETAIN: Slot = Slot::new(u64::MAX);
 
 /// The `AnchorInfo` encoding full availability of all historic blocks & states.
 pub const ANCHOR_FOR_ARCHIVE_NODE: AnchorInfo = AnchorInfo {
-    anchor_slot: Slot::new(0),
+    hot_hdiff_start_slot: Slot::new(0),
     oldest_block_slot: Slot::new(0),
     oldest_block_parent: Hash256::ZERO,
     state_upper_limit: Slot::new(0),
@@ -36,7 +36,7 @@ pub const ANCHOR_FOR_ARCHIVE_NODE: AnchorInfo = AnchorInfo {
 /// This value should never exist except on initial start-up prior to the anchor being initialised
 /// by `init_anchor_info`.
 pub const ANCHOR_UNINITIALIZED: AnchorInfo = AnchorInfo {
-    anchor_slot: Slot::new(u64::MAX),
+    hot_hdiff_start_slot: Slot::new(u64::MAX),
     oldest_block_slot: Slot::new(u64::MAX),
     oldest_block_parent: Hash256::ZERO,
     state_upper_limit: Slot::new(u64::MAX),
@@ -86,13 +86,14 @@ impl StoreItem for CompactionTimestamp {
 /// Database parameters relevant to weak subjectivity sync.
 #[derive(Debug, PartialEq, Eq, Clone, Encode, Decode, Serialize, Deserialize)]
 pub struct AnchorInfo {
-    /// The slot at which the anchor state is present and which we cannot revert. Values on start:
+    /// Slot at which the hot HDiff grid is rooted on. Must never change after one hot diff is
+    /// persisted. Values on start:
     /// - Genesis start: 0
     /// - Checkpoint sync: Slot of the finalized state advanced to the checkpoint epoch
     /// - Existing DB prior to v23: Finalized state slot at the migration moment
     ///
     /// Immutable
-    pub anchor_slot: Slot,
+    pub hot_hdiff_start_slot: Slot,
     /// All blocks with slots greater than or equal to this value are available in the database.
     /// Additionally, the genesis block is always available.
     ///
@@ -156,7 +157,7 @@ impl AnchorInfo {
 
     pub fn as_archive_node(&self) -> Self {
         AnchorInfo {
-            anchor_slot: self.anchor_slot,
+            hot_hdiff_start_slot: self.hot_hdiff_start_slot,
             oldest_block_slot: Slot::new(0),
             oldest_block_parent: Hash256::ZERO,
             state_upper_limit: Slot::new(0),

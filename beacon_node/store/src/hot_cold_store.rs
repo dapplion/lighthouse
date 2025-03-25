@@ -450,13 +450,13 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     }
 
     pub fn hot_hdiff_start_slot(&self) -> Result<Slot, Error> {
-        let anchor_slot = self.anchor_info.read_recursive().anchor_slot;
-        if anchor_slot == u64::MAX {
+        let hot_hdiff_start_slot = self.anchor_info.read_recursive().hot_hdiff_start_slot;
+        if hot_hdiff_start_slot == u64::MAX {
             // If hot_hdiff_start_slot returns such a high value all writes will fail. This should
             // never happen, but it's best to stop this useless value from propagating downstream
             Err(Error::AnchorUninitialized)
         } else {
-            Ok(anchor_slot)
+            Ok(hot_hdiff_start_slot)
         }
     }
 
@@ -506,7 +506,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         let anchor_info = self.get_anchor_info();
         metrics::set_gauge(
             &metrics::STORE_BEACON_ANCHOR_SLOT,
-            anchor_info.anchor_slot.as_u64() as i64,
+            anchor_info.hot_hdiff_start_slot.as_u64() as i64,
         );
         metrics::set_gauge(
             &metrics::STORE_BEACON_OLDEST_BLOCK_SLOT,
@@ -2439,22 +2439,24 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         oldest_block_parent: Hash256,
         oldest_block_slot: Slot,
-        anchor_slot: Slot,
+        initial_finalized_state_slot: Slot,
         retain_historic_states: bool,
     ) -> Result<KeyValueStoreOp, Error> {
         // Set the `state_upper_limit` to the slot of the *next* checkpoint.
-        let next_snapshot_slot = self.hierarchy.next_snapshot_slot(anchor_slot)?;
+        let next_snapshot_slot = self
+            .hierarchy
+            .next_snapshot_slot(initial_finalized_state_slot)?;
         let state_upper_limit = if !retain_historic_states {
             STATE_UPPER_LIMIT_NO_RETAIN
         } else {
             next_snapshot_slot
         };
-        let anchor_info = if state_upper_limit == 0 && anchor_slot == 0 {
+        let anchor_info = if state_upper_limit == 0 && initial_finalized_state_slot == 0 {
             // Genesis archive node: no anchor because we *will* store all states.
             ANCHOR_FOR_ARCHIVE_NODE
         } else {
             AnchorInfo {
-                anchor_slot,
+                hot_hdiff_start_slot: initial_finalized_state_slot,
                 oldest_block_slot,
                 oldest_block_parent,
                 state_upper_limit,
