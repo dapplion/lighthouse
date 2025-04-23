@@ -1,4 +1,4 @@
-use crate::block_verification_types::{MaybeAvailableBlock, RpcBlock};
+use crate::block_verification_types::{ChainSegmentBlock, MaybeAvailableBlock};
 use crate::data_availability_checker::{AvailabilityCheckError, AvailableBlockData};
 use crate::{metrics, BeaconChain, BeaconChainTypes};
 use itertools::Itertools;
@@ -80,7 +80,7 @@ impl From<AvailabilityCheckError> for HistoricalBlockError {
 impl<T: BeaconChainTypes> BeaconChain<T> {
     pub fn assert_correct_historical_block_chain(
         &self,
-        blocks: &[RpcBlock<T::EthSpec>],
+        blocks: &[ChainSegmentBlock<T::EthSpec>],
     ) -> Result<(), HistoricalBlockError> {
         let anchor_info = self.store.get_anchor_info();
         let mut expected_block_root = anchor_info.oldest_block_parent;
@@ -119,7 +119,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Return the number of blocks successfully imported.
     pub fn import_historical_block_batch(
         &self,
-        blocks: Vec<RpcBlock<T::EthSpec>>,
+        blocks: Vec<ChainSegmentBlock<T::EthSpec>>,
     ) -> Result<usize, HistoricalBlockError> {
         // First check that chain of blocks is correct
         self.assert_correct_historical_block_chain(&blocks)?;
@@ -148,7 +148,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // checked the block root is correct first.
         let mut blocks = self
             .data_availability_checker
-            .verify_kzg_for_rpc_blocks(blocks)
+            .verify_kzg_for_chain_segment(blocks)
             .and_then(|blocks| {
                 blocks
                     .into_iter()

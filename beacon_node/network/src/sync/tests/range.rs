@@ -422,7 +422,6 @@ impl TestRig {
         let block_root = block.canonical_root();
         self.harness.set_current_slot(block.slot());
         let _: SignedBeaconBlockHash = self
-            .harness
             .chain
             .process_block(
                 block_root,

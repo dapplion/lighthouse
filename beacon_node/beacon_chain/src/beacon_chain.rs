@@ -16,7 +16,7 @@ use crate::block_verification::{
     GossipVerifiedBlock, IntoExecutionPendingBlock,
 };
 use crate::block_verification_types::{
-    AsBlock, AvailableExecutedBlock, BlockImportData, ExecutedBlock, RpcBlock,
+    AsBlock, AvailableExecutedBlock, BlockImportData, ChainSegmentBlock, ExecutedBlock,
 };
 pub use crate::canonical_head::CanonicalHead;
 use crate::chain_config::ChainConfig;
@@ -132,9 +132,6 @@ use types::payload::BlockProductionVersion;
 use types::*;
 
 pub type ForkChoiceError = fork_choice::Error<crate::ForkChoiceStoreError>;
-
-/// Alias to appease clippy.
-type HashBlockTuple<E> = (Hash256, RpcBlock<E>);
 
 // These keys are all zero because they get stored in different columns, see `DBColumn` type.
 pub const BEACON_CHAIN_DB_KEY: Hash256 = Hash256::ZERO;
@@ -2730,8 +2727,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// This method is potentially long-running and should not run on the core executor.
     pub fn filter_chain_segment(
         self: &Arc<Self>,
-        chain_segment: Vec<RpcBlock<T::EthSpec>>,
-    ) -> Result<Vec<HashBlockTuple<T::EthSpec>>, ChainSegmentResult> {
+        chain_segment: Vec<ChainSegmentBlock<T::EthSpec>>,
+    ) -> Result<Vec<ChainSegmentBlock<T::EthSpec>>, ChainSegmentResult> {
         // This function will never import any blocks.
         let imported_blocks = vec![];
         let mut filtered_chain_segment = Vec::with_capacity(chain_segment.len());
@@ -2742,19 +2739,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let children = chain_segment
             .iter()
             .skip(1)
-            .map(|block| (block.parent_root(), block.slot()))
+            .map(|block| (block.block.parent_root(), block.block.slot()))
             .collect::<Vec<_>>();
 
         for (i, block) in chain_segment.into_iter().enumerate() {
             // Ensure the block is the correct structure for the fork at `block.slot()`.
-            if let Err(e) = block.as_block().fork_name(&self.spec) {
+            if let Err(e) = block.block.as_block().fork_name(&self.spec) {
                 return Err(ChainSegmentResult::Failed {
                     imported_blocks,
                     error: BlockError::InconsistentFork(e),
                 });
             }
 
-            let block_root = block.block_root();
+            let block_root = block.block.block_root();
 
             if let Some((child_parent_root, child_slot)) = children.get(i) {
                 // If this block has a child in this chain segment, ensure that its parent root matches
@@ -2770,7 +2767,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 }
 
                 // Ensure that the slots are strictly increasing throughout the chain segment.
-                if *child_slot <= block.slot() {
+                if *child_slot <= block.block.slot() {
                     return Err(ChainSegmentResult::Failed {
                         imported_blocks,
                         error: BlockError::NonLinearSlots,
@@ -2780,7 +2777,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
             match check_block_relevancy(block.as_block(), block_root, self) {
                 // If the block is relevant, add it to the filtered chain segment.
-                Ok(_) => filtered_chain_segment.push((block_root, block)),
+                Ok(_) => filtered_chain_segment.push(block),
                 // If the block is already known, simply ignore this block.
                 //
                 // Note that `check_block_relevancy` is incapable of returning
@@ -2839,7 +2836,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// `Self::process_block`.
     pub async fn process_chain_segment(
         self: &Arc<Self>,
-        chain_segment: Vec<RpcBlock<T::EthSpec>>,
+        chain_segment: Vec<ChainSegmentBlock<T::EthSpec>>,
         notify_execution_layer: NotifyExecutionLayer,
     ) -> ChainSegmentResult {
         for block in chain_segment.iter() {
@@ -2870,9 +2867,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             }
         };
 
-        while let Some((_root, block)) = filtered_chain_segment.first() {
+        while let Some(block) = filtered_chain_segment.first() {
             // Determine the epoch of the first block in the remaining segment.
-            let start_epoch = block.epoch();
+            let start_epoch = block.block.epoch();
 
             // The `last_index` indicates the position of the first block in an epoch greater
             // than the current epoch: partitioning the blocks into a run of blocks in the same
@@ -2880,7 +2877,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // the same `BeaconState`.
             let last_index = filtered_chain_segment
                 .iter()
-                .position(|(_root, block)| block.epoch() > start_epoch)
+                .position(|block| block.block.epoch() > start_epoch)
                 .unwrap_or(filtered_chain_segment.len());
 
             let mut blocks = filtered_chain_segment.split_off(last_index);

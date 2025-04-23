@@ -50,7 +50,7 @@
 
 use crate::beacon_snapshot::PreProcessingSnapshot;
 use crate::blob_verification::GossipBlobError;
-use crate::block_verification_types::{AsBlock, BlockImportData, RpcBlock};
+use crate::block_verification_types::{AsBlock, BlockImportData, ChainSegmentBlock, RpcBlock};
 use crate::data_availability_checker::{AvailabilityCheckError, MaybeAvailableBlock};
 use crate::data_column_verification::GossipDataColumnError;
 use crate::eth1_finalization_cache::Eth1FinalizationData;
@@ -613,21 +613,20 @@ pub(crate) fn process_block_slash_info<T: BeaconChainTypes, TErr: BlockBlobError
 /// The given `chain_segment` must contain only blocks from the same epoch, otherwise an error
 /// will be returned.
 pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
-    mut chain_segment: Vec<(Hash256, RpcBlock<T::EthSpec>)>,
+    chain_segment: Vec<ChainSegmentBlock<T::EthSpec>>,
     chain: &BeaconChain<T>,
 ) -> Result<Vec<SignatureVerifiedBlock<T>>, BlockError> {
     if chain_segment.is_empty() {
         return Ok(vec![]);
     }
 
-    let (first_root, first_block) = chain_segment.remove(0);
-    let (mut parent, first_block) = load_parent(first_block, chain)?;
-    let slot = first_block.slot();
-    chain_segment.insert(0, (first_root, first_block));
+    let first_block = chain_segment.first().expect("not empty");
+    let (mut parent, _) = load_parent(first_block.block.clone(), chain)?;
+    let slot = first_block.block.slot();
 
     let highest_slot = chain_segment
         .last()
-        .map(|(_, block)| block.slot())
+        .map(|block| block.block.slot())
         .unwrap_or_else(|| slot);
 
     let state = cheap_state_advance_to_obtain_committees::<_, BlockError>(
@@ -640,9 +639,9 @@ pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
     // verify signatures before matching blocks and data
     let pubkey_cache = get_validator_pubkey_cache(chain)?;
     let mut signature_verifier = get_signature_verifier(&state, &pubkey_cache, &chain.spec);
-    for (block_root, block) in &chain_segment {
+    for block in &chain_segment {
         let mut consensus_context =
-            ConsensusContext::new(block.slot()).set_current_block_root(*block_root);
+            ConsensusContext::new(block.block.slot()).set_current_block_root(block.block_root());
         signature_verifier.include_all_signatures(block.as_block(), &mut consensus_context)?;
     }
     if signature_verifier.verify().is_err() {
@@ -650,7 +649,7 @@ pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
     }
 
     // Verify that blobs or data columns signatures match
-    for (_, block) in &chain_segment {
+    for block in &chain_segment {
         if let Some(indices) = block.non_matching_blobs_signed_headers() {
             if !indices.is_empty() {
                 return Err(BlockError::InvalidBlobsSignature(indices));
@@ -666,15 +665,14 @@ pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
     // Should check correct proposer cheap for added protection if blocks and columns don't match
 
     // unzip chain segment and verify kzg in bulk
-    let (roots, blocks): (Vec<_>, Vec<_>) = chain_segment.into_iter().unzip();
     let maybe_available_blocks = chain
         .data_availability_checker
-        .verify_kzg_for_rpc_blocks(blocks)?;
+        .verify_kzg_for_chain_segment(chain_segment)?;
     // zip it back up
-    let mut signature_verified_blocks = roots
+    let mut signature_verified_blocks = maybe_available_blocks
         .into_iter()
-        .zip(maybe_available_blocks)
-        .map(|(block_root, maybe_available_block)| {
+        .map(|maybe_available_block| {
+            let block_root = maybe_available_block.block_root();
             let consensus_context = ConsensusContext::new(maybe_available_block.slot())
                 .set_current_block_root(block_root);
             SignatureVerifiedBlock {
@@ -1298,15 +1296,11 @@ impl<T: BeaconChainTypes> IntoExecutionPendingBlock<T> for RpcBlock<T::EthSpec> 
         // Perform an early check to prevent wasting time on irrelevant blocks.
         let block_root = check_block_relevancy(self.as_block(), block_root, chain)
             .map_err(|e| BlockSlashInfo::SignatureNotChecked(self.signed_block_header(), e))?;
-        let maybe_available = chain
-            .data_availability_checker
-            .verify_kzg_for_rpc_block(self.clone())
-            .map_err(|e| {
-                BlockSlashInfo::SignatureNotChecked(
-                    self.signed_block_header(),
-                    BlockError::AvailabilityCheck(e),
-                )
-            })?;
+        let maybe_available = MaybeAvailableBlock::AvailabilityPending {
+            block_root,
+            block: self.block_cloned(),
+            custody_columns_count: self.custody_columns_count(),
+        };
         SignatureVerifiedBlock::check_slashable(maybe_available, block_root, chain)?
             .into_execution_pending_block_slashable(block_root, chain, notify_execution_layer)
     }

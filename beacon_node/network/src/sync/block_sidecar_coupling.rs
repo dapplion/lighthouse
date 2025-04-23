@@ -1,5 +1,7 @@
 use beacon_chain::{
-    block_verification_types::RpcBlock, data_column_verification::CustodyDataColumn, get_block_root,
+    block_verification_types::{ChainSegmentBlock, RpcBlock},
+    data_column_verification::CustodyDataColumn,
+    get_block_root,
 };
 use lighthouse_network::{
     service::api_types::{
@@ -126,7 +128,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
     pub fn responses(
         &self,
         spec: &ChainSpec,
-    ) -> Option<Result<(Vec<RpcBlock<E>>, BatchPeerGroup), String>> {
+    ) -> Option<Result<(Vec<ChainSegmentBlock<E>>, BatchPeerGroup), String>> {
         let Some((blocks, &block_peer)) = self.blocks_request.to_finished() else {
             return None;
         };
@@ -178,7 +180,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         blocks: Vec<Arc<SignedBeaconBlock<E>>>,
         blobs: Vec<Arc<BlobSidecar<E>>>,
         spec: &ChainSpec,
-    ) -> Result<Vec<RpcBlock<E>>, String> {
+    ) -> Result<Vec<ChainSegmentBlock<E>>, String> {
         // There can't be more more blobs than blocks. i.e. sending any blob (empty
         // included) for a skipped slot is not permitted.
         let mut responses = Vec::with_capacity(blocks.len());
@@ -213,7 +215,10 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
                 max_blobs_per_block,
             )
             .map_err(|_| "Blobs returned exceeds max length".to_string())?;
-            responses.push(RpcBlock::new(None, block, Some(blobs)).map_err(|e| format!("{e:?}"))?)
+            responses.push(
+                ChainSegmentBlock::new_post_deneb(RpcBlock::new(None, block, 0), blobs)
+                    .map_err(|e| format!("{e:?}"))?,
+            )
         }
 
         // if accumulated sidecars is not empty, throw an error.
@@ -229,7 +234,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         data_columns: DataColumnSidecarList<E>,
         expected_custody_columns: HashMap<ColumnIndex, PeerId>,
         spec: &ChainSpec,
-    ) -> Result<Vec<RpcBlock<E>>, String> {
+    ) -> Result<Vec<ChainSegmentBlock<E>>, String> {
         // Group data columns by block_root and index
         let mut custody_columns_by_block = HashMap::<Hash256, Vec<CustodyDataColumn<E>>>::new();
         let mut block_roots_by_slot = HashMap::<Slot, HashSet<Hash256>>::new();
@@ -272,9 +277,8 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
                     .remove(&block_root)
                     .unwrap_or_default();
 
-                RpcBlock::new_with_custody_columns(
-                    Some(block_root),
-                    block,
+                ChainSegmentBlock::new_post_fulu(
+                    RpcBlock::new(Some(block_root), block, expected_custody_indices.len()),
                     custody_columns,
                     expected_custody_indices.clone(),
                     spec,
