@@ -1,4 +1,4 @@
-use beacon_chain::block_verification_types::RpcBlock;
+use beacon_chain::block_verification_types::{ChainSegmentBlock, RpcBlock};
 use lighthouse_network::rpc::methods::BlocksByRangeRequest;
 use lighthouse_network::service::api_types::Id;
 use lighthouse_network::PeerId;
@@ -161,7 +161,7 @@ pub enum BatchState<E: EthSpec> {
     /// The batch is being downloaded.
     Downloading(Id),
     /// The batch has been completely downloaded and is ready for processing.
-    AwaitingProcessing(BatchPeerGroup, Vec<RpcBlock<E>>, Instant),
+    AwaitingProcessing(BatchPeerGroup, Vec<ChainSegmentBlock<E>>, Instant),
     /// The batch is being processed.
     Processing(Attempt),
     /// The batch was successfully processed and is waiting to be validated.
@@ -297,7 +297,7 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
     #[must_use = "Batch may have failed"]
     pub fn download_completed(
         &mut self,
-        blocks: Vec<RpcBlock<E>>,
+        blocks: Vec<ChainSegmentBlock<E>>,
         peer: BatchPeerGroup,
     ) -> Result<usize /* Received blocks */, WrongState> {
         match self.state.poison() {
@@ -371,7 +371,9 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
         }
     }
 
-    pub fn start_processing(&mut self) -> Result<(Vec<RpcBlock<E>>, Duration), WrongState> {
+    pub fn start_processing(
+        &mut self,
+    ) -> Result<(Vec<ChainSegmentBlock<E>>, Duration), WrongState> {
         match self.state.poison() {
             BatchState::AwaitingProcessing(peers, blocks, start_instant) => {
                 self.state = BatchState::Processing(Attempt::new::<B, E>(peers, &blocks));

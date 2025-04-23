@@ -13,7 +13,7 @@ use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::block_lookups::SingleLookupId;
 use crate::sync::network_context::requests::BlobsByRootSingleBlockRequest;
-use beacon_chain::block_verification_types::RpcBlock;
+use beacon_chain::block_verification_types::{ChainSegmentBlock, RpcBlock};
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
@@ -571,7 +571,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         id: ComponentsByRangeRequestId,
         peer_id: PeerId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
-    ) -> Option<Result<(Vec<RpcBlock<T::EthSpec>>, BatchPeerGroup), RpcResponseError>> {
+    ) -> Option<Result<(Vec<ChainSegmentBlock<T::EthSpec>>, BatchPeerGroup), RpcResponseError>>
+    {
         let Entry::Occupied(mut entry) = self.components_by_range_requests.entry(id) else {
             metrics::inc_counter_vec(&metrics::SYNC_UNKNOWN_NETWORK_REQUESTS, &["range_blocks"]);
             return None;
@@ -1446,7 +1447,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .beacon_processor_if_enabled()
             .ok_or(SendErrorProcessor::ProcessorNotAvailable)?;
 
-        let block = RpcBlock::new_without_blobs(
+        let block = RpcBlock::new(
             Some(block_root),
             block,
             self.network_globals().custody_columns_count() as usize,

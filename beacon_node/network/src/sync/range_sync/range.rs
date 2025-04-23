@@ -47,7 +47,7 @@ use crate::metrics;
 use crate::status::ToStatusMessage;
 use crate::sync::network_context::{RpcResponseError, SyncNetworkContext};
 use crate::sync::BatchProcessResult;
-use beacon_chain::block_verification_types::RpcBlock;
+use beacon_chain::block_verification_types::ChainSegmentBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::rpc::GoodbyeReason;
 use lighthouse_network::service::api_types::Id;
@@ -232,7 +232,7 @@ where
         chain_id: ChainId,
         batch_id: BatchId,
         request_id: Id,
-        blocks: Vec<RpcBlock<T::EthSpec>>,
+        blocks: Vec<ChainSegmentBlock<T::EthSpec>>,
     ) {
         // check if this chunk removes the chain
         match self.chains.call_by_id(chain_id, |chain| {

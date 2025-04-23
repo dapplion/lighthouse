@@ -2,7 +2,7 @@ use crate::sync::manager::BlockProcessType;
 use crate::sync::SamplingId;
 use crate::{service::NetworkMessage, sync::manager::SyncMessage};
 use beacon_chain::blob_verification::{GossipBlobError, GossipVerifiedBlob};
-use beacon_chain::block_verification_types::RpcBlock;
+use beacon_chain::block_verification_types::{ChainSegmentBlock, RpcBlock};
 use beacon_chain::data_column_verification::{observe_gossip_data_column, GossipDataColumnError};
 use beacon_chain::fetch_blobs::{
     fetch_and_process_engine_blobs, BlobsOrDataColumns, FetchEngineBlobError,
@@ -590,7 +590,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     pub fn send_chain_segment(
         self: &Arc<Self>,
         process_id: ChainSegmentProcessId,
-        blocks: Vec<RpcBlock<T::EthSpec>>,
+        blocks: Vec<ChainSegmentBlock<T::EthSpec>>,
     ) -> Result<(), Error<T::EthSpec>> {
         let is_backfill = matches!(&process_id, ChainSegmentProcessId::BackSyncBatchId { .. });
         debug!(blocks = blocks.len(), id = ?process_id, "Batch sending for process");

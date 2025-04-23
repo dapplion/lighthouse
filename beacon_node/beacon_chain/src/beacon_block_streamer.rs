@@ -754,12 +754,14 @@ mod tests {
                     terminal_block.timestamp = timestamp;
                 }
             });
-        // finish out merge epoch
-        harness.extend_slots(slots_per_epoch / 2).await;
-        // finish rest of epochs
-        harness
-            .extend_slots((num_epochs - 1 - bellatrix_fork_epoch) * slots_per_epoch)
-            .await;
+        {
+            // finish out merge epoch
+            harness.extend_slots(slots_per_epoch / 2).await;
+            // finish rest of epochs
+            harness
+                .extend_slots((num_epochs - 1 - bellatrix_fork_epoch) * slots_per_epoch)
+                .await;
+        }
 
         let head = harness.chain.head_snapshot();
         let state = &head.beacon_state;

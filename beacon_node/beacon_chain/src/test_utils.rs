@@ -1,5 +1,5 @@
 use crate::blob_verification::GossipVerifiedBlob;
-use crate::block_verification_types::{AsBlock, RpcBlock};
+use crate::block_verification_types::{AsBlock, ChainSegmentBlock, RpcBlock};
 use crate::data_column_verification::CustodyDataColumn;
 use crate::kzg_utils::build_data_column_sidecars;
 use crate::observed_operations::ObservationOutcome;
@@ -18,7 +18,7 @@ use crate::{
     BeaconChain, BeaconChainTypes, BlockError, ChainConfig, ServerSentEventHandler,
     StateSkipConfig,
 };
-use crate::{get_block_root, BeaconBlockResponseWrapper};
+use crate::{get_block_root, BeaconBlockResponseWrapper, ChainSegmentResult};
 use bls::get_withdrawal_credentials;
 use eth2::types::SignedBlockContentsTuple;
 use execution_layer::test_utils::generate_genesis_header;
@@ -778,12 +778,14 @@ where
         let block = self.chain.head_beacon_block();
         let block_root = block.canonical_root();
         self.build_rpc_block_from_store_blobs(Some(block_root), block)
+            .block
     }
 
     pub fn get_full_block(&self, block_root: &Hash256) -> RpcBlock<E> {
         let block = self.chain.get_blinded_block(block_root).unwrap().unwrap();
         let full_block = self.chain.store.make_full_block(block_root, block).unwrap();
         self.build_rpc_block_from_store_blobs(Some(*block_root), Arc::new(full_block))
+            .block
     }
 
     pub fn get_all_validators(&self) -> Vec<usize> {
@@ -2312,18 +2314,12 @@ where
         let (block, blob_items) = block_contents;
 
         let rpc_block = self.build_rpc_block_from_blobs(block_root, block, blob_items)?;
-        let block_hash: SignedBeaconBlockHash = self
-            .chain
-            .process_block(
-                block_root,
-                rpc_block,
-                NotifyExecutionLayer::Yes,
-                BlockImportSource::RangeSync,
-                || Ok(()),
-            )
-            .await?
-            .try_into()
-            .expect("block blobs are available");
+        let block_hash = chain_segment_result_to_block_err(
+            self.chain
+                .process_chain_segment(vec![rpc_block], NotifyExecutionLayer::Yes)
+                .await,
+        )?
+        .into();
         self.chain.recompute_head_at_current_slot().await;
         Ok(block_hash)
     }
@@ -2336,18 +2332,12 @@ where
 
         let block_root = block.canonical_root();
         let rpc_block = self.build_rpc_block_from_blobs(block_root, block, blob_items)?;
-        let block_hash: SignedBeaconBlockHash = self
-            .chain
-            .process_block(
-                block_root,
-                rpc_block,
-                NotifyExecutionLayer::Yes,
-                BlockImportSource::RangeSync,
-                || Ok(()),
-            )
-            .await?
-            .try_into()
-            .expect("block blobs are available");
+        let block_hash: SignedBeaconBlockHash = chain_segment_result_to_block_err(
+            self.chain
+                .process_chain_segment(vec![rpc_block], NotifyExecutionLayer::Yes)
+                .await,
+        )?
+        .into();
         self.chain.recompute_head_at_current_slot().await;
         Ok(block_hash)
     }
@@ -2358,36 +2348,40 @@ where
         &self,
         block_root: Option<Hash256>,
         block: Arc<SignedBeaconBlock<E>>,
-    ) -> RpcBlock<E> {
+    ) -> ChainSegmentBlock<E> {
         let block_root = block_root.unwrap_or_else(|| get_block_root(&block));
-        let has_blobs = block
-            .message()
-            .body()
-            .blob_kzg_commitments()
-            .is_ok_and(|c| !c.is_empty());
-        if !has_blobs {
-            return RpcBlock::new_without_blobs(Some(block_root), block, 0);
-        }
+        let sampling_column_count = self.get_sampling_column_count();
 
         // Blobs are stored as data columns from Fulu (PeerDAS)
         if self.spec.is_peer_das_enabled_for_epoch(block.epoch()) {
-            let columns = self.chain.get_data_columns(&block_root).unwrap().unwrap();
+            let columns = if block.has_data() {
+                self.chain.get_data_columns(&block_root).unwrap().unwrap()
+            } else {
+                vec![]
+            };
             let expected_custody_indices = columns.iter().map(|d| d.index).collect::<Vec<_>>();
             let custody_columns = columns
                 .into_iter()
                 .map(CustodyDataColumn::from_asserted_custody)
                 .collect::<Vec<_>>();
-            RpcBlock::new_with_custody_columns(
-                Some(block_root),
-                block,
+            ChainSegmentBlock::new_post_fulu(
+                RpcBlock::new(Some(block_root), block, sampling_column_count),
                 custody_columns,
                 expected_custody_indices,
                 &self.spec,
             )
             .unwrap()
         } else {
-            let blobs = self.chain.get_blobs(&block_root).unwrap().blobs();
-            RpcBlock::new(Some(block_root), block, blobs).unwrap()
+            let blobs = if block.has_data() {
+                self.chain.get_blobs(&block_root).unwrap().blobs()
+            } else {
+                None
+            };
+            ChainSegmentBlock::new_post_deneb(
+                RpcBlock::new(Some(block_root), block, sampling_column_count),
+                blobs.unwrap_or_else(|| RuntimeVariableList::empty(0)),
+            )
+            .unwrap()
         }
     }
 
@@ -2397,31 +2391,30 @@ where
         block_root: Hash256,
         block: Arc<SignedBeaconBlock<E, FullPayload<E>>>,
         blob_items: Option<(KzgProofs<E>, BlobsList<E>)>,
-    ) -> Result<RpcBlock<E>, BlockError> {
-        Ok(if self.spec.is_peer_das_enabled_for_epoch(block.epoch()) {
-            let sampling_column_count = self.get_sampling_column_count();
+    ) -> Result<ChainSegmentBlock<E>, BlockError> {
+        let sampling_column_count = self.get_sampling_column_count();
 
-            if blob_items.is_some_and(|(_, blobs)| !blobs.is_empty()) {
+        Ok(if self.spec.is_peer_das_enabled_for_epoch(block.epoch()) {
+            let columns = if blob_items.is_some_and(|(_, blobs)| !blobs.is_empty()) {
                 // Note: this method ignores the actual custody columns and just take the first
                 // `sampling_column_count` for testing purpose only, because the chain does not
                 // currently have any knowledge of the columns being custodied.
-                let columns = generate_data_column_sidecars_from_block(&block, &self.spec)
+                generate_data_column_sidecars_from_block(&block, &self.spec)
                     .into_iter()
                     .take(sampling_column_count)
                     .map(CustodyDataColumn::from_asserted_custody)
-                    .collect::<Vec<_>>();
-                let expected_custody_indices =
-                    columns.iter().map(|d| d.index()).collect::<Vec<_>>();
-                RpcBlock::new_with_custody_columns(
-                    Some(block_root),
-                    block,
-                    columns,
-                    expected_custody_indices,
-                    &self.spec,
-                )?
+                    .collect::<Vec<_>>()
             } else {
-                RpcBlock::new_without_blobs(Some(block_root), block, sampling_column_count)
-            }
+                vec![]
+            };
+
+            let expected_custody_indices = columns.iter().map(|d| d.index()).collect::<Vec<_>>();
+            ChainSegmentBlock::new_post_fulu(
+                RpcBlock::new(Some(block_root), block, sampling_column_count),
+                columns,
+                expected_custody_indices,
+                &self.spec,
+            )?
         } else {
             let blobs = blob_items
                 .map(|(proofs, blobs)| {
@@ -2429,7 +2422,10 @@ where
                 })
                 .transpose()
                 .unwrap();
-            RpcBlock::new(Some(block_root), block, blobs)?
+            ChainSegmentBlock::new_post_deneb(
+                RpcBlock::new(Some(block_root), block, sampling_column_count),
+                blobs.unwrap_or_else(|| RuntimeVariableList::empty(0)),
+            )?
         })
     }
 
@@ -3339,4 +3335,13 @@ fn generate_data_column_sidecars_from_block<E: EthSpec>(
         spec,
     )
     .unwrap()
+}
+
+fn chain_segment_result_to_block_err(result: ChainSegmentResult) -> Result<Hash256, BlockError> {
+    match result {
+        ChainSegmentResult::Successful { imported_blocks } => {
+            Ok(imported_blocks.first().expect("should import one block").0)
+        }
+        ChainSegmentResult::Failed { error, .. } => Err(error),
+    }
 }

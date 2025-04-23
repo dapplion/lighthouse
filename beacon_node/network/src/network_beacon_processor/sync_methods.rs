@@ -5,7 +5,7 @@ use crate::sync::{
     manager::{BlockProcessType, SyncMessage},
     ChainId,
 };
-use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
+use beacon_chain::block_verification_types::{AsBlock, ChainSegmentBlock, RpcBlock};
 use beacon_chain::data_availability_checker::AvailabilityCheckError;
 use beacon_chain::data_column_verification::verify_kzg_for_data_column_list;
 use beacon_chain::{
@@ -490,14 +490,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     pub async fn process_chain_segment(
         &self,
         sync_type: ChainSegmentProcessId,
-        downloaded_blocks: Vec<RpcBlock<T::EthSpec>>,
+        downloaded_blocks: Vec<ChainSegmentBlock<T::EthSpec>>,
         notify_execution_layer: NotifyExecutionLayer,
     ) {
         let result = match sync_type {
             // this a request from the range sync
             ChainSegmentProcessId::RangeBatchId(chain_id, epoch) => {
-                let start_slot = downloaded_blocks.first().map(|b| b.slot().as_u64());
-                let end_slot = downloaded_blocks.last().map(|b| b.slot().as_u64());
+                let start_slot = downloaded_blocks.first().map(|b| b.block.slot().as_u64());
+                let end_slot = downloaded_blocks.last().map(|b| b.block.slot().as_u64());
                 let sent_blocks = downloaded_blocks.len();
 
                 match self
@@ -541,17 +541,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             }
             // this a request from the Backfill sync
             ChainSegmentProcessId::BackSyncBatchId(epoch) => {
-                let start_slot = downloaded_blocks.first().map(|b| b.slot().as_u64());
-                let end_slot = downloaded_blocks.last().map(|b| b.slot().as_u64());
+                let start_slot = downloaded_blocks.first().map(|b| b.block.slot().as_u64());
+                let end_slot = downloaded_blocks.last().map(|b| b.block.slot().as_u64());
                 let sent_blocks = downloaded_blocks.len();
-                let n_blobs = downloaded_blocks
-                    .iter()
-                    .map(|wrapped| wrapped.n_blobs())
-                    .sum::<usize>();
-                let n_data_columns = downloaded_blocks
-                    .iter()
-                    .map(|wrapped| wrapped.n_data_columns())
-                    .sum::<usize>();
 
                 match self.process_backfill_blocks(downloaded_blocks) {
                     Ok(imported_blocks) => {
@@ -561,8 +553,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             keep_execution_payload = !self.chain.store.get_config().prune_payloads,
                             last_block_slot = end_slot,
                             processed_blocks = sent_blocks,
-                            processed_blobs = n_blobs,
-                            processed_data_columns = n_data_columns,
                             service= "sync",
                             "Backfill batch processed");
                         BatchProcessResult::Success {
@@ -575,7 +565,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             batch_epoch = %epoch,
                             first_block_slot = start_slot,
                             last_block_slot = end_slot,
-                            processed_blobs = n_blobs,
                             error = %e.message,
                             service = "sync",
                             "Backfill batch processing failed"
@@ -599,7 +588,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     /// Helper function to process blocks batches which only consumes the chain and blocks to process.
     async fn process_blocks<'a>(
         &self,
-        downloaded_blocks: impl Iterator<Item = &'a RpcBlock<T::EthSpec>>,
+        downloaded_blocks: impl Iterator<Item = &'a ChainSegmentBlock<T::EthSpec>>,
         notify_execution_layer: NotifyExecutionLayer,
     ) -> (usize, Result<(), ChainSegmentFailed>) {
         let blocks: Vec<_> = downloaded_blocks.cloned().collect();
@@ -641,7 +630,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     /// Helper function to process backfill block batches which only consumes the chain and blocks to process.
     fn process_backfill_blocks(
         &self,
-        downloaded_blocks: Vec<RpcBlock<T::EthSpec>>,
+        downloaded_blocks: Vec<ChainSegmentBlock<T::EthSpec>>,
     ) -> Result<usize, ChainSegmentFailed> {
         match self.chain.import_historical_block_batch(downloaded_blocks) {
             Ok(imported_blocks) => {
