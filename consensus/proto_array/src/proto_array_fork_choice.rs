@@ -868,6 +868,54 @@ impl ProtoArrayForkChoice {
         self.proto_array.iter_block_roots(block_root)
     }
 
+    pub fn descendants_of_checkpoint<E: EthSpec>(
+        &self,
+        checkpoint: Checkpoint,
+    ) -> Vec<(Hash256, Slot)> {
+        // Construct a mapping of parent -> childs
+        let mut child_to_parent = HashMap::<Hash256, Vec<&ProtoNode>>::new();
+        for node in self.proto_array.nodes.iter() {
+            if let Some(parent_index) = node.parent {
+                if let Some(parent) = self.proto_array.nodes.get(parent_index) {
+                    child_to_parent.entry(parent.root).or_default().push(node);
+                }
+            }
+        }
+
+        // Recursive function to gather descendants
+        fn find_descendants<E: EthSpec>(
+            parent_root: &Hash256,
+            child_to_parent: &HashMap<Hash256, Vec<&ProtoNode>>,
+            descendants: &mut Vec<(Hash256, Slot)>,
+            checkpoint: &Checkpoint,
+        ) {
+            if let Some(children) = child_to_parent.get(parent_root) {
+                for child in children {
+                    // Filter out blocks that are descendant of the finalized block but not the
+                    // finalized checkpoint.
+                    if parent_root == &checkpoint.root
+                        && child.slot < checkpoint.epoch.start_slot(E::slots_per_epoch())
+                    {
+                        continue;
+                    }
+
+                    descendants.push((child.root, child.slot));
+                    find_descendants::<E>(&child.root, child_to_parent, descendants, checkpoint);
+                }
+            }
+        }
+
+        // Start recursion from the query block_root
+        let mut descendants = vec![];
+        find_descendants::<E>(
+            &checkpoint.root,
+            &child_to_parent,
+            &mut descendants,
+            &checkpoint,
+        );
+        descendants
+    }
+
     pub fn as_bytes(&self) -> Vec<u8> {
         SszContainer::from(self).as_ssz_bytes()
     }
