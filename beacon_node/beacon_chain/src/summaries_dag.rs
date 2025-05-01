@@ -6,12 +6,16 @@ use std::{
 use store::HotStateSummary;
 use types::{Hash256, Slot};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DAGStateSummary {
     pub slot: Slot,
     pub latest_block_root: Hash256,
     pub latest_block_slot: Slot,
-    pub previous_state_root: Hash256,
+    /// `previous_state_root` is computed when building the DAG. If the provided summaries don't
+    /// form a valid tree we are not able to find the ancestor of this summary. Instead of error-ing
+    /// when building the DAG we store the previous state root as an Error. The consumer of the DAG
+    /// may never query the previous_state_root of this summary.
+    pub previous_state_root: Result<Hash256, String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,19 +55,25 @@ pub enum Error {
         state_root: Hash256,
         state_slot: Slot,
     },
-    RootUnknownPreviousStateRoot(Slot, Hash256),
+    RootUnknownPreviousStateRoot {
+        state_root: Hash256,
+        state_slot: Slot,
+        reason: String,
+    },
     RootUnknownAncestorStateRoot {
         starting_state_root: Hash256,
         ancestor_slot: Slot,
         root_state_root: Hash256,
         root_state_slot: Slot,
+        reason: String,
     },
     CircularAncestorChain {
         state_root: Hash256,
-        previous_state_root: Hash256,
+        previous_state_root: Result<Hash256, String>,
         slot: Slot,
         last_slot: Slot,
     },
+    BadParent(String),
 }
 
 impl StateSummariesDAG {
@@ -81,7 +91,7 @@ impl StateSummariesDAG {
             // Sanity check to ensure no duplicate summaries for the tuple (block_root, state_slot)
             match summaries.entry(summary.slot) {
                 Entry::Vacant(entry) => {
-                    entry.insert((state_root, summary));
+                    entry.insert((state_root, summary.clone()));
                 }
                 Entry::Occupied(existing) => {
                     return Err(Error::DuplicateStateSummary {
@@ -92,14 +102,16 @@ impl StateSummariesDAG {
                 }
             }
 
-            state_summaries_by_state_root.insert(state_root, summary);
-
-            child_state_roots
-                .entry(summary.previous_state_root)
-                .or_default()
-                .push(state_root);
+            if let Ok(previous_state_root) = &summary.previous_state_root {
+                child_state_roots
+                    .entry(*previous_state_root)
+                    .or_default()
+                    .push(state_root);
+            }
             // Add empty entry for the child state
             child_state_roots.entry(state_root).or_default();
+
+            state_summaries_by_state_root.insert(state_root, summary);
         }
 
         Ok(Self {
@@ -145,7 +157,7 @@ impl StateSummariesDAG {
             .iter()
             .map(|(state_root, summary)| {
                 let previous_state_root = if summary.slot == 0 {
-                    Hash256::ZERO
+                    Err("Genesis state".to_owned())
                 } else {
                     let previous_slot = summary.slot - 1;
 
@@ -160,7 +172,7 @@ impl StateSummariesDAG {
                         })?;
                     if let Some((state_root, _)) = same_block_root_summaries.get(&previous_slot) {
                         // Skipped slot: block root at previous slot is the same as latest block root.
-                        **state_root
+                        Ok(**state_root)
                     } else {
                         // Common case: not a skipped slot.
                         //
@@ -173,7 +185,10 @@ impl StateSummariesDAG {
                             .and_then(|parent_block_summaries| {
                                 parent_block_summaries.get(&previous_slot)
                             })
-                            .map_or(Hash256::ZERO, |(parent_state_root, _)| **parent_state_root)
+                            .map_or(
+                                Err("Unknown parent".to_owned()),
+                                |(parent_state_root, _)| Ok(**parent_state_root),
+                            )
                     }
                 };
 
@@ -221,14 +236,18 @@ impl StateSummariesDAG {
         self.state_summaries_by_state_root
             .iter()
             .filter_map(|(state_root, summary)| {
-                if self
-                    .state_summaries_by_state_root
-                    .contains_key(&summary.previous_state_root)
-                {
+                let known_parent = match summary.previous_state_root {
+                    Ok(previous_state_root) => self
+                        .state_summaries_by_state_root
+                        .contains_key(&previous_state_root),
+                    Err(_) => false,
+                };
+
+                if known_parent {
                     // Summaries with a known parent are not roots
                     None
                 } else {
-                    Some((*state_root, *summary))
+                    Some((*state_root, summary.clone()))
                 }
             })
             .collect()
@@ -247,7 +266,7 @@ impl StateSummariesDAG {
             summaries
                 .entry(summary.slot)
                 .or_default()
-                .push((*state_root, *summary));
+                .push((*state_root, summary.clone()));
         }
         summaries
     }
@@ -257,14 +276,14 @@ impl StateSummariesDAG {
             .state_summaries_by_state_root
             .get(&state_root)
             .ok_or(Error::MissingStateSummary(state_root))?;
-        if summary.previous_state_root == Hash256::ZERO {
-            Err(Error::RootUnknownPreviousStateRoot(
-                summary.slot,
+        summary
+            .previous_state_root
+            .clone()
+            .map_err(|reason| Error::RootUnknownPreviousStateRoot {
                 state_root,
-            ))
-        } else {
-            Ok(summary.previous_state_root)
-        }
+                state_slot: summary.slot,
+                reason,
+            })
     }
 
     pub fn ancestor_state_root_at_slot(
@@ -293,18 +312,20 @@ impl StateSummariesDAG {
                 Ordering::Equal => {
                     return Ok(state_root);
                 }
-                Ordering::Greater => {
-                    if summary.previous_state_root == Hash256::ZERO {
+                Ordering::Greater => match &summary.previous_state_root {
+                    Ok(previous_state_root) => {
+                        state_root = *previous_state_root;
+                    }
+                    Err(e) => {
                         return Err(Error::RootUnknownAncestorStateRoot {
                             starting_state_root,
                             ancestor_slot,
                             root_state_root: state_root,
                             root_state_slot: summary.slot,
+                            reason: e.clone(),
                         });
-                    } else {
-                        state_root = summary.previous_state_root;
                     }
-                }
+                },
             }
         }
     }
@@ -326,7 +347,7 @@ impl StateSummariesDAG {
                     if summary.slot >= last_slot {
                         return Err(Error::CircularAncestorChain {
                             state_root,
-                            previous_state_root: summary.previous_state_root,
+                            previous_state_root: summary.previous_state_root.clone(),
                             slot: summary.slot,
                             last_slot,
                         });
@@ -335,7 +356,10 @@ impl StateSummariesDAG {
 
                 ancestors.push((state_root, summary.slot));
                 last_slot = Some(summary.slot);
-                state_root = summary.previous_state_root;
+                state_root = summary
+                    .previous_state_root
+                    .clone()
+                    .map_err(Error::BadParent)?;
             } else {
                 return Ok(ancestors);
             }
@@ -363,7 +387,7 @@ impl From<HotStateSummary> for DAGStateSummary {
             slot: value.slot,
             latest_block_root: value.latest_block_root,
             latest_block_slot: value.latest_block_slot,
-            previous_state_root: value.previous_state_root,
+            previous_state_root: Ok(value.previous_state_root),
         }
     }
 }
