@@ -402,6 +402,10 @@ where
             }
         }
 
+        if let RemoveChain::OptimisticStartFailed = remove_reason {
+            // Drop chain and start again
+        }
+
         metrics::inc_counter_vec_by(
             &metrics::SYNCING_CHAINS_DROPPED_BLOCKS,
             &[sync_type.as_str()],

@@ -50,6 +50,7 @@ pub enum RemoveChain {
     },
     WrongBatchState(String),
     WrongChainState(String),
+    OptimisticStartFailed,
 }
 
 #[derive(Debug)]
@@ -66,6 +67,26 @@ pub enum SyncingChainType {
     Backfill,
 }
 
+#[derive(Debug)]
+pub enum SyncingChainStart {
+    Optimistic {
+        start_epoch: Epoch,
+        fallback_epoch: Epoch,
+    },
+    Normal {
+        start_epoch: Epoch,
+    },
+}
+
+impl SyncingChainStart {
+    fn start_epoch(&self) -> Epoch {
+        match self {
+            Self::Optimistic { start_epoch, .. } => *start_epoch,
+            Self::Normal { start_epoch } => *start_epoch,
+        }
+    }
+}
+
 /// A chain of blocks that need to be downloaded. Peers who claim to contain the target head
 /// root are grouped into the peer pool and queried for batches when downloading the
 /// chain.
@@ -79,6 +100,9 @@ pub struct SyncingChain<T: BeaconChainTypes> {
 
     /// The start of the chain segment. Any epoch previous to this one has been validated.
     pub start_epoch: Epoch,
+    /// Optimistic head to sync.
+    /// If a block is imported for this batch, the chain advances to this point.
+    start: SyncingChainStart,
 
     /// The target head slot.
     pub target_head_slot: Slot,
@@ -100,10 +124,6 @@ pub struct SyncingChain<T: BeaconChainTypes> {
     /// Starting epoch of the batch that needs to be processed next.
     /// This is incremented as the chain advances.
     processing_target: BatchId,
-
-    /// Optimistic head to sync.
-    /// If a block is imported for this batch, the chain advances to this point.
-    optimistic_start: Option<BatchId>,
 
     /// When a batch for an optimistic start is tried (either successful or not), it is stored to
     /// avoid trying it again due to chain stopping/re-starting on chain switching.
@@ -138,7 +158,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: Id,
-        start_epoch: Epoch,
+        start: SyncingChainStart,
         target_head_slot: Slot,
         target_head_root: Hash256,
         peer_id: PeerId,
@@ -146,18 +166,19 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
     ) -> Self {
         let mut peers = FnvHashMap::default();
         peers.insert(peer_id, Default::default());
+        let start_epoch = start.start_epoch();
 
         SyncingChain {
             id,
             chain_type,
             start_epoch,
+            start,
             target_head_slot,
             target_head_root,
             batches: BTreeMap::new(),
             peers,
             to_be_downloaded: start_epoch,
             processing_target: start_epoch,
-            optimistic_start: None,
             attempted_optimistic_starts: HashSet::default(),
             state: ChainSyncingState::Stopped,
             current_processing_batch: None,
@@ -286,10 +307,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             .map(|active_requests| active_requests.remove(&batch_id));
 
         let received = batch.download_completed(blocks)?;
-        let awaiting_batches = batch_id
-            .saturating_sub(self.optimistic_start.unwrap_or(self.processing_target))
-            / EPOCHS_PER_BATCH;
-        debug!(epoch = %batch_id, blocks = received, batch_state = self.visualize_batch_state(), %awaiting_batches,"Batch downloaded");
+        debug!(epoch = %batch_id, blocks = received, batch_state = self.visualize_batch_state(), "Batch downloaded");
 
         // pre-emptively request more blocks from peers whilst we process current blocks,
         self.request_batches(network)?;
@@ -354,51 +372,6 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         // Only process batches if this chain is Syncing and only process one batch at a time
         if self.state != ChainSyncingState::Syncing || self.current_processing_batch.is_some() {
             return Ok(KeepChain);
-        }
-
-        // Find the id of the batch we are going to process.
-        //
-        // First try our optimistic start, if any. If this batch is ready, we process it. If the
-        // batch has not already been completed, check the current chain target.
-        if let Some(epoch) = self.optimistic_start {
-            if let Some(batch) = self.batches.get(&epoch) {
-                let state = batch.state();
-                match state {
-                    BatchState::AwaitingProcessing(..) => {
-                        // this batch is ready
-                        debug!(%epoch, "Processing optimistic start");
-                        return self.process_batch(network, epoch);
-                    }
-                    BatchState::Downloading(..) => {
-                        // The optimistic batch is being downloaded. We wait for this before
-                        // attempting to process other batches.
-                        return Ok(KeepChain);
-                    }
-                    BatchState::Poisoned => unreachable!("Poisoned batch"),
-                    BatchState::Processing(_)
-                    | BatchState::AwaitingDownload
-                    | BatchState::Failed => {
-                        // these are all inconsistent states:
-                        // - Processing -> `self.current_processing_batch` is None
-                        // - Failed -> non recoverable batch. For an optimistic batch, it should
-                        //   have been removed
-                        // - AwaitingDownload -> A recoverable failed batch should have been
-                        //   re-requested.
-                        return Err(RemoveChain::WrongChainState(format!(
-                            "Optimistic batch indicates inconsistent chain state: {:?}",
-                            state
-                        )));
-                    }
-                    BatchState::AwaitingValidation(_) => {
-                        // If an optimistic start is given to the chain after the corresponding
-                        // batch has been requested and processed we can land here. We drop the
-                        // optimistic candidate since we can't conclude whether the batch included
-                        // blocks or not at this point
-                        debug!(batch = %epoch, "Dropping optimistic candidate");
-                        self.optimistic_start = None;
-                    }
-                }
-            }
         }
 
         // if the optimistic target can't be processed, check the processing target
@@ -635,7 +608,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             }
         }
 
-        Ok(KeepChain)
+        Err(RemoveChain::OptimisticStartFailed)
     }
 
     /// Removes any batches previous to the given `validating_epoch` and updates the current
