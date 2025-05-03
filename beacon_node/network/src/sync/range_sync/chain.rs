@@ -9,7 +9,7 @@ use beacon_chain::BeaconChainTypes;
 use lighthouse_network::service::api_types::Id;
 use lighthouse_network::{PeerAction, PeerId};
 use logging::crit;
-use std::collections::{btree_map::Entry, BTreeMap, HashSet};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 use std::fmt;
 use strum::IntoStaticStr;
 use tracing::{debug, instrument, warn};
@@ -87,9 +87,11 @@ pub struct SyncingChain<T: BeaconChainTypes> {
     batches: BTreeMap<BatchId, BatchInfo<T::EthSpec>>,
 
     /// The peers that agree on the `target_head_slot` and `target_head_root` as a canonical chain
-    /// and thus available to download this chain from, as well as the batches we are currently
-    /// requesting.
-    peers: HashSet<PeerId>,
+    /// and thus available to download this chain from.
+    ///
+    /// Also, For each peer tracks the total requests done per peer as part of this SyncingChain
+    /// `HashMap<peer, total_requests_per_peer>`
+    peers: HashMap<PeerId, usize>,
 
     /// Starting epoch of the next batch that needs to be downloaded.
     to_be_downloaded: BatchId,
@@ -148,7 +150,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             target_head_slot,
             target_head_root,
             batches: BTreeMap::new(),
-            peers: HashSet::from_iter([peer_id]),
+            peers: HashMap::from_iter([(peer_id, <_>::default())]),
             to_be_downloaded: start_epoch,
             processing_target: start_epoch,
             optimistic_start: None,
@@ -178,7 +180,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
     /// Peers currently syncing this chain.
     #[instrument(parent = None,level = "info", fields(chain = self.id , service = "range_sync"), skip_all)]
     pub fn peers(&self) -> impl Iterator<Item = PeerId> + '_ {
-        self.peers.iter().cloned()
+        self.peers.keys().cloned()
     }
 
     /// Progress in epochs made by the chain
@@ -231,6 +233,12 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         request_id: Id,
         blocks: Vec<RpcBlock<T::EthSpec>>,
     ) -> ProcessingResult {
+        // Account for one more requests to this peer
+        // TODO(das): this code assumes that we do a single request per peer per RpcBlock
+        for peer in peer.iter_unique_peers() {
+            *self.peers.entry(*peer).or_default() += 1;
+        }
+
         // check if we have this batch
         let batch = match self.batches.get_mut(&batch_id) {
             None => {
@@ -580,7 +588,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                             "Batch failed to download. Dropping chain scoring peers"
                         );
 
-                        for peer in self.peers.drain() {
+                        for (peer, _) in self.peers.drain() {
                             network.report_peer(peer, penalty, "faulty_chain");
                         }
                         Err(RemoveChain::ChainFailed {
@@ -845,7 +853,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         network: &mut SyncNetworkContext<T>,
         peer_id: PeerId,
     ) -> ProcessingResult {
-        self.peers.insert(peer_id);
+        self.peers.insert(peer_id, <_>::default());
         self.request_batches(network)
     }
 
@@ -940,6 +948,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 },
                 &synced_peers,
                 &failed_peers,
+                &self.peers,
             ) {
                 Ok(request_id) => {
                     // inform the batch about the new request

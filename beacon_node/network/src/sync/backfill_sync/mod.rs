@@ -24,7 +24,7 @@ use lighthouse_network::{PeerAction, PeerId};
 use logging::crit;
 use std::collections::{
     btree_map::{BTreeMap, Entry},
-    HashSet,
+    HashMap, HashSet,
 };
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
@@ -920,6 +920,8 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 RangeRequestId::BackfillSync { batch_id },
                 &synced_peers,
                 &failed_peers,
+                // Does not track total requests per peers for now
+                &HashMap::new(),
             ) {
                 Ok(request_id) => {
                     // inform the batch about the new request

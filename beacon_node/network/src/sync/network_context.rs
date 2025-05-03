@@ -412,6 +412,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         requester: RangeRequestId,
         peers: &HashSet<PeerId>,
         peers_to_deprioritize: &HashSet<PeerId>,
+        total_requests_per_peer: &HashMap<PeerId, usize>,
     ) -> Result<Id, RpcRequestSendError> {
         let batch_epoch = Slot::new(*request.start_slot()).epoch(T::EthSpec::slots_per_epoch());
         let batch_type = self.batch_type(batch_epoch);
@@ -426,13 +427,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     peers_to_deprioritize.contains(peer),
                     // Prefer peers with less overall requests
                     active_request_count_by_peer.get(peer).copied().unwrap_or(0),
+                    // Prefer peers with less total cummulative requests, so we fetch data from a
+                    // diverse set of peers
+                    total_requests_per_peer.get(peer).copied().unwrap_or(0),
                     // Random factor to break ties, otherwise the PeerID breaks ties
                     rand::random::<u32>(),
                     peer,
                 )
             })
             .min()
-            .map(|(_, _, _, peer)| *peer)
+            .map(|(_, _, _, _, peer)| *peer)
         else {
             // Backfill and forward sync handle this condition gracefully.
             // - Backfill sync: will pause waiting for more peers to join
