@@ -570,7 +570,7 @@ impl<T: BeaconChainTypes> ActiveSamplingRequest<T> {
         // Send requests.
         let mut sent_request = false;
         for (peer_id, column_indexes) in column_indexes_to_request {
-            cx.data_column_lookup_request(
+            cx.data_columns_by_root_request(
                 DataColumnsByRootRequester::Sampling(SamplingId {
                     id: self.requester_id,
                     sampling_request_id: self.current_sampling_request_id,

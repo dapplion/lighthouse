@@ -63,6 +63,14 @@ pub struct DataColumnsByRangeRequestId {
     pub parent_request_id: ComponentsByRangeRequestId,
 }
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct CustodyByRangeRequestId {
+    /// Id to identify this attempt at a meta custody by range request for `parent_request_id`
+    pub id: Id,
+    /// The Id of the overall By Range request for block components.
+    pub parent_request_id: ComponentsByRangeRequestId,
+}
+
 /// Block components by range request for range sync. Includes an ID for downstream consumers to
 /// handle retries and tie all their sub requests together.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -221,6 +229,7 @@ macro_rules! impl_display {
 impl_display!(BlocksByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(BlobsByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(DataColumnsByRangeRequestId, "{}/{}", id, parent_request_id);
+impl_display!(CustodyByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
 impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);

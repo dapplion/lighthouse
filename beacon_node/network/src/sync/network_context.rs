@@ -1,7 +1,8 @@
 //! Provides network functionality for the Syncing thread. This fundamentally wraps a network
 //! channel and stores a global RPC ID to perform requests.
 
-use self::custody::{ActiveCustodyRequest, Error as CustodyRequestError};
+use self::custody::{ActiveCustodyByRootRequest, Error as CustodyRequestError};
+use self::custody_by_range::{ActiveCustodyByRangeRequest, Error as CustodyByRangeError};
 pub use self::requests::{BlocksByRootSingleRequest, DataColumnsByRootSingleBlockRequest};
 use super::block_sidecar_coupling::RangeBlockComponentsRequest;
 use super::manager::BlockProcessType;
@@ -22,8 +23,8 @@ use lighthouse_network::rpc::{BlocksByRangeRequest, GoodbyeReason, RPCError, Req
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
     AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyId, CustodyRequester, DataColumnsByRangeRequestId, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, SingleLookupReqId, SyncRequestId,
+    CustodyByRangeRequestId, CustodyId, CustodyRequester, DataColumnsByRangeRequestId,
+    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
@@ -41,11 +42,12 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, span, warn, Level};
 use types::blob_sidecar::FixedBlobSidecarList;
 use types::{
-    BlobSidecar, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, EthSpec, ForkContext,
-    Hash256, SignedBeaconBlock, Slot,
+    BlobSidecar, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Epoch, EthSpec,
+    ForkContext, Hash256, SignedBeaconBlock, Slot,
 };
 
 pub mod custody;
+pub mod custody_by_range;
 mod requests;
 
 #[derive(Debug)]
@@ -189,8 +191,11 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     data_columns_by_range_requests:
         ActiveRequests<DataColumnsByRangeRequestId, DataColumnsByRangeRequestItems<T::EthSpec>>,
 
-    /// Mapping of active custody column requests for a block root
-    custody_by_root_requests: FnvHashMap<CustodyRequester, ActiveCustodyRequest<T>>,
+    /// Mapping of active custody column by root requests for a block root
+    custody_by_root_requests: FnvHashMap<CustodyRequester, ActiveCustodyByRootRequest<T>>,
+
+    /// Mapping of active custody column by range requests
+    custody_by_range_requests: FnvHashMap<CustodyByRangeRequestId, ActiveCustodyByRangeRequest<T>>,
 
     /// BlocksByRange requests paired with other ByRange requests for data components
     components_by_range_requests:
@@ -248,6 +253,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             blobs_by_range_requests: ActiveRequests::new("blobs_by_range"),
             data_columns_by_range_requests: ActiveRequests::new("data_columns_by_range"),
             custody_by_root_requests: <_>::default(),
+            custody_by_range_requests: <_>::default(),
             components_by_range_requests: FnvHashMap::default(),
             network_beacon_processor,
             chain,
@@ -276,6 +282,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             data_columns_by_range_requests,
             // custody_by_root_requests is a meta request of data_columns_by_root_requests
             custody_by_root_requests: _,
+            custody_by_range_requests: _,
             // components_by_range_requests is a meta request of various _by_range requests
             components_by_range_requests: _,
             execution_engine_state: _,
@@ -379,6 +386,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             data_columns_by_range_requests,
             // custody_by_root_requests is a meta request of data_columns_by_root_requests
             custody_by_root_requests: _,
+            custody_by_range_requests: _,
             // components_by_range_requests is a meta request of various _by_range requests
             components_by_range_requests: _,
             execution_engine_state: _,
@@ -499,7 +507,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                             id,
                         )
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("remove this code");
 
                 Ok((requests, column_to_peer_map))
             })
@@ -821,7 +830,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     }
 
     /// Request to send a single `data_columns_by_root` request to the network.
-    pub fn data_column_lookup_request(
+    pub fn data_columns_by_root_request(
         &mut self,
         requester: DataColumnsByRootRequester,
         peer_id: PeerId,
@@ -915,7 +924,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         );
 
         let requester = CustodyRequester(id);
-        let mut request = ActiveCustodyRequest::new(
+        let mut request = ActiveCustodyByRootRequest::new(
             block_root,
             CustodyId { requester },
             &custody_indexes_to_fetch,
@@ -1038,7 +1047,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peer_id: PeerId,
         request: DataColumnsByRangeRequest,
         parent_request_id: ComponentsByRangeRequestId,
-    ) -> Result<DataColumnsByRangeRequestId, RpcRequestSendError> {
+    ) -> Result<DataColumnsByRangeRequestId, &'static str> {
         let id = DataColumnsByRangeRequestId {
             id: self.next_id(),
             parent_request_id,
@@ -1049,7 +1058,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request: RequestType::DataColumnsByRange(request.clone()),
             app_request_id: AppRequestId::Sync(SyncRequestId::DataColumnsByRange(id)),
         })
-        .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+        .map_err(|_| "network send error")?;
 
         debug!(
             method = "DataColumnsByRange",
@@ -1070,6 +1079,68 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             DataColumnsByRangeRequestItems::new(request),
         );
         Ok(id)
+    }
+
+    /// Request to fetch all needed custody columns of a range of slot. This function may not send
+    /// any request to the network if no columns have to be fetched based on the import state of the
+    /// node. A custody request is a "super request" that may trigger 0 or more `data_columns_by_range`
+    /// requests.
+    pub fn send_custody_by_range_request(
+        &mut self,
+        parent_id: ComponentsByRangeRequestId,
+        block_slots_with_data: Vec<Slot>,
+        epoch: Epoch,
+        column_indices: Vec<ColumnIndex>,
+        lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
+    ) -> Result<CustodyByRangeRequestId, RpcRequestSendError> {
+        let id = CustodyByRangeRequestId {
+            id: self.next_id(),
+            parent_request_id: parent_id,
+        };
+
+        debug!(
+            indices = ?column_indices,
+            %id,
+            "Starting custody columns by range request"
+        );
+
+        let mut request = ActiveCustodyByRangeRequest::new(
+            epoch,
+            block_slots_with_data,
+            parent_id,
+            &column_indices,
+            lookup_peers,
+        );
+
+        // Note that you can only send, but not handle a response here
+        match request.continue_requests(self) {
+            Ok(_) => {
+                // Ignoring the result of `continue_requests` is okay. A request that has just been
+                // created cannot return data immediately, it must send some request to the network
+                // first. And there must exist some request, `custody_indexes_to_fetch` is not empty.
+                self.custody_by_range_requests.insert(id, request);
+                Ok(id)
+            }
+            Err(e) => Err(match e {
+                CustodyByRangeError::NoPeer(column_index) => {
+                    RpcRequestSendError::NoPeer(NoPeerError::CustodyPeer(column_index))
+                }
+                // - TooManyFailures: Should never happen, `request` has just been created, it's
+                //   count of download_failures is 0 here
+                // - BadState: Should never happen, a bad state can only happen when handling a
+                //   network response
+                // - UnexpectedRequestId: Never happens: this Err is only constructed handling a
+                //   download or processing response
+                // - SendFailed: Should never happen unless in a bad drop sequence when shutting
+                //   down the node
+                e @ (CustodyByRangeError::TooManyFailures
+                | CustodyByRangeError::BadState { .. }
+                | CustodyByRangeError::UnexpectedRequestId { .. }
+                | CustodyByRangeError::SendFailed { .. }) => {
+                    RpcRequestSendError::InternalError(format!("{e:?}"))
+                }
+            }),
+        }
     }
 
     pub fn is_execution_engine_online(&self) -> bool {
@@ -1402,7 +1473,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     fn handle_custody_by_root_result(
         &mut self,
         id: CustodyRequester,
-        request: ActiveCustodyRequest<T>,
+        request: ActiveCustodyByRootRequest<T>,
         result: CustodyRequestResult<T::EthSpec>,
     ) -> Option<CustodyByRootResult<T::EthSpec>> {
         let span = span!(
@@ -1427,6 +1498,60 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             }
             None => {
                 self.custody_by_root_requests.insert(id, request);
+            }
+        }
+        result
+    }
+
+    /// Insert a downloaded column into an active custody request. Then make progress on the
+    /// entire request.
+    ///
+    /// ### Returns
+    ///
+    /// - `Some`: Request completed, won't make more progress. Expect requester to act on the result.
+    /// - `None`: Request still active, requester should do no action
+    #[allow(clippy::type_complexity)]
+    pub fn on_custody_by_range_response(
+        &mut self,
+        id: CustodyByRangeRequestId,
+        req_id: DataColumnsByRangeRequestId,
+        peer_id: PeerId,
+        resp: RpcResponseResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>,
+    ) -> Option<CustodyByRootResult<T::EthSpec>> {
+        // Note: need to remove the request to borrow self again below. Otherwise we can't
+        // do nested requests
+        let Some(mut request) = self.custody_by_range_requests.remove(&id) else {
+            // TOOD(das): This log can happen if the request is error'ed early and dropped
+            debug!(?id, "Custody by range downloaded event for unknown request");
+            return None;
+        };
+
+        let result = request.on_data_column_downloaded(peer_id, req_id, resp, self);
+
+        self.handle_custody_by_range_result(id, request, result)
+    }
+
+    fn handle_custody_by_range_result(
+        &mut self,
+        id: CustodyByRangeRequestId,
+        request: ActiveCustodyByRangeRequest<T>,
+        result: CustodyRequestResult<T::EthSpec>,
+    ) -> Option<CustodyByRootResult<T::EthSpec>> {
+        let result = result
+            .map_err(RpcResponseError::CustodyRequestError)
+            .transpose();
+
+        // Convert a result from internal format of `ActiveCustodyRequest` (error first to use ?) to
+        // an Option first to use in an `if let Some() { act on result }` block.
+        match result.as_ref() {
+            Some(Ok((columns, peer_group, _))) => {
+                debug!(?id, count = columns.len(), peers = ?peer_group, "Custody request success, removing")
+            }
+            Some(Err(e)) => {
+                debug!(?id, error = ?e, "Custody request failure, removing" )
+            }
+            None => {
+                self.custody_by_range_requests.insert(id, request);
             }
         }
         result
