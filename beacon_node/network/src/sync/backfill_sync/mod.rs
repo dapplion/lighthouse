@@ -20,7 +20,7 @@ use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::service::api_types::Id;
 use lighthouse_network::types::{BackFillState, NetworkGlobals};
-use lighthouse_network::{PeerAction, PeerId};
+use lighthouse_network::PeerAction;
 use logging::crit;
 use std::collections::{
     btree_map::{BTreeMap, Entry},
@@ -311,7 +311,6 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         &mut self,
         network: &mut SyncNetworkContext<T>,
         batch_id: BatchId,
-        peer_id: &PeerId,
         request_id: Id,
         err: RpcResponseError,
     ) -> Result<(), BackFillError> {
@@ -325,7 +324,9 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 return Ok(());
             }
             debug!(batch_epoch = %batch_id, error = ?err, "Batch download failed");
-            match batch.download_failed(Some(*peer_id)) {
+            // TODO(das): Is it necessary for the batch to track failed peers? Can we make this
+            // mechanism compatible with PeerDAS and before PeerDAS?
+            match batch.download_failed(None) {
                 Err(e) => self.fail_sync(BackFillError::BatchInvalidState(batch_id, e.0)),
                 Ok(BatchOperationOutcome::Failed { blacklist: _ }) => {
                     self.fail_sync(BackFillError::BatchDownloadFailed(batch_id))

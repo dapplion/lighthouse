@@ -3,7 +3,7 @@ use beacon_chain::BeaconChainTypes;
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::DataColumnsByRangeRequest;
 use lighthouse_network::service::api_types::{
-    ComponentsByRangeRequestId, DataColumnsByRangeRequestId,
+    CustodyByRangeRequestId, DataColumnsByRangeRequestId,
 };
 use lighthouse_network::PeerId;
 use lru_cache::LRUTimeCache;
@@ -13,7 +13,10 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 use tracing::{debug, warn};
-use types::{data_column_sidecar::ColumnIndex, DataColumnSidecar, Epoch, EthSpec, Slot};
+use types::{
+    data_column_sidecar::ColumnIndex, DataColumnSidecar, Epoch, EthSpec, Hash256,
+    SignedBeaconBlockHeader, Slot,
+};
 
 use super::{PeerGroup, RpcResponseResult, SyncNetworkContext};
 
@@ -23,10 +26,11 @@ const MAX_STALE_NO_PEERS_DURATION: Duration = Duration::from_secs(30);
 type DataColumnSidecarList<E> = Vec<Arc<DataColumnSidecar<E>>>;
 
 pub struct ActiveCustodyByRangeRequest<T: BeaconChainTypes> {
+    id: CustodyByRangeRequestId,
     // TODO(das): Pass a better type for the by_range request
     epoch: Epoch,
-    block_slots_with_data: Vec<Slot>,
-    parent_id: ComponentsByRangeRequestId,
+    /// Blocks that we expect peers to serve data columns for
+    blocks_with_data: Vec<SignedBeaconBlockHeader>,
     /// List of column indices this request needs to download to complete successfully
     column_requests: FnvHashMap<ColumnIndex, ColumnRequest<T::EthSpec>>,
     /// Active requests for 1 or more columns each
@@ -63,18 +67,27 @@ struct ActiveBatchColumnsRequest {
 pub type CustodyByRangeRequestResult<E> =
     Result<Option<(DataColumnSidecarList<E>, PeerGroup, Duration)>, Error>;
 
+enum ColumnResponseError {
+    NonMatchingColumn {
+        slot: Slot,
+        actual_block_root: Hash256,
+        expected_block_root: Hash256,
+    },
+    MissingColumn(Slot),
+}
+
 impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
     pub(crate) fn new(
+        id: CustodyByRangeRequestId,
         epoch: Epoch,
-        block_slots_with_data: Vec<Slot>,
-        parent_id: ComponentsByRangeRequestId,
+        blocks_with_data: Vec<SignedBeaconBlockHeader>,
         column_indices: &[ColumnIndex],
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Self {
         Self {
+            id,
             epoch,
-            block_slots_with_data,
-            parent_id,
+            blocks_with_data,
             column_requests: HashMap::from_iter(
                 column_indices
                     .iter()
@@ -101,10 +114,10 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
         req_id: DataColumnsByRangeRequestId,
         resp: RpcResponseResult<DataColumnSidecarList<T::EthSpec>>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> CustodyRequestResult<T::EthSpec> {
+    ) -> CustodyByRangeRequestResult<T::EthSpec> {
         let Some(batch_request) = self.active_batch_columns_requests.get_mut(&req_id) else {
             warn!(
-                id = ?self.parent_id,
+                id = %self.id,
                 %req_id,
                 "Received custody by range response for unrequested index"
             );
@@ -113,14 +126,6 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
 
         match resp {
             Ok((data_columns, seen_timestamp)) => {
-                debug!(
-                    id = ?self.parent_id,
-                    %req_id,
-                    %peer_id,
-                    count = data_columns.len(),
-                    "Custody by range request download success"
-                );
-
                 // Map columns by index as an optimization to not loop the returned list on each
                 // requested index. The worse case is 128 loops over a 128 item vec + mutation to
                 // drop the consumed columns.
@@ -133,6 +138,8 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
 
                 // Accumulate columns that the peer does not have to issue a single log per request
                 let mut missing_column_indexes = vec![];
+                let mut incorrect_column_indices = vec![];
+                let mut imported_column_indices = vec![];
 
                 for index in &batch_request.indices {
                     let column_request = self
@@ -141,13 +148,27 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                         .ok_or(Error::BadState(format!("unknown column_index {index}")))?;
 
                     let columns_at_index = self
-                        .block_slots_with_data
+                        .blocks_with_data
                         .iter()
-                        .map(|slot| {
-                            if let Some(data_column) =
-                                data_columns_by_index.remove(&(*index, *slot))
+                        .map(|block| {
+                            let slot = block.message.slot;
+                            if let Some(data_column) = data_columns_by_index.remove(&(*index, slot))
                             {
-                                Ok(data_column)
+                                let actual_block_root =
+                                    data_column.signed_block_header.message.canonical_root();
+                                let expected_block_root = block.message.canonical_root();
+                                if actual_block_root != expected_block_root {
+                                    Err(ColumnResponseError::NonMatchingColumn {
+                                        slot,
+                                        actual_block_root: data_column
+                                            .signed_block_header
+                                            .message
+                                            .canonical_root(),
+                                        expected_block_root: block.message.canonical_root(),
+                                    })
+                                } else {
+                                    Ok(data_column)
+                                }
                             } else {
                                 // The following three statements are true:
                                 // - block at `slot` is not missed, and has data
@@ -162,7 +183,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                                 // TODO(das): Should track which columns are missing and eventually give up
                                 // TODO(das): If the peer is in the lookup peer set it claims to have imported
                                 // the block AND its custody columns. So in this case we can downscore
-                                Err(format!("Missing column at slot {slot} index {index}"))
+                                Err(ColumnResponseError::MissingColumn(slot))
                             }
                         })
                         .collect::<Result<Vec<_>, _>>();
@@ -175,19 +196,64 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                                 columns_at_index,
                                 seen_timestamp,
                             )?;
+
+                            imported_column_indices.push(index);
                         }
-                        Err(reason) => {
+                        Err(e) => {
                             column_request.on_download_error(req_id)?;
-                            missing_column_indexes.push(index);
+
+                            match e {
+                                ColumnResponseError::NonMatchingColumn {
+                                    slot,
+                                    actual_block_root,
+                                    expected_block_root,
+                                } => {
+                                    incorrect_column_indices.push((
+                                        index,
+                                        slot,
+                                        actual_block_root,
+                                        expected_block_root,
+                                    ));
+                                }
+                                ColumnResponseError::MissingColumn(slot) => {
+                                    missing_column_indexes.push((index, slot));
+                                }
+                            }
                         }
                     }
+                }
+
+                // Log missing_column_indexes and incorrect_column_indices here in batch per request
+                // to make this logs more compact and less noisy.
+                if !imported_column_indices.is_empty() {
+                    debug!(
+                        id = %self.id,
+                        data_columns_by_range_req_id = %req_id,
+                        %peer_id,
+                        count = imported_column_indices.len(),
+                        "Custody by range request download imported columns"
+                    );
+                }
+
+                if !incorrect_column_indices.is_empty() {
+                    // Note: Batch logging that columns are missing to not spam logger
+                    debug!(
+                        id = %self.id,
+                        data_columns_by_range_req_id = %req_id,
+                        %peer_id,
+                        // TODO(das): this property can become very noisy, being the full range 0..128
+                        incorrect_columns = ?incorrect_column_indices,
+                        "Custody by range peer returned non-matching columns"
+                    );
+
+                    self.failed_peers.insert(peer_id);
                 }
 
                 if !missing_column_indexes.is_empty() {
                     // Note: Batch logging that columns are missing to not spam logger
                     debug!(
-                        id = ?self.parent_id,
-                        %req_id,
+                        id = %self.id,
+                        data_columns_by_range_req_id = %req_id,
                         %peer_id,
                         // TODO(das): this property can become very noisy, being the full range 0..128
                         ?missing_column_indexes,
@@ -199,7 +265,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
             }
             Err(err) => {
                 debug!(
-                    id = ?self.parent_id,
+                    id = %self.id,
                     %req_id,
                     %peer_id,
                     error = ?err,
@@ -224,7 +290,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
     pub(crate) fn continue_requests(
         &mut self,
         cx: &mut SyncNetworkContext<T>,
-    ) -> CustodyRequestResult<T::EthSpec> {
+    ) -> CustodyByRangeRequestResult<T::EthSpec> {
         if self.column_requests.values().all(|r| r.is_downloaded()) {
             // All requests have completed successfully.
             let mut peers = HashMap::<PeerId, Vec<usize>>::new();
@@ -333,7 +399,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                         count: T::EthSpec::slots_per_epoch(),
                         columns: indices.clone(),
                     },
-                    self.parent_id,
+                    self.id,
                 )
                 .map_err(Error::SendFailed)?;
 

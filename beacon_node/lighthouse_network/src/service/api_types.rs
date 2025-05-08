@@ -59,8 +59,8 @@ pub struct BlobsByRangeRequestId {
 pub struct DataColumnsByRangeRequestId {
     /// Id to identify this attempt at a data_columns_by_range request for `parent_request_id`
     pub id: Id,
-    /// The Id of the overall By Range request for block components.
-    pub parent_request_id: ComponentsByRangeRequestId,
+    /// The Id of the parent custody by range request that issued this data_columns_by_range request
+    pub parent_request_id: CustodyByRangeRequestId,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -308,14 +308,17 @@ mod tests {
     fn display_id_data_columns_by_range() {
         let id = DataColumnsByRangeRequestId {
             id: 123,
-            parent_request_id: ComponentsByRangeRequestId {
+            parent_request_id: CustodyByRangeRequestId {
                 id: 122,
-                requester: RangeRequestId::RangeSync {
-                    chain_id: 54,
-                    batch_id: Epoch::new(0),
+                parent_request_id: ComponentsByRangeRequestId {
+                    id: 121,
+                    requester: RangeRequestId::RangeSync {
+                        chain_id: 54,
+                        batch_id: Epoch::new(0),
+                    },
                 },
             },
         };
-        assert_eq!(format!("{id}"), "123/122/RangeSync/0/54");
+        assert_eq!(format!("{id}"), "123/122/121/RangeSync/0/54");
     }
 }

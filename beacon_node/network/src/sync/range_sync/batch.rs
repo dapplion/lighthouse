@@ -18,15 +18,7 @@ const MAX_BATCH_DOWNLOAD_ATTEMPTS: u8 = 5;
 /// after `MAX_BATCH_PROCESSING_ATTEMPTS` times, it is considered faulty.
 const MAX_BATCH_PROCESSING_ATTEMPTS: u8 = 3;
 
-/// Type of expected batch.
-#[derive(Debug, Copy, Clone, Display)]
-#[strum(serialize_all = "snake_case")]
-pub enum ByRangeRequestType {
-    BlocksAndColumns,
-    BlocksAndBlobs,
-    Blocks,
-}
-
+// TODO(das): Consider merging with PeerGroup
 #[derive(Clone, Debug)]
 pub struct BatchPeerGroup {
     block_peer: PeerId,

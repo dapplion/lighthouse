@@ -1166,10 +1166,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
         if let Some(resp) = self.network.on_blocks_by_range_response(id, peer_id, block) {
-            self.on_range_components_response(
+            self.on_block_components_by_range_response(
                 id.parent_request_id,
-                peer_id,
-                RangeBlockComponent::Block(id, resp),
+                RangeBlockComponent::Block(id, resp, peer_id),
             );
         }
     }
@@ -1181,10 +1180,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         blob: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
     ) {
         if let Some(resp) = self.network.on_blobs_by_range_response(id, peer_id, blob) {
-            self.on_range_components_response(
+            self.on_block_components_by_range_response(
                 id.parent_request_id,
-                peer_id,
-                RangeBlockComponent::Blob(id, resp),
+                RangeBlockComponent::Blob(id, resp, peer_id),
             );
         }
     }
@@ -1195,15 +1193,34 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         peer_id: PeerId,
         data_column: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
     ) {
+        // data_columns_by_range returns either an Ok list of data columns, or an RpcResponseError
         if let Some(resp) = self
             .network
             .on_data_columns_by_range_response(id, peer_id, data_column)
         {
-            self.on_range_components_response(
-                id.parent_request_id,
-                peer_id,
-                RangeBlockComponent::CustodyColumns(id, resp),
-            );
+            // custody_by_range accumulates the results of multiple data_columns_by_range requests
+            // returning a bigger list of data columns across all the column indices this node has
+            // to custody
+            if let Some(result) =
+                self.network
+                    .on_custody_by_range_response(id.parent_request_id, id, peer_id, resp)
+            {
+                // TODO(das): Improve the type of RangeBlockComponent::CustodyColumns, not
+                // not have to pass a PeerGroup in case of error
+                let peers = match &result {
+                    Ok((_, peers, _)) => peers.clone(),
+                    Err(_) => todo!(),
+                };
+
+                self.on_block_components_by_range_response(
+                    id.parent_request_id.parent_request_id,
+                    RangeBlockComponent::CustodyColumns(
+                        id.parent_request_id,
+                        result.map(|(data, _peers, timestamp)| (data, timestamp)),
+                        peers,
+                    ),
+                );
+            }
         }
     }
 
@@ -1247,17 +1264,15 @@ impl<T: BeaconChainTypes> SyncManager<T> {
 
     /// Handles receiving a response for a range sync request that should have both blocks and
     /// blobs.
-    fn on_range_components_response(
+    fn on_block_components_by_range_response(
         &mut self,
         range_request_id: ComponentsByRangeRequestId,
-        peer_id: PeerId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
     ) {
-        if let Some(resp) = self.network.range_block_component_response(
-            range_request_id,
-            peer_id,
-            range_block_component,
-        ) {
+        if let Some(resp) = self
+            .network
+            .on_block_components_by_range_response(range_request_id, range_block_component)
+        {
             match resp {
                 Ok((blocks, batch_peers)) => {
                     match range_request_id.requester {
@@ -1295,7 +1310,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     RangeRequestId::RangeSync { chain_id, batch_id } => {
                         self.range_sync.inject_error(
                             &mut self.network,
-                            peer_id,
                             batch_id,
                             chain_id,
                             range_request_id.id,
@@ -1307,7 +1321,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         match self.backfill_sync.inject_error(
                             &mut self.network,
                             batch_id,
-                            &peer_id,
                             range_request_id.id,
                             e,
                         ) {

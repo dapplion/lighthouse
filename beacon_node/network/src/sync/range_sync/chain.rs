@@ -865,7 +865,6 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         &mut self,
         network: &mut SyncNetworkContext<T>,
         batch_id: BatchId,
-        peer_id: &PeerId,
         request_id: Id,
         err: RpcResponseError,
     ) -> ProcessingResult {
@@ -880,7 +879,6 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 debug!(
                     batch_epoch = %batch_id,
                     batch_state = ?batch.state(),
-                    %peer_id,
                     %request_id,
                     ?batch_state,
                     "Batch not expecting block"
@@ -891,12 +889,13 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 batch_epoch = %batch_id,
                 batch_state = ?batch.state(),
                 error = ?err,
-                %peer_id,
                 %request_id,
                 "Batch download error"
             );
             if let BatchOperationOutcome::Failed { blacklist } =
-                batch.download_failed(Some(*peer_id))?
+                // TODO(das): Is it necessary for the batch to track failed peers? Can we make this
+                // mechanism compatible with PeerDAS and before PeerDAS?
+                batch.download_failed(None)?
             {
                 return Err(RemoveChain::ChainFailed {
                     blacklist,
@@ -907,7 +906,6 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         } else {
             debug!(
                 batch_epoch = %batch_id,
-                %peer_id,
                 %request_id,
                 batch_state,
                 "Batch not found"

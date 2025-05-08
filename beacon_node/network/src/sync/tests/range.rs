@@ -15,14 +15,15 @@ use lighthouse_network::rpc::methods::{
 };
 use lighthouse_network::rpc::{RequestType, StatusMessage};
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, DataColumnsByRangeRequestId,
-    SyncRequestId,
+    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
+    DataColumnsByRangeRequestId, SyncRequestId,
 };
 use lighthouse_network::{PeerId, SyncInfo};
 use std::time::Duration;
 use types::{
-    BlobSidecarList, BlockImportSource, Epoch, EthSpec, Hash256, MinimalEthSpec as E,
-    SignedBeaconBlock, SignedBeaconBlockHash, Slot,
+    BeaconBlock, BlobSidecarList, BlockImportSource, ColumnIndex, DataColumnSidecar, Epoch,
+    EthSpec, Hash256, KzgCommitment, MinimalEthSpec as E, Signature, SignedBeaconBlock,
+    SignedBeaconBlockHash, Slot, VariableList,
 };
 
 const D: Duration = Duration::new(0, 0);
@@ -35,7 +36,13 @@ pub(crate) enum DataSidecars<E: EthSpec> {
 enum ByRangeDataRequestIds {
     PreDeneb,
     PrePeerDAS(BlobsByRangeRequestId, PeerId),
-    PostPeerDAS(Vec<(DataColumnsByRangeRequestId, PeerId)>),
+    PostPeerDAS(
+        Vec<(
+            DataColumnsByRangeRequestId,
+            PeerId,
+            DataColumnsByRangeRequest,
+        )>,
+    ),
 }
 
 /// Sync tests are usually written in the form:
@@ -46,10 +53,11 @@ enum ByRangeDataRequestIds {
 /// To make writting tests succint, the machinery in this testing rig automatically identifies
 /// _which_ request to complete. Picking the right request is critical for tests to pass, so this
 /// filter allows better expressivity on the criteria to identify the right request.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy)]
 struct RequestFilter {
     peer: Option<PeerId>,
     epoch: Option<u64>,
+    column_index: Option<u64>,
 }
 
 impl RequestFilter {
@@ -62,13 +70,64 @@ impl RequestFilter {
         self.epoch = Some(epoch);
         self
     }
+
+    fn column_index(mut self, index: u64) -> Self {
+        self.column_index = Some(index);
+        self
+    }
+
+    fn matches(&self, peer: PeerId, start_slot: u64) -> bool {
+        if let Some(expected_epoch) = self.epoch {
+            let epoch = Slot::new(start_slot).epoch(E::slots_per_epoch()).as_u64();
+            if epoch != expected_epoch {
+                return false;
+            }
+        }
+        if let Some(expected_peer) = self.peer {
+            if peer != expected_peer {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 fn filter() -> RequestFilter {
     RequestFilter::default()
 }
 
+/// Instruct the testing rig how to complete requests for _by_range requests
+#[derive(Debug, Clone, Copy)]
+struct CompleteConfig {
+    with_data: bool,
+    custody_failure_at_index: Option<u64>,
+}
+
+impl CompleteConfig {
+    // TODO(das): add tests where blocks don't have data
+
+    fn custody_failure_at_index(mut self, index: u64) -> Self {
+        self.custody_failure_at_index = Some(index);
+        self
+    }
+}
+
+fn complete() -> CompleteConfig {
+    CompleteConfig {
+        with_data: true,
+        custody_failure_at_index: None,
+    }
+}
+
 impl TestRig {
+    fn our_custody_indices(&self) -> Vec<ColumnIndex> {
+        self.network_globals
+            .sampling_columns
+            .iter()
+            .copied()
+            .collect()
+    }
+
     /// Produce a head peer with an advanced head
     fn add_head_peer(&mut self) -> PeerId {
         self.add_head_peer_with_root(Hash256::random())
@@ -191,31 +250,120 @@ impl TestRig {
         }
     }
 
+    fn expect_no_columns_by_range_requests(&mut self, request_filter: RequestFilter) {
+        let requests = self.find_data_columns_by_range_requests(request_filter);
+        if !requests.is_empty() {
+            panic!("Expected no DataColumnsByRange requests with filter {request_filter:?} but found {requests:?}");
+        }
+    }
+
     fn update_execution_engine_state(&mut self, state: EngineState) {
         self.log(&format!("execution engine state updated: {state:?}"));
         self.sync_manager.update_execution_engine_state(state);
     }
 
+    fn zero_block_at_slot(&mut self, slot: Slot, with_data: bool) -> Arc<SignedBeaconBlock<E>> {
+        let fork_name = self.spec.fork_name_at_slot::<E>(slot);
+        let mut block = match fork_name {
+            ForkName::Fulu => {
+                let mut block = BeaconBlock::empty(&self.spec);
+                if with_data {
+                    block
+                        .body_mut()
+                        .blob_kzg_commitments_mut()
+                        .expect("fulu block")
+                        .push(KzgCommitment([0; 48]))
+                        .expect("pushed to empty kzg commitments");
+                }
+                block
+            }
+            _ => todo!("extend for other forks"),
+        };
+        *block.slot_mut() = slot;
+        Arc::new(SignedBeaconBlock::from_block(block, Signature::empty()))
+    }
+
+    fn last_sent_blocks_by_range(
+        &mut self,
+        id: ComponentsByRangeRequestId,
+    ) -> Vec<Arc<SignedBeaconBlock<E>>> {
+        self.sent_blocks_by_range
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| panic!("No blocks for ComponentsByRangeRequestId {id}"))
+    }
+
+    fn send_blocks_by_range_response(
+        &mut self,
+        req_id: BlocksByRangeRequestId,
+        peer_id: PeerId,
+        blocks: &[Arc<SignedBeaconBlock<E>>],
+    ) {
+        let slots = blocks.iter().map(|block| block.slot()).collect::<Vec<_>>();
+        self.log(&format!(
+            "Completing BlocksByRange request {req_id} to {peer_id} with blocks {slots:?}"
+        ));
+
+        for block in blocks {
+            self.send_sync_message(SyncMessage::RpcBlock {
+                sync_request_id: SyncRequestId::BlocksByRange(req_id),
+                peer_id,
+                beacon_block: Some(block.clone()),
+                seen_timestamp: D,
+            });
+        }
+        self.send_sync_message(SyncMessage::RpcBlock {
+            sync_request_id: SyncRequestId::BlocksByRange(req_id),
+            peer_id,
+            beacon_block: None,
+            seen_timestamp: D,
+        });
+
+        if self
+            .sent_blocks_by_range
+            .insert(req_id.parent_request_id, blocks.to_vec())
+            .is_some()
+        {
+            panic!("Sent two blocks_by_range requests in the same epoch. We need better tracking");
+        }
+    }
+
+    fn send_data_columns_by_range_response(
+        &mut self,
+        id: DataColumnsByRangeRequestId,
+        peer_id: PeerId,
+        data_columns: &[Arc<DataColumnSidecar<E>>],
+    ) {
+        let mut ids = data_columns
+            .iter()
+            .map(|d| (d.slot().as_u64(), d.index))
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        self.log(&format!(
+            "Completing DataColumnsByRange request {id} to {peer_id} with data_columns {ids:?}"
+        ));
+
+        for data_column in data_columns {
+            self.send_sync_message(SyncMessage::RpcDataColumn {
+                sync_request_id: SyncRequestId::DataColumnsByRange(id),
+                peer_id,
+                data_column: Some(data_column.clone()),
+                seen_timestamp: D,
+            });
+        }
+        self.send_sync_message(SyncMessage::RpcDataColumn {
+            sync_request_id: SyncRequestId::DataColumnsByRange(id),
+            peer_id,
+            data_column: None,
+            seen_timestamp: D,
+        });
+    }
+
     fn find_blocks_by_range_request(
         &mut self,
         request_filter: RequestFilter,
-    ) -> ((BlocksByRangeRequestId, PeerId), ByRangeDataRequestIds) {
-        let filter_f = |peer: PeerId, start_slot: u64| {
-            if let Some(expected_epoch) = request_filter.epoch {
-                let epoch = Slot::new(start_slot).epoch(E::slots_per_epoch()).as_u64();
-                if epoch != expected_epoch {
-                    return false;
-                }
-            }
-            if let Some(expected_peer) = request_filter.peer {
-                if peer != expected_peer {
-                    return false;
-                }
-            }
-            true
-        };
-
-        let block_req = self
+    ) -> (BlocksByRangeRequestId, PeerId) {
+        self
             .pop_received_network_event(|ev| match ev {
                 NetworkMessage::SendRequest {
                     peer_id,
@@ -224,28 +372,49 @@ impl TestRig {
                             OldBlocksByRangeRequestV2 { start_slot, .. },
                         )),
                     app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRange(id)),
-                } if filter_f(*peer_id, *start_slot) => Some((*id, *peer_id)),
+                } if request_filter.matches(*peer_id, *start_slot) => Some((*id, *peer_id)),
                 _ => None,
             })
             .unwrap_or_else(|e| {
                 panic!("Should have a BlocksByRange request, filter {request_filter:?}: {e:?}")
-            });
+            })
+    }
 
-        let by_range_data_requests = if self.after_fulu() {
-            let mut data_columns_requests = vec![];
-            while let Ok(data_columns_request) = self.pop_received_network_event(|ev| match ev {
+    fn find_data_columns_by_range_requests(
+        &mut self,
+        request_filter: RequestFilter,
+    ) -> Vec<(
+        DataColumnsByRangeRequestId,
+        PeerId,
+        DataColumnsByRangeRequest,
+    )> {
+        let mut data_columns_requests = vec![];
+        while let Ok(data_columns_request) =
+            self.pop_received_network_event(|ev| match ev {
                 NetworkMessage::SendRequest {
                     peer_id,
                     request:
-                        RequestType::DataColumnsByRange(DataColumnsByRangeRequest {
-                            start_slot, ..
-                        }),
+                        RequestType::DataColumnsByRange(
+                            req @ DataColumnsByRangeRequest { start_slot, .. },
+                        ),
                     app_request_id: AppRequestId::Sync(SyncRequestId::DataColumnsByRange(id)),
-                } if filter_f(*peer_id, *start_slot) => Some((*id, *peer_id)),
+                } if request_filter.matches(*peer_id, *start_slot) => {
+                    Some((*id, *peer_id, req.clone()))
+                }
                 _ => None,
-            }) {
-                data_columns_requests.push(data_columns_request);
-            }
+            })
+        {
+            data_columns_requests.push(data_columns_request);
+        }
+        data_columns_requests
+    }
+
+    fn find_data_by_range_request(
+        &mut self,
+        request_filter: RequestFilter,
+    ) -> ByRangeDataRequestIds {
+        if self.after_fulu() {
+            let data_columns_requests = self.find_data_columns_by_range_requests(request_filter);
             if data_columns_requests.is_empty() {
                 panic!("Found zero DataColumnsByRange requests, filter {request_filter:?}");
             }
@@ -257,7 +426,7 @@ impl TestRig {
                         peer_id,
                         request: RequestType::BlobsByRange(BlobsByRangeRequest { start_slot, .. }),
                         app_request_id: AppRequestId::Sync(SyncRequestId::BlobsByRange(id)),
-                    } if filter_f(*peer_id, *start_slot) => Some((*id, *peer_id)),
+                    } if request_filter.matches(*peer_id, *start_slot) => Some((*id, *peer_id)),
                     _ => None,
                 })
                 .unwrap_or_else(|e| {
@@ -266,35 +435,59 @@ impl TestRig {
             ByRangeDataRequestIds::PrePeerDAS(id, peer)
         } else {
             ByRangeDataRequestIds::PreDeneb
-        };
+        }
+    }
 
-        (block_req, by_range_data_requests)
+    fn find_and_complete_block_components_by_range_request(
+        &mut self,
+        epoch: Epoch,
+        request_filter: RequestFilter,
+        complete_config: CompleteConfig,
+    ) -> RangeRequestId {
+        let id =
+            self.find_and_complete_blocks_by_range_request(epoch, request_filter, complete_config);
+        self.find_and_complete_data_by_range_request(request_filter, complete_config);
+        id
     }
 
     fn find_and_complete_blocks_by_range_request(
         &mut self,
+        epoch: Epoch,
         request_filter: RequestFilter,
+        complete_config: CompleteConfig,
     ) -> RangeRequestId {
-        let ((blocks_req_id, block_peer), by_range_data_request_ids) =
-            self.find_blocks_by_range_request(request_filter);
+        let (blocks_req_id, block_peer) = self.find_blocks_by_range_request(request_filter);
 
-        // Complete the request with a single stream termination
-        self.log(&format!(
-            "Completing BlocksByRange request {blocks_req_id:?} with empty stream"
-        ));
-        self.send_sync_message(SyncMessage::RpcBlock {
-            sync_request_id: SyncRequestId::BlocksByRange(blocks_req_id),
-            peer_id: block_peer,
-            beacon_block: None,
-            seen_timestamp: D,
-        });
+        let block = self.zero_block_at_slot(
+            epoch.start_slot(E::slots_per_epoch()),
+            complete_config.with_data,
+        );
+        let blocks = [block];
+        self.send_blocks_by_range_response(blocks_req_id, block_peer, &blocks);
 
+        blocks_req_id.parent_request_id.requester
+    }
+
+    fn find_and_complete_data_by_range_request(
+        &mut self,
+        request_filter: RequestFilter,
+        complete_config: CompleteConfig,
+    ) {
+        let by_range_data_request_ids = self.find_data_by_range_request(request_filter);
+        self.complete_data_by_range_request(by_range_data_request_ids, complete_config);
+    }
+
+    fn complete_data_by_range_request(
+        &mut self,
+        by_range_data_request_ids: ByRangeDataRequestIds,
+        complete_config: CompleteConfig,
+    ) {
         match by_range_data_request_ids {
             ByRangeDataRequestIds::PreDeneb => {}
             ByRangeDataRequestIds::PrePeerDAS(id, peer_id) => {
                 // Complete the request with a single stream termination
                 self.log(&format!(
-                    "Completing BlobsByRange request {id:?} with empty stream"
+                    "Completing BlobsByRange request {id} with empty stream"
                 ));
                 self.send_sync_message(SyncMessage::RpcBlob {
                     sync_request_id: SyncRequestId::BlobsByRange(id),
@@ -305,21 +498,62 @@ impl TestRig {
             }
             ByRangeDataRequestIds::PostPeerDAS(data_column_req_ids) => {
                 // Complete the request with a single stream termination
-                for (id, peer_id) in data_column_req_ids {
-                    self.log(&format!(
-                        "Completing DataColumnsByRange request {id:?} with empty stream"
-                    ));
-                    self.send_sync_message(SyncMessage::RpcDataColumn {
-                        sync_request_id: SyncRequestId::DataColumnsByRange(id),
-                        peer_id,
-                        data_column: None,
-                        seen_timestamp: D,
-                    });
+                for (id, peer_id, req) in data_column_req_ids {
+                    // To reply with a valid DataColumnsByRange we need to construct
+                    // DataColumnsByRange for the block root that we requested the block peer, plus
+                    // figure out which exact columns we requested this peer
+
+                    let components_by_range_req_id = id.parent_request_id.parent_request_id;
+                    let blocks = self.last_sent_blocks_by_range(components_by_range_req_id);
+
+                    let data_columns = blocks
+                        .iter()
+                        .flat_map(|block| {
+                            let kzg_commitments_inclusion_proof = block
+                                .message()
+                                .body()
+                                .kzg_commitments_merkle_proof()
+                                .unwrap();
+                            let kzg_commitments = block
+                                .message()
+                                .body()
+                                .blob_kzg_commitments()
+                                .unwrap()
+                                .clone();
+                            let signed_block_header = block.signed_block_header();
+
+                            req.columns.iter().filter_map(move |index| {
+                                // Skip column generation if index is marked as failure
+                                if complete_config.custody_failure_at_index == Some(*index) {
+                                    return None;
+                                }
+
+                                // We need to produce a DataColumn with valid inclusion proof, but can
+                                // be with random KZG proof and data as we won't send it for processing
+                                Some(Arc::new(DataColumnSidecar {
+                                    index: *index,
+                                    column: VariableList::empty(),
+                                    kzg_commitments: kzg_commitments.clone(),
+                                    kzg_proofs: VariableList::from(vec![]),
+                                    signed_block_header: signed_block_header.clone(),
+                                    kzg_commitments_inclusion_proof:
+                                        kzg_commitments_inclusion_proof.clone(),
+                                }))
+                            })
+                        })
+                        .collect::<Vec<_>>();
+
+                    // Need to log here because I can't capture &mut self inside the columns iter
+                    if !blocks.is_empty() {
+                        if let Some(index) = complete_config.custody_failure_at_index {
+                            self.log(&format!("Forced custody failure at request {id} for peer {peer_id} index {index:?}"));
+                        }
+                    }
+
+                    self.send_data_columns_by_range_response(id, peer_id, &data_columns);
                 }
             }
         }
-
-        blocks_req_id.parent_request_id.requester
     }
 
     fn find_and_complete_processing_chain_segment(&mut self, id: ChainSegmentProcessId) {
@@ -344,15 +578,19 @@ impl TestRig {
         &mut self,
         last_epoch: u64,
         request_filter: RequestFilter,
+        complete_config: CompleteConfig,
     ) {
         for epoch in 0..last_epoch {
             // Note: In this test we can't predict the block peer
-            let id =
-                self.find_and_complete_blocks_by_range_request(request_filter.clone().epoch(epoch));
+            let id = self.find_and_complete_block_components_by_range_request(
+                Epoch::new(epoch),
+                request_filter.epoch(epoch),
+                complete_config,
+            );
             if let RangeRequestId::RangeSync { batch_id, .. } = id {
                 assert_eq!(batch_id.as_u64(), epoch, "Unexpected batch_id");
             } else {
-                panic!("unexpected RangeRequestId {id:?}");
+                panic!("unexpected RangeRequestId {id}");
             }
 
             let id = match id {
@@ -536,7 +774,12 @@ fn pause_and_resume_on_ee_offline() {
     // make the ee offline
     rig.update_execution_engine_state(EngineState::Offline);
     // send the response to the request
-    rig.find_and_complete_blocks_by_range_request(filter().peer(peer1).epoch(0));
+    let epoch = Epoch::new(0);
+    rig.find_and_complete_block_components_by_range_request(
+        epoch,
+        filter().peer(peer1).epoch(0),
+        complete(),
+    );
     // the beacon processor shouldn't have received any work
     rig.expect_empty_processor();
 
@@ -547,7 +790,7 @@ fn pause_and_resume_on_ee_offline() {
     // Don't filter requests and the columns requests may be sent to peer1 or peer2
     // We need to filter by epoch, because the previous batch eagerly sent requests for the next
     // epoch for the other batch. So we can either filter by epoch of by sync type.
-    rig.find_and_complete_blocks_by_range_request(filter().epoch(0));
+    rig.find_and_complete_block_components_by_range_request(epoch, filter().epoch(0), complete());
     // the beacon processor shouldn't have received any work
     rig.expect_empty_processor();
     // make the beacon processor available again.
@@ -576,14 +819,11 @@ fn finalized_sync_enough_global_custody_peers_few_chain_peers() {
 
     // Current priorization only sends batches to idle peers, so we need enough peers for each batch
     // TODO: Test this with a single peer in the chain, it should still work
-    r.add_random_peers(
-        remote_info,
-        (advanced_epochs + EXTRA_SYNCED_EPOCHS) as usize,
-    );
+    r.add_random_peers(remote_info, 1);
     r.assert_state(RangeSyncType::Finalized);
 
     let last_epoch = advanced_epochs + EXTRA_SYNCED_EPOCHS;
-    r.complete_and_process_range_sync_until(last_epoch, filter());
+    r.complete_and_process_range_sync_until(last_epoch, filter(), complete());
 }
 
 #[test]
@@ -618,5 +858,44 @@ fn finalized_sync_not_enough_custody_peers_on_start() {
     );
 
     let last_epoch = advanced_epochs + EXTRA_SYNCED_EPOCHS;
-    r.complete_and_process_range_sync_until(last_epoch, filter());
+    r.complete_and_process_range_sync_until(last_epoch, filter(), complete());
+}
+
+#[test]
+fn finalized_sync_single_custody_peer_failure() {
+    let mut r = TestRig::test_setup();
+    // Only run post-PeerDAS
+    if !r.fork_name.fulu_enabled() {
+        return;
+    }
+
+    let advanced_epochs: u64 = 2;
+    let remote_info = r.finalized_remote_info_advanced_by(advanced_epochs.into());
+
+    // Unikely that the single peer we added has enough columns for us. Tests are determinstic and
+    // this error should never be hit
+    r.add_random_peer(remote_info.clone());
+    r.assert_state(RangeSyncType::Finalized);
+
+    // send the response to the request
+    // Don't filter requests and the columns requests may be sent to peer1 or peer2
+    // We need to filter by epoch, because the previous batch eagerly sent requests for the next
+    // epoch for the other batch. So we can either filter by epoch of by sync type.
+    let column_index_to_fail = r.our_custody_indices().first().copied().unwrap();
+    r.find_and_complete_block_components_by_range_request(
+        Epoch::new(0),
+        filter().epoch(0),
+        complete().custody_failure_at_index(column_index_to_fail),
+    );
+
+    // Some peer had a costudy failure at `column_index` so sync should do a single extra request
+    // for that index and epoch.
+    let reqs = r.find_data_by_range_request(filter().epoch(0).column_index(column_index_to_fail));
+    // Find the requests first to assert that this is the only request that exists
+    r.expect_no_columns_by_range_requests(filter().epoch(0));
+    // complete this one request without the custody failure now
+    r.complete_data_by_range_request(reqs, complete());
+
+    // TODO(das): send batch 1 for completing processing and check that SyncingChain processed batch
+    // 1 successfully
 }

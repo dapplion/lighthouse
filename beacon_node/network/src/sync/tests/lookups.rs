@@ -113,6 +113,7 @@ impl TestRig {
             network_rx,
             network_rx_queue: vec![],
             sync_rx,
+            sent_blocks_by_range: <_>::default(),
             rng,
             network_globals: beacon_processor.network_globals.clone(),
             sync_manager: SyncManager::new(
@@ -356,22 +357,34 @@ impl TestRig {
     }
 
     pub fn new_connected_peer(&mut self) -> PeerId {
+        self.add_connected_peer_testing_only(false)
+    }
+
+    pub fn new_connected_supernode_peer(&mut self) -> PeerId {
+        self.add_connected_peer_testing_only(true)
+    }
+
+    fn add_connected_peer_testing_only(&mut self, supernode: bool) -> PeerId {
         let key = self.determinstic_key();
         let peer_id = self
             .network_globals
             .peers
             .write()
-            .__add_connected_peer_testing_only(false, &self.harness.spec, key);
-        self.log(&format!("Added new peer for testing {peer_id:?}"));
-        peer_id
-    }
-
-    pub fn new_connected_supernode_peer(&mut self) -> PeerId {
-        let key = self.determinstic_key();
-        self.network_globals
+            .__add_connected_peer_testing_only(supernode, &self.harness.spec, key);
+        let mut peer_custody_subnets = self
+            .network_globals
             .peers
-            .write()
-            .__add_connected_peer_testing_only(true, &self.harness.spec, key)
+            .read()
+            .peer_info(&peer_id)
+            .expect("peer was just added")
+            .custody_subnets_iter()
+            .map(|subnet| **subnet)
+            .collect::<Vec<_>>();
+        peer_custody_subnets.sort_unstable();
+        self.log(&format!(
+            "Added new peer for testing {peer_id:?} custody subnets {peer_custody_subnets:?}"
+        ));
+        peer_id
     }
 
     fn determinstic_key(&mut self) -> CombinedKey {
