@@ -1,10 +1,8 @@
 //! Provides network functionality for the Syncing thread. This fundamentally wraps a network
 //! channel and stores a global RPC ID to perform requests.
 
-use self::custody::{ActiveCustodyByRootRequest, Error as CustodyRequestError};
-use self::custody_by_range::{
-    ActiveCustodyByRangeRequest, CustodyByRangeRequestResult, Error as CustodyByRangeError,
-};
+use self::custody::ActiveCustodyByRootRequest;
+use self::custody_by_range::{ActiveCustodyByRangeRequest, CustodyByRangeRequestResult};
 pub use self::requests::{BlocksByRootSingleRequest, DataColumnsByRootSingleBlockRequest};
 use super::manager::BlockProcessType;
 use super::range_sync::BatchPeerGroup;
@@ -74,14 +72,11 @@ pub type RpcResponseResult<T> = Result<(T, Duration), RpcResponseError>;
 pub type CustodyByRootResult<T> =
     Result<(DataColumnSidecarList<T>, PeerGroup, Duration), RpcResponseError>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RpcResponseError {
     RpcError(#[allow(dead_code)] RPCError),
     VerifyError(LookupVerifyError),
-    // TODO(das): find a way to collapse this errors into a more managable enum
-    CustodyRequestError(#[allow(dead_code)] CustodyRequestError),
-    CustodyByRangeError(#[allow(dead_code)] CustodyByRangeError),
-    BlockComponentsByRangeError(#[allow(dead_code)] String),
+    InternalError(#[allow(dead_code)] String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -486,18 +481,18 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             RangeBlockComponent::Block(req_id, resp, peer_id) => resp.and_then(|(blocks, _)| {
                 request
                     .on_blocks_by_range_result(req_id, blocks, peer_id, self)
-                    .map_err(RpcResponseError::BlockComponentsByRangeError)
+                    .map_err(Into::<RpcResponseError>::into)
             }),
             RangeBlockComponent::Blob(req_id, resp, peer_id) => resp.and_then(|(blobs, _)| {
                 request
                     .on_blobs_by_range_result(req_id, blobs, peer_id, self)
-                    .map_err(RpcResponseError::BlockComponentsByRangeError)
+                    .map_err(Into::<RpcResponseError>::into)
             }),
             RangeBlockComponent::CustodyColumns(req_id, resp, peers) => {
                 resp.and_then(|(custody_columns, _)| {
                     request
                         .on_custody_by_range_result(req_id, custody_columns, peers, self)
-                        .map_err(RpcResponseError::BlockComponentsByRangeError)
+                        .map_err(Into::<RpcResponseError>::into)
                 })
             }
         };
@@ -845,25 +840,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 self.custody_by_root_requests.insert(requester, request);
                 Ok(LookupRequestResult::RequestSent(id.req_id))
             }
-            Err(e) => Err(match e {
-                CustodyRequestError::NoPeer(column_index) => {
-                    RpcRequestSendError::NoPeer(NoPeerError::CustodyPeer(column_index))
-                }
-                // - TooManyFailures: Should never happen, `request` has just been created, it's
-                //   count of download_failures is 0 here
-                // - BadState: Should never happen, a bad state can only happen when handling a
-                //   network response
-                // - UnexpectedRequestId: Never happens: this Err is only constructed handling a
-                //   download or processing response
-                // - SendFailed: Should never happen unless in a bad drop sequence when shutting
-                //   down the node
-                e @ (CustodyRequestError::TooManyFailures
-                | CustodyRequestError::BadState { .. }
-                | CustodyRequestError::UnexpectedRequestId { .. }
-                | CustodyRequestError::SendFailed { .. }) => {
-                    RpcRequestSendError::InternalError(format!("{e:?}"))
-                }
-            }),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1026,25 +1003,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 self.custody_by_range_requests.insert(id, request);
                 Ok(id)
             }
-            Err(e) => Err(match e {
-                CustodyByRangeError::NoPeer(column_index) => {
-                    RpcRequestSendError::NoPeer(NoPeerError::CustodyPeer(column_index))
-                }
-                // - TooManyFailures: Should never happen, `request` has just been created, it's
-                //   count of download_failures is 0 here
-                // - BadState: Should never happen, a bad state can only happen when handling a
-                //   network response
-                // - UnexpectedRequestId: Never happens: this Err is only constructed handling a
-                //   download or processing response
-                // - SendFailed: Should never happen unless in a bad drop sequence when shutting
-                //   down the node
-                e @ (CustodyByRangeError::TooManyFailures
-                | CustodyByRangeError::BadState { .. }
-                | CustodyByRangeError::UnexpectedRequestId { .. }
-                | CustodyByRangeError::SendFailed { .. }) => {
-                    RpcRequestSendError::InternalError(format!("{e:?}"))
-                }
-            }),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -1362,9 +1321,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         );
         let _enter = span.enter();
 
-        let result = result
-            .map_err(RpcResponseError::CustodyRequestError)
-            .transpose();
+        let result = result.map_err(Into::<RpcResponseError>::into).transpose();
 
         // Convert a result from internal format of `ActiveCustodyRequest` (error first to use ?) to
         // an Option first to use in an `if let Some() { act on result }` block.
@@ -1416,9 +1373,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         request: ActiveCustodyByRangeRequest<T>,
         result: CustodyByRangeRequestResult<T::EthSpec>,
     ) -> Option<CustodyByRootResult<T::EthSpec>> {
-        let result = result
-            .map_err(RpcResponseError::CustodyByRangeError)
-            .transpose();
+        let result = result.map_err(Into::<RpcResponseError>::into).transpose();
 
         // Convert a result from internal format of `ActiveCustodyRequest` (error first to use ?) to
         // an Option first to use in an `if let Some() { act on result }` block.

@@ -1209,7 +1209,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 // not have to pass a PeerGroup in case of error
                 let peers = match &result {
                     Ok((_, peers, _)) => peers.clone(),
-                    Err(_) => todo!(),
+                    // TODO(das): this PeerGroup with a single peer is incorrect
+                    Err(_) => PeerGroup::from_single(peer_id),
                 };
 
                 self.on_block_components_by_range_response(

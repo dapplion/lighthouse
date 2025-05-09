@@ -1,3 +1,4 @@
+use crate::sync::network_context::{NoPeerError, RpcRequestSendError, RpcResponseError};
 use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::BeaconChainTypes;
 use fnv::FnvHashMap;
@@ -5,7 +6,7 @@ use lighthouse_network::rpc::methods::DataColumnsByRangeRequest;
 use lighthouse_network::service::api_types::{
     CustodyByRangeRequestId, DataColumnsByRangeRequestId,
 };
-use lighthouse_network::PeerId;
+use lighthouse_network::{PeerAction, PeerId};
 use lru_cache::LRUTimeCache;
 use parking_lot::RwLock;
 use rand::Rng;
@@ -20,7 +21,7 @@ use types::{
 
 use super::{PeerGroup, RpcResponseResult, SyncNetworkContext};
 
-const FAILED_PEERS_CACHE_EXPIRY_SECONDS: u64 = 5;
+const TEMPORARY_FAULT_EXPIRY_SECONDS: u64 = 15;
 const MAX_STALE_NO_PEERS_DURATION: Duration = Duration::from_secs(30);
 
 type DataColumnSidecarList<E> = Vec<Arc<DataColumnSidecar<E>>>;
@@ -38,26 +39,48 @@ pub struct ActiveCustodyByRangeRequest<T: BeaconChainTypes> {
         FnvHashMap<DataColumnsByRangeRequestId, ActiveBatchColumnsRequest>,
     /// Peers that have recently failed to successfully respond to a columns by root request.
     /// Having a LRUTimeCache allows this request to not have to track disconnecting peers.
-    failed_peers: LRUTimeCache<PeerId>,
+    peers_with_custody_failures: LRUTimeCache<PeerId>,
+    peers_with_temporary_faults: LRUTimeCache<PeerId>,
+    // TODO(das): does this HashSet has an OOM risk? We should either: make sure that this request
+    // structs are dropped after some time, that disconnected peers are pruned (but we may want to
+    // retain faulty information if they just disconnect and reconnect) or make this an LRUTimeCache
+    // with a long time (like 5 minutes).
+    peers_with_permanent_faults: HashSet<PeerId>,
     /// Set of peers that claim to have imported this block and their custody columns
     lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
 
     _phantom: PhantomData<T>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum Error {
-    SendFailed(&'static str),
-    TooManyFailures,
-    BadState(String),
+    InternalError(String),
+    TooManyDownloadErrors(RpcResponseError),
     NoPeer(ColumnIndex),
-    /// Received a download result for a different request id than the in-flight request.
-    /// There should only exist a single request at a time. Having multiple requests is a bug and
-    /// can result in undefined state, so it's treated as a hard error and the batch is dropped.
-    UnexpectedRequestId {
-        expected_req_id: DataColumnsByRangeRequestId,
-        req_id: DataColumnsByRangeRequestId,
-    },
+}
+
+impl From<Error> for RpcResponseError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::InternalError(e) => RpcResponseError::InternalError(e),
+            Error::TooManyDownloadErrors(e) => e,
+            Error::NoPeer(_index) => todo!(),
+        }
+    }
+}
+
+impl From<Error> for RpcRequestSendError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::NoPeer(column_index) => {
+                RpcRequestSendError::NoPeer(NoPeerError::CustodyPeer(column_index))
+            }
+            Error::TooManyDownloadErrors(_) => {
+                RpcRequestSendError::InternalError("Download error in request send".to_string())
+            }
+            Error::InternalError(e) => RpcRequestSendError::InternalError(e),
+        }
+    }
 }
 
 struct ActiveBatchColumnsRequest {
@@ -94,7 +117,13 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                     .map(|index| (*index, ColumnRequest::new())),
             ),
             active_batch_columns_requests: <_>::default(),
-            failed_peers: LRUTimeCache::new(Duration::from_secs(FAILED_PEERS_CACHE_EXPIRY_SECONDS)),
+            peers_with_custody_failures: LRUTimeCache::new(Duration::from_secs(
+                TEMPORARY_FAULT_EXPIRY_SECONDS,
+            )),
+            peers_with_temporary_faults: LRUTimeCache::new(Duration::from_secs(
+                TEMPORARY_FAULT_EXPIRY_SECONDS,
+            )),
+            peers_with_permanent_faults: HashSet::new(),
             lookup_peers,
             _phantom: PhantomData,
         }
@@ -142,10 +171,12 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                 let mut imported_column_indices = vec![];
 
                 for index in &batch_request.indices {
-                    let column_request = self
-                        .column_requests
-                        .get_mut(index)
-                        .ok_or(Error::BadState(format!("unknown column_index {index}")))?;
+                    let column_request =
+                        self.column_requests
+                            .get_mut(index)
+                            .ok_or(Error::InternalError(format!(
+                                "unknown column_index {index}"
+                            )))?;
 
                     let columns_at_index = self
                         .blocks_with_data
@@ -246,7 +277,16 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                         "Custody by range peer returned non-matching columns"
                     );
 
-                    self.failed_peers.insert(peer_id);
+                    // Returning a non-canonical column is not a permanent fault. We should not
+                    // retry the peer for some time but the peer may return a canonical column in
+                    // the future.
+                    // TODO(das): if this finalized sync the fault is permanent
+                    self.peers_with_temporary_faults.insert(peer_id);
+                    cx.report_peer(
+                        peer_id,
+                        PeerAction::MidToleranceError,
+                        "non-matching data column",
+                    );
                 }
 
                 if !missing_column_indexes.is_empty() {
@@ -260,7 +300,13 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                         "Custody by range peer claims to not have some data"
                     );
 
-                    self.failed_peers.insert(peer_id);
+                    // Not having columns is not a permanent fault. The peer may be backfilling.
+                    self.peers_with_custody_failures.insert(peer_id);
+                    cx.report_peer(
+                        peer_id,
+                        PeerAction::MidToleranceError,
+                        "data column custody failure",
+                    );
                 }
             }
             Err(err) => {
@@ -276,11 +322,24 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                 for column_index in &batch_request.indices {
                     self.column_requests
                         .get_mut(column_index)
-                        .ok_or(Error::BadState("unknown column_index".to_owned()))?
-                        .on_download_error_and_mark_failure(req_id)?;
+                        .ok_or(Error::InternalError("unknown column_index".to_owned()))?
+                        .on_download_error_and_mark_failure(req_id, err.clone())?;
                 }
 
-                self.failed_peers.insert(peer_id);
+                match err {
+                    // Verify errors are correctness errors against our request or about the
+                    // returned data itself. This peer is faulty or malicious, should not be
+                    // retried.
+                    RpcResponseError::VerifyError(_) => {
+                        self.peers_with_permanent_faults.insert(peer_id);
+                    }
+                    // Network errors are not permanent faults and worth retrying
+                    RpcResponseError::RpcError(_) => {
+                        self.peers_with_temporary_faults.insert(peer_id);
+                    }
+                    // Do nothing for internal errors
+                    RpcResponseError::InternalError(_) => {}
+                }
             }
         };
 
@@ -334,8 +393,12 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
 
         for (column_index, request) in self.column_requests.iter_mut() {
             if let Some(wait_duration) = request.is_awaiting_download() {
-                if request.download_failures > MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS {
-                    return Err(Error::TooManyFailures);
+                if request.download_failures.len() > MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS {
+                    let last_error = request
+                        .download_failures
+                        .last()
+                        .expect("download_failures is not empty");
+                    return Err(Error::TooManyDownloadErrors(last_error.clone()));
                 }
 
                 // TODO(das): When is a fork and only a subset of your peers know about a block, we should
@@ -349,13 +412,19 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                 // custody peers on a given column
                 let mut priorized_peers = custodial_peers
                     .iter()
+                    .filter(|peer| {
+                        // Never request again peers with permanent faults
+                        // Do not request peers with custody failures for some time
+                        !self.peers_with_permanent_faults.contains(peer)
+                            && !self.peers_with_custody_failures.contains(peer)
+                    })
                     .map(|peer| {
                         (
                             // Prioritize peers that claim to know have imported this block
                             if lookup_peers.contains(peer) { 0 } else { 1 },
                             // De-prioritize peers that have failed to successfully respond to
-                            // requests recently
-                            self.failed_peers.contains(peer),
+                            // requests recently, but allow to immediatelly request them again
+                            self.peers_with_temporary_faults.contains(peer),
                             // Prefer peers with fewer requests to load balance across peers.
                             // We batch requests to the same peer, so count existence in the
                             // `columns_to_request_by_peer` as a single 1 request.
@@ -381,6 +450,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                     // descendants of this un-available lookup.
                     return Err(Error::NoPeer(*column_index));
                 } else {
+                    return Err(Error::NoPeer(*column_index));
                     // Do not issue requests if there is no custody peer on this column
                 }
             }
@@ -401,14 +471,16 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                     },
                     self.id,
                 )
-                .map_err(Error::SendFailed)?;
+                .map_err(|e| Error::InternalError(format!("send failed {e}")))?;
 
             for column_index in &indices {
                 let column_request = self
                     .column_requests
                     .get_mut(column_index)
                     // Should never happen: column_index is iterated from column_requests
-                    .ok_or(Error::BadState("unknown column_index".to_owned()))?;
+                    .ok_or(Error::InternalError(format!(
+                        "Unknown column_request {column_index}"
+                    )))?;
 
                 column_request.on_download_start(req_id)?;
             }
@@ -426,7 +498,7 @@ const MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS: usize = 3;
 
 struct ColumnRequest<E: EthSpec> {
     status: Status<E>,
-    download_failures: usize,
+    download_failures: Vec<RpcResponseError>,
 }
 
 #[derive(Debug, Clone)]
@@ -440,7 +512,7 @@ impl<E: EthSpec> ColumnRequest<E> {
     fn new() -> Self {
         Self {
             status: Status::NotStarted(Instant::now()),
-            download_failures: 0,
+            download_failures: vec![],
         }
     }
 
@@ -464,7 +536,7 @@ impl<E: EthSpec> ColumnRequest<E> {
                 self.status = Status::Downloading(req_id);
                 Ok(())
             }
-            other => Err(Error::BadState(format!(
+            other => Err(Error::InternalError(format!(
                 "bad state on_download_start expected NotStarted got {other:?}"
             ))),
         }
@@ -474,15 +546,14 @@ impl<E: EthSpec> ColumnRequest<E> {
         match &self.status {
             Status::Downloading(expected_req_id) => {
                 if req_id != *expected_req_id {
-                    return Err(Error::UnexpectedRequestId {
-                        expected_req_id: *expected_req_id,
-                        req_id,
-                    });
+                    return Err(Error::InternalError(format!(
+                        "Received download result for req_id {req_id} expecting {expected_req_id}"
+                    )));
                 }
                 self.status = Status::NotStarted(Instant::now());
                 Ok(())
             }
-            other => Err(Error::BadState(format!(
+            other => Err(Error::InternalError(format!(
                 "bad state on_download_error expected Downloading got {other:?}"
             ))),
         }
@@ -491,9 +562,9 @@ impl<E: EthSpec> ColumnRequest<E> {
     fn on_download_error_and_mark_failure(
         &mut self,
         req_id: DataColumnsByRangeRequestId,
+        e: RpcResponseError,
     ) -> Result<(), Error> {
-        // TODO(das): Should track which peers don't have data
-        self.download_failures += 1;
+        self.download_failures.push(e);
         self.on_download_error(req_id)
     }
 
@@ -507,15 +578,14 @@ impl<E: EthSpec> ColumnRequest<E> {
         match &self.status {
             Status::Downloading(expected_req_id) => {
                 if req_id != *expected_req_id {
-                    return Err(Error::UnexpectedRequestId {
-                        expected_req_id: *expected_req_id,
-                        req_id,
-                    });
+                    return Err(Error::InternalError(format!(
+                        "Received download result for req_id {req_id} expecting {expected_req_id}"
+                    )));
                 }
                 self.status = Status::Downloaded(peer_id, data_column, seen_timestamp);
                 Ok(())
             }
-            other => Err(Error::BadState(format!(
+            other => Err(Error::InternalError(format!(
                 "bad state on_download_success expected Downloading got {other:?}"
             ))),
         }
@@ -526,7 +596,7 @@ impl<E: EthSpec> ColumnRequest<E> {
             Status::Downloaded(peer_id, data_column, seen_timestamp) => {
                 Ok((peer_id, data_column, seen_timestamp))
             }
-            other => Err(Error::BadState(format!(
+            other => Err(Error::InternalError(format!(
                 "bad state complete expected Downloaded got {other:?}"
             ))),
         }

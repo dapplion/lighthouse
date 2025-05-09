@@ -1,5 +1,5 @@
 use crate::sync::network_context::{
-    NoPeerError, PeerGroup, RpcRequestSendError, SyncNetworkContext,
+    NoPeerError, PeerGroup, RpcRequestSendError, RpcResponseError, SyncNetworkContext,
 };
 use crate::sync::range_sync::BatchPeerGroup;
 use beacon_chain::block_verification_types::RpcBlock;
@@ -62,7 +62,19 @@ enum ByRangeRequest<I: PartialEq + std::fmt::Display, T, P = PeerId> {
 }
 
 pub type BlockComponentsByRangeRequestResult<E> =
-    Result<Option<(Vec<RpcBlock<E>>, BatchPeerGroup)>, String>;
+    Result<Option<(Vec<RpcBlock<E>>, BatchPeerGroup)>, Error>;
+
+pub enum Error {
+    InternalError(String),
+}
+
+impl From<Error> for RpcResponseError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::InternalError(e) => RpcResponseError::InternalError(e),
+        }
+    }
+}
 
 impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     pub fn new(
@@ -238,9 +250,11 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                                 )
                                 .map_err(|e| match e {
                                     RpcRequestSendError::NoPeer(e) => todo!("what to do? {e:?}"),
-                                    RpcRequestSendError::InternalError(e) => format!(
-                                        "InternalError sending custody_by_range request: {e}"
-                                    ),
+                                    RpcRequestSendError::InternalError(e) => {
+                                        Error::InternalError(format!(
+                                            "InternalError sending custody_by_range request: {e}",
+                                        ))
+                                    }
                                 })?;
 
                             *state = FuluEnabledState::CustodyRequest {
@@ -310,9 +324,9 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                 blocks_by_range_request.finish(id, data, peer_id)?;
             }
             State::FuluEnabled(FuluEnabledState::CustodyRequest { .. }) => {
-                return Err(
+                return Err(Error::InternalError(
                     "Received blocks_by_range response expecting custody_by_range".to_string(),
-                )
+                ))
             }
         }
 
@@ -328,7 +342,9 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     ) -> BlockComponentsByRangeRequestResult<T::EthSpec> {
         match &mut self.state {
             State::Base { .. } => {
-                return Err("Received blobs_by_range response before Deneb".to_string())
+                return Err(Error::InternalError(
+                    "Received blobs_by_range response before Deneb".to_string(),
+                ))
             }
             State::DenebEnabled {
                 blobs_by_range_request,
@@ -337,7 +353,9 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                 blobs_by_range_request.finish(id, data, peer_id)?;
             }
             State::FuluEnabled(_) => {
-                return Err("Received blobs_by_range response after PeerDAS".to_string())
+                return Err(Error::InternalError(
+                    "Received blobs_by_range response after PeerDAS".to_string(),
+                ))
             }
         }
 
@@ -353,11 +371,15 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     ) -> BlockComponentsByRangeRequestResult<T::EthSpec> {
         match &mut self.state {
             State::Base { .. } | State::DenebEnabled { .. } => {
-                return Err("Received custody_by_range response before PeerDAS".to_string())
+                return Err(Error::InternalError(
+                    "Received custody_by_range response before PeerDAS".to_string(),
+                ))
             }
             State::FuluEnabled(state) => match state {
                 FuluEnabledState::BlockRequest { .. } => {
-                    return Err("Received custody_by_range expecting blocks_by_range".to_string());
+                    return Err(Error::InternalError(
+                        "Received custody_by_range expecting blocks_by_range".to_string(),
+                    ));
                 }
                 FuluEnabledState::CustodyRequest {
                     custody_by_range_request,
@@ -388,7 +410,7 @@ fn couple_blocks_fulu<E: EthSpec>(
     data_columns: Vec<Arc<DataColumnSidecar<E>>>,
     custody_column_indices: Vec<ColumnIndex>,
     spec: &ChainSpec,
-) -> Result<Vec<RpcBlock<E>>, String> {
+) -> Result<Vec<RpcBlock<E>>, Error> {
     // Group data columns by block_root and index
     let mut custody_columns_by_block = HashMap::<Hash256, Vec<CustodyDataColumn<E>>>::new();
 
@@ -425,21 +447,26 @@ fn couple_blocks_fulu<E: EthSpec>(
                 custody_column_indices.clone(),
                 spec,
             )
+            .map_err(Error::InternalError)
         })
         .collect::<Result<Vec<_>, _>>()
 }
 
 impl<I: PartialEq + std::fmt::Display, T, P> ByRangeRequest<I, T, P> {
-    fn finish(&mut self, id: I, data: T, peer_id: P) -> Result<(), String> {
+    fn finish(&mut self, id: I, data: T, peer_id: P) -> Result<(), Error> {
         match self {
             Self::Active(expected_id) => {
                 if expected_id != &id {
-                    return Err(format!("unexpected req_id expected {expected_id} got {id}"));
+                    return Err(Error::InternalError(format!(
+                        "unexpected req_id expected {expected_id} got {id}"
+                    )));
                 }
                 *self = Self::Complete(data, peer_id);
                 Ok(())
             }
-            Self::Complete(_, _) => Err("request already complete".to_owned()),
+            Self::Complete(_, _) => Err(Error::InternalError(format!(
+                "request already complete {id}"
+            ))),
         }
     }
 

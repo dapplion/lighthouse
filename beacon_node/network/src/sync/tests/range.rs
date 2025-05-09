@@ -11,7 +11,6 @@ use beacon_chain::{block_verification_types::RpcBlock, EngineState, NotifyExecut
 use beacon_processor::WorkType;
 use lighthouse_network::rpc::methods::{
     BlobsByRangeRequest, DataColumnsByRangeRequest, OldBlocksByRangeRequest,
-    OldBlocksByRangeRequestV2,
 };
 use lighthouse_network::rpc::{RequestType, StatusMessage};
 use lighthouse_network::service::api_types::{
@@ -19,6 +18,7 @@ use lighthouse_network::service::api_types::{
     DataColumnsByRangeRequestId, SyncRequestId,
 };
 use lighthouse_network::{PeerId, SyncInfo};
+use std::collections::HashSet;
 use std::time::Duration;
 use types::{
     BeaconBlock, BlobSidecarList, BlockImportSource, ColumnIndex, DataColumnSidecar, Epoch,
@@ -35,7 +35,7 @@ pub(crate) enum DataSidecars<E: EthSpec> {
 
 enum ByRangeDataRequestIds {
     PreDeneb,
-    PrePeerDAS(BlobsByRangeRequestId, PeerId),
+    PrePeerDAS(BlobsByRangeRequestId, PeerId, BlobsByRangeRequest),
     PostPeerDAS(
         Vec<(
             DataColumnsByRangeRequestId,
@@ -43,6 +43,21 @@ enum ByRangeDataRequestIds {
             DataColumnsByRangeRequest,
         )>,
     ),
+}
+
+impl ByRangeDataRequestIds {
+    fn peer(&self) -> PeerId {
+        match self {
+            Self::PreDeneb => panic!("no requests PreDeneb"),
+            Self::PrePeerDAS(_, peer, _) => *peer,
+            Self::PostPeerDAS(reqs) => {
+                if reqs.len() != 1 {
+                    panic!("Should have 1 PostPeerDAS request");
+                }
+                reqs.first().expect("no PostPeerDAS requests").1
+            }
+        }
+    }
 }
 
 /// Sync tests are usually written in the form:
@@ -76,7 +91,28 @@ impl RequestFilter {
         self
     }
 
-    fn matches(&self, peer: PeerId, start_slot: u64) -> bool {
+    fn matches_blocks_by_range(&self, peer: &PeerId, req: &OldBlocksByRangeRequest) -> bool {
+        self.matches_common(peer, *req.start_slot())
+    }
+
+    fn matches_blobs_by_range(&self, peer: &PeerId, req: &BlobsByRangeRequest) -> bool {
+        self.matches_common(peer, req.start_slot)
+    }
+
+    fn matches_data_columns_by_range(
+        &self,
+        peer: &PeerId,
+        req: &DataColumnsByRangeRequest,
+    ) -> bool {
+        if let Some(index) = self.column_index {
+            if !req.columns.contains(&index) {
+                return false;
+            }
+        }
+        self.matches_common(peer, req.start_slot)
+    }
+
+    fn matches_common(&self, peer: &PeerId, start_slot: u64) -> bool {
         if let Some(expected_epoch) = self.epoch {
             let epoch = Slot::new(start_slot).epoch(E::slots_per_epoch()).as_u64();
             if epoch != expected_epoch {
@@ -84,7 +120,7 @@ impl RequestFilter {
             }
         }
         if let Some(expected_peer) = self.peer {
-            if peer != expected_peer {
+            if *peer != expected_peer {
                 return false;
             }
         }
@@ -99,6 +135,7 @@ fn filter() -> RequestFilter {
 /// Instruct the testing rig how to complete requests for _by_range requests
 #[derive(Debug, Clone, Copy)]
 struct CompleteConfig {
+    block_count: usize,
     with_data: bool,
     custody_failure_at_index: Option<u64>,
 }
@@ -114,6 +151,7 @@ impl CompleteConfig {
 
 fn complete() -> CompleteConfig {
     CompleteConfig {
+        block_count: 1,
         with_data: true,
         custody_failure_at_index: None,
     }
@@ -362,22 +400,20 @@ impl TestRig {
     fn find_blocks_by_range_request(
         &mut self,
         request_filter: RequestFilter,
-    ) -> (BlocksByRangeRequestId, PeerId) {
-        self
-            .pop_received_network_event(|ev| match ev {
-                NetworkMessage::SendRequest {
-                    peer_id,
-                    request:
-                        RequestType::BlocksByRange(OldBlocksByRangeRequest::V2(
-                            OldBlocksByRangeRequestV2 { start_slot, .. },
-                        )),
-                    app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRange(id)),
-                } if request_filter.matches(*peer_id, *start_slot) => Some((*id, *peer_id)),
-                _ => None,
-            })
-            .unwrap_or_else(|e| {
-                panic!("Should have a BlocksByRange request, filter {request_filter:?}: {e:?}")
-            })
+    ) -> (BlocksByRangeRequestId, PeerId, OldBlocksByRangeRequest) {
+        self.pop_received_network_event(|ev| match ev {
+            NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::BlocksByRange(req),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRange(id)),
+            } if request_filter.matches_blocks_by_range(peer_id, req) => {
+                Some((*id, *peer_id, req.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|e| {
+            panic!("Should have a BlocksByRange request, filter {request_filter:?}: {e:?}")
+        })
     }
 
     fn find_data_columns_by_range_requests(
@@ -389,21 +425,16 @@ impl TestRig {
         DataColumnsByRangeRequest,
     )> {
         let mut data_columns_requests = vec![];
-        while let Ok(data_columns_request) =
-            self.pop_received_network_event(|ev| match ev {
-                NetworkMessage::SendRequest {
-                    peer_id,
-                    request:
-                        RequestType::DataColumnsByRange(
-                            req @ DataColumnsByRangeRequest { start_slot, .. },
-                        ),
-                    app_request_id: AppRequestId::Sync(SyncRequestId::DataColumnsByRange(id)),
-                } if request_filter.matches(*peer_id, *start_slot) => {
-                    Some((*id, *peer_id, req.clone()))
-                }
-                _ => None,
-            })
-        {
+        while let Ok(data_columns_request) = self.pop_received_network_event(|ev| match ev {
+            NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::DataColumnsByRange(req),
+                app_request_id: AppRequestId::Sync(SyncRequestId::DataColumnsByRange(id)),
+            } if request_filter.matches_data_columns_by_range(peer_id, req) => {
+                Some((*id, *peer_id, req.clone()))
+            }
+            _ => None,
+        }) {
             data_columns_requests.push(data_columns_request);
         }
         data_columns_requests
@@ -420,19 +451,21 @@ impl TestRig {
             }
             ByRangeDataRequestIds::PostPeerDAS(data_columns_requests)
         } else if self.after_deneb() {
-            let (id, peer) = self
+            let (id, peer, req) = self
                 .pop_received_network_event(|ev| match ev {
                     NetworkMessage::SendRequest {
                         peer_id,
-                        request: RequestType::BlobsByRange(BlobsByRangeRequest { start_slot, .. }),
+                        request: RequestType::BlobsByRange(req),
                         app_request_id: AppRequestId::Sync(SyncRequestId::BlobsByRange(id)),
-                    } if request_filter.matches(*peer_id, *start_slot) => Some((*id, *peer_id)),
+                    } if request_filter.matches_blobs_by_range(peer_id, req) => {
+                        Some((*id, *peer_id, req.clone()))
+                    }
                     _ => None,
                 })
                 .unwrap_or_else(|e| {
                     panic!("Should have a blobs by range request, filter {request_filter:?}: {e:?}")
                 });
-            ByRangeDataRequestIds::PrePeerDAS(id, peer)
+            ByRangeDataRequestIds::PrePeerDAS(id, peer, req)
         } else {
             ByRangeDataRequestIds::PreDeneb
         }
@@ -440,29 +473,28 @@ impl TestRig {
 
     fn find_and_complete_block_components_by_range_request(
         &mut self,
-        epoch: Epoch,
         request_filter: RequestFilter,
         complete_config: CompleteConfig,
     ) -> RangeRequestId {
-        let id =
-            self.find_and_complete_blocks_by_range_request(epoch, request_filter, complete_config);
+        let id = self.find_and_complete_blocks_by_range_request(request_filter, complete_config);
         self.find_and_complete_data_by_range_request(request_filter, complete_config);
         id
     }
 
     fn find_and_complete_blocks_by_range_request(
         &mut self,
-        epoch: Epoch,
         request_filter: RequestFilter,
         complete_config: CompleteConfig,
     ) -> RangeRequestId {
-        let (blocks_req_id, block_peer) = self.find_blocks_by_range_request(request_filter);
+        let (blocks_req_id, block_peer, blocks_req) =
+            self.find_blocks_by_range_request(request_filter);
 
-        let block = self.zero_block_at_slot(
-            epoch.start_slot(E::slots_per_epoch()),
-            complete_config.with_data,
-        );
-        let blocks = [block];
+        let start_slot = Slot::new(*blocks_req.start_slot());
+        let blocks = (0..complete_config.block_count)
+            .map(|i| {
+                self.zero_block_at_slot(start_slot + Slot::new(i as u64), complete_config.with_data)
+            })
+            .collect::<Vec<_>>();
         self.send_blocks_by_range_response(blocks_req_id, block_peer, &blocks);
 
         blocks_req_id.parent_request_id.requester
@@ -484,10 +516,10 @@ impl TestRig {
     ) {
         match by_range_data_request_ids {
             ByRangeDataRequestIds::PreDeneb => {}
-            ByRangeDataRequestIds::PrePeerDAS(id, peer_id) => {
+            ByRangeDataRequestIds::PrePeerDAS(id, peer_id, req) => {
                 // Complete the request with a single stream termination
                 self.log(&format!(
-                    "Completing BlobsByRange request {id} with empty stream"
+                    "Completing BlobsByRange request {id} {req:?} with empty stream"
                 ));
                 self.send_sync_message(SyncMessage::RpcBlob {
                     sync_request_id: SyncRequestId::BlobsByRange(id),
@@ -583,7 +615,6 @@ impl TestRig {
         for epoch in 0..last_epoch {
             // Note: In this test we can't predict the block peer
             let id = self.find_and_complete_block_components_by_range_request(
-                Epoch::new(epoch),
                 request_filter.epoch(epoch),
                 complete_config,
             );
@@ -774,9 +805,7 @@ fn pause_and_resume_on_ee_offline() {
     // make the ee offline
     rig.update_execution_engine_state(EngineState::Offline);
     // send the response to the request
-    let epoch = Epoch::new(0);
     rig.find_and_complete_block_components_by_range_request(
-        epoch,
         filter().peer(peer1).epoch(0),
         complete(),
     );
@@ -790,7 +819,7 @@ fn pause_and_resume_on_ee_offline() {
     // Don't filter requests and the columns requests may be sent to peer1 or peer2
     // We need to filter by epoch, because the previous batch eagerly sent requests for the next
     // epoch for the other batch. So we can either filter by epoch of by sync type.
-    rig.find_and_complete_block_components_by_range_request(epoch, filter().epoch(0), complete());
+    rig.find_and_complete_block_components_by_range_request(filter().epoch(0), complete());
     // the beacon processor shouldn't have received any work
     rig.expect_empty_processor();
     // make the beacon processor available again.
@@ -871,19 +900,16 @@ fn finalized_sync_single_custody_peer_failure() {
 
     let advanced_epochs: u64 = 2;
     let remote_info = r.finalized_remote_info_advanced_by(advanced_epochs.into());
+    let column_index_to_fail = r.our_custody_indices().first().copied().unwrap();
 
     // Unikely that the single peer we added has enough columns for us. Tests are determinstic and
     // this error should never be hit
     r.add_random_peer(remote_info.clone());
     r.assert_state(RangeSyncType::Finalized);
 
-    // send the response to the request
-    // Don't filter requests and the columns requests may be sent to peer1 or peer2
-    // We need to filter by epoch, because the previous batch eagerly sent requests for the next
-    // epoch for the other batch. So we can either filter by epoch of by sync type.
-    let column_index_to_fail = r.our_custody_indices().first().copied().unwrap();
+    // Progress all blocks_by_range and columns_by_range requests but respond empty for a single
+    // column index
     r.find_and_complete_block_components_by_range_request(
-        Epoch::new(0),
         filter().epoch(0),
         complete().custody_failure_at_index(column_index_to_fail),
     );
@@ -895,6 +921,60 @@ fn finalized_sync_single_custody_peer_failure() {
     r.expect_no_columns_by_range_requests(filter().epoch(0));
     // complete this one request without the custody failure now
     r.complete_data_by_range_request(reqs, complete());
+
+    // TODO(das): send batch 1 for completing processing and check that SyncingChain processed batch
+    // 1 successfully
+}
+
+#[test]
+fn finalized_sync_permanent_custody_peer_failure() {
+    let mut r = TestRig::test_setup();
+    // Only run post-PeerDAS
+    if !r.fork_name.fulu_enabled() {
+        return;
+    }
+
+    let advanced_epochs: u64 = 2;
+    let remote_info = r.finalized_remote_info_advanced_by(advanced_epochs.into());
+    let column_index_to_fail = r.our_custody_indices().first().copied().unwrap();
+    const PEERS_IN_BATCH: usize = 4;
+
+    for _ in 0..PEERS_IN_BATCH {
+        r.add_random_peer(remote_info.clone());
+    }
+    r.assert_state(RangeSyncType::Finalized);
+
+    // Some peer had a costudy failure at `column_index` so sync should do a single extra request
+    // for that index and epoch.
+    r.find_and_complete_block_components_by_range_request(
+        filter().epoch(0),
+        complete().custody_failure_at_index(column_index_to_fail),
+    );
+
+    let mut requested_peers = HashSet::new();
+
+    for i in 0..PEERS_IN_BATCH {
+        r.log(&format!("Loop {i} of custody failure round"));
+
+        // Some peer had a costudy failure at `column_index` so sync should do a single extra request
+        // for that index and epoch. We want to make sure that the request goes to different peer
+        // than the attempts before.
+        let reqs =
+            r.find_data_by_range_request(filter().epoch(0).column_index(column_index_to_fail));
+        let req_peer = reqs.peer();
+        if requested_peers.contains(&req_peer) {
+            panic!("Re-requested the same peer {req_peer} again after a custody failure");
+        }
+        requested_peers.insert(req_peer);
+
+        // Find the requests first to assert that this is the only request that exists
+        r.expect_no_columns_by_range_requests(filter().epoch(0));
+        // complete this one request without the custody failure now
+        r.complete_data_by_range_request(
+            reqs,
+            complete().custody_failure_at_index(column_index_to_fail),
+        );
+    }
 
     // TODO(das): send batch 1 for completing processing and check that SyncingChain processed batch
     // 1 successfully
