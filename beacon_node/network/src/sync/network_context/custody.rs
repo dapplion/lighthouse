@@ -1,6 +1,6 @@
 use crate::sync::network_context::{
-    DataColumnsByRootRequestId, DataColumnsByRootSingleBlockRequest, NoPeerError,
-    RpcRequestSendError, RpcResponseError,
+    DataColumnsByRootRequestId, DataColumnsByRootSingleBlockRequest, RpcRequestSendError,
+    RpcResponseError,
 };
 use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::BeaconChainTypes;
@@ -20,7 +20,6 @@ use types::{data_column_sidecar::ColumnIndex, DataColumnSidecar, Hash256};
 use super::{LookupRequestResult, PeerGroup, RpcResponseResult, SyncNetworkContext};
 
 const FAILED_PEERS_CACHE_EXPIRY_SECONDS: u64 = 5;
-const MAX_STALE_NO_PEERS_DURATION: Duration = Duration::from_secs(30);
 
 type DataColumnSidecarList<E> = Vec<Arc<DataColumnSidecar<E>>>;
 
@@ -43,7 +42,6 @@ pub struct ActiveCustodyByRootRequest<T: BeaconChainTypes> {
 
 #[derive(Debug)]
 pub enum Error {
-    NoPeer(ColumnIndex),
     TooManyDownloadErrors(RpcResponseError),
     InternalError(String),
 }
@@ -53,7 +51,6 @@ impl From<Error> for RpcResponseError {
         match e {
             Error::InternalError(e) => RpcResponseError::InternalError(e),
             Error::TooManyDownloadErrors(e) => e,
-            Error::NoPeer(_index) => todo!(),
         }
     }
 }
@@ -61,9 +58,6 @@ impl From<Error> for RpcResponseError {
 impl From<Error> for RpcRequestSendError {
     fn from(e: Error) -> Self {
         match e {
-            Error::NoPeer(column_index) => {
-                RpcRequestSendError::NoPeer(NoPeerError::CustodyPeer(column_index))
-            }
             Error::TooManyDownloadErrors(_) => {
                 RpcRequestSendError::InternalError("Download error in request send".to_string())
             }
@@ -246,7 +240,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
         // - which peer returned what to have PeerGroup attributability
 
         for (column_index, request) in self.column_requests.iter_mut() {
-            if let Some(wait_duration) = request.is_awaiting_download() {
+            if let Some(_) = request.is_awaiting_download() {
                 if request.download_failures.len() > MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS {
                     let last_error = request
                         .download_failures
@@ -291,14 +285,14 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
                         .entry(*peer_id)
                         .or_default()
                         .push(*column_index);
-                } else if wait_duration > MAX_STALE_NO_PEERS_DURATION {
-                    // Allow to request to sit stale in `NotStarted` state for at most
-                    // `MAX_STALE_NO_PEERS_DURATION`, else error and drop the request. Note that
-                    // lookup will naturally retry when other peers send us attestations for
-                    // descendants of this un-available lookup.
-                    return Err(Error::NoPeer(*column_index));
                 } else {
-                    // Do not issue requests if there is no custody peer on this column
+                    // Do not issue requests if there is no custody peer on this column. The request
+                    // will sit idle without making progress. The only way to make to progress is:
+                    // - Add a new peer that custodies the missing columns
+                    // - Call `continue_requests`
+                    //
+                    // Otherwise this request should be dropped and failed after some time.
+                    // TODO(das): implement the above
                 }
             }
         }

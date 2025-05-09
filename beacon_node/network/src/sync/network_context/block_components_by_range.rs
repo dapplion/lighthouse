@@ -1,5 +1,5 @@
 use crate::sync::network_context::{
-    NoPeerError, PeerGroup, RpcRequestSendError, RpcResponseError, SyncNetworkContext,
+    PeerGroup, RpcRequestSendError, RpcResponseError, SyncNetworkContext,
 };
 use crate::sync::range_sync::BatchPeerGroup;
 use beacon_chain::block_verification_types::RpcBlock;
@@ -76,6 +76,14 @@ impl From<Error> for RpcResponseError {
     }
 }
 
+impl From<Error> for RpcRequestSendError {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::InternalError(e) => RpcRequestSendError::InternalError(e),
+        }
+    }
+}
+
 impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     pub fn new(
         id: ComponentsByRangeRequestId,
@@ -119,10 +127,12 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
             .min()
             .map(|(_, _, _, peer)| *peer)
         else {
-            // Backfill and forward sync handle this condition gracefully.
-            // - Backfill sync: will pause waiting for more peers to join
-            // - Forward sync: can never happen as the chain is dropped when removing the last peer.
-            return Err(RpcRequestSendError::NoPeer(NoPeerError::BlockPeer));
+            // When a peer disconnects and is removed from the SyncingChain peer set, if the set
+            // reaches zero the SyncingChain is removed.
+            // TODO(das): add test for this.
+            return Err(RpcRequestSendError::InternalError(
+                "A batch peer set should never be empty".to_string(),
+            ));
         };
 
         let blocks_req_id = cx.send_blocks_by_range_request(block_peer, request.clone(), id)?;
@@ -248,14 +258,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                                     column_indices,
                                     self.peers.clone(),
                                 )
-                                .map_err(|e| match e {
-                                    RpcRequestSendError::NoPeer(e) => todo!("what to do? {e:?}"),
-                                    RpcRequestSendError::InternalError(e) => {
-                                        Error::InternalError(format!(
-                                            "InternalError sending custody_by_range request: {e}",
-                                        ))
-                                    }
-                                })?;
+                                .map_err(|e| e.into())?;
 
                             *state = FuluEnabledState::CustodyRequest {
                                 blocks: blocks.to_vec(),
