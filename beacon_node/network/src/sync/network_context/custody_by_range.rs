@@ -13,6 +13,7 @@ use rand::Rng;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+use strum::IntoStaticStr;
 use tracing::{debug, warn};
 use types::{
     data_column_sidecar::ColumnIndex, DataColumnSidecar, Epoch, EthSpec, Hash256,
@@ -22,17 +23,24 @@ use types::{
 use super::{PeerGroup, RpcResponseResult, SyncNetworkContext};
 
 const TEMPORARY_FAULT_EXPIRY_SECONDS: u64 = 15;
+/// TODO(das): this attempt count is nested into the existing lookup request count.
+const MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS: usize = 3;
+const REQUEST_EXPIRY_SECONDS: u64 = 300;
 
 type DataColumnSidecarList<E> = Vec<Arc<DataColumnSidecar<E>>>;
 
 pub struct ActiveCustodyByRangeRequest<T: BeaconChainTypes> {
+    start_time: Instant,
     id: CustodyByRangeRequestId,
     // TODO(das): Pass a better type for the by_range request
     epoch: Epoch,
     /// Blocks that we expect peers to serve data columns for
     blocks_with_data: Vec<SignedBeaconBlockHeader>,
     /// List of column indices this request needs to download to complete successfully
-    column_requests: FnvHashMap<ColumnIndex, ColumnRequest<T::EthSpec>>,
+    column_requests: FnvHashMap<
+        ColumnIndex,
+        ColumnRequest<DataColumnsByRangeRequestId, DataColumnSidecarList<T::EthSpec>>,
+    >,
     /// Active requests for 1 or more columns each
     active_batch_columns_requests:
         FnvHashMap<DataColumnsByRangeRequestId, ActiveBatchColumnsRequest>,
@@ -55,6 +63,7 @@ pub struct ActiveCustodyByRangeRequest<T: BeaconChainTypes> {
 pub enum Error {
     InternalError(String),
     TooManyDownloadErrors(RpcResponseError),
+    ExpiredNoCustodyPeers(Vec<ColumnIndex>),
 }
 
 impl From<Error> for RpcResponseError {
@@ -62,6 +71,9 @@ impl From<Error> for RpcResponseError {
         match e {
             Error::InternalError(e) => RpcResponseError::InternalError(e),
             Error::TooManyDownloadErrors(e) => e,
+            Error::ExpiredNoCustodyPeers(indices) => RpcResponseError::RequestExpired(format!(
+                "Expired waiting for custody peers {indices:?}"
+            )),
         }
     }
 }
@@ -73,6 +85,9 @@ impl From<Error> for RpcRequestSendError {
                 RpcRequestSendError::InternalError("Download error in request send".to_string())
             }
             Error::InternalError(e) => RpcRequestSendError::InternalError(e),
+            Error::ExpiredNoCustodyPeers(_) => RpcRequestSendError::InternalError(
+                "Request can not expire when requesting it".to_string(),
+            ),
         }
     }
 }
@@ -102,6 +117,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Self {
         Self {
+            start_time: Instant::now(),
             id,
             epoch,
             blocks_with_data,
@@ -333,6 +349,8 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                     }
                     // Do nothing for internal errors
                     RpcResponseError::InternalError(_) => {}
+                    // unreachable
+                    RpcResponseError::RequestExpired(_) => {}
                 }
             }
         };
@@ -386,13 +404,9 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
         // - which peer returned what to have PeerGroup attributability
 
         for (column_index, request) in self.column_requests.iter_mut() {
-            if let Some(_) = request.is_awaiting_download() {
-                if request.download_failures.len() > MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS {
-                    let last_error = request
-                        .download_failures
-                        .last()
-                        .expect("download_failures is not empty");
-                    return Err(Error::TooManyDownloadErrors(last_error.clone()));
+            if request.is_awaiting_download() {
+                if let Some(last_error) = request.too_many_failures() {
+                    return Err(Error::TooManyDownloadErrors(last_error));
                 }
 
                 // TODO(das): When is a fork and only a subset of your peers know about a block, we should
@@ -482,60 +496,91 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                 .insert(req_id, ActiveBatchColumnsRequest { indices });
         }
 
+        if self.start_time.elapsed() > Duration::from_secs(REQUEST_EXPIRY_SECONDS)
+            && !self.column_requests.values().any(|r| r.is_downloading())
+        {
+            let awaiting_peers_indicies = self
+                .column_requests
+                .iter()
+                .filter(|(_, r)| r.is_awaiting_download())
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            return Err(Error::ExpiredNoCustodyPeers(awaiting_peers_indicies));
+        }
+
         Ok(None)
     }
 }
 
-/// TODO(das): this attempt count is nested into the existing lookup request count.
-const MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS: usize = 3;
-
-struct ColumnRequest<E: EthSpec> {
-    status: Status<E>,
+pub struct ColumnRequest<I: std::fmt::Display + PartialEq, T> {
+    status: Status<I, T>,
     download_failures: Vec<RpcResponseError>,
 }
 
-#[derive(Debug, Clone)]
-enum Status<E: EthSpec> {
-    NotStarted(Instant),
-    Downloading(DataColumnsByRangeRequestId),
-    Downloaded(PeerId, DataColumnSidecarList<E>, Duration),
+#[derive(Debug, Clone, IntoStaticStr)]
+pub enum Status<I, T> {
+    NotStarted,
+    Downloading(I),
+    Downloaded(PeerId, T, Duration),
 }
 
-impl<E: EthSpec> ColumnRequest<E> {
-    fn new() -> Self {
+impl<I: std::fmt::Display + PartialEq, T> ColumnRequest<I, T> {
+    pub fn new() -> Self {
         Self {
-            status: Status::NotStarted(Instant::now()),
+            status: Status::NotStarted,
             download_failures: vec![],
         }
     }
 
-    fn is_awaiting_download(&self) -> Option<Duration> {
+    pub fn is_awaiting_download(&self) -> bool {
         match self.status {
-            Status::NotStarted(start_time) => Some(start_time.elapsed()),
-            Status::Downloading { .. } | Status::Downloaded { .. } => None,
+            Status::NotStarted => true,
+            Status::Downloading { .. } | Status::Downloaded { .. } => false,
         }
     }
 
-    fn is_downloaded(&self) -> bool {
+    pub fn is_downloading(&self) -> bool {
         match self.status {
-            Status::NotStarted { .. } | Status::Downloading { .. } => false,
+            Status::NotStarted => false,
+            Status::Downloading { .. } => true,
+            Status::Downloaded { .. } => false,
+        }
+    }
+
+    pub fn is_downloaded(&self) -> bool {
+        match self.status {
+            Status::NotStarted | Status::Downloading { .. } => false,
             Status::Downloaded { .. } => true,
         }
     }
 
-    fn on_download_start(&mut self, req_id: DataColumnsByRangeRequestId) -> Result<(), Error> {
+    pub fn too_many_failures(&self) -> Option<RpcResponseError> {
+        if self.download_failures.len() > MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS {
+            Some(
+                self.download_failures
+                    .last()
+                    .cloned()
+                    .expect("download_failures is not empty"),
+            )
+        } else {
+            None
+        }
+    }
+
+    pub fn on_download_start(&mut self, req_id: I) -> Result<(), Error> {
         match &self.status {
-            Status::NotStarted { .. } => {
+            Status::NotStarted => {
                 self.status = Status::Downloading(req_id);
                 Ok(())
             }
             other => Err(Error::InternalError(format!(
-                "bad state on_download_start expected NotStarted got {other:?}"
+                "bad state on_download_start expected NotStarted got {}",
+                Into::<&'static str>::into(other),
             ))),
         }
     }
 
-    fn on_download_error(&mut self, req_id: DataColumnsByRangeRequestId) -> Result<(), Error> {
+    pub fn on_download_error(&mut self, req_id: I) -> Result<(), Error> {
         match &self.status {
             Status::Downloading(expected_req_id) => {
                 if req_id != *expected_req_id {
@@ -543,29 +588,30 @@ impl<E: EthSpec> ColumnRequest<E> {
                         "Received download result for req_id {req_id} expecting {expected_req_id}"
                     )));
                 }
-                self.status = Status::NotStarted(Instant::now());
+                self.status = Status::NotStarted;
                 Ok(())
             }
             other => Err(Error::InternalError(format!(
-                "bad state on_download_error expected Downloading got {other:?}"
+                "bad state on_download_error expected Downloading got {}",
+                Into::<&'static str>::into(other),
             ))),
         }
     }
 
-    fn on_download_error_and_mark_failure(
+    pub fn on_download_error_and_mark_failure(
         &mut self,
-        req_id: DataColumnsByRangeRequestId,
+        req_id: I,
         e: RpcResponseError,
     ) -> Result<(), Error> {
         self.download_failures.push(e);
         self.on_download_error(req_id)
     }
 
-    fn on_download_success(
+    pub fn on_download_success(
         &mut self,
-        req_id: DataColumnsByRangeRequestId,
+        req_id: I,
         peer_id: PeerId,
-        data_column: DataColumnSidecarList<E>,
+        data_column: T,
         seen_timestamp: Duration,
     ) -> Result<(), Error> {
         match &self.status {
@@ -579,18 +625,20 @@ impl<E: EthSpec> ColumnRequest<E> {
                 Ok(())
             }
             other => Err(Error::InternalError(format!(
-                "bad state on_download_success expected Downloading got {other:?}"
+                "bad state on_download_success expected Downloading got {}",
+                Into::<&'static str>::into(other),
             ))),
         }
     }
 
-    fn complete(self) -> Result<(PeerId, DataColumnSidecarList<E>, Duration), Error> {
+    pub fn complete(self) -> Result<(PeerId, T, Duration), Error> {
         match self.status {
             Status::Downloaded(peer_id, data_column, seen_timestamp) => {
                 Ok((peer_id, data_column, seen_timestamp))
             }
             other => Err(Error::InternalError(format!(
-                "bad state complete expected Downloaded got {other:?}"
+                "bad state complete expected Downloaded got {}",
+                Into::<&'static str>::into(other),
             ))),
         }
     }

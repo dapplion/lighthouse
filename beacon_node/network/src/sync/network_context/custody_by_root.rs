@@ -1,6 +1,6 @@
+use super::custody_by_range::{ColumnRequest, Error};
 use crate::sync::network_context::{
-    DataColumnsByRootRequestId, DataColumnsByRootSingleBlockRequest, RpcRequestSendError,
-    RpcResponseError,
+    DataColumnsByRootRequestId, DataColumnsByRootSingleBlockRequest,
 };
 use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::BeaconChainTypes;
@@ -14,20 +14,25 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 use tracing::{debug, warn};
-use types::EthSpec;
 use types::{data_column_sidecar::ColumnIndex, DataColumnSidecar, Hash256};
 
 use super::{LookupRequestResult, PeerGroup, RpcResponseResult, SyncNetworkContext};
 
 const FAILED_PEERS_CACHE_EXPIRY_SECONDS: u64 = 5;
+const REQUEST_EXPIRY_SECONDS: u64 = 300;
 
 type DataColumnSidecarList<E> = Vec<Arc<DataColumnSidecar<E>>>;
 
 pub struct ActiveCustodyByRootRequest<T: BeaconChainTypes> {
+    start_time: Instant,
     block_root: Hash256,
     custody_id: CustodyId,
     /// List of column indices this request needs to download to complete successfully
-    column_requests: FnvHashMap<ColumnIndex, ColumnRequest<T::EthSpec>>,
+    #[allow(clippy::type_complexity)]
+    column_requests: FnvHashMap<
+        ColumnIndex,
+        ColumnRequest<DataColumnsByRootRequestId, Arc<DataColumnSidecar<T::EthSpec>>>,
+    >,
     /// Active requests for 1 or more columns each
     active_batch_columns_requests:
         FnvHashMap<DataColumnsByRootRequestId, ActiveBatchColumnsRequest>,
@@ -40,37 +45,11 @@ pub struct ActiveCustodyByRootRequest<T: BeaconChainTypes> {
     _phantom: PhantomData<T>,
 }
 
-#[derive(Debug)]
-pub enum Error {
-    TooManyDownloadErrors(RpcResponseError),
-    InternalError(String),
-}
-
-impl From<Error> for RpcResponseError {
-    fn from(e: Error) -> Self {
-        match e {
-            Error::InternalError(e) => RpcResponseError::InternalError(e),
-            Error::TooManyDownloadErrors(e) => e,
-        }
-    }
-}
-
-impl From<Error> for RpcRequestSendError {
-    fn from(e: Error) -> Self {
-        match e {
-            Error::TooManyDownloadErrors(_) => {
-                RpcRequestSendError::InternalError("Download error in request send".to_string())
-            }
-            Error::InternalError(e) => RpcRequestSendError::InternalError(e),
-        }
-    }
-}
-
 struct ActiveBatchColumnsRequest {
     indices: Vec<ColumnIndex>,
 }
 
-pub type CustodyRequestResult<E> =
+pub type CustodyByRootRequestResult<E> =
     Result<Option<(DataColumnSidecarList<E>, PeerGroup, Duration)>, Error>;
 
 impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
@@ -81,6 +60,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Self {
         Self {
+            start_time: Instant::now(),
             block_root,
             custody_id,
             column_requests: HashMap::from_iter(
@@ -109,7 +89,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
         req_id: DataColumnsByRootRequestId,
         resp: RpcResponseResult<DataColumnSidecarList<T::EthSpec>>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> CustodyRequestResult<T::EthSpec> {
+    ) -> CustodyByRootRequestResult<T::EthSpec> {
         let Some(batch_request) = self.active_batch_columns_requests.get_mut(&req_id) else {
             warn!(
                 block_root = ?self.block_root,
@@ -207,7 +187,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
     pub(crate) fn continue_requests(
         &mut self,
         cx: &mut SyncNetworkContext<T>,
-    ) -> CustodyRequestResult<T::EthSpec> {
+    ) -> CustodyByRootRequestResult<T::EthSpec> {
         if self.column_requests.values().all(|r| r.is_downloaded()) {
             // All requests have completed successfully.
             let mut peers = HashMap::<PeerId, Vec<usize>>::new();
@@ -233,6 +213,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
         let active_request_count_by_peer = cx.active_request_count_by_peer();
         let mut columns_to_request_by_peer = HashMap::<PeerId, Vec<ColumnIndex>>::new();
         let lookup_peers = self.lookup_peers.read();
+        let mut indices_without_peers = vec![];
 
         // Need to:
         // - track how many active requests a peer has for load balancing
@@ -240,13 +221,9 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
         // - which peer returned what to have PeerGroup attributability
 
         for (column_index, request) in self.column_requests.iter_mut() {
-            if let Some(_) = request.is_awaiting_download() {
-                if request.download_failures.len() > MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS {
-                    let last_error = request
-                        .download_failures
-                        .last()
-                        .expect("download_failures is not empty");
-                    return Err(Error::TooManyDownloadErrors(last_error.clone()));
+            if request.is_awaiting_download() {
+                if let Some(last_error) = request.too_many_failures() {
+                    return Err(Error::TooManyDownloadErrors(last_error));
                 }
 
                 // TODO(das): When is a fork and only a subset of your peers know about a block, we should
@@ -293,6 +270,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
                     //
                     // Otherwise this request should be dropped and failed after some time.
                     // TODO(das): implement the above
+                    indices_without_peers.push(column_index);
                 }
             }
         }
@@ -336,116 +314,18 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
             }
         }
 
+        if self.start_time.elapsed() > Duration::from_secs(REQUEST_EXPIRY_SECONDS)
+            && !self.column_requests.values().any(|r| r.is_downloading())
+        {
+            let awaiting_peers_indicies = self
+                .column_requests
+                .iter()
+                .filter(|(_, r)| r.is_awaiting_download())
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            return Err(Error::ExpiredNoCustodyPeers(awaiting_peers_indicies));
+        }
+
         Ok(None)
-    }
-}
-
-/// TODO(das): this attempt count is nested into the existing lookup request count.
-const MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS: usize = 3;
-
-struct ColumnRequest<E: EthSpec> {
-    status: Status<E>,
-    download_failures: Vec<RpcResponseError>,
-}
-
-#[derive(Debug, Clone)]
-enum Status<E: EthSpec> {
-    NotStarted(Instant),
-    Downloading(DataColumnsByRootRequestId),
-    Downloaded(PeerId, Arc<DataColumnSidecar<E>>, Duration),
-}
-
-impl<E: EthSpec> ColumnRequest<E> {
-    fn new() -> Self {
-        Self {
-            status: Status::NotStarted(Instant::now()),
-            download_failures: vec![],
-        }
-    }
-
-    fn is_awaiting_download(&self) -> Option<Duration> {
-        match self.status {
-            Status::NotStarted(start_time) => Some(start_time.elapsed()),
-            Status::Downloading { .. } | Status::Downloaded { .. } => None,
-        }
-    }
-
-    fn is_downloaded(&self) -> bool {
-        match self.status {
-            Status::NotStarted { .. } | Status::Downloading { .. } => false,
-            Status::Downloaded { .. } => true,
-        }
-    }
-
-    fn on_download_start(&mut self, req_id: DataColumnsByRootRequestId) -> Result<(), Error> {
-        match &self.status {
-            Status::NotStarted { .. } => {
-                self.status = Status::Downloading(req_id);
-                Ok(())
-            }
-            other => Err(Error::InternalError(format!(
-                "bad state on_download_start expected NotStarted got {other:?}"
-            ))),
-        }
-    }
-
-    fn on_download_error(&mut self, req_id: DataColumnsByRootRequestId) -> Result<(), Error> {
-        match &self.status {
-            Status::Downloading(expected_req_id) => {
-                if req_id != *expected_req_id {
-                    return Err(Error::InternalError(format!(
-                        "Received download result for req_id {req_id} expecting {expected_req_id}"
-                    )));
-                }
-                self.status = Status::NotStarted(Instant::now());
-                Ok(())
-            }
-            other => Err(Error::InternalError(format!(
-                "bad state on_download_error expected Downloading got {other:?}"
-            ))),
-        }
-    }
-
-    fn on_download_error_and_mark_failure(
-        &mut self,
-        req_id: DataColumnsByRootRequestId,
-        e: RpcResponseError,
-    ) -> Result<(), Error> {
-        self.download_failures.push(e);
-        self.on_download_error(req_id)
-    }
-
-    fn on_download_success(
-        &mut self,
-        req_id: DataColumnsByRootRequestId,
-        peer_id: PeerId,
-        data_column: Arc<DataColumnSidecar<E>>,
-        seen_timestamp: Duration,
-    ) -> Result<(), Error> {
-        match &self.status {
-            Status::Downloading(expected_req_id) => {
-                if req_id != *expected_req_id {
-                    return Err(Error::InternalError(format!(
-                        "Received download result for req_id {req_id} expecting {expected_req_id}"
-                    )));
-                }
-                self.status = Status::Downloaded(peer_id, data_column, seen_timestamp);
-                Ok(())
-            }
-            other => Err(Error::InternalError(format!(
-                "bad state on_download_success expected Downloading got {other:?}"
-            ))),
-        }
-    }
-
-    fn complete(self) -> Result<(PeerId, Arc<DataColumnSidecar<E>>, Duration), Error> {
-        match self.status {
-            Status::Downloaded(peer_id, data_column, seen_timestamp) => {
-                Ok((peer_id, data_column, seen_timestamp))
-            }
-            other => Err(Error::InternalError(format!(
-                "bad state complete expected Downloaded got {other:?}"
-            ))),
-        }
     }
 }

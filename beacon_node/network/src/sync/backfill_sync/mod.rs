@@ -328,9 +328,14 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             // mechanism compatible with PeerDAS and before PeerDAS?
             match batch.download_failed(None) {
                 Err(e) => self.fail_sync(BackFillError::BatchInvalidState(batch_id, e.0)),
-                Ok(BatchOperationOutcome::Failed { blacklist: _ }) => {
-                    self.fail_sync(BackFillError::BatchDownloadFailed(batch_id))
-                }
+                Ok(BatchOperationOutcome::Failed { blacklist: _ }) => self.fail_sync(match err {
+                    RpcResponseError::RpcError(_)
+                    | RpcResponseError::VerifyError(_)
+                    | RpcResponseError::InternalError(_) => {
+                        BackFillError::BatchDownloadFailed(batch_id)
+                    }
+                    RpcResponseError::RequestExpired(_) => BackFillError::Paused,
+                }),
                 Ok(BatchOperationOutcome::Continue) => self.send_batch(network, batch_id),
             }
         } else {
@@ -934,15 +939,9 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     return Ok(());
                 }
                 Err(e) => match e {
-                    RpcRequestSendError::NoPeer(no_peer) => {
-                        // If we are here the chain has no more synced peers
-                        info!(
-                            "reason" = format!("insufficient_synced_peers({no_peer:?})"),
-                            "Backfill sync paused"
-                        );
-                        self.set_state(BackFillState::Paused);
-                        return Err(BackFillError::Paused);
-                    }
+                    // TODO(das): block_components_by_range requests can now hang out indefinitely.
+                    // Is that fine? Maybe we should fail the requests from the network_context
+                    // level without involving the BackfillSync itself.
                     RpcRequestSendError::InternalError(e) => {
                         // NOTE: under normal conditions this shouldn't happen but we handle it anyway
                         warn!(%batch_id, error = ?e, %batch,"Could not send batch request");

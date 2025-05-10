@@ -1,8 +1,8 @@
 //! Provides network functionality for the Syncing thread. This fundamentally wraps a network
 //! channel and stores a global RPC ID to perform requests.
 
-use self::custody::ActiveCustodyByRootRequest;
 use self::custody_by_range::{ActiveCustodyByRangeRequest, CustodyByRangeRequestResult};
+use self::custody_by_root::{ActiveCustodyByRootRequest, CustodyByRootRequestResult};
 pub use self::requests::{BlocksByRootSingleRequest, DataColumnsByRootSingleBlockRequest};
 use super::manager::BlockProcessType;
 use super::range_sync::BatchPeerGroup;
@@ -16,7 +16,6 @@ use crate::sync::network_context::requests::BlobsByRootSingleBlockRequest;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
 pub use block_components_by_range::BlockComponentsByRangeRequest;
-use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{BlobsByRangeRequest, DataColumnsByRangeRequest};
 use lighthouse_network::rpc::{BlocksByRangeRequest, GoodbyeReason, RPCError, RequestType};
@@ -46,8 +45,8 @@ use types::{
 };
 
 pub mod block_components_by_range;
-pub mod custody;
 pub mod custody_by_range;
+pub mod custody_by_root;
 mod requests;
 
 #[derive(Debug)]
@@ -68,31 +67,29 @@ impl<T> RpcEvent<T> {
 
 pub type RpcResponseResult<T> = Result<(T, Duration), RpcResponseError>;
 
+pub type RpcResponseBatchResult<T> = Result<(T, PeerGroup, Duration), RpcResponseError>;
+
 /// Duration = latest seen timestamp of all received data columns
-pub type CustodyByRootResult<T> =
-    Result<(DataColumnSidecarList<T>, PeerGroup, Duration), RpcResponseError>;
+pub type CustodyByRootResult<T> = RpcResponseBatchResult<DataColumnSidecarList<T>>;
+
+pub type CustodyByRangeResult<T> = RpcResponseBatchResult<DataColumnSidecarList<T>>;
 
 #[derive(Debug, Clone)]
 pub enum RpcResponseError {
     RpcError(#[allow(dead_code)] RPCError),
     VerifyError(LookupVerifyError),
+    RequestExpired(String),
     InternalError(#[allow(dead_code)] String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RpcRequestSendError {
-    /// No peer available matching the required criteria
-    NoPeer(NoPeerError),
     /// These errors should never happen, including unreachable custody errors or network send
     /// errors.
     InternalError(String),
-}
-
-/// Type of peer missing that caused a `RpcRequestSendError::NoPeers`
-#[derive(Debug, PartialEq, Eq)]
-pub enum NoPeerError {
-    BlockPeer,
-    CustodyPeer(ColumnIndex),
+    // If RpcRequestSendError has a single variant `InternalError` it's to signal to downstream
+    // consumers that sends are expected to be infallible. If this assumption changes in the future,
+    // add a new variant.
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1137,6 +1134,32 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .collect()
     }
 
+    /// Attempt to make progress on all custody_by_range requests. Some request may be stale waiting
+    /// for custody peers. Returns a Vec of results as zero or more requests may fail in this
+    /// attempt.
+    pub fn continue_custody_by_range_requests(
+        &mut self,
+    ) -> Vec<(CustodyByRangeRequestId, CustodyByRangeResult<T::EthSpec>)> {
+        let ids = self
+            .custody_by_range_requests
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+
+        // Need to collect ids and results in separate steps to re-borrow self.
+        ids.into_iter()
+            .filter_map(|id| {
+                let mut request = self
+                    .custody_by_range_requests
+                    .remove(&id)
+                    .expect("key of hashmap");
+                let result = request.continue_requests(self);
+                self.handle_custody_by_range_result(id, request, result)
+                    .map(|result| (id, result))
+            })
+            .collect()
+    }
+
     // Request handlers
 
     pub(crate) fn on_single_block_response(
@@ -1312,7 +1335,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         &mut self,
         id: CustodyRequester,
         request: ActiveCustodyByRootRequest<T>,
-        result: CustodyRequestResult<T::EthSpec>,
+        result: CustodyByRootRequestResult<T::EthSpec>,
     ) -> Option<CustodyByRootResult<T::EthSpec>> {
         let span = span!(
             Level::INFO,
@@ -1372,7 +1395,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         id: CustodyByRangeRequestId,
         request: ActiveCustodyByRangeRequest<T>,
         result: CustodyByRangeRequestResult<T::EthSpec>,
-    ) -> Option<CustodyByRootResult<T::EthSpec>> {
+    ) -> Option<CustodyByRangeResult<T::EthSpec>> {
         let result = result.map_err(Into::<RpcResponseError>::into).transpose();
 
         // Convert a result from internal format of `ActiveCustodyRequest` (error first to use ?) to

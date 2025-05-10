@@ -258,7 +258,11 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                                     column_indices,
                                     self.peers.clone(),
                                 )
-                                .map_err(|e| e.into())?;
+                                .map_err(|e| match e {
+                                    RpcRequestSendError::InternalError(e) => {
+                                        Error::InternalError(e)
+                                    }
+                                })?;
 
                             *state = FuluEnabledState::CustodyRequest {
                                 blocks: blocks.to_vec(),

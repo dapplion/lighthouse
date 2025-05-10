@@ -36,7 +36,8 @@
 use super::backfill_sync::{BackFillSync, ProcessResult, SyncStart};
 use super::block_lookups::BlockLookups;
 use super::network_context::{
-    CustodyByRootResult, RangeBlockComponent, RangeRequestId, RpcEvent, SyncNetworkContext,
+    CustodyByRangeResult, CustodyByRootResult, RangeBlockComponent, RangeRequestId, RpcEvent,
+    SyncNetworkContext,
 };
 use super::peer_sampling::{Sampling, SamplingConfig, SamplingResult};
 use super::peer_sync_info::{remote_sync_type, PeerSyncType};
@@ -58,9 +59,10 @@ use beacon_chain::{
 use futures::StreamExt;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
-    BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRootRequestId, DataColumnsByRootRequester, Id,
-    SamplingId, SamplingRequester, SingleLookupReqId, SyncRequestId,
+    BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
+    CustodyByRangeRequestId, CustodyRequester, DataColumnsByRangeRequestId,
+    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, SamplingId, SamplingRequester,
+    SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::PeerId;
@@ -439,6 +441,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         for (id, result) in self.network.continue_custody_by_root_requests() {
             self.on_custody_by_root_result(id, result);
         }
+        for (id, result) in self.network.continue_custody_by_range_requests() {
+            self.on_custody_by_range_result(id, result);
+        }
     }
 
     /// Trigger range sync for a set of peers that claim to have imported a head unknown to us.
@@ -531,6 +536,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         // `continue_custody_by_root_requests` is just a convenience to have less code.
         for (id, result) in self.network.continue_custody_by_root_requests() {
             self.on_custody_by_root_result(id, result);
+        }
+        for (id, result) in self.network.continue_custody_by_range_requests() {
+            self.on_custody_by_range_result(id, result);
         }
     }
 
@@ -1205,24 +1213,32 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.network
                     .on_custody_by_range_response(id.parent_request_id, id, peer_id, resp)
             {
-                // TODO(das): Improve the type of RangeBlockComponent::CustodyColumns, not
-                // not have to pass a PeerGroup in case of error
-                let peers = match &result {
-                    Ok((_, peers, _)) => peers.clone(),
-                    // TODO(das): this PeerGroup with a single peer is incorrect
-                    Err(_) => PeerGroup::from_single(peer_id),
-                };
-
-                self.on_block_components_by_range_response(
-                    id.parent_request_id.parent_request_id,
-                    RangeBlockComponent::CustodyColumns(
-                        id.parent_request_id,
-                        result.map(|(data, _peers, timestamp)| (data, timestamp)),
-                        peers,
-                    ),
-                );
+                self.on_custody_by_range_result(id.parent_request_id, result);
             }
         }
+    }
+
+    fn on_custody_by_range_result(
+        &mut self,
+        id: CustodyByRangeRequestId,
+        result: CustodyByRangeResult<T::EthSpec>,
+    ) {
+        // TODO(das): Improve the type of RangeBlockComponent::CustodyColumns, not
+        // not have to pass a PeerGroup in case of error
+        let peers = match &result {
+            Ok((_, peers, _)) => peers.clone(),
+            // TODO(das): this PeerGroup with no peers incorrect
+            Err(_) => PeerGroup::from_set(<_>::default()),
+        };
+
+        self.on_block_components_by_range_response(
+            id.parent_request_id,
+            RangeBlockComponent::CustodyColumns(
+                id,
+                result.map(|(data, _peers, timestamp)| (data, timestamp)),
+                peers,
+            ),
+        );
     }
 
     fn on_custody_by_root_result(

@@ -892,6 +892,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 %request_id,
                 "Batch download error"
             );
+            // TODO(das): Should handle here the error RequestExpired explicitly?
             if let BatchOperationOutcome::Failed { blacklist } =
                 // TODO(das): Is it necessary for the batch to track failed peers? Can we make this
                 // mechanism compatible with PeerDAS and before PeerDAS?
@@ -969,8 +970,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                     // that happens. Sync manager must periodicatlly prune stalled batches like
                     // we do for lookup sync. Then we can deprecate the redundant
                     // `good_peers_on_sampling_subnets` checks.
-                    e
-                    @ (RpcRequestSendError::NoPeer(_) | RpcRequestSendError::InternalError(_)) => {
+                    e @ RpcRequestSendError::InternalError(_) => {
                         // NOTE: under normal conditions this shouldn't happen but we handle it anyway
                         warn!(%batch_id, error = ?e, "batch_id" = %batch_id, %batch, "Could not send batch request");
                         // register the failed download and check if the batch can be retried
