@@ -344,7 +344,6 @@ where
     pub fn inject_error(
         &mut self,
         network: &mut SyncNetworkContext<T>,
-        peer_id: PeerId,
         batch_id: BatchId,
         chain_id: ChainId,
         request_id: Id,
@@ -352,7 +351,7 @@ where
     ) {
         // check that this request is pending
         match self.chains.call_by_id(chain_id, |chain| {
-            chain.inject_error(network, batch_id, &peer_id, request_id, err)
+            chain.inject_error(network, batch_id, request_id, err)
         }) {
             Ok((removed_chain, sync_type)) => {
                 if let Some((removed_chain, remove_reason)) = removed_chain {

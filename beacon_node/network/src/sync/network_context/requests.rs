@@ -26,7 +26,7 @@ mod blocks_by_root;
 mod data_columns_by_range;
 mod data_columns_by_root;
 
-#[derive(Debug, PartialEq, Eq, IntoStaticStr)]
+#[derive(Debug, Clone, PartialEq, Eq, IntoStaticStr)]
 pub enum LookupVerifyError {
     NotEnoughResponsesReturned { actual: usize },
     TooManyResponses,
