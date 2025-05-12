@@ -16,6 +16,8 @@ use store::MemoryStore;
 use tokio::sync::mpsc;
 use types::{ChainSpec, ForkName, MinimalEthSpec as E, SignedBeaconBlock};
 
+pub use lookups::PeersConfig;
+
 mod lookups;
 mod range;
 

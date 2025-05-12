@@ -504,11 +504,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     .iter()
                     .filter(|block| block.as_block().has_data())
                     .count();
+                // Don't log the peer_group here, it's very long (could be up to 128 peers). If you
+                // want to trace which peer sent the column at index X, search for the log:
+                // `Sync RPC request sent method="DataColumnsByRange" ...`
                 debug!(
                     %id,
                     blocks = blocks.len(),
                     blocks_with_data,
-                    peers = ?peer_group,
+                    block_peer = ?peer_group.block(),
                     "Block components by range request success, removing"
                 )
             }
@@ -1401,8 +1404,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         // Convert a result from internal format of `ActiveCustodyRequest` (error first to use ?) to
         // an Option first to use in an `if let Some() { act on result }` block.
         match result.as_ref() {
-            Some(Ok((columns, peer_group, _))) => {
-                debug!(%id, count = columns.len(), peers = ?peer_group, "Custody by range request success, removing")
+            Some(Ok((columns, _peer_group, _))) => {
+                // Don't log the peer_group here, it's very long (could be up to 128 peers). If you
+                // want to trace which peer sent the column at index X, search for the log:
+                // `Sync RPC request sent method="DataColumnsByRange" ...`
+                debug!(%id, count = columns.len(), "Custody by range request success, removing")
             }
             Some(Err(e)) => {
                 debug!(%id, error = ?e, "Custody by range request failure, removing" )

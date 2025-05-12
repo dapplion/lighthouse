@@ -53,6 +53,11 @@ const SAMPLING_REQUIRED_SUCCESSES: usize = 2;
 type DCByRootIds = Vec<DCByRootId>;
 type DCByRootId = (SyncRequestId, Vec<ColumnIndex>);
 
+pub enum PeersConfig {
+    SupernodeAndRandom,
+    SupernodeOnly,
+}
+
 impl TestRig {
     pub fn test_setup() -> Self {
         Self::test_setup_with_options(false)
@@ -398,6 +403,20 @@ impl TestRig {
 
     fn determinstic_key(&mut self) -> CombinedKey {
         k256::ecdsa::SigningKey::random(&mut self.rng).into()
+    }
+
+    pub fn new_connected_peers(&mut self, config: PeersConfig) {
+        match config {
+            PeersConfig::SupernodeAndRandom => {
+                for _ in 0..100 {
+                    self.new_connected_peer();
+                }
+                self.new_connected_supernode_peer();
+            }
+            PeersConfig::SupernodeOnly => {
+                self.new_connected_supernode_peer();
+            }
+        }
     }
 
     pub fn new_connected_peers_for_peerdas(&mut self) {

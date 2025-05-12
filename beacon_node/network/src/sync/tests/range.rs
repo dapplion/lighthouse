@@ -6,9 +6,10 @@ use crate::sync::network_context::RangeRequestId;
 use crate::sync::range_sync::RangeSyncType;
 use crate::sync::SyncMessage;
 use beacon_chain::data_column_verification::CustodyDataColumn;
-use beacon_chain::test_utils::{AttestationStrategy, BlockStrategy};
+use beacon_chain::test_utils::{test_spec, AttestationStrategy, BlockStrategy};
 use beacon_chain::{block_verification_types::RpcBlock, EngineState, NotifyExecutionLayer};
 use beacon_processor::WorkType;
+use lighthouse_network::discovery::{peer_id_to_node_id, CombinedKey};
 use lighthouse_network::rpc::methods::{
     BlobsByRangeRequest, DataColumnsByRangeRequest, OldBlocksByRangeRequest,
 };
@@ -17,13 +18,16 @@ use lighthouse_network::service::api_types::{
     AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
     DataColumnsByRangeRequestId, SyncRequestId,
 };
-use lighthouse_network::{PeerId, SyncInfo};
+use lighthouse_network::{Enr, EnrExt, PeerId, SyncInfo};
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use std::collections::HashSet;
 use std::time::Duration;
+use types::data_column_custody_group::compute_subnets_for_node;
 use types::{
-    BeaconBlock, BlobSidecarList, BlockImportSource, ColumnIndex, DataColumnSidecar, Epoch,
-    EthSpec, Hash256, KzgCommitment, MinimalEthSpec as E, Signature, SignedBeaconBlock,
-    SignedBeaconBlockHash, Slot, VariableList,
+    BeaconBlock, BlobSidecarList, BlockImportSource, ColumnIndex, DataColumnSidecar,
+    DataColumnSubnetId, Epoch, EthSpec, Hash256, KzgCommitment, MinimalEthSpec as E, Signature,
+    SignedBeaconBlock, SignedBeaconBlockHash, Slot, VariableList,
 };
 
 const D: Duration = Duration::new(0, 0);
@@ -58,6 +62,10 @@ impl ByRangeDataRequestIds {
             }
         }
     }
+}
+
+struct Config {
+    peers: PeersConfig,
 }
 
 /// Sync tests are usually written in the form:
@@ -847,9 +855,20 @@ fn finalized_sync_enough_global_custody_peers_few_chain_peers() {
     r.complete_and_process_range_sync_until(last_epoch, filter(), complete());
 }
 
+// Same test with different types of peers:
+// - 100 peers
+// - 1 supernode
+// - perfectly distributed peer ids
+
 #[test]
-fn finalized_sync_not_enough_custody_peers_on_start() {
-    let mut r = TestRig::test_setup();
+fn finalized_sync_not_enough_custody_peers_on_start_supernode_only() {
+    finalized_sync_not_enough_custody_peers_on_start(Config {
+        peers: PeersConfig::SupernodeOnly,
+    });
+}
+
+fn finalized_sync_not_enough_custody_peers_on_start(config: Config) {
+    let mut r = TestRig::test_setup_as_supernode();
     // Only run post-PeerDAS
     if !r.fork_name.fulu_enabled() {
         return;
@@ -869,14 +888,10 @@ fn finalized_sync_not_enough_custody_peers_on_start() {
     r.expect_empty_network();
 
     // Generate enough peers and supernodes to cover all custody columns
-    r.new_connected_peers_for_peerdas();
+    r.new_connected_peers(config.peers);
     // Note: not necessary to add this peers to the chain, as we draw from the global pool
     // We still need to add enough peers to trigger batch downloads with idle peers. Same issue as
     // the test above.
-    r.add_random_peers(
-        remote_info,
-        (advanced_epochs + EXTRA_SYNCED_EPOCHS - 1) as usize,
-    );
 
     let last_epoch = advanced_epochs + EXTRA_SYNCED_EPOCHS;
     r.complete_and_process_range_sync_until(last_epoch, filter(), complete());
@@ -970,4 +985,36 @@ fn finalized_sync_permanent_custody_peer_failure() {
 
     // TODO(das): send batch 1 for completing processing and check that SyncingChain processed batch
     // 1 successfully
+}
+
+#[test]
+#[ignore]
+fn mine_peerids() {
+    let spec = test_spec::<E>();
+    let mut rng = ChaCha20Rng::from_seed([0u8; 32]);
+
+    let expected_subnets = (0..3)
+        .map(|i| DataColumnSubnetId::new(i as u64))
+        .collect::<HashSet<_>>();
+
+    for i in 0..usize::MAX {
+        let key: CombinedKey = k256::ecdsa::SigningKey::random(&mut rng).into();
+        let enr = Enr::builder().build(&key).unwrap();
+        let peer_id = enr.peer_id();
+        // Use default custody groups count
+        let node_id = peer_id_to_node_id(&peer_id).expect("convert peer_id to node_id");
+        let subnets = compute_subnets_for_node(node_id.raw(), spec.custody_requirement, &spec)
+            .expect("should compute custody subnets");
+        if expected_subnets == subnets {
+            panic!("{:?}", subnets);
+        } else {
+            let matches = expected_subnets
+                .iter()
+                .filter(|index| subnets.contains(index))
+                .count();
+            if matches > 0 {
+                println!("{i} {:?}", matches);
+            }
+        }
+    }
 }

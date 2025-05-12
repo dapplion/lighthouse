@@ -267,6 +267,13 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
                 // Log missing_column_indexes and incorrect_column_indices here in batch per request
                 // to make this logs more compact and less noisy.
                 if !imported_column_indices.is_empty() {
+                    // TODO(das): this log may be redundant. We already log on DataColumnsByRange
+                    // completed, and on DataColumnsByRange sent we log the column indices
+                    // ```
+                    // Sync RPC request sent method="DataColumnsByRange" slots=8 epoch=4 columns=[52] peer=16Uiu2HAmEooeoHzHDYS35TSHrJDSfmREecPyFskrLPYm9Gm1EURj id=493/399/10/RangeSync/4/1
+                    // Sync RPC request completed id=493/399/10/RangeSync/4/1 method="DataColumnsByRange" count=1
+                    // ```
+                    // Which can be traced to this custody by range request, and the initial log
                     debug!(
                         id = %self.id,
                         data_columns_by_range_req_id = %req_id,
