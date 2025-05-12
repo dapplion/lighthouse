@@ -55,6 +55,14 @@ type DCByRootId = (SyncRequestId, Vec<ColumnIndex>);
 
 impl TestRig {
     pub fn test_setup() -> Self {
+        Self::test_setup_with_options(false)
+    }
+
+    pub fn test_setup_as_supernode() -> Self {
+        Self::test_setup_with_options(true)
+    }
+
+    fn test_setup_with_options(is_supernode: bool) -> Self {
         // Use `fork_from_env` logic to set correct fork epochs
         let spec = test_spec::<E>();
 
@@ -83,10 +91,11 @@ impl TestRig {
         // TODO(das): make the generation of the ENR use the deterministic rng to have consistent
         // column assignments
         let network_config = Arc::new(NetworkConfig::default());
-        let globals = Arc::new(NetworkGlobals::new_test_globals(
+        let globals = Arc::new(NetworkGlobals::new_test_globals_as_supernode(
             Vec::new(),
             network_config,
             chain.spec.clone(),
+            is_supernode,
         ));
         let (beacon_processor, beacon_processor_rx) = NetworkBeaconProcessor::null_for_testing(
             globals,

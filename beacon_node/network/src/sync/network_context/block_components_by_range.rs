@@ -15,8 +15,8 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use types::{
-    BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, EthSpec, Hash256, SignedBeaconBlock,
-    Slot,
+    BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, EthSpec, Hash256, RuntimeVariableList,
+    SignedBeaconBlock, Slot,
 };
 
 pub struct BlockComponentsByRangeRequest<T: BeaconChainTypes> {
@@ -185,7 +185,10 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                 if let Some((blocks, block_peer)) = blocks_by_range_request.to_finished() {
                     // TODO(das): use the peer group
                     let peer_group = BatchPeerGroup::new_from_block_peer(*block_peer);
-                    let rpc_blocks = couple_blocks_base(blocks.to_vec());
+                    let rpc_blocks = couple_blocks_base(
+                        blocks.to_vec(),
+                        cx.network_globals().sampling_columns.len(),
+                    );
                     Ok(Some((rpc_blocks, peer_group)))
                 } else {
                     // Wait for blocks_by_range requests to complete
@@ -202,7 +205,8 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                 ) {
                     // We use the same block_peer for the blobs request
                     let peer_group = BatchPeerGroup::new_from_block_peer(*block_peer);
-                    let rpc_blocks = couple_blocks_deneb(blocks.to_vec(), blobs.to_vec());
+                    let rpc_blocks =
+                        couple_blocks_deneb(blocks.to_vec(), blobs.to_vec(), cx.spec())?;
                     Ok(Some((rpc_blocks, peer_group)))
                 } else {
                     // Wait for blocks_by_range and blobs_by_range requests to complete
@@ -401,15 +405,51 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     }
 }
 
-fn couple_blocks_base<E: EthSpec>(_blocks: Vec<Arc<SignedBeaconBlock<E>>>) -> Vec<RpcBlock<E>> {
-    todo!();
+fn couple_blocks_base<E: EthSpec>(
+    blocks: Vec<Arc<SignedBeaconBlock<E>>>,
+    custody_columns_count: usize,
+) -> Vec<RpcBlock<E>> {
+    blocks
+        .into_iter()
+        .map(|block| RpcBlock::new_without_blobs(None, block, custody_columns_count))
+        .collect()
 }
 
 fn couple_blocks_deneb<E: EthSpec>(
-    _blocks: Vec<Arc<SignedBeaconBlock<E>>>,
-    _blobs: Vec<Arc<BlobSidecar<E>>>,
-) -> Vec<RpcBlock<E>> {
-    todo!();
+    blocks: Vec<Arc<SignedBeaconBlock<E>>>,
+    blobs: Vec<Arc<BlobSidecar<E>>>,
+    spec: &ChainSpec,
+) -> Result<Vec<RpcBlock<E>>, Error> {
+    let mut blobs_by_block = HashMap::<Hash256, Vec<Arc<BlobSidecar<E>>>>::new();
+    for blob in blobs {
+        let block_root = blob.block_root();
+        blobs_by_block.entry(block_root).or_default().push(blob);
+    }
+
+    // Now collect all blobs that match to the block by block root. BlobsByRange request checks
+    // the inclusion proof so we know that the commitment is the expected.
+    //
+    // BlobsByRange request handler ensures that we don't receive more blobs than possible.
+    // If the peer serving the request sends us blobs that don't pair well we'll send to the
+    // processor blocks without expected blobs, resulting in a downscoring event. A serving peer
+    // could serve fake blobs for blocks that don't have data, but it would gain nothing by it
+    // wasting theirs and our bandwidth 1:1. Therefore blobs that don't pair well are just ignored.
+    //
+    // RpcBlock::new ensures that the count of blobs is consistent with the block
+    blocks
+        .into_iter()
+        .map(|block| {
+            let block_root = get_block_root(&block);
+            let max_blobs_per_block = spec.max_blobs_per_block(block.epoch()) as usize;
+            let blobs = blobs_by_block.remove(&block_root).unwrap_or_default();
+            // BlobsByRange request handler enforces that blobs are sorted by index
+            let blobs = RuntimeVariableList::new(blobs, max_blobs_per_block).map_err(|_| {
+                Error::InternalError("Blobs returned exceeds max length".to_string())
+            })?;
+            Ok(RpcBlock::new(Some(block_root), block, Some(blobs))
+                .expect("TODO: don't do matching here"))
+        })
+        .collect::<Result<Vec<RpcBlock<E>>, Error>>()
 }
 
 fn couple_blocks_fulu<E: EthSpec>(

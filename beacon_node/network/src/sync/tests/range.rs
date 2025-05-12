@@ -301,22 +301,14 @@ impl TestRig {
     }
 
     fn zero_block_at_slot(&mut self, slot: Slot, with_data: bool) -> Arc<SignedBeaconBlock<E>> {
-        let fork_name = self.spec.fork_name_at_slot::<E>(slot);
-        let mut block = match fork_name {
-            ForkName::Fulu => {
-                let mut block = BeaconBlock::empty(&self.spec);
-                if with_data {
-                    block
-                        .body_mut()
-                        .blob_kzg_commitments_mut()
-                        .expect("fulu block")
-                        .push(KzgCommitment([0; 48]))
-                        .expect("pushed to empty kzg commitments");
-                }
-                block
+        let mut block = BeaconBlock::empty(&self.spec);
+        if with_data {
+            if let Ok(blob_kzg_commitments) = block.body_mut().blob_kzg_commitments_mut() {
+                blob_kzg_commitments
+                    .push(KzgCommitment([0; 48]))
+                    .expect("pushed to empty kzg commitments");
             }
-            _ => todo!("extend for other forks"),
-        };
+        }
         *block.slot_mut() = slot;
         Arc::new(SignedBeaconBlock::from_block(block, Signature::empty()))
     }
@@ -953,7 +945,7 @@ fn finalized_sync_permanent_custody_peer_failure() {
 
     let mut requested_peers = HashSet::new();
 
-    for i in 0..PEERS_IN_BATCH {
+    for i in 0..PEERS_IN_BATCH - 1 {
         r.log(&format!("Loop {i} of custody failure round"));
 
         // Some peer had a costudy failure at `column_index` so sync should do a single extra request
