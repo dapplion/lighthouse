@@ -319,11 +319,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRangeRequest<T> {
 
                     // Not having columns is not a permanent fault. The peer may be backfilling.
                     self.peers_with_custody_failures.insert(peer_id);
-                    cx.report_peer(
-                        peer_id,
-                        PeerAction::MidToleranceError,
-                        "data column custody failure",
-                    );
+                    cx.report_peer(peer_id, PeerAction::MidToleranceError, "custody_failure");
                 }
             }
             Err(err) => {

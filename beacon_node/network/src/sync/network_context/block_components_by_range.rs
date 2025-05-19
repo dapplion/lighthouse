@@ -84,6 +84,13 @@ impl From<Error> for RpcRequestSendError {
     }
 }
 
+/// FOR TESTING ONLY
+#[derive(Debug)]
+pub enum BlockComponentsByRangeRequestStep {
+    BlocksRequest,
+    CustodyRequest,
+}
+
 impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     pub fn new(
         id: ComponentsByRangeRequestId,
@@ -402,6 +409,21 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
         }
 
         self.continue_requests(cx)
+    }
+
+    pub fn state_step(&self) -> BlockComponentsByRangeRequestStep {
+        match &self.state {
+            State::Base { .. } => BlockComponentsByRangeRequestStep::BlocksRequest,
+            State::DenebEnabled { .. } => BlockComponentsByRangeRequestStep::BlocksRequest,
+            State::FuluEnabled(state) => match state {
+                FuluEnabledState::BlockRequest { .. } => {
+                    BlockComponentsByRangeRequestStep::BlocksRequest
+                }
+                FuluEnabledState::CustodyRequest { .. } => {
+                    BlockComponentsByRangeRequestStep::CustodyRequest
+                }
+            },
+        }
     }
 }
 

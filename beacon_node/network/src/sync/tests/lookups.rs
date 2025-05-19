@@ -35,7 +35,7 @@ use lighthouse_network::{
         SamplingRequester, SingleLookupReqId, SyncRequestId,
     },
     types::SyncState,
-    NetworkConfig, NetworkGlobals, PeerId,
+    NetworkConfig, NetworkGlobals, PeerId, SyncInfo,
 };
 use slot_clock::{SlotClock, TestingSlotClock};
 use tokio::sync::mpsc;
@@ -259,8 +259,8 @@ impl TestRig {
         self.sync_manager.active_parent_lookups().len()
     }
 
-    fn active_range_sync_chain(&self) -> (RangeSyncType, Slot, Slot) {
-        self.sync_manager.get_range_sync_chains().unwrap().unwrap()
+    fn active_range_sync_chain(&mut self) -> (RangeSyncType, Slot, Slot) {
+        self.sync_manager.range_sync().state().unwrap().unwrap()
     }
 
     fn assert_single_lookups_count(&self, count: usize) {
@@ -370,15 +370,17 @@ impl TestRig {
         self.expect_empty_network();
     }
 
-    pub fn new_connected_peer(&mut self) -> PeerId {
+    // Don't make pub, use `add_connected_peer_testing_only`
+    fn new_connected_peer(&mut self) -> PeerId {
         self.add_connected_peer_testing_only(false)
     }
 
-    pub fn new_connected_supernode_peer(&mut self) -> PeerId {
+    // Don't make pub, use `add_connected_peer_testing_only`
+    fn new_connected_supernode_peer(&mut self) -> PeerId {
         self.add_connected_peer_testing_only(true)
     }
 
-    fn add_connected_peer_testing_only(&mut self, supernode: bool) -> PeerId {
+    pub fn add_connected_peer_testing_only(&mut self, supernode: bool) -> PeerId {
         let key = self.determinstic_key();
         let peer_id = self
             .network_globals
@@ -401,20 +403,26 @@ impl TestRig {
         peer_id
     }
 
+    pub fn add_sync_peer(&mut self, supernode: bool, remote_info: SyncInfo) -> PeerId {
+        let peer_id = self.add_connected_peer_testing_only(supernode);
+        self.send_sync_message(SyncMessage::AddPeer(peer_id, remote_info));
+        peer_id
+    }
+
     fn determinstic_key(&mut self) -> CombinedKey {
         k256::ecdsa::SigningKey::random(&mut self.rng).into()
     }
 
-    pub fn new_connected_peers(&mut self, config: PeersConfig) {
+    pub fn add_sync_peers(&mut self, config: PeersConfig, remote_info: SyncInfo) {
         match config {
             PeersConfig::SupernodeAndRandom => {
                 for _ in 0..100 {
-                    self.new_connected_peer();
+                    self.add_sync_peer(false, remote_info.clone());
                 }
-                self.new_connected_supernode_peer();
+                self.add_sync_peer(true, remote_info);
             }
             PeersConfig::SupernodeOnly => {
-                self.new_connected_supernode_peer();
+                self.add_sync_peer(true, remote_info);
             }
         }
     }
@@ -881,6 +889,19 @@ impl TestRig {
         }
     }
 
+    // Find, not pop
+    pub fn filter_received_network_events<T, F: Fn(&NetworkMessage<E>) -> Option<T>>(
+        &mut self,
+        predicate_transform: F,
+    ) -> Vec<T> {
+        self.drain_network_rx();
+
+        self.network_rx_queue
+            .iter()
+            .filter_map(predicate_transform)
+            .collect()
+    }
+
     pub fn pop_received_processor_event<T, F: Fn(&WorkEvent<E>) -> Option<T>>(
         &mut self,
         predicate_transform: F,
@@ -1134,6 +1155,21 @@ impl TestRig {
         }
     }
 
+    pub fn expect_no_penalty_for_anyone(&mut self) {
+        self.drain_network_rx();
+        let downscore_events = self
+            .network_rx_queue
+            .iter()
+            .filter_map(|ev| match ev {
+                NetworkMessage::ReportPeer { peer_id, msg, .. } => Some((peer_id, msg)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !downscore_events.is_empty() {
+            panic!("Expected no downscoring events but found: {downscore_events:?}");
+        }
+    }
+
     #[track_caller]
     fn expect_parent_chain_process(&mut self) {
         match self.beacon_processor_rx.try_recv() {
@@ -1167,6 +1203,25 @@ impl TestRig {
             Ok(event) => panic!("expected empty beacon processor: {:?}", event),
             other => panic!("unexpected err {:?}", other),
         }
+    }
+
+    #[track_caller]
+    pub fn expect_penalties(&mut self, expected_penalty_msg: &'static str) {
+        let all_penalties = self.filter_received_network_events(|ev| match ev {
+            NetworkMessage::ReportPeer { peer_id, msg, .. } => Some((*peer_id, *msg)),
+            _ => None,
+        });
+        if all_penalties
+            .iter()
+            .any(|(_, msg)| *msg != expected_penalty_msg)
+        {
+            panic!(
+                "Expected penalties only of {expected_penalty_msg}, but found {all_penalties:?}"
+            );
+        }
+        self.log(&format!(
+            "Found expected penalties {expected_penalty_msg}: {all_penalties:?}"
+        ));
     }
 
     #[track_caller]

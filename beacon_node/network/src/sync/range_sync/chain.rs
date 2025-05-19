@@ -133,7 +133,40 @@ pub enum ChainSyncingState {
     Syncing,
 }
 
+#[cfg(test)]
+#[derive(Debug, Eq, PartialEq)]
+pub enum BatchStateSummary {
+    Downloading,
+    Processing,
+    AwaitingProcessing,
+    AwaitingValidation,
+    Unexpected(&'static str),
+}
+
 impl<T: BeaconChainTypes> SyncingChain<T> {
+    /// Returns a summary of batch states for assertions in tests.
+    #[cfg(test)]
+    pub fn batches_state(&self) -> Vec<(BatchId, BatchStateSummary)> {
+        self.batches
+            .iter()
+            .map(|(id, batch)| {
+                let state = match batch.state() {
+                    // A batch is never left in this state, it's only the initial value
+                    BatchState::AwaitingDownload => {
+                        BatchStateSummary::Unexpected("AwaitingDownload")
+                    }
+                    BatchState::Downloading { .. } => BatchStateSummary::Downloading,
+                    BatchState::AwaitingProcessing { .. } => BatchStateSummary::AwaitingProcessing,
+                    BatchState::Poisoned { .. } => BatchStateSummary::Unexpected("Poisoned"),
+                    BatchState::Processing { .. } => BatchStateSummary::Processing,
+                    BatchState::Failed => BatchStateSummary::Unexpected("Failed"),
+                    BatchState::AwaitingValidation { .. } => BatchStateSummary::AwaitingValidation,
+                };
+                (*id, state)
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: Id,
@@ -419,11 +452,6 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                     self.request_batches(network)?;
                 }
             }
-        } else if !self.good_peers_on_sampling_subnets(self.processing_target, network) {
-            // This is to handle the case where no batch was sent for the current processing
-            // target when there is no sampling peers available. This is a valid state and should not
-            // return an error.
-            return Ok(KeepChain);
         } else {
             return Err(RemoveChain::WrongChainState(format!(
                 "Batch not found for current processing target {}",
@@ -964,13 +992,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                     return Ok(KeepChain);
                 }
                 Err(e) => match e {
-                    // TODO(das): Handle the NoPeer case explicitly and don't drop the batch. For
-                    // sync to work properly it must be okay to have "stalled" batches in
-                    // AwaitingDownload state. Currently it will error with invalid state if
-                    // that happens. Sync manager must periodicatlly prune stalled batches like
-                    // we do for lookup sync. Then we can deprecate the redundant
-                    // `good_peers_on_sampling_subnets` checks.
-                    e @ RpcRequestSendError::InternalError(_) => {
+                    RpcRequestSendError::InternalError(e) => {
                         // NOTE: under normal conditions this shouldn't happen but we handle it anyway
                         warn!(%batch_id, error = ?e, "batch_id" = %batch_id, %batch, "Could not send batch request");
                         // register the failed download and check if the batch can be retried
@@ -1029,11 +1051,6 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         // check if we have the batch for our optimistic start. If not, request it first.
         // We wait for this batch before requesting any other batches.
         if let Some(epoch) = self.optimistic_start {
-            if !self.good_peers_on_sampling_subnets(epoch, network) {
-                debug!("Waiting for peers to be available on sampling column subnets");
-                return Ok(KeepChain);
-            }
-
             if let Entry::Vacant(entry) = self.batches.entry(epoch) {
                 let optimistic_batch = BatchInfo::new(&epoch, EPOCHS_PER_BATCH);
                 entry.insert(optimistic_batch);
@@ -1054,35 +1071,6 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
 
         // No more batches, simply stop
         Ok(KeepChain)
-    }
-
-    /// Checks all sampling column subnets for peers. Returns `true` if there is at least one peer in
-    /// every sampling column subnet.
-    fn good_peers_on_sampling_subnets(
-        &self,
-        epoch: Epoch,
-        network: &SyncNetworkContext<T>,
-    ) -> bool {
-        if network.chain.spec.is_peer_das_enabled_for_epoch(epoch) {
-            // Require peers on all sampling column subnets before sending batches
-            let peers_on_all_custody_subnets = network
-                .network_globals()
-                .sampling_subnets
-                .iter()
-                .all(|subnet_id| {
-                    let peer_count = network
-                        .network_globals()
-                        .peers
-                        .read()
-                        .good_custody_subnet_peer(*subnet_id)
-                        .count();
-
-                    peer_count > 0
-                });
-            peers_on_all_custody_subnets
-        } else {
-            true
-        }
     }
 
     /// Creates the next required batch from the chain. If there are no more batches required,
@@ -1114,15 +1102,6 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             .count()
             > BATCH_BUFFER_SIZE as usize
         {
-            return None;
-        }
-
-        // don't send batch requests until we have peers on sampling subnets
-        // TODO(das): this is a workaround to avoid sending out excessive block requests because
-        // block and data column requests are currently coupled. This can be removed once we find a
-        // way to decouple the requests and do retries individually, see issue #6258.
-        if !self.good_peers_on_sampling_subnets(self.to_be_downloaded, network) {
-            debug!("Waiting for peers to be available on custody column subnets");
             return None;
         }
 

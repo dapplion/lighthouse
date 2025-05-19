@@ -336,23 +336,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn get_range_sync_chains(
-        &self,
-    ) -> Result<Option<(RangeSyncType, Slot, Slot)>, &'static str> {
-        self.range_sync.state()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn range_sync_state(&self) -> super::range_sync::SyncChainStatus {
-        self.range_sync.state()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn __range_failed_chains(&mut self) -> Vec<Hash256> {
-        self.range_sync.__failed_chains()
-    }
-
-    #[cfg(test)]
     pub(crate) fn get_failed_chains(&mut self) -> Vec<Hash256> {
         self.block_lookups.get_failed_chains()
     }
@@ -374,6 +357,18 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         index: &ColumnIndex,
     ) -> Option<super::peer_sampling::Status> {
         self.sampling.get_request_status(block_root, index)
+    }
+
+    // Leak the full network context to prevent having to add many cfg(test) methods here
+    #[cfg(test)]
+    pub(crate) fn network(&mut self) -> &mut SyncNetworkContext<T> {
+        &mut self.network
+    }
+
+    // Leak the full range_sync to prevent having to add many cfg(test) methods here
+    #[cfg(test)]
+    pub(crate) fn range_sync(&mut self) -> &mut RangeSync<T> {
+        &mut self.range_sync
     }
 
     #[cfg(test)]

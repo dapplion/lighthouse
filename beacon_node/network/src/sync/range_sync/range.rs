@@ -39,7 +39,7 @@
 //!  Each chain is downloaded in batches of blocks. The batched blocks are processed sequentially
 //!  and further batches are requested as current blocks are being processed.
 
-use super::chain::{BatchId, ChainId, RemoveChain, SyncingChain};
+use super::chain::{BatchId, BatchStateSummary, ChainId, RemoveChain, SyncingChain};
 use super::chain_collection::{ChainCollection, SyncChainStatus};
 use super::sync_type::RangeSyncType;
 use super::BatchPeerGroup;
@@ -100,8 +100,21 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn __failed_chains(&mut self) -> Vec<Hash256> {
+    pub(crate) fn failed_chains(&mut self) -> Vec<Hash256> {
         self.failed_chains.keys().copied().collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn batches_state(&self) -> Vec<(ChainId, BatchId, BatchStateSummary)> {
+        self.chains
+            .iter()
+            .flat_map(|chain| {
+                chain
+                    .batches_state()
+                    .into_iter()
+                    .map(|(batch_id, state)| (chain.get_id(), batch_id, state))
+            })
+            .collect()
     }
 
     #[instrument(parent = None,

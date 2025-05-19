@@ -15,7 +15,9 @@ use crate::sync::block_lookups::SingleLookupId;
 use crate::sync::network_context::requests::BlobsByRootSingleBlockRequest;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
-pub use block_components_by_range::BlockComponentsByRangeRequest;
+pub use block_components_by_range::{
+    BlockComponentsByRangeRequest, BlockComponentsByRangeRequestStep,
+};
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{BlobsByRangeRequest, DataColumnsByRangeRequest};
 use lighthouse_network::rpc::{BlocksByRangeRequest, GoodbyeReason, RPCError, RequestType};
@@ -278,6 +280,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     /// Returns the ids of all the requests made to the given peer_id.
     pub fn peer_disconnected(&mut self, peer_id: &PeerId) -> Vec<SyncRequestId> {
+        self.active_requests()
+            .filter(|(_, request_peer)| *request_peer == peer_id)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Returns the ids of all active requests
+    pub fn active_requests(&mut self) -> impl Iterator<Item = (SyncRequestId, &PeerId)> {
         // Note: using destructuring pattern without a default case to make sure we don't forget to
         // add new request types to this function. Otherwise, lookup sync can break and lookups
         // will get stuck if a peer disconnects during an active requests.
@@ -302,29 +312,23 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         } = self;
 
         let blocks_by_root_ids = blocks_by_root_requests
-            .active_requests_of_peer(peer_id)
-            .into_iter()
-            .map(|id| SyncRequestId::SingleBlock { id: *id });
+            .active_requests()
+            .map(|(id, peer)| (SyncRequestId::SingleBlock { id: *id }, peer));
         let blobs_by_root_ids = blobs_by_root_requests
-            .active_requests_of_peer(peer_id)
-            .into_iter()
-            .map(|id| SyncRequestId::SingleBlob { id: *id });
+            .active_requests()
+            .map(|(id, peer)| (SyncRequestId::SingleBlob { id: *id }, peer));
         let data_column_by_root_ids = data_columns_by_root_requests
-            .active_requests_of_peer(peer_id)
-            .into_iter()
-            .map(|req_id| SyncRequestId::DataColumnsByRoot(*req_id));
+            .active_requests()
+            .map(|(id, peer)| (SyncRequestId::DataColumnsByRoot(*id), peer));
         let blocks_by_range_ids = blocks_by_range_requests
-            .active_requests_of_peer(peer_id)
-            .into_iter()
-            .map(|req_id| SyncRequestId::BlocksByRange(*req_id));
+            .active_requests()
+            .map(|(id, peer)| (SyncRequestId::BlocksByRange(*id), peer));
         let blobs_by_range_ids = blobs_by_range_requests
-            .active_requests_of_peer(peer_id)
-            .into_iter()
-            .map(|req_id| SyncRequestId::BlobsByRange(*req_id));
+            .active_requests()
+            .map(|(id, peer)| (SyncRequestId::BlobsByRange(*id), peer));
         let data_column_by_range_ids = data_columns_by_range_requests
-            .active_requests_of_peer(peer_id)
-            .into_iter()
-            .map(|req_id| SyncRequestId::DataColumnsByRange(*req_id));
+            .active_requests()
+            .map(|(id, peer)| (SyncRequestId::DataColumnsByRange(*id), peer));
 
         blocks_by_root_ids
             .chain(blobs_by_root_ids)
@@ -332,6 +336,17 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .chain(blocks_by_range_ids)
             .chain(blobs_by_range_ids)
             .chain(data_column_by_range_ids)
+    }
+
+    pub fn active_block_components_by_range_requests(
+        &self,
+    ) -> Vec<(
+        ComponentsByRangeRequestId,
+        BlockComponentsByRangeRequestStep,
+    )> {
+        self.block_components_by_range_requests
+            .iter()
+            .map(|(id, req)| (*id, req.state_step()))
             .collect()
     }
 
