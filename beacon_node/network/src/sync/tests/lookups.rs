@@ -4,7 +4,7 @@ use crate::sync::block_lookups::{
 };
 use crate::sync::range_sync::BATCH_BUFFER_SIZE;
 use crate::sync::{
-    manager::{BlockProcessType, BlockProcessingResult, SyncManager},
+    manager::{BlockProcessingResult, SyncManager},
     peer_sampling::SamplingConfig,
     SamplingId, SyncMessage,
 };
@@ -145,6 +145,7 @@ impl TestRig {
             network_rx_queue: vec![],
             sync_rx,
             sent_blocks_by_range: <_>::default(),
+            blocks_by_root: <_>::default(),
             rng,
             network_globals: beacon_processor.network_globals.clone(),
             sync_manager: SyncManager::new(
@@ -502,11 +503,8 @@ impl TestRig {
         );
     }
 
-    fn single_block_component_processed(&mut self, id: Id, result: BlockProcessingResult) {
-        self.send_sync_message(SyncMessage::BlockComponentProcessed {
-            process_type: BlockProcessType::SingleBlock { id },
-            result,
-        })
+    fn single_block_component_processed(&mut self, _id: Id, _result: BlockProcessingResult) {
+        todo!();
     }
 
     fn single_block_component_processed_imported(&mut self, block_root: Hash256) {
@@ -517,41 +515,26 @@ impl TestRig {
         )
     }
 
-    fn single_blob_component_processed(&mut self, id: Id, result: BlockProcessingResult) {
-        self.send_sync_message(SyncMessage::BlockComponentProcessed {
-            process_type: BlockProcessType::SingleBlob { id },
-            result,
-        })
+    fn single_blob_component_processed(&mut self, _id: Id, _result: BlockProcessingResult) {
+        todo!();
     }
 
     fn parent_lookup_block_response(
         &mut self,
-        id: SingleLookupReqId,
-        peer_id: PeerId,
-        beacon_block: Option<Arc<SignedBeaconBlock<E>>>,
+        _id: SingleLookupReqId,
+        _peer_id: PeerId,
+        _beacon_block: Option<Arc<SignedBeaconBlock<E>>>,
     ) {
-        self.log("parent_lookup_block_response");
-        self.send_sync_message(SyncMessage::RpcBlock {
-            sync_request_id: SyncRequestId::SingleBlock { id },
-            peer_id,
-            beacon_block,
-            seen_timestamp: D,
-        });
+        todo!();
     }
 
     fn single_lookup_block_response(
         &mut self,
-        id: SingleLookupReqId,
-        peer_id: PeerId,
-        beacon_block: Option<Arc<SignedBeaconBlock<E>>>,
+        _id: SingleLookupReqId,
+        _peer_id: PeerId,
+        _beacon_block: Option<Arc<SignedBeaconBlock<E>>>,
     ) {
-        self.log("single_lookup_block_response");
-        self.send_sync_message(SyncMessage::RpcBlock {
-            sync_request_id: SyncRequestId::SingleBlock { id },
-            peer_id,
-            beacon_block,
-            seen_timestamp: D,
-        });
+        todo!();
     }
 
     fn parent_lookup_blob_response(
@@ -565,7 +548,7 @@ impl TestRig {
             blob_sidecar.as_ref().map(|b| b.index)
         ));
         self.send_sync_message(SyncMessage::RpcBlob {
-            sync_request_id: SyncRequestId::SingleBlob { id },
+            sync_request_id: todo!(),
             peer_id,
             blob_sidecar,
             seen_timestamp: D,
@@ -579,7 +562,7 @@ impl TestRig {
         blob_sidecar: Option<Arc<BlobSidecar<E>>>,
     ) {
         self.send_sync_message(SyncMessage::RpcBlob {
-            sync_request_id: SyncRequestId::SingleBlob { id },
+            sync_request_id: todo!(),
             peer_id,
             blob_sidecar,
             seen_timestamp: D,
@@ -652,12 +635,8 @@ impl TestRig {
         self.complete_lookup_block_import_valid(block_root, import)
     }
 
-    fn parent_lookup_failed(&mut self, id: SingleLookupReqId, peer_id: PeerId, error: RPCError) {
-        self.send_sync_message(SyncMessage::RpcError {
-            peer_id,
-            sync_request_id: SyncRequestId::SingleBlock { id },
-            error,
-        })
+    fn parent_lookup_failed(&mut self, _id: SingleLookupReqId, _peer_id: PeerId, _error: RPCError) {
+        todo!()
     }
 
     fn parent_lookup_failed_unavailable(&mut self, id: SingleLookupReqId, peer_id: PeerId) {
@@ -671,12 +650,8 @@ impl TestRig {
         );
     }
 
-    fn single_lookup_failed(&mut self, id: SingleLookupReqId, peer_id: PeerId, error: RPCError) {
-        self.send_sync_message(SyncMessage::RpcError {
-            peer_id,
-            sync_request_id: SyncRequestId::SingleBlock { id },
-            error,
-        })
+    fn single_lookup_failed(&mut self, _id: SingleLookupReqId, _peer_id: PeerId, _error: RPCError) {
+        todo!();
     }
 
     fn return_empty_sampling_requests(&mut self, ids: DCByRootIds) {
@@ -787,19 +762,20 @@ impl TestRig {
         &mut self,
         ids: DCByRootIds,
         data_columns: DataColumnSidecarList<E>,
-        missing_components: bool,
+        _missing_components: bool,
     ) {
-        let lookup_id = if let SyncRequestId::DataColumnsByRoot(DataColumnsByRootRequestId {
+        let _lookup_id = if let SyncRequestId::DataColumnsByRoot(DataColumnsByRootRequestId {
             requester: DataColumnsByRootRequester::Custody(id),
             ..
         }) = ids.first().unwrap().0
         {
-            id.requester.0.lookup_id
+            todo!();
+            // id.parent_request_id.0.lookup_id
         } else {
             panic!("not a custody requester")
         };
 
-        let first_column = data_columns.first().cloned().unwrap();
+        let _first_column = data_columns.first().cloned().unwrap();
 
         for id in ids {
             self.log(&format!("return valid data column for {id:?}"));
@@ -815,19 +791,7 @@ impl TestRig {
         self.expect_rpc_custody_column_work_event();
 
         // Respond with valid result
-        self.send_sync_message(SyncMessage::BlockComponentProcessed {
-            process_type: BlockProcessType::SingleCustodyColumn(lookup_id),
-            result: if missing_components {
-                BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents(
-                    first_column.slot(),
-                    first_column.block_root(),
-                ))
-            } else {
-                BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(
-                    first_column.block_root(),
-                ))
-            },
-        });
+        todo!();
     }
 
     fn complete_data_columns_by_root_request(
@@ -958,16 +922,9 @@ impl TestRig {
 
     fn find_block_lookup_request(
         &mut self,
-        for_block: Hash256,
+        _for_block: Hash256,
     ) -> Result<SingleLookupReqId, String> {
-        self.pop_received_network_event(|ev| match ev {
-            NetworkMessage::SendRequest {
-                peer_id: _,
-                request: RequestType::BlocksByRoot(request),
-                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlock { id }),
-            } if request.block_roots().to_vec().contains(&for_block) => Some(*id),
-            _ => None,
-        })
+        todo!();
     }
 
     #[track_caller]
@@ -984,14 +941,14 @@ impl TestRig {
             NetworkMessage::SendRequest {
                 peer_id: _,
                 request: RequestType::BlobsByRoot(request),
-                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlob { id }),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlobsByRoot(id)),
             } if request
                 .blob_ids
                 .to_vec()
                 .iter()
                 .any(|r| r.block_root == for_block) =>
             {
-                Some(*id)
+                todo!();
             }
             _ => None,
         })
@@ -1004,16 +961,8 @@ impl TestRig {
     }
 
     #[track_caller]
-    fn expect_block_parent_request(&mut self, for_block: Hash256) -> SingleLookupReqId {
-        self.pop_received_network_event(|ev| match ev {
-            NetworkMessage::SendRequest {
-                peer_id: _,
-                request: RequestType::BlocksByRoot(request),
-                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlock { id }),
-            } if request.block_roots().to_vec().contains(&for_block) => Some(*id),
-            _ => None,
-        })
-        .unwrap_or_else(|e| panic!("Expected block parent request for {for_block:?}: {e}"))
+    fn expect_block_parent_request(&mut self, _for_block: Hash256) -> SingleLookupReqId {
+        todo!();
     }
 
     fn expect_no_requests_for(&mut self, block_root: Hash256) {
@@ -1031,14 +980,14 @@ impl TestRig {
             NetworkMessage::SendRequest {
                 peer_id: _,
                 request: RequestType::BlobsByRoot(request),
-                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlob { id }),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlobsByRoot(id)),
             } if request
                 .blob_ids
                 .to_vec()
                 .iter()
                 .all(|r| r.block_root == for_block) =>
             {
-                Some(*id)
+                todo!();
             }
             _ => None,
         })

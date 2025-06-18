@@ -721,7 +721,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 }
                 BatchState::AwaitingProcessing(..) => {}
                 BatchState::Processing(_) => {
-                    debug!(batch = %id, %batch, "Advancing chain while processing a batch");
+                    debug!(batch = %id, "Advancing chain while processing a batch");
                     if let Some(processing_id) = self.current_processing_batch {
                         if id <= processing_id {
                             self.current_processing_batch = None;
@@ -934,7 +934,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             let failed_peers = batch.failed_peers();
 
             match network.block_components_by_range_request(
-                request,
+                todo!(),
                 RangeRequestId::RangeSync {
                     chain_id: self.id,
                     batch_id,
@@ -950,16 +950,16 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                         .map(|epoch| epoch == batch_id)
                         .unwrap_or(false)
                     {
-                        debug!(epoch = %batch_id, %batch, %batch_state, "Requesting optimistic batch");
+                        debug!(%batch_id, %batch_state, "Requesting optimistic batch");
                     } else {
-                        debug!(epoch = %batch_id, %batch, %batch_state, "Requesting batch");
+                        debug!(%batch_id, %batch_state, "Requesting batch");
                     }
                     return Ok(KeepChain);
                 }
                 Err(e) => match e {
                     e @ (RpcRequestSendError::NoPeers | RpcRequestSendError::InternalError(_)) => {
                         // NOTE: under normal conditions this shouldn't happen but we handle it anyway
-                        warn!(%batch_id, error = ?e, "batch_id" = %batch_id, %batch, "Could not send batch request");
+                        warn!(%batch_id, error = ?e, "Could not send batch request");
                         // register the failed download and check if the batch can be retried
                         batch.start_downloading(1)?; // fake request_id = 1 is not relevant
                         match batch.download_failed()? {
@@ -1016,10 +1016,8 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         // check if we have the batch for our optimistic start. If not, request it first.
         // We wait for this batch before requesting any other batches.
         if let Some(epoch) = self.optimistic_start {
-            if let Entry::Vacant(entry) = self.batches.entry(epoch) {
-                let optimistic_batch = BatchInfo::new(&epoch, EPOCHS_PER_BATCH);
-                entry.insert(optimistic_batch);
-                self.send_batch(network, epoch)?;
+            if let Entry::Vacant(_entry) = self.batches.entry(epoch) {
+                todo!();
             }
             return Ok(KeepChain);
         }
@@ -1079,8 +1077,8 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 self.to_be_downloaded += EPOCHS_PER_BATCH;
                 self.include_next_batch(network)
             }
-            Entry::Vacant(entry) => {
-                entry.insert(BatchInfo::new(&next_batch_id, EPOCHS_PER_BATCH));
+            Entry::Vacant(_entry) => {
+                todo!();
                 self.to_be_downloaded += EPOCHS_PER_BATCH;
                 Some(next_batch_id)
             }

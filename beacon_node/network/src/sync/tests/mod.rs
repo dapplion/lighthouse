@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use types::{ChainSpec, ForkName, MinimalEthSpec as E, SignedBeaconBlock};
+use types::{ChainSpec, ForkName, Hash256, MinimalEthSpec as E, SignedBeaconBlock};
 
 mod lookups;
 mod range;
@@ -75,6 +75,7 @@ struct TestRig {
 
     // Cache of sent blocks for PeerDAS responses
     sent_blocks_by_range: HashMap<ComponentsByRangeRequestId, Vec<Arc<SignedBeaconBlock<E>>>>,
+    blocks_by_root: HashMap<Hash256, Arc<SignedBeaconBlock<E>>>,
 }
 
 // Environment variable to read if `fork_from_env` feature is enabled.

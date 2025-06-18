@@ -4,7 +4,6 @@ use crate::sync::block_lookups::single_block_lookup::{
 use crate::sync::block_lookups::{
     BlobRequestState, BlockRequestState, CustodyRequestState, PeerId,
 };
-use crate::sync::manager::BlockProcessType;
 use crate::sync::network_context::{LookupRequestResult, SyncNetworkContext};
 use beacon_chain::BeaconChainTypes;
 use lighthouse_network::service::api_types::Id;
@@ -76,28 +75,20 @@ impl<T: BeaconChainTypes> RequestState<T> for BlockRequestState<T::EthSpec> {
 
     fn make_request(
         &self,
-        id: SingleLookupId,
-        lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
+        _id: SingleLookupId,
+        _lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
         _: usize,
-        cx: &mut SyncNetworkContext<T>,
+        _cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupRequestResult, LookupRequestError> {
-        cx.block_lookup_request(id, lookup_peers, self.requested_block_root)
-            .map_err(LookupRequestError::SendFailedNetwork)
+        todo!();
     }
 
     fn send_for_processing(
-        id: SingleLookupId,
-        download_result: DownloadResult<Self::VerifiedResponseType>,
-        cx: &SyncNetworkContext<T>,
+        _id: SingleLookupId,
+        _download_result: DownloadResult<Self::VerifiedResponseType>,
+        _cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
-        let DownloadResult {
-            value,
-            block_root,
-            seen_timestamp,
-            ..
-        } = download_result;
-        cx.send_block_for_processing(id, block_root, value, seen_timestamp)
-            .map_err(LookupRequestError::SendFailedProcessor)
+        todo!();
     }
 
     fn response_type() -> ResponseType {
@@ -119,28 +110,20 @@ impl<T: BeaconChainTypes> RequestState<T> for BlobRequestState<T::EthSpec> {
 
     fn make_request(
         &self,
-        id: Id,
-        lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
-        expected_blobs: usize,
-        cx: &mut SyncNetworkContext<T>,
+        _id: Id,
+        _lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
+        _expected_blobs: usize,
+        _cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupRequestResult, LookupRequestError> {
-        cx.blob_lookup_request(id, lookup_peers, self.block_root, expected_blobs)
-            .map_err(LookupRequestError::SendFailedNetwork)
+        todo!();
     }
 
     fn send_for_processing(
-        id: Id,
-        download_result: DownloadResult<Self::VerifiedResponseType>,
-        cx: &SyncNetworkContext<T>,
+        _id: Id,
+        _download_result: DownloadResult<Self::VerifiedResponseType>,
+        _cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
-        let DownloadResult {
-            value,
-            block_root,
-            seen_timestamp,
-            ..
-        } = download_result;
-        cx.send_blobs_for_processing(id, block_root, value, seen_timestamp)
-            .map_err(LookupRequestError::SendFailedProcessor)
+        todo!();
     }
 
     fn response_type() -> ResponseType {
@@ -167,34 +150,20 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
 
     fn make_request(
         &self,
-        id: Id,
-        lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
+        _id: Id,
+        _lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
         _: usize,
-        cx: &mut SyncNetworkContext<T>,
+        _cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupRequestResult, LookupRequestError> {
-        cx.custody_lookup_request(id, self.block_root, lookup_peers)
-            .map_err(LookupRequestError::SendFailedNetwork)
+        todo!();
     }
 
     fn send_for_processing(
-        id: Id,
-        download_result: DownloadResult<Self::VerifiedResponseType>,
-        cx: &SyncNetworkContext<T>,
+        _id: Id,
+        _download_result: DownloadResult<Self::VerifiedResponseType>,
+        _cx: &SyncNetworkContext<T>,
     ) -> Result<(), LookupRequestError> {
-        let DownloadResult {
-            value,
-            block_root,
-            seen_timestamp,
-            ..
-        } = download_result;
-        cx.send_custody_columns_for_processing(
-            id,
-            block_root,
-            value,
-            seen_timestamp,
-            BlockProcessType::SingleCustodyColumn(id),
-        )
-        .map_err(LookupRequestError::SendFailedProcessor)
+        todo!();
     }
 
     fn response_type() -> ResponseType {

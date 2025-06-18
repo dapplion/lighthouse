@@ -5,22 +5,13 @@ use types::{EthSpec, ForkContext, Hash256, SignedBeaconBlock};
 
 use super::{ActiveRequestItems, LookupVerifyError};
 
-#[derive(Debug, Copy, Clone)]
-pub struct BlocksByRootSingleRequest(pub Hash256);
-
-impl BlocksByRootSingleRequest {
-    pub fn into_request(self, fork_context: &ForkContext) -> BlocksByRootRequest {
-        BlocksByRootRequest::new(vec![self.0], fork_context)
-    }
-}
-
 pub struct BlocksByRootRequestItems<E: EthSpec> {
-    request: BlocksByRootSingleRequest,
+    request: BlocksByRootRequest,
     items: Vec<Arc<SignedBeaconBlock<E>>>,
 }
 
 impl<E: EthSpec> BlocksByRootRequestItems<E> {
-    pub fn new(request: BlocksByRootSingleRequest) -> Self {
+    pub fn new(request: BlocksByRootRequest) -> Self {
         Self {
             request,
             items: vec![],
@@ -35,8 +26,14 @@ impl<E: EthSpec> ActiveRequestItems for BlocksByRootRequestItems<E> {
     /// resolved immediately.
     /// The active request SHOULD be dropped after `add_response` returns an error
     fn add(&mut self, block: Self::Item) -> Result<bool, LookupVerifyError> {
+        // TODO(tree-sync): Cache this block root calculation
         let block_root = get_block_root(&block);
-        if self.request.0 != block_root {
+        if !self
+            .request
+            .block_roots()
+            .iter()
+            .any(|root| root == &block_root)
+        {
             return Err(LookupVerifyError::UnrequestedBlockRoot(block_root));
         }
 

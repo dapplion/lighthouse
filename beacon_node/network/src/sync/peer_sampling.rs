@@ -1,12 +1,11 @@
 use self::request::ActiveColumnSampleRequest;
 #[cfg(test)]
 pub(crate) use self::request::Status;
-use super::network_context::{
-    DataColumnsByRootSingleBlockRequest, RpcResponseError, SyncNetworkContext,
-};
+use super::network_context::{RpcResponseError, SyncNetworkContext};
 use crate::metrics;
 use beacon_chain::BeaconChainTypes;
 use fnv::FnvHashMap;
+use lighthouse_network::rpc::methods::DataColumnsByRootRequest;
 use lighthouse_network::service::api_types::{
     DataColumnsByRootRequester, SamplingId, SamplingRequestId, SamplingRequester,
 };
@@ -17,7 +16,10 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, error, instrument, warn};
-use types::{data_column_sidecar::ColumnIndex, ChainSpec, DataColumnSidecar, Hash256};
+use types::{
+    data_column_sidecar::ColumnIndex, ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier,
+    Hash256, RuntimeVariableList,
+};
 
 pub type SamplingResult = Result<(), SamplingError>;
 
@@ -576,10 +578,8 @@ impl<T: BeaconChainTypes> ActiveSamplingRequest<T> {
                     sampling_request_id: self.current_sampling_request_id,
                 }),
                 peer_id,
-                DataColumnsByRootSingleBlockRequest {
-                    block_root: self.block_root,
-                    indices: column_indexes.clone(),
-                },
+                vec![self.block_root],
+                column_indexes.clone(),
                 // false = We issue request to custodians who may or may not have received the
                 // samples yet. We don't any signal (like an attestation or status messages that the
                 // custodian has received data).

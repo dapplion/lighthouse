@@ -11,12 +11,14 @@ use beacon_chain::test_utils::{AttestationStrategy, BlockStrategy};
 use beacon_chain::{block_verification_types::RpcBlock, EngineState, NotifyExecutionLayer};
 use beacon_processor::WorkType;
 use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, DataColumnsByRangeRequest, OldBlocksByRangeRequest,
+    BlobsByRangeRequest, BlocksByRootRequest, DataColumnsByRangeRequest, DataColumnsByRootRequest,
+    OldBlocksByRangeRequest,
 };
 use lighthouse_network::rpc::{RequestType, StatusMessage};
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    DataColumnsByRangeRequestId, SyncRequestId,
+    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, BlocksByRootRequestId,
+    BlocksByRootRequester, ComponentsByRangeRequestId, DataColumnsByRangeRequestId,
+    DataColumnsByRootRequestId, HeaderLookupId, SyncRequestId,
 };
 use lighthouse_network::types::SyncState;
 use lighthouse_network::{PeerId, SyncInfo};
@@ -69,11 +71,15 @@ struct Config {
 
 type BlocksByRangeRequestData = (BlocksByRangeRequestId, PeerId, OldBlocksByRangeRequest);
 
+type BlocksByRootRequestData = (BlocksByRootRequestId, PeerId, BlocksByRootRequest);
+
 type DataColumnsByRangeRequestData = (
     DataColumnsByRangeRequestId,
     PeerId,
     DataColumnsByRangeRequest,
 );
+
+type DataColumnsByRootRequestData = (DataColumnsByRootRequestId, PeerId, DataColumnsByRootRequest);
 
 /// Sync tests are usually written in the form:
 /// - Do some action
@@ -126,6 +132,20 @@ impl RequestFilter {
         }
     }
 
+    fn blocks_by_root_requests<E: EthSpec>(
+        &self,
+        ev: &NetworkMessage<E>,
+    ) -> Option<BlocksByRootRequestData> {
+        match ev {
+            NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::BlocksByRoot(req),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRoot(id)),
+            } if self.matches_blocks_by_root(peer_id, req) => Some((*id, *peer_id, req.clone())),
+            _ => None,
+        }
+    }
+
     fn data_columns_by_range_requests<E: EthSpec>(
         &self,
         ev: &NetworkMessage<E>,
@@ -140,6 +160,26 @@ impl RequestFilter {
             }
             _ => None,
         }
+    }
+
+    fn data_columns_by_root_requests<E: EthSpec>(
+        &self,
+        ev: &NetworkMessage<E>,
+    ) -> Option<DataColumnsByRootRequestData> {
+        match ev {
+            NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::DataColumnsByRoot(req),
+                app_request_id: AppRequestId::Sync(SyncRequestId::DataColumnsByRoot(id)),
+            } if self.matches_data_columns_by_root(peer_id, req) => {
+                Some((*id, *peer_id, req.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    fn matches_blocks_by_root(&self, peer: &PeerId, _req: &BlocksByRootRequest) -> bool {
+        self.matches_peer(peer)
     }
 
     fn matches_blocks_by_range(&self, peer: &PeerId, req: &OldBlocksByRangeRequest) -> bool {
@@ -163,6 +203,19 @@ impl RequestFilter {
         self.matches_common(peer, req.start_slot)
     }
 
+    fn matches_data_columns_by_root(&self, peer: &PeerId, req: &DataColumnsByRootRequest) -> bool {
+        if let Some(index) = self.column_index {
+            if !req
+                .data_column_ids
+                .iter()
+                .any(|id| id.columns.iter().any(|i| *i == index))
+            {
+                return false;
+            }
+        }
+        self.matches_peer(peer)
+    }
+
     fn matches_common(&self, peer: &PeerId, start_slot: u64) -> bool {
         if let Some(expected_epoch) = self.epoch {
             let epoch = Slot::new(start_slot).epoch(E::slots_per_epoch()).as_u64();
@@ -170,6 +223,10 @@ impl RequestFilter {
                 return false;
             }
         }
+        self.matches_peer(peer)
+    }
+
+    fn matches_peer(&self, peer: &PeerId) -> bool {
         if let Some(expected_peer) = self.peer {
             if *peer != expected_peer {
                 return false;
@@ -426,7 +483,7 @@ impl TestRig {
         self.sync_manager.update_execution_engine_state(state);
     }
 
-    fn zero_block_at_slot(&mut self, slot: Slot, with_data: bool) -> Arc<SignedBeaconBlock<E>> {
+    fn zero_block_at_slot(&mut self, slot: Slot, with_data: bool) -> SignedBeaconBlock<E> {
         let mut block = BeaconBlock::empty(&self.spec);
         if with_data {
             if let Ok(blob_kzg_commitments) = block.body_mut().blob_kzg_commitments_mut() {
@@ -436,7 +493,24 @@ impl TestRig {
             }
         }
         *block.slot_mut() = slot;
-        Arc::new(SignedBeaconBlock::from_block(block, Signature::empty()))
+        SignedBeaconBlock::from_block(block, Signature::empty())
+    }
+
+    fn create_parent_chain(&mut self) -> (Hash256, Slot) {
+        let current_head = self.harness.chain.head();
+        let mut parent_root = current_head.head_block_root();
+        let mut slot = current_head.head_slot();
+        for _ in 0..64 {
+            let mut block = self.zero_block_at_slot(slot, true);
+            *block.message_mut().parent_root_mut() = parent_root;
+            *block.message_mut().slot_mut() = slot;
+            let block_root = block.canonical_root();
+            self.blocks_by_root.insert(block_root, block.into());
+
+            parent_root = block_root;
+            slot = slot + Slot::new(1);
+        }
+        (parent_root, slot)
     }
 
     fn last_sent_blocks_by_range(
@@ -484,6 +558,33 @@ impl TestRig {
         }
     }
 
+    fn send_blocks_by_root_response(
+        &mut self,
+        req_id: BlocksByRootRequestId,
+        peer_id: PeerId,
+        blocks: &[Arc<SignedBeaconBlock<E>>],
+    ) {
+        let slots = blocks.iter().map(|block| block.slot()).collect::<Vec<_>>();
+        self.log(&format!(
+            "Completing BlocksByRoot request {req_id} to {peer_id} with blocks {slots:?}"
+        ));
+
+        for block in blocks {
+            self.send_sync_message(SyncMessage::RpcBlock {
+                sync_request_id: SyncRequestId::BlocksByRoot(req_id),
+                peer_id,
+                beacon_block: Some(block.clone()),
+                seen_timestamp: D,
+            });
+        }
+        self.send_sync_message(SyncMessage::RpcBlock {
+            sync_request_id: SyncRequestId::BlocksByRoot(req_id),
+            peer_id,
+            beacon_block: None,
+            seen_timestamp: D,
+        });
+    }
+
     fn send_data_columns_by_range_response(
         &mut self,
         id: DataColumnsByRangeRequestId,
@@ -509,6 +610,37 @@ impl TestRig {
         }
         self.send_sync_message(SyncMessage::RpcDataColumn {
             sync_request_id: SyncRequestId::DataColumnsByRange(id),
+            peer_id,
+            data_column: None,
+            seen_timestamp: D,
+        });
+    }
+
+    fn send_data_columns_by_root_response(
+        &mut self,
+        id: DataColumnsByRootRequestId,
+        peer_id: PeerId,
+        data_columns: &[Arc<DataColumnSidecar<E>>],
+    ) {
+        let mut ids = data_columns
+            .iter()
+            .map(|d| (d.slot().as_u64(), d.index))
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        self.log(&format!(
+            "Completing DataColumnsByRange request {id} to {peer_id} with data_columns {ids:?}"
+        ));
+
+        for data_column in data_columns {
+            self.send_sync_message(SyncMessage::RpcDataColumn {
+                sync_request_id: SyncRequestId::DataColumnsByRoot(id),
+                peer_id,
+                data_column: Some(data_column.clone()),
+                seen_timestamp: D,
+            });
+        }
+        self.send_sync_message(SyncMessage::RpcDataColumn {
+            sync_request_id: SyncRequestId::DataColumnsByRoot(id),
             peer_id,
             data_column: None,
             seen_timestamp: D,
@@ -595,6 +727,7 @@ impl TestRig {
         let blocks = (0..complete_config.block_count)
             .map(|i| {
                 self.zero_block_at_slot(start_slot + Slot::new(i as u64), complete_config.with_data)
+                    .into()
             })
             .collect::<Vec<_>>();
         self.send_blocks_by_range_response(blocks_req_id, block_peer, &blocks);
@@ -612,11 +745,35 @@ impl TestRig {
         let blocks = (0..complete_config.block_count)
             .map(|i| {
                 self.zero_block_at_slot(start_slot + Slot::new(i as u64), complete_config.with_data)
+                    .into()
             })
             .collect::<Vec<_>>();
         self.send_blocks_by_range_response(blocks_req_id, block_peer, &blocks);
 
         blocks_req_id.parent_request_id.requester
+    }
+
+    fn complete_blocks_by_root_request(
+        &mut self,
+        request: BlocksByRootRequestData,
+        complete_config: CompleteConfig,
+    ) -> BlocksByRootRequester {
+        let (blocks_req_id, block_peer, blocks_req) = request;
+
+        let blocks = blocks_req
+            .block_roots()
+            .iter()
+            .map(|block_root| {
+                self.blocks_by_root
+                    .get(block_root)
+                    .expect("Test consumer requested unknown block")
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+
+        self.send_blocks_by_root_response(blocks_req_id, block_peer, &blocks);
+
+        blocks_req_id.parent_request_id
     }
 
     fn complete_data_columns_by_range_request(
@@ -677,6 +834,72 @@ impl TestRig {
         }
 
         self.send_data_columns_by_range_response(id, peer_id, &data_columns);
+    }
+
+    fn complete_data_columns_by_root_request_range_sync(
+        &mut self,
+        (id, peer_id, req): DataColumnsByRootRequestData,
+        complete_config: CompleteConfig,
+    ) {
+        // To reply with a valid DataColumnsByRange we need to construct
+        // DataColumnsByRange for the block root that we requested the block peer, plus
+        // figure out which exact columns we requested this peer
+        let mut triggered_custody_failure = false;
+
+        let data_columns = req
+            .data_column_ids
+            .iter()
+            .flat_map(|column_id| {
+                let block = self
+                    .blocks_by_root
+                    .get(&column_id.block_root)
+                    .expect("Test consumer requested unknown block")
+                    .clone();
+
+                let kzg_commitments_inclusion_proof = block
+                    .message()
+                    .body()
+                    .kzg_commitments_merkle_proof()
+                    .unwrap();
+                let kzg_commitments = block
+                    .message()
+                    .body()
+                    .blob_kzg_commitments()
+                    .unwrap()
+                    .clone();
+                let signed_block_header = block.signed_block_header();
+
+                column_id.columns.iter().filter_map(move |index| {
+                    // Skip column generation if index is marked as failure
+                    if complete_config.custody_failure_at_index == Some(*index) {
+                        triggered_custody_failure = true;
+                        return None;
+                    }
+
+                    // We need to produce a DataColumn with valid inclusion proof, but can
+                    // be with random KZG proof and data as we won't send it for processing
+                    Some(Arc::new(DataColumnSidecar {
+                        index: *index,
+                        column: VariableList::empty(),
+                        kzg_commitments: kzg_commitments.clone(),
+                        kzg_proofs: VariableList::from(vec![]),
+                        signed_block_header: signed_block_header.clone(),
+                        kzg_commitments_inclusion_proof: kzg_commitments_inclusion_proof.clone(),
+                    }))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Need to log here because I can't capture &mut self inside the columns iter
+        if triggered_custody_failure {
+            if let Some(index) = complete_config.custody_failure_at_index {
+                self.log(&format!(
+                    "Forced custody failure at request {id} for peer {peer_id} index {index:?}"
+                ));
+            }
+        }
+
+        self.send_data_columns_by_root_response(id, peer_id, &data_columns);
     }
 
     fn find_and_complete_data_by_range_request(
@@ -780,10 +1003,24 @@ impl TestRig {
                 continue;
             }
 
+            if let Ok(request) =
+                self.pop_received_network_event(|ev| request_filter.blocks_by_root_requests(ev))
+            {
+                self.complete_blocks_by_root_request(request, complete_config);
+                continue;
+            }
+
             if let Ok(request) = self
                 .pop_received_network_event(|ev| request_filter.data_columns_by_range_requests(ev))
             {
                 self.complete_data_columns_by_range_request(request, complete_config);
+                continue;
+            }
+
+            if let Ok(request) = self
+                .pop_received_network_event(|ev| request_filter.data_columns_by_root_requests(ev))
+            {
+                self.complete_data_columns_by_root_request_range_sync(request, complete_config);
                 continue;
             }
 
@@ -1211,4 +1448,21 @@ fn finalized_sync_permanent_custody_peer_failure() {
 
     // custody_by_range request is still active waiting for a new peer to connect
     r.expect_active_block_components_by_range_request_on_custody_step();
+}
+
+#[tokio::test]
+async fn tree_sync_happy_path() {
+    let mut r = TestRig::test_setup();
+    let (head_root, head_slot) = r.create_parent_chain();
+    let remote_info = SyncInfo {
+        finalized_epoch: Epoch::new(0),
+        finalized_root: Hash256::ZERO,
+        head_slot,
+        head_root,
+    };
+    r.add_sync_peer(false, remote_info.clone());
+    r.progress_until_no_events(NO_FILTER, complete());
+    r.add_sync_peer(true, remote_info);
+    r.progress_until_no_events(NO_FILTER, complete());
+    r.expect_empty_network();
 }

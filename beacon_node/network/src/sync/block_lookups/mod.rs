@@ -587,22 +587,11 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     )]
     pub fn on_processing_result(
         &mut self,
-        process_type: BlockProcessType,
-        result: BlockProcessingResult,
-        cx: &mut SyncNetworkContext<T>,
+        _process_type: BlockProcessType,
+        _result: BlockProcessingResult,
+        _cx: &mut SyncNetworkContext<T>,
     ) {
-        let lookup_result = match process_type {
-            BlockProcessType::SingleBlock { id } => {
-                self.on_processing_result_inner::<BlockRequestState<T::EthSpec>>(id, result, cx)
-            }
-            BlockProcessType::SingleBlob { id } => {
-                self.on_processing_result_inner::<BlobRequestState<T::EthSpec>>(id, result, cx)
-            }
-            BlockProcessType::SingleCustodyColumn(id) => {
-                self.on_processing_result_inner::<CustodyRequestState<T::EthSpec>>(id, result, cx)
-            }
-        };
-        self.on_lookup_result(process_type.id(), lookup_result, "processing_result", cx);
+        todo!();
     }
 
     #[instrument(parent = None,

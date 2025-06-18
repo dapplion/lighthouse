@@ -628,7 +628,7 @@ impl<T: BeaconChainTypes> Router<T> {
     ) {
         let sync_request_id = match app_request_id {
             AppRequestId::Sync(sync_id) => match sync_id {
-                id @ SyncRequestId::SingleBlock { .. } => id,
+                id @ SyncRequestId::BlocksByRoot { .. } => id,
                 other => {
                     crit!(request = ?other, "BlocksByRoot response on incorrect request");
                     return;
@@ -662,7 +662,7 @@ impl<T: BeaconChainTypes> Router<T> {
     ) {
         let sync_request_id = match app_request_id {
             AppRequestId::Sync(sync_id) => match sync_id {
-                id @ SyncRequestId::SingleBlob { .. } => id,
+                id @ SyncRequestId::BlobsByRoot { .. } => id,
                 other => {
                     crit!(request = ?other, "BlobsByRoot response on incorrect request");
                     return;

@@ -1,11 +1,11 @@
 use crate::sync::network_context::{
-    DataColumnsByRootRequestId, DataColumnsByRootSingleBlockRequest, RpcRequestSendError,
-    RpcResponseError,
+    DataColumnsByRootRequestId, RpcRequestSendError, RpcResponseError,
 };
 use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::BeaconChainTypes;
 use fnv::FnvHashMap;
-use lighthouse_network::service::api_types::{CustodyId, DataColumnsByRootRequester};
+use lighthouse_network::rpc::methods::DataColumnsByRootRequest;
+use lighthouse_network::service::api_types::{CustodyByRootRequestId, DataColumnsByRootRequester};
 use lighthouse_network::PeerId;
 use lru_cache::LRUTimeCache;
 use parking_lot::RwLock;
@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 use strum::IntoStaticStr;
 use tracing::{debug, warn};
-use types::{data_column_sidecar::ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Hash256};
+use types::{
+    data_column_sidecar::ColumnIndex, DataColumnSidecar, DataColumnSidecarList,
+    DataColumnsByRootIdentifier, Hash256, RuntimeVariableList,
+};
 
 use super::{LookupRequestResult, PeerGroup, RpcResponseResult, SyncNetworkContext};
 
@@ -27,8 +30,8 @@ const MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS: usize = 3;
 
 pub struct ActiveCustodyByRootRequest<T: BeaconChainTypes> {
     start_time: Instant,
-    block_root: Hash256,
-    custody_id: CustodyId,
+    block_roots: Vec<Hash256>,
+    custody_id: CustodyByRootRequestId,
     /// List of column indices this request needs to download to complete successfully
     #[allow(clippy::type_complexity)]
     column_requests: FnvHashMap<
@@ -89,14 +92,14 @@ pub type CustodyByRootRequestResult<E> =
 
 impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
     pub(crate) fn new(
-        block_root: Hash256,
-        custody_id: CustodyId,
+        block_roots: Vec<Hash256>,
+        custody_id: CustodyByRootRequestId,
         column_indices: &[ColumnIndex],
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Self {
         Self {
             start_time: Instant::now(),
-            block_root,
+            block_roots,
             custody_id,
             column_requests: HashMap::from_iter(
                 column_indices
@@ -127,7 +130,6 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
     ) -> CustodyByRootRequestResult<T::EthSpec> {
         let Some(batch_request) = self.active_batch_columns_requests.get_mut(&req_id) else {
             warn!(
-                block_root = ?self.block_root,
                 %req_id,
                 "Received custody column response for unrequested index"
             );
@@ -137,7 +139,6 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
         match resp {
             Ok((data_columns, seen_timestamp)) => {
                 debug!(
-                    block_root = ?self.block_root,
                     %req_id,
                     %peer_id,
                     count = data_columns.len(),
@@ -184,7 +185,6 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
                 if !missing_column_indexes.is_empty() {
                     // Note: Batch logging that columns are missing to not spam logger
                     debug!(
-                        block_root = ?self.block_root,
                         %req_id,
                         %peer_id,
                         // TODO(das): this property can become very noisy, being the full range 0..128
@@ -197,10 +197,9 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
             }
             Err(err) => {
                 debug!(
-                    block_root = ?self.block_root,
                     %req_id,
-                   %peer_id,
-                   error = ?err,
+                    %peer_id,
+                    error = ?err,
                     "Custody column download error"
                 );
 
@@ -312,10 +311,8 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
                 .data_columns_by_root_request(
                     DataColumnsByRootRequester::Custody(self.custody_id),
                     peer_id,
-                    DataColumnsByRootSingleBlockRequest {
-                        block_root: self.block_root,
-                        indices: indices.clone(),
-                    },
+                    self.block_roots.clone(),
+                    indices.clone(),
                     // If peer is in the lookup peer set, it claims to have imported the block and
                     // must have its columns in custody. In that case, set `true = enforce max_requests`
                     // and downscore if data_columns_by_root does not returned the expected custody
@@ -478,6 +475,13 @@ impl<I: std::fmt::Display + PartialEq, T> ColumnRequest<I, T> {
                 "bad state on_download_success expected Downloading got {}",
                 Into::<&'static str>::into(other),
             ))),
+        }
+    }
+
+    pub fn peek_downloaded_data(&self) -> Option<&T> {
+        match &self.status {
+            Status::Downloaded(_, data, _) => Some(data),
+            _ => None,
         }
     }
 

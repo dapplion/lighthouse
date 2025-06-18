@@ -18,9 +18,9 @@ pub struct SingleLookupReqId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum SyncRequestId {
     /// Request searching for a block given a hash.
-    SingleBlock { id: SingleLookupReqId },
+    BlocksByRoot(BlocksByRootRequestId),
     /// Request searching for a set of blobs given a hash.
-    SingleBlob { id: SingleLookupReqId },
+    BlobsByRoot(BlobsByRootRequestId),
     /// Request searching for a set of data columns given a hash and list of column indices.
     DataColumnsByRoot(DataColumnsByRootRequestId),
     /// Blocks by range request
@@ -30,6 +30,18 @@ pub enum SyncRequestId {
     /// Data columns by range request
     DataColumnsByRange(DataColumnsByRangeRequestId),
 }
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BlocksByRootRequestId {
+    pub id: Id,
+    pub parent_request_id: BlocksByRootRequester,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct HeaderLookupId(pub Hash256);
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BatchId(pub Id);
 
 /// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
 /// Wrapping this particular req_id, ensures not mixing this request with a custody req_id.
@@ -42,6 +54,14 @@ pub struct DataColumnsByRootRequestId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct BlocksByRangeRequestId {
     /// Id to identify this attempt at a blocks_by_range request for `parent_request_id`
+    pub id: Id,
+    /// The Id of the overall By Range request for block components.
+    pub parent_request_id: ComponentsByRangeRequestId,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BlobsByRootRequestId {
+    /// Id to identify this attempt at a blobs_by_range request for `parent_request_id`
     pub id: Id,
     /// The Id of the overall By Range request for block components.
     pub parent_request_id: ComponentsByRangeRequestId,
@@ -90,9 +110,15 @@ pub enum RangeRequestId {
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum BlocksByRootRequester {
+    Header(HeaderLookupId),
+    RangeSync(ComponentsByRangeRequestId),
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum DataColumnsByRootRequester {
     Sampling(SamplingId),
-    Custody(CustodyId),
+    Custody(CustodyByRootRequestId),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -117,8 +143,8 @@ pub enum SamplingRequester {
 pub struct SamplingRequestId(pub usize);
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct CustodyId {
-    pub requester: CustodyRequester,
+pub struct CustodyByRootRequestId {
+    pub parent_request_id: ComponentsByRangeRequestId,
 }
 
 /// Downstream components that perform custody by root requests.
@@ -231,9 +257,11 @@ impl_display!(BlobsByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(DataColumnsByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(CustodyByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
+impl_display!(BlocksByRootRequestId, "{}/{}", id, parent_request_id);
+impl_display!(BlobsByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
-impl_display!(CustodyId, "{}", requester);
+impl_display!(CustodyByRootRequestId, "{}", parent_request_id);
 impl_display!(SamplingId, "{}/{}", sampling_request_id, id);
 
 impl Display for DataColumnsByRootRequester {
@@ -242,6 +270,18 @@ impl Display for DataColumnsByRootRequester {
             Self::Custody(id) => write!(f, "Custody/{id}"),
             Self::Sampling(id) => write!(f, "Sampling/{id}"),
         }
+    }
+}
+
+impl Display for HeaderLookupId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Display for BatchId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -256,6 +296,15 @@ impl Display for RangeRequestId {
         match self {
             Self::RangeSync { chain_id, batch_id } => write!(f, "RangeSync/{batch_id}/{chain_id}"),
             Self::BackfillSync { batch_id } => write!(f, "BackfillSync/{batch_id}"),
+        }
+    }
+}
+
+impl Display for BlocksByRootRequester {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Header(id) => write!(f, "Header/{id}"),
+            Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
         }
     }
 }

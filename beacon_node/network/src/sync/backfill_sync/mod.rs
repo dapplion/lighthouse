@@ -576,8 +576,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
 
         debug!(
             ?result,
-            %batch,
-            batch_epoch = %batch_id,
+            %batch_id,
             "Backfill batch processed"
         );
 
@@ -841,7 +840,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 }
                 BatchState::AwaitingProcessing(..) => {}
                 BatchState::Processing(_) => {
-                    debug!(batch = %id, %batch, "Advancing chain while processing a batch");
+                    debug!(batch = %id, "Advancing chain while processing a batch");
                     if let Some(processing_id) = self.current_processing_batch {
                         if id >= processing_id {
                             self.current_processing_batch = None;
@@ -936,7 +935,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         batch_id: BatchId,
     ) -> Result<(), BackFillError> {
         if let Some(batch) = self.batches.get_mut(&batch_id) {
-            let request = batch.to_blocks_by_range_request();
+            let request = todo!();
             let failed_peers = batch.failed_peers();
             match network.block_components_by_range_request(
                 request,
@@ -949,7 +948,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     if let Err(e) = batch.start_downloading(request_id) {
                         return self.fail_sync(BackFillError::BatchInvalidState(batch_id, e.0));
                     }
-                    debug!(epoch = %batch_id, %batch, "Requesting batch");
+                    debug!(%batch_id, "Requesting batch");
 
                     return Ok(());
                 }
@@ -965,7 +964,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     }
                     RpcRequestSendError::InternalError(e) => {
                         // NOTE: under normal conditions this shouldn't happen but we handle it anyway
-                        warn!(%batch_id, error = ?e, %batch,"Could not send batch request");
+                        warn!(%batch_id, error = ?e, "Could not send batch request");
                         // register the failed download and check if the batch can be retried
                         if let Err(e) = batch.start_downloading(1) {
                             return self.fail_sync(BackFillError::BatchInvalidState(batch_id, e.0));
@@ -1097,8 +1096,8 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     .saturating_sub(BACKFILL_EPOCHS_PER_BATCH);
                 self.include_next_batch(network)
             }
-            Entry::Vacant(entry) => {
-                entry.insert(BatchInfo::new(&batch_id, BACKFILL_EPOCHS_PER_BATCH));
+            Entry::Vacant(_entry) => {
+                // TODO
                 if self.would_complete(batch_id) {
                     self.last_batch_downloaded = true;
                 }

@@ -1,4 +1,3 @@
-use crate::sync::manager::BlockProcessType;
 use crate::sync::SamplingId;
 use crate::{service::NetworkMessage, sync::manager::SyncMessage};
 use beacon_chain::blob_verification::{GossipBlobError, GossipVerifiedBlob};
@@ -34,7 +33,6 @@ use tracing::{debug, error, trace, warn, Instrument};
 use types::*;
 
 pub use sync_methods::{ChainSegmentProcessId, PeerGroupAction};
-use types::blob_sidecar::FixedBlobSidecarList;
 
 pub type Error<T> = TrySendError<BeaconWorkEvent<T>>;
 
@@ -476,76 +474,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
             work: Work::GossipBlsToExecutionChange(Box::new(process_fn)),
-        })
-    }
-
-    /// Create a new `Work` event for some block, where the result from computation (if any) is
-    /// sent to the other side of `result_tx`.
-    pub fn send_rpc_beacon_block(
-        self: &Arc<Self>,
-        block_root: Hash256,
-        block: RpcBlock<T::EthSpec>,
-        seen_timestamp: Duration,
-        process_type: BlockProcessType,
-    ) -> Result<(), Error<T::EthSpec>> {
-        let process_fn = self.clone().generate_rpc_beacon_block_process_fn(
-            block_root,
-            block,
-            seen_timestamp,
-            process_type,
-        );
-        self.try_send(BeaconWorkEvent {
-            drop_during_sync: false,
-            work: Work::RpcBlock { process_fn },
-        })
-    }
-
-    /// Create a new `Work` event for some blobs, where the result from computation (if any) is
-    /// sent to the other side of `result_tx`.
-    pub fn send_rpc_blobs(
-        self: &Arc<Self>,
-        block_root: Hash256,
-        blobs: FixedBlobSidecarList<T::EthSpec>,
-        seen_timestamp: Duration,
-        process_type: BlockProcessType,
-    ) -> Result<(), Error<T::EthSpec>> {
-        let blob_count = blobs.iter().filter(|b| b.is_some()).count();
-        if blob_count == 0 {
-            return Ok(());
-        }
-        let process_fn = self.clone().generate_rpc_blobs_process_fn(
-            block_root,
-            blobs,
-            seen_timestamp,
-            process_type,
-        );
-        self.try_send(BeaconWorkEvent {
-            drop_during_sync: false,
-            work: Work::RpcBlobs { process_fn },
-        })
-    }
-
-    /// Create a new `Work` event for some custody columns. `process_rpc_custody_columns` reports
-    /// the result back to sync.
-    pub fn send_rpc_custody_columns(
-        self: &Arc<Self>,
-        block_root: Hash256,
-        custody_columns: DataColumnSidecarList<T::EthSpec>,
-        seen_timestamp: Duration,
-        process_type: BlockProcessType,
-    ) -> Result<(), Error<T::EthSpec>> {
-        let s = self.clone();
-        self.try_send(BeaconWorkEvent {
-            drop_during_sync: false,
-            work: Work::RpcCustodyColumn(Box::pin(async move {
-                s.process_rpc_custody_columns(
-                    block_root,
-                    custody_columns,
-                    seen_timestamp,
-                    process_type,
-                )
-                .await;
-            })),
         })
     }
 

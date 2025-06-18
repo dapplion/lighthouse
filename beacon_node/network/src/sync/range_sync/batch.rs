@@ -1,6 +1,6 @@
 use crate::sync::network_context::PeerGroup;
 use beacon_chain::block_verification_types::RpcBlock;
-use lighthouse_network::rpc::methods::BlocksByRangeRequest;
+use lighthouse_network::rpc::methods::{BlocksByRangeRequest, BlocksByRootRequest};
 use lighthouse_network::service::api_types::Id;
 use lighthouse_network::PeerId;
 use std::collections::HashSet;
@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Sub;
 use std::time::{Duration, Instant};
 use strum::Display;
-use types::{ColumnIndex, Epoch, EthSpec, Slot};
+use types::{ChainSpec, ColumnIndex, Epoch, EthSpec, ForkName, Hash256, Slot};
 
 /// The number of times to retry a batch before it is considered failed.
 const MAX_BATCH_DOWNLOAD_ATTEMPTS: u8 = 5;
@@ -120,9 +120,7 @@ pub enum BatchProcessingResult {
 /// A segment of a chain.
 pub struct BatchInfo<E: EthSpec, B: BatchConfig = RangeSyncBatchConfig> {
     /// Start slot of the batch.
-    start_slot: Slot,
-    /// End slot of the batch.
-    end_slot: Slot,
+    block_roots: Vec<Hash256>,
     /// The `Attempts` that have been made and failed to send us this batch.
     failed_processing_attempts: Vec<Attempt>,
     /// Number of processing attempts that have failed but we do not count.
@@ -135,16 +133,6 @@ pub struct BatchInfo<E: EthSpec, B: BatchConfig = RangeSyncBatchConfig> {
     state: BatchState<E>,
     /// Pin the generic
     marker: std::marker::PhantomData<B>,
-}
-
-impl<E: EthSpec, B: BatchConfig> fmt::Display for BatchInfo<E, B> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Start Slot: {}, End Slot: {}, State: {}",
-            self.start_slot, self.end_slot, self.state
-        )
-    }
 }
 
 #[derive(Display)]
@@ -192,12 +180,9 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
     /// fork boundary will be of mixed type (all blocks and one last blockblob), and I don't want to
     /// deal with this for now.
     /// This means finalization might be slower in deneb
-    pub fn new(start_epoch: &Epoch, num_of_epochs: u64) -> Self {
-        let start_slot = start_epoch.start_slot(E::slots_per_epoch());
-        let end_slot = start_slot + num_of_epochs * E::slots_per_epoch();
+    pub fn new(block_roots: Vec<Hash256>) -> Self {
         BatchInfo {
-            start_slot,
-            end_slot,
+            block_roots,
             failed_processing_attempts: Vec::new(),
             failed_download_attempts: 0,
             failed_peers: <_>::default(),
@@ -247,10 +232,12 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B> {
 
     /// Returns a BlocksByRange request associated with the batch.
     pub fn to_blocks_by_range_request(&self) -> BlocksByRangeRequest {
-        BlocksByRangeRequest::new(
-            self.start_slot.into(),
-            self.end_slot.sub(self.start_slot).into(),
-        )
+        todo!();
+    }
+
+    pub fn to_blocks_by_root_request(&self, spec: &ChainSpec) -> BlocksByRootRequest {
+        // TODO: Is it necessary to pass ForkName to BlocksByRootRequest
+        BlocksByRootRequest::new(self.block_roots.clone(), spec, ForkName::Fulu)
     }
 
     /// After different operations over a batch, this could be in a state that allows it to
