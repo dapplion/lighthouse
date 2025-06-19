@@ -363,6 +363,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         &mut self.range_sync
     }
 
+    // Leak the full struct to prevent having to add many cfg(test) methods here
+    #[cfg(test)]
+    pub(crate) fn block_tree(&mut self) -> &mut BlockTree<T> {
+        &mut self.block_tree
+    }
+
     #[cfg(test)]
     pub(crate) fn update_execution_engine_state(&mut self, state: EngineState) {
         self.handle_new_execution_engine_state(state);
@@ -833,13 +839,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 imported,
             } => self.block_tree.prune_root(block_root, imported),
             SyncMessage::BatchProcessed { sync_type, result } => match sync_type {
-                ChainSegmentProcessId::RangeBatchId(chain_id, epoch) => {
-                    self.range_sync.handle_block_process_result(
-                        &mut self.network,
-                        chain_id,
-                        epoch,
-                        result,
-                    );
+                ChainSegmentProcessId::RangeBatchId(id) => {
+                    self.block_tree
+                        .handle_block_process_result(id, result, &mut self.network);
                     self.update_sync_state();
                 }
                 ChainSegmentProcessId::BackSyncBatchId(epoch) => {
@@ -1028,8 +1030,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         {
             match req_id.parent_request_id {
                 BlocksByRootRequester::Header(lookup_id) => {
-                    self.block_tree
-                        .on_block(req_id, lookup_id, result, peer_id, &mut self.network);
+                    self.block_tree.on_block_header(
+                        req_id,
+                        lookup_id,
+                        result,
+                        peer_id,
+                        &mut self.network,
+                    );
                 }
                 BlocksByRootRequester::RangeSync(batch_id) => {
                     self.on_block_components_by_range_response(
@@ -1232,15 +1239,14 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             .network
             .on_block_components_by_range_response(range_request_id, range_block_component)
         {
-            match result {
-                Ok((blocks, batch_peers)) => {
-                    match range_request_id.requester {
-                        RangeRequestId::RangeSync { chain_id, batch_id } => {
-                            self.block_tree
-                                .on_blocks_response(chain_id, blocks, batch_peers);
-                            self.update_sync_state();
-                        }
-                        RangeRequestId::BackfillSync { batch_id } => {
+            match range_request_id.requester {
+                RangeRequestId::RangeSync(id) => {
+                    self.block_tree
+                        .on_blocks_response(id, result, &mut self.network);
+                }
+                RangeRequestId::BackfillSync { batch_id } => {
+                    match result {
+                        Ok((blocks, batch_peers)) => {
                             match self.backfill_sync.on_block_response(
                                 &mut self.network,
                                 batch_id,
@@ -1257,21 +1263,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                                 }
                             }
                         }
-                    }
-                }
-                Err(e) => match range_request_id.requester {
-                    RangeRequestId::RangeSync { chain_id, batch_id } => {
-                        self.range_sync.inject_error(
-                            &mut self.network,
-                            batch_id,
-                            chain_id,
-                            range_request_id.id,
-                            e,
-                        );
-                        self.update_sync_state();
-                    }
-                    RangeRequestId::BackfillSync { batch_id } => {
-                        match self.backfill_sync.inject_error(
+                        Err(e) => match self.backfill_sync.inject_error(
                             &mut self.network,
                             batch_id,
                             range_request_id.id,
@@ -1279,9 +1271,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         ) {
                             Ok(_) => {}
                             Err(_) => self.update_sync_state(),
-                        }
+                        },
                     }
-                },
+                }
             }
         }
     }

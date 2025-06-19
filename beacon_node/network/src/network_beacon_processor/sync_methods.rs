@@ -8,8 +8,10 @@ use beacon_chain::data_column_verification::verify_kzg_for_data_column_list;
 use beacon_chain::{
     BeaconChainTypes, BlockError, ChainSegmentResult, HistoricalBlockError, NotifyExecutionLayer,
 };
+use lighthouse_network::service::api_types::HeaderLookupId;
 use lighthouse_network::PeerAction;
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -19,13 +21,12 @@ use types::{ColumnIndex, DataColumnSidecar, Epoch, Hash256};
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChainSegmentProcessId {
     /// Processing Id of a range syncing batch.
-    RangeBatchId(ChainId, Epoch),
+    RangeBatchId(HeaderLookupId),
     /// Processing ID for a backfill syncing batch.
     BackSyncBatchId(Epoch),
 }
 
 /// Returned when a chain segment import fails.
-#[derive(Debug)]
 pub struct ChainSegmentFailed {
     /// To be displayed in logs.
     pub message: String,
@@ -116,7 +117,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     ) {
         let result = match sync_type {
             // this a request from the range sync
-            ChainSegmentProcessId::RangeBatchId(chain_id, epoch) => {
+            ChainSegmentProcessId::RangeBatchId(id) => {
                 let start_slot = downloaded_blocks.first().map(|b| b.slot().as_u64());
                 let end_slot = downloaded_blocks.last().map(|b| b.slot().as_u64());
                 let sent_blocks = downloaded_blocks.len();
@@ -127,9 +128,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 {
                     (imported_blocks, Ok(_)) => {
                         debug!(
-                            batch_epoch = %epoch,
+                            %id,
                             first_block_slot = start_slot,
-                            chain = chain_id,
                             last_block_slot = end_slot,
                             processed_blocks = sent_blocks,
                             service= "sync",
@@ -141,9 +141,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     }
                     (imported_blocks, Err(e)) => {
                         debug!(
-                            batch_epoch = %epoch,
+                            %id,
                             first_block_slot = start_slot,
-                            chain = chain_id,
                             last_block_slot = end_slot,
                             imported_blocks,
                             error = %e.message,
@@ -427,5 +426,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             message: format!("{error:?}"),
             peer_action,
         })
+    }
+}
+
+impl Display for ChainSegmentProcessId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RangeBatchId(id) => write!(f, "RangeBatchId/{id}"),
+            Self::BackSyncBatchId(id) => write!(f, "BackSyncBatchId/{id}"),
+        }
     }
 }

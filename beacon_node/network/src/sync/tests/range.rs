@@ -5,10 +5,14 @@ use crate::sync::manager::SLOT_IMPORT_TOLERANCE;
 use crate::sync::network_context::{BlockComponentsByRangeRequestStep, RangeRequestId};
 use crate::sync::range_sync::{BatchId, BatchState, RangeSyncType};
 use crate::sync::tests::lookups::TestOptions;
+use crate::sync::BatchProcessResult;
 use crate::sync::{ChainId, SyncMessage};
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::test_utils::{AttestationStrategy, BlockStrategy};
-use beacon_chain::{block_verification_types::RpcBlock, EngineState, NotifyExecutionLayer};
+use beacon_chain::{
+    block_verification_types::RpcBlock, EngineState, NotifyExecutionLayer,
+    PayloadVerificationStatus,
+};
 use beacon_processor::WorkType;
 use lighthouse_network::rpc::methods::{
     BlobsByRangeRequest, BlocksByRootRequest, DataColumnsByRangeRequest, DataColumnsByRootRequest,
@@ -496,7 +500,45 @@ impl TestRig {
         SignedBeaconBlock::from_block(block, Signature::empty())
     }
 
-    fn create_parent_chain(&mut self) -> (Hash256, Slot) {
+    async fn create_unimported_parent_chain(&mut self) -> (Hash256, Slot) {
+        let block_count = 8;
+        self.log(&format!(
+            "Creating unimported chain of {block_count} blocks"
+        ));
+
+        let mut r = TestRig::test_setup();
+
+        r.harness.advance_slot();
+        let head_root = r
+            .harness
+            .extend_chain(
+                block_count,
+                BlockStrategy::OnCanonicalHead,
+                AttestationStrategy::AllValidators,
+            )
+            .await;
+
+        let store = &r.harness.chain.store;
+        let head_block = store.get_full_block(&head_root).unwrap().unwrap();
+
+        let mut target_block_root = head_root;
+        while let Some(block) = store.get_full_block(&target_block_root).unwrap() {
+            self.log(&format!(
+                "Adding block {target_block_root:?} slot {} to known blocks",
+                block.slot()
+            ));
+            let parent_root = block.parent_root();
+            self.blocks_by_root.insert(target_block_root, block.into());
+            if parent_root == Hash256::ZERO {
+                break;
+            }
+            target_block_root = parent_root;
+        }
+
+        (head_root, head_block.slot())
+    }
+
+    fn create_not_rooted_parent_chain(&mut self) -> (Hash256, Slot) {
         let current_head = self.harness.chain.head();
         let mut parent_root = current_head.head_block_root();
         let mut slot = current_head.head_slot();
@@ -628,7 +670,7 @@ impl TestRig {
             .collect::<Vec<_>>();
         ids.sort_unstable();
         self.log(&format!(
-            "Completing DataColumnsByRange request {id} to {peer_id} with data_columns {ids:?}"
+            "Completing DataColumnsByRoot request {id} to {peer_id} with data_columns {ids:?}"
         ));
 
         for data_column in data_columns {
@@ -990,6 +1032,56 @@ impl TestRig {
         }
     }
 
+    fn complete_block_processing(&mut self, ids: Vec<HeaderLookupId>) {
+        // Sort ids first as we need to process blocks in order of ancestors. This only works if the
+        // test does not send blocks of two parallel chains at once.
+        let mut blocks = ids
+            .into_iter()
+            .map(|id| {
+                let block = self
+                    .blocks_by_root
+                    .get(&id.0)
+                    .cloned()
+                    .expect("unknown block");
+                (id, block)
+            })
+            .collect::<Vec<_>>();
+        blocks.sort_by_key(|(_, block)| block.slot());
+
+        for (id, block) in blocks {
+            self.log(&format!(
+                "Completing block processing {id} slot {}",
+                block.slot()
+            ));
+
+            {
+                let mut head_state = self.harness.chain.head().snapshot.beacon_state.clone();
+                *head_state.slot_mut() = block.slot();
+
+                let mut fork_choice = self.harness.chain.canonical_head.fork_choice_write_lock();
+                fork_choice
+                    .on_block(
+                        block.slot(),
+                        block.message(),
+                        id.0,
+                        Duration::from_secs(0),
+                        &head_state,
+                        PayloadVerificationStatus::Verified,
+                        &self.spec,
+                    )
+                    .expect("error importing block to fork-choice");
+            }
+
+            self.send_sync_message(SyncMessage::BatchProcessed {
+                sync_type: ChainSegmentProcessId::RangeBatchId(id),
+                result: BatchProcessResult::Success {
+                    sent_blocks: 1,
+                    imported_blocks: 1,
+                },
+            });
+        }
+    }
+
     fn progress_until_no_events(
         &mut self,
         request_filter: RequestFilter,
@@ -1021,6 +1113,13 @@ impl TestRig {
                 .pop_received_network_event(|ev| request_filter.data_columns_by_root_requests(ev))
             {
                 self.complete_data_columns_by_root_request_range_sync(request, complete_config);
+                continue;
+            }
+
+            // TODO(tree-sync): find a way to get this info from the beacon processor events
+            let ids = self.sync_manager.block_tree().get_processing_ids();
+            if !ids.is_empty() {
+                self.complete_block_processing(ids);
                 continue;
             }
 
@@ -1061,15 +1160,15 @@ impl TestRig {
                 request_filter.epoch(epoch),
                 complete_config,
             );
-            if let RangeRequestId::RangeSync { batch_id, .. } = id {
-                assert_eq!(batch_id.as_u64(), epoch, "Unexpected batch_id");
+            if let RangeRequestId::RangeSync { .. } = id {
+                todo!();
             } else {
                 panic!("unexpected RangeRequestId {id}");
             }
 
             let id = match id {
-                RangeRequestId::RangeSync { chain_id, batch_id } => {
-                    ChainSegmentProcessId::RangeBatchId(chain_id, batch_id)
+                RangeRequestId::RangeSync(id) => {
+                    todo!();
                 }
                 RangeRequestId::BackfillSync { batch_id } => {
                     ChainSegmentProcessId::BackSyncBatchId(batch_id)
@@ -1453,7 +1552,7 @@ fn finalized_sync_permanent_custody_peer_failure() {
 #[tokio::test]
 async fn tree_sync_happy_path() {
     let mut r = TestRig::test_setup();
-    let (head_root, head_slot) = r.create_parent_chain();
+    let (head_root, head_slot) = r.create_unimported_parent_chain().await;
     let remote_info = SyncInfo {
         finalized_epoch: Epoch::new(0),
         finalized_root: Hash256::ZERO,

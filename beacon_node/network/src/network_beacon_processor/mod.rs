@@ -521,7 +521,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         blocks: Vec<RpcBlock<T::EthSpec>>,
     ) -> Result<(), Error<T::EthSpec>> {
         let is_backfill = matches!(&process_id, ChainSegmentProcessId::BackSyncBatchId { .. });
-        debug!(blocks = blocks.len(), id = ?process_id, "Batch sending for process");
+        debug!(blocks = blocks.len(), id = %process_id, "Batch sending for process");
 
         let processor = self.clone();
         let process_fn = async move {

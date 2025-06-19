@@ -1,7 +1,11 @@
 use super::network_context::{LookupRequestResult, RpcResponseError, SyncNetworkContext};
+use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::sync::network_context::custody_by_root::ColumnRequest;
-use crate::sync::network_context::{BlocksByRootSameForkRequest, RpcResponseResult};
+use crate::sync::network_context::{
+    BlocksByRootSameForkRequest, RpcResponseBatchResult, RpcResponseResult,
+};
 use crate::sync::range_sync::{BatchInfo, BatchPeers};
+use crate::sync::BatchProcessResult;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::rpc::BlocksByRootRequest;
@@ -13,81 +17,105 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::debug;
-use types::{BeaconBlockHeader, Epoch, ForkName, Hash256, SignedBeaconBlock, Slot};
+use types::{BeaconBlockHeader, Epoch, EthSpec, ForkName, Hash256, SignedBeaconBlock, Slot};
 
 pub struct BlockTree<T: BeaconChainTypes> {
-    blocks: HashMap<Hash256, Block>,
+    blocks: HashMap<Hash256, Block<T::EthSpec>>,
     batches: HashMap<Id, BatchInfo<T::EthSpec>>,
-    roots: HashMap<Hash256, TreeRoot>,
-    tips: HashSet<Hash256>,
     chain: Arc<BeaconChain<T>>,
 }
 
-struct TreeRoot {
+struct Block<E: EthSpec> {
+    id: HeaderLookupId,
     peers: HashSet<PeerId>,
-    request: ColumnRequest<BlocksByRootRequestId, BeaconBlockHeader>,
+    status: Status<E>,
 }
 
-struct Block {
-    id: HeaderLookupId,
-    block: BeaconBlockHeader,
-    is_syncing: bool,
+enum Status<E: EthSpec> {
+    DownloadingHeader(ColumnRequest<BlocksByRootRequestId, BeaconBlockHeader>),
+    Header(BeaconBlockHeader),
+    Syncing(BeaconBlockHeader, SyncingStatus<E>),
+}
+
+enum SyncingStatus<E: EthSpec> {
+    AwaitingDownload,
+    Downloading(Id),
+    AwaitingProcessing(RpcBlock<E>, BatchPeers),
+    Processing(BatchPeers),
 }
 
 // TODO(tree-sync): Re-add the reprocessing cache, so we don't process twice a block that we got
 // through gossip and sync.
 
-impl Block {
-    fn new(block_root: Hash256, block: BeaconBlockHeader) -> Self {
+impl<E: EthSpec> Block<E> {
+    fn new(block_root: Hash256, id: Id, peers: &[PeerId]) -> Self {
         Self {
-            id: HeaderLookupId(block_root),
-            block,
-            is_syncing: false,
+            id: HeaderLookupId(block_root, id),
+            peers: HashSet::from_iter(peers.iter().copied()),
+            status: Status::DownloadingHeader(ColumnRequest::new()),
         }
     }
 
-    fn start<T: BeaconChainTypes>(&mut self, cx: &mut SyncNetworkContext<T>) {
-        cx.block_lookup_request(self.id, &self.peers, self.id.0);
-    }
+    fn start<T: BeaconChainTypes>(&mut self, cx: &mut SyncNetworkContext<T>) {}
 
     fn on_error(&mut self, _e: RpcResponseError) {
         todo!();
-    }
-
-    fn slot(&self) -> Option<Slot> {
-        if let Some(block) = self.request.peek_downloaded_data() {
-            Some(block.slot)
-        } else {
-            None
-        }
     }
 
     fn root(&self) -> Hash256 {
         todo!();
     }
 
+    fn peer_count(&self) -> usize {
+        self.peers.len()
+    }
+
     fn is_syncing(&self) -> bool {
-        self.is_syncing
+        match self.status {
+            Status::DownloadingHeader(..) => false,
+            Status::Header(..) => false,
+            Status::Syncing(..) => true,
+        }
+    }
+
+    fn header(&self) -> Option<&BeaconBlockHeader> {
+        match &self.status {
+            Status::DownloadingHeader(..) => None,
+            Status::Header(header) => Some(header),
+            Status::Syncing(header, _) => Some(header),
+        }
     }
 
     fn parent_root(&self) -> Option<Hash256> {
-        if let Some(block) = self.request.peek_downloaded_data() {
-            Some(block.parent_root)
-        } else {
-            None
-        }
+        self.header().map(|header| header.parent_root)
     }
 
     fn parent_root_and_slot(&self) -> Option<(Hash256, Slot)> {
-        if let Some(block) = self.request.peek_downloaded_data() {
-            Some((block.parent_root, block.slot))
-        } else {
-            None
+        self.header()
+            .map(|header| (header.parent_root, header.slot))
+    }
+
+    fn header_request(
+        &mut self,
+    ) -> Result<&mut ColumnRequest<BlocksByRootRequestId, BeaconBlockHeader>, String> {
+        match &mut self.status {
+            Status::DownloadingHeader(request) => Ok(request),
+            _ => Err("Expected lookup to be in DownloadingHeader state".to_owned()),
         }
     }
 
-    fn is_rooted(&self) -> bool {
-        todo!();
+    fn syncing(&mut self) -> Option<(&mut BeaconBlockHeader, &mut SyncingStatus<E>)> {
+        match &mut self.status {
+            Status::Syncing(header, request) => Some((header, request)),
+            _ => None,
+        }
+    }
+
+    fn block_request(&mut self) -> Result<&mut SyncingStatus<E>, String> {
+        match &mut self.status {
+            Status::Syncing(_, request) => Ok(request),
+            _ => Err("Expected lookup to be in Syncing state".to_owned()),
+        }
     }
 }
 
@@ -100,10 +128,22 @@ impl<T: BeaconChainTypes> BlockTree<T> {
         Self {
             blocks: <_>::default(),
             batches: <_>::default(),
-            roots: <_>::default(),
-            tips: <_>::default(),
             chain,
         }
+    }
+
+    #[cfg(test)]
+    pub fn get_processing_ids(&self) -> Vec<HeaderLookupId> {
+        self.blocks
+            .values()
+            .filter(|block| {
+                matches!(
+                    block.status,
+                    Status::Syncing(_, SyncingStatus::Processing(_)),
+                )
+            })
+            .map(|block| block.id)
+            .collect()
     }
 
     pub fn pause(&mut self) {
@@ -121,63 +161,27 @@ impl<T: BeaconChainTypes> BlockTree<T> {
         cx: &mut SyncNetworkContext<T>,
     ) -> bool {
         if self.blocks.contains_key(&block_root) {
-            // `block_root` points to a known block item in the header DAG
-            // Target root is the oldest known ancestor of `block_root` in the header tree
-            let oldest_ancestor = self.oldest_known_ancestor(block_root);
-            let Some(root) = self.roots.get_mut(&oldest_ancestor) else {
-                panic!("root node should exist");
-            };
-            // Add peer to the root's peer set
-            for peer in peers {
-                if root.peers.insert(peer) {
-                    debug!(block_root = ?oldest_ancestor, ?peer, "Adding peer to existing header lookup");
+            // Add peer to `block`'s entry and all its ancestors
+            let mut target_block_root = block_root;
+            while let Some(lookup) = self.blocks.get_mut(&target_block_root) {
+                for peer in peers {
+                    // TODO(tree-sync): If peer already in set no need to add to its ancestors
+                    lookup.peers.insert(*peer);
+                    // TODO(tree-sync): This log can be very noisy maybe log once per peer
+                    debug!(block_root = ?target_block_root, ?peer, "Adding peer to existing header lookup");
+                }
+                if let Some(parent_root) = lookup.parent_root() {
+                    target_block_root = parent_root;
+                } else {
+                    break;
                 }
             }
+
             true
         } else {
             debug!(?block_root, ?peers, "Creating new header lookup");
 
-            let new_lookup_peers = HashSet::from_iter(peers);
-
-            // If any root has a parent that points to `block_root` remove them from roots and don't
-            // make `block_root` node a tip
-            let roots_that_descend_from_new_block = self
-                .roots
-                .keys()
-                .filter(|root| {
-                    if let Some(parent_root) = self
-                        .blocks
-                        .get(root)
-                        .expect("node must exist")
-                        .parent_root()
-                    {
-                        parent_root == block_root
-                    } else {
-                        false
-                    }
-                })
-                .copied()
-                .collect::<Vec<_>>();
-
-            // We only remove roots that have have a known parent, so they have completed download
-            for block_root in roots_that_descend_from_new_block {
-                let root = self.roots.remove(&block_root).expect("node must exist");
-                new_lookup_peers.extend(root.peers.values());
-            }
-
-            // New nodes always become roots since we don't know their parent
-            self.roots.insert(
-                block_root,
-                TreeRoot {
-                    peers: new_lookup_peers,
-                    request: ColumnRequest::new(),
-                },
-            );
-
-            // If no one descends from this new node, add it to tips
-            if roots_that_descend_from_new_block.is_empty() {
-                self.tips.insert(block_root);
-            }
+            let mut lookup = Block::new(block_root, cx.next_id(), peers);
 
             // TODO(tree-sync): have good peer selection
             let Some(peer) = lookup.peers.iter().next() else {
@@ -192,7 +196,11 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                 )
                 .unwrap();
 
-            lookup.request.on_download_start(req_id).unwrap();
+            lookup
+                .header_request()
+                .expect("A new lookup is in DownloadingHeader request state")
+                .on_download_start(req_id)
+                .expect("A new request is in AwaitingDownload state");
 
             self.blocks.insert(block_root, lookup);
             true
@@ -225,7 +233,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
         }
     }
 
-    pub fn on_block(
+    pub fn on_block_header(
         &mut self,
         req_id: BlocksByRootRequestId,
         lookup_id: HeaderLookupId,
@@ -234,31 +242,30 @@ impl<T: BeaconChainTypes> BlockTree<T> {
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), String> {
         let block_root = lookup_id.0;
-        let Some(lookup) = self.roots.get_mut(&block_root) else {
+        let Some(lookup) = self.blocks.get_mut(&block_root) else {
             return Err(format!("No header lookup for root {block_root}"));
         };
 
-        match response {
-            Ok((blocks, received)) => {
-                if blocks.len() != 1 {
-                    return Err(format!(
-                        "Lookup {block_root} returned {} blocks expecting 1",
-                        blocks.len()
-                    ));
-                }
-                let block = blocks.first().expect("blocks len == 1").clone();
+        let response = response.and_then(|(blocks, timestamp)| {
+            let block = blocks
+                .first()
+                .cloned()
+                .ok_or(RpcResponseError::InternalError(
+                    "blocks_by_root response contains zero blocks".to_owned(),
+                ))?;
+            Ok((block, timestamp))
+        });
 
+        match response {
+            Ok((block, received)) => {
                 let block_header = block.message().block_header();
                 let parent_root = block_header.parent_root;
 
                 lookup
-                    .request
-                    .on_download_success(req_id, peer_id, block_header, received)
+                    .header_request()?
+                    .on_download_success(req_id, peer_id, block_header.clone(), received)
                     .unwrap();
-
-                // TODO(tree-sync): Should check if node already exist to not override state
-                self.blocks
-                    .insert(block_root, Block::new(block_root, block_header));
+                lookup.status = Status::Header(block_header.clone());
 
                 // Once we discover the parent_root of this block three things can happen
                 // 1. The parent root is a known block -> stop
@@ -269,30 +276,51 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                 // TODO(tree-sync): on finalization or every interval we should drop branches that
                 // conflict with finality
                 let parent_imported = self.chain.block_is_known_to_fork_choice(&parent_root);
+                let finalized_checkpoint = self.chain.head().finalized_checkpoint();
                 let parent_known = self.blocks.contains_key(&parent_root);
 
-                if parent_known {
-                    self.tips.remove(&parent_root);
-                }
-
-                let finalized_slot = Slot::new(0);
-
-                if block_header.slot <= finalized_slot {
-                    panic!("Block conflicts with finality");
+                if block_header.slot
+                    <= finalized_checkpoint
+                        .epoch
+                        .start_slot(T::EthSpec::slots_per_epoch())
+                    && block_root != finalized_checkpoint.root
+                {
+                    panic!(
+                        "Block {:?} {} conflicts with finalized checkpoint {:?}",
+                        block_root, block_header.slot, finalized_checkpoint
+                    );
                 }
                 if parent_imported || parent_known {
                     // Stop search we reached a known block
-                    self.mark_descendants_as_rooted(parent_root);
                     self.trigger_forward_sync(cx);
                 } else {
                     let lookup = self.blocks.get_mut(&block_root).expect("lookup exists");
-                    let peers = lookup.peers();
+                    let peers = lookup.peers.iter().copied().collect::<Vec<_>>();
                     self.search(parent_root, &peers, cx);
                 }
             }
             Err(e) => {
-                lookup.request.on_download_error(req_id).unwrap();
-                lookup.start(cx);
+                lookup.header_request()?.on_download_error(req_id).unwrap();
+
+                // TODO(tree-sync): have good peer selection
+                let Some(peer) = lookup.peers.iter().next() else {
+                    todo!("no peer");
+                };
+
+                let req_id = cx
+                    .send_blocks_by_root_request(
+                        *peer,
+                        BlocksByRootRequest::new(vec![block_root], cx.spec(), ForkName::Fulu),
+                        BlocksByRootRequester::Header(lookup.id),
+                    )
+                    .unwrap();
+
+                lookup
+                    .header_request()
+                    .expect("A new lookup is in DownloadingHeader request state")
+                    .on_download_start(req_id)
+                    .expect("A new request is in AwaitingDownload state");
+
                 todo!("error {e:?}");
             }
         }
@@ -328,126 +356,207 @@ impl<T: BeaconChainTypes> BlockTree<T> {
         ancestors
     }
 
+    /// Marks blocks ready for download as syncing
+    /// Should be called anytime:
+    /// - A new block is imported to fork-choice
+    /// - A block in the header tree is advanced to Syncing
+    /// - A new header is downloaded with a parent that is imported or syncing
     fn trigger_forward_sync(&mut self, cx: &mut SyncNetworkContext<T>) {
-        // Find the block range with most peers and highest slot. This is the block
-        // to be used as tip of the chain of blocks to fetch.
-        let Some(block_root) = self
+        // We want to download and import blocks whose parent is imported in our fork-choice. Also
+        // to buffer we want to download children of blocks that are awaiting import.
+        //
+        // We may want to avoid 1M calls into fork-choice to check if a block is imported. We only
+        // need to work of roots. Once a root is processed we have re-compute roots, or track
+        // children.
+
+        // TODO(tree-sync): don't build on demand, cache roots somewhere
+
+        let blocks_syncing = self
             .blocks
-            .iter()
-            .filter_map(|(root, block)| {
-                // Ignore blocks that are already being forward synced
-                if block.is_syncing() {
-                    return None;
+            .values()
+            .filter(|block| block.is_syncing())
+            .count();
+        let mut new_syncing_blocks = false;
+
+        // Have up to 2 blocks syncing
+        for _ in blocks_syncing..2 {
+            // Find the block range with most peers and highest slot. This is the block
+            // to be used as tip of the chain of blocks to fetch.
+            let Some(block_root) = self
+                .blocks
+                .iter()
+                .filter_map(|(root, block)| {
+                    // Ignore blocks that are already being forward synced
+                    if block.is_syncing() {
+                        return None;
+                    }
+                    // Ignore block roots which header is not downloaded yet
+                    let Some((parent_root, slot)) = block.parent_root_and_slot() else {
+                        return None;
+                    };
+                    // Check if the parent is known in the header tree
+                    let is_candidate = if let Some(parent) = self.blocks.get(&parent_root) {
+                        parent.is_syncing()
+                    } else {
+                        // TODO(tree-sync): cache this calls in the struct
+                        cx.chain.block_is_known_to_fork_choice(&parent_root)
+                    };
+
+                    if is_candidate {
+                        // Find highest peer count, then min slot
+                        Some((block.peer_count(), Slot::new(u64::MAX) - slot, root))
+                    } else {
+                        None
+                    }
+                })
+                .max()
+                .map(|(_, _, root)| *root)
+            else {
+                break;
+            };
+
+            // Start syncing `block_root`
+            let block_to_sync = self
+                .blocks
+                .get_mut(&block_root)
+                .expect("Block should exist");
+
+            match &mut block_to_sync.status {
+                Status::Header(header) => {
+                    block_to_sync.status =
+                        Status::Syncing(header.clone(), SyncingStatus::AwaitingDownload);
                 }
-                // Ignore block roots which header is not downloaded yet
-                let Some((parent_root, slot)) = block.parent_root_and_slot() else {
-                    return None;
-                };
-                // Check if the parent is known in the header tree
-                if let Some(slot) = block.slot() {
-                    // Find highest peer count, then slot
-                    Some((block.peer_count(), slot, root))
-                } else {
-                    None
-                }
-            })
-            .max()
-            .map(|(_, _, root)| *root)
-        else {
-            return;
-        };
+                _ => panic!("Unpected state"),
+            }
+            debug!(id = %block_to_sync.id, "Starting forwards sync of block");
 
-        // Get the chain of ancestors of that block_root. Because they are ancestors
-        // of block_root all these blocks have the same peer count as `block_root`.
-        // Consider limiting the length of blocks so some sensible number to not sync
-        // too much at once. There's no good reason to do a big fetch at once.
-        let blocks = self.collect_ancestors(block_root);
-        self.mark_as_syncing(&blocks);
+            new_syncing_blocks = true;
+        }
 
-        // TODO: We can sync parallel chains at once here, if we have multiple chains
-        // rooted in different places
-        let peers = self
-            .blocks
-            .get(&block_root)
-            .expect("block for block_root should exist")
-            .peers();
-
-        self.forward_sync_blocks(&blocks, &peers, cx)
+        if new_syncing_blocks {
+            self.continue_syncing_blocks(cx);
+        }
     }
 
-    fn forward_sync_blocks(
-        &mut self,
-        blocks: &[Hash256],
-        peers: &[PeerId],
-        cx: &mut SyncNetworkContext<T>,
-    ) {
-        // Create a batch with this blocks
-        // Trigger batch sync
+    fn continue_syncing_blocks(&mut self, cx: &mut SyncNetworkContext<T>) {
+        for lookup in self.blocks.values_mut().filter(|block| block.is_syncing()) {
+            match &mut lookup.status {
+                Status::Syncing(header, syncing_status) => match syncing_status {
+                    SyncingStatus::AwaitingDownload => {
+                        let request = BlocksByRootSameForkRequest {
+                            // TODO(tree-sync): cache block root
+                            block_roots: vec![header.canonical_root()],
+                            fork: cx.spec().fork_name_at_slot::<T::EthSpec>(header.slot),
+                        };
 
-        let headers = blocks
-            .iter()
-            .map(|root| {
-                self.blocks
-                    .get(root)
-                    .expect("block should exist")
-                    .request
-                    .peek_downloaded_data()
-                    .expect("header should be downloaded")
-                    .clone()
-            })
-            .collect::<Vec<_>>();
+                        // TODO
+                        let chain_id = cx.next_id();
+                        let requester = RangeRequestId::RangeSync(lookup.id);
+                        let peers = Arc::new(RwLock::new(HashSet::from_iter(
+                            lookup.peers.iter().copied(),
+                        )));
+                        let failed_peers = HashSet::new();
 
-        // TODO(tree-sync): only choose ranges of blocks in the same fork
-        let first_header = headers.first().unwrap();
-        let fork = cx.spec().fork_name_at_slot::<T::EthSpec>(first_header.slot);
-
-        // Create batch here?
-        let mut batch = BatchInfo::new(blocks.to_vec());
-
-        let request = BlocksByRootSameForkRequest {
-            block_roots: batch
-                .to_blocks_by_root_request(cx.spec())
-                .block_roots()
-                .to_vec(),
-            fork,
-        };
-        let chain_id = cx.next_id();
-        let requester = RangeRequestId::RangeSync {
-            chain_id,
-            batch_id: Epoch::new(0),
-        };
-        let peers = Arc::new(RwLock::new(HashSet::from_iter(peers.iter().copied())));
-        let failed_peers = HashSet::new();
-
-        let id =
-            match cx.block_components_by_range_request(request, requester, peers, &failed_peers) {
-                Ok(req_id) => {
-                    // TODO: Update batch state
-                    batch.start_downloading(req_id);
-                    self.batches.insert(chain_id, batch);
-                }
-                Err(e) => {
-                    // Log failed chain, mark blocks as not syncing
-                }
-            };
+                        match cx.block_components_by_range_request(
+                            request,
+                            requester,
+                            peers,
+                            &failed_peers,
+                        ) {
+                            Ok(req_id) => {
+                                *syncing_status = SyncingStatus::Downloading(req_id);
+                            }
+                            Err(e) => {
+                                // Log failed chain, mark blocks as not syncing
+                            }
+                        };
+                    }
+                    SyncingStatus::Downloading(_) => {} // wait for event
+                    SyncingStatus::AwaitingProcessing(block, peers) => {
+                        let Some(beacon_processor) = cx.beacon_processor_if_enabled() else {
+                            todo!("processor disabled");
+                        };
+                        if let Err(e) = beacon_processor.send_chain_segment(
+                            ChainSegmentProcessId::RangeBatchId(lookup.id),
+                            vec![block.clone()],
+                        ) {
+                            todo!("error sending");
+                        }
+                        *syncing_status = SyncingStatus::Processing(peers.clone());
+                    }
+                    SyncingStatus::Processing(_) => {} // wait for event
+                },
+                _ => panic!("bad state"),
+            }
+        }
     }
 
     pub fn on_blocks_response(
         &mut self,
-        batch_id: Id,
-        blocks: Vec<RpcBlock<T::EthSpec>>,
-        batch_peers: BatchPeers,
+        id: HeaderLookupId,
+        result: Result<(Vec<RpcBlock<T::EthSpec>>, BatchPeers), RpcResponseError>,
+        cx: &mut SyncNetworkContext<T>,
     ) {
-        let Some(batch) = self.batches.get_mut(&batch_id) else {
-            panic!("Unknown batch id {batch_id}");
+        // TODO(tree-sync): attach an ID to the block entry to make sure we are querying the right
+        // one, while still indexing by block_root only
+        let Some(lookup) = self.blocks.get_mut(&id.0) else {
+            panic!("Unknown batch id {id}");
         };
 
-        let received = batch
-            .download_completed(blocks, batch_peers)
-            .map_err(|e| e.0)
-            .unwrap();
-        debug!(%batch_id, blocks = received, "Batch downloaded");
+        let result = result.and_then(|(blocks, peers)| {
+            let block = blocks
+                .first()
+                .cloned()
+                .ok_or(RpcResponseError::InternalError(
+                    "blocks_by_root response contains zero blocks".to_owned(),
+                ))?;
+            Ok((block, peers))
+        });
+
+        let request = lookup.block_request().unwrap();
+        match request {
+            SyncingStatus::Downloading(_) => match result {
+                Ok((block, peers)) => {
+                    debug!(%id, "Sync block downloaded");
+                    *request = SyncingStatus::AwaitingProcessing(block, peers);
+                }
+                Err(e) => {
+                    debug!(%id, "Sync block download error");
+                    *request = SyncingStatus::AwaitingDownload;
+                }
+            },
+            _ => panic!("Bad state"),
+        }
 
         // Continue batches
+        self.continue_syncing_blocks(cx);
+    }
+
+    pub fn handle_block_process_result(
+        &mut self,
+        id: HeaderLookupId,
+        result: BatchProcessResult,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        let Some(lookup) = self.blocks.get_mut(&id.0) else {
+            panic!("Unknown batch id {id}");
+        };
+
+        let request = lookup.block_request().unwrap();
+        match request {
+            SyncingStatus::Processing(peers) => match result {
+                BatchProcessResult::Success { .. } => {
+                    debug!(%id, "Sync block process success");
+                    self.blocks.remove(&id.0);
+                    self.trigger_forward_sync(cx);
+                }
+                BatchProcessResult::FaultyFailure { .. } | BatchProcessResult::NonFaultyFailure => {
+                    debug!(%id, "Sync block process error");
+                    *request = SyncingStatus::AwaitingDownload;
+                    // TODO(tree-sync): add peer to failed peers and downscore
+                }
+            },
+            _ => panic!("Bad state"),
+        }
     }
 }

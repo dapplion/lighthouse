@@ -38,7 +38,7 @@ pub struct BlocksByRootRequestId {
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct HeaderLookupId(pub Hash256);
+pub struct HeaderLookupId(pub Hash256, pub Id);
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct BatchId(pub Id);
@@ -105,7 +105,7 @@ pub struct ComponentsByRangeRequestId {
 /// Range sync chain or backfill batch
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum RangeRequestId {
-    RangeSync { chain_id: Id, batch_id: Epoch },
+    RangeSync(HeaderLookupId),
     BackfillSync { batch_id: Epoch },
 }
 
@@ -275,7 +275,7 @@ impl Display for DataColumnsByRootRequester {
 
 impl Display for HeaderLookupId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}/{}", self.0, self.1)
     }
 }
 
@@ -294,7 +294,7 @@ impl Display for CustodyRequester {
 impl Display for RangeRequestId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::RangeSync { chain_id, batch_id } => write!(f, "RangeSync/{batch_id}/{chain_id}"),
+            Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
             Self::BackfillSync { batch_id } => write!(f, "BackfillSync/{batch_id}"),
         }
     }

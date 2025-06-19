@@ -310,7 +310,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             duration_in_awaiting_processing,
         );
 
-        let process_id = ChainSegmentProcessId::RangeBatchId(self.id, batch_id);
+        let process_id = todo!();
         self.current_processing_batch = Some(batch_id);
 
         if let Err(e) = beacon_processor.send_chain_segment(process_id, blocks) {
@@ -935,10 +935,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
 
             match network.block_components_by_range_request(
                 todo!(),
-                RangeRequestId::RangeSync {
-                    chain_id: self.id,
-                    batch_id,
-                },
+                todo!(),
                 self.peers.clone(),
                 failed_peers,
             ) {
