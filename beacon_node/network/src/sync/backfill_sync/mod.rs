@@ -268,16 +268,11 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     ) {
         match &mut self.status {
             SyncingStatus::Processing(block, _peers) => match result {
-                BatchProcessResult::Success { .. } => {
+                BatchProcessResult::Success => {
                     debug!(%id, "Sync block process success");
                     self.status = SyncingStatus::AwaitingDownload(block.as_block().parent_root())
                 }
-                BatchProcessResult::FaultyFailure { .. } => {
-                    debug!(%id, "Sync block process error");
-                    self.status = SyncingStatus::AwaitingDownload(block.block_root())
-                    // TODO(tree-sync): add peer to failed peers and downscore
-                }
-                BatchProcessResult::NonFaultyFailure => {
+                BatchProcessResult::Failure { .. } => {
                     debug!(%id, "Sync block process error");
                     self.status = SyncingStatus::AwaitingDownload(block.block_root())
                     // TODO(tree-sync): add peer to failed peers and downscore

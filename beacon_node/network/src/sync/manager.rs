@@ -192,17 +192,12 @@ pub enum BlockProcessingResult {
 #[derive(Debug)]
 pub enum BatchProcessResult {
     /// The batch was completed successfully. It carries whether the sent batch contained blocks.
-    Success {
-        sent_blocks: usize,
-        imported_blocks: usize,
-    },
+    Success,
     /// The batch processing failed. It carries whether the processing imported any block.
-    FaultyFailure {
-        imported_blocks: usize,
-        peer_action: PeerGroupAction,
+    Failure {
+        peer_action: Option<PeerGroupAction>,
         error: String,
     },
-    NonFaultyFailure,
 }
 
 /// The primary object for handling and driving all the current syncing logic. It maintains the
@@ -665,18 +660,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     ) {
         match self.should_search_for_block(Some(slot), &peer_id) {
             Ok(_) => {
-                if self
-                    .block_tree
-                    .search(block_root, &[peer_id], &mut self.network)
-                {
-                    // Lookup created. No need to log here it's logged in `new_current_lookup`
-                } else {
-                    debug!(
-                        ?block_root,
-                        ?parent_root,
-                        "No lookup created for child and parent"
-                    );
-                }
+                self.block_tree
+                    .search(block_root, &[peer_id], &mut self.network);
             }
             Err(reason) => {
                 debug!(%block_root, %parent_root, reason, "Ignoring unknown parent request");
@@ -687,14 +672,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     fn handle_unknown_block_root(&mut self, peer_id: PeerId, block_root: Hash256) {
         match self.should_search_for_block(None, &peer_id) {
             Ok(_) => {
-                if self
-                    .block_tree
-                    .search(block_root, &[peer_id], &mut self.network)
-                {
-                    // Lookup created. No need to log here it's logged in `new_current_lookup`
-                } else {
-                    debug!(?block_root, "No lookup created for unknown block");
-                }
+                self.block_tree
+                    .search(block_root, &[peer_id], &mut self.network);
             }
             Err(reason) => {
                 debug!(%block_root, reason, "Ignoring unknown block request");

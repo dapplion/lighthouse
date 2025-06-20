@@ -16,7 +16,7 @@ use strum::IntoStaticStr;
 use tracing::{debug, warn};
 use types::{data_column_sidecar::ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Hash256};
 
-use super::{LookupRequestResult, PeerGroup, RpcResponseResult, SyncNetworkContext};
+use super::{PeerGroup, RpcResponseResult, SyncNetworkContext};
 
 const FAILED_PEERS_CACHE_EXPIRY_SECONDS: u64 = 5;
 const REQUEST_EXPIRY_SECONDS: u64 = 300;
@@ -303,7 +303,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
         }
 
         for (peer_id, indices) in columns_to_request_by_peer.into_iter() {
-            let request_result = cx
+            let req_id = cx
                 .data_columns_by_root_request(
                     DataColumnsByRootRequester::Custody(self.custody_id),
                     peer_id,
@@ -319,24 +319,18 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
                     Error::InternalError(format!("Send failed data_columns_by_root {e:?}"))
                 })?;
 
-            match request_result {
-                LookupRequestResult::RequestSent(req_id) => {
-                    for column_index in &indices {
-                        let column_request = self
-                            .column_requests
-                            .get_mut(column_index)
-                            // Should never happen: column_index is iterated from column_requests
-                            .ok_or(Error::InternalError("unknown column_index".to_owned()))?;
+            for column_index in &indices {
+                let column_request = self
+                    .column_requests
+                    .get_mut(column_index)
+                    // Should never happen: column_index is iterated from column_requests
+                    .ok_or(Error::InternalError("unknown column_index".to_owned()))?;
 
-                        column_request.on_download_start(req_id)?;
-                    }
-
-                    self.active_batch_columns_requests
-                        .insert(req_id, ActiveBatchColumnsRequest { indices });
-                }
-                LookupRequestResult::NoRequestNeeded(_) => unreachable!(),
-                LookupRequestResult::Pending(_) => unreachable!(),
+                column_request.on_download_start(req_id)?;
             }
+
+            self.active_batch_columns_requests
+                .insert(req_id, ActiveBatchColumnsRequest { indices });
         }
 
         if self.start_time.elapsed() > Duration::from_secs(REQUEST_EXPIRY_SECONDS)
@@ -471,13 +465,6 @@ impl<I: std::fmt::Display + PartialEq, T> ColumnRequest<I, T> {
                 "bad state on_download_success expected Downloading got {}",
                 Into::<&'static str>::into(other),
             ))),
-        }
-    }
-
-    pub fn peek_downloaded_data(&self) -> Option<&T> {
-        match &self.status {
-            Status::Downloaded(_, data, _) => Some(data),
-            _ => None,
         }
     }
 

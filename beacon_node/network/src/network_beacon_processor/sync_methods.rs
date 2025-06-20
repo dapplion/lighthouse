@@ -126,7 +126,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     .process_blocks(downloaded_blocks.iter(), notify_execution_layer)
                     .await
                 {
-                    (imported_blocks, Ok(_)) => {
+                    (_imported_blocks, Ok(_)) => {
                         debug!(
                             %id,
                             first_block_slot = start_slot,
@@ -134,27 +134,19 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             processed_blocks = sent_blocks,
                             service= "sync",
                             "Batch processed");
-                        BatchProcessResult::Success {
-                            sent_blocks,
-                            imported_blocks,
-                        }
+                        BatchProcessResult::Success
                     }
-                    (imported_blocks, Err(e)) => {
+                    (_imported_blocks, Err(e)) => {
                         debug!(
                             %id,
                             first_block_slot = start_slot,
                             last_block_slot = end_slot,
-                            imported_blocks,
                             error = %e.message,
                             service = "sync",
                             "Batch processing failed");
-                        match e.peer_action {
-                            Some(penalty) => BatchProcessResult::FaultyFailure {
-                                imported_blocks,
-                                peer_action: penalty,
-                                error: e.message,
-                            },
-                            None => BatchProcessResult::NonFaultyFailure,
+                        BatchProcessResult::Failure {
+                            peer_action: e.peer_action,
+                            error: e.message,
                         }
                     }
                 }
@@ -185,10 +177,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             processed_data_columns = n_data_columns,
                             service= "sync",
                             "Backfill batch processed");
-                        BatchProcessResult::Success {
-                            sent_blocks,
-                            imported_blocks,
-                        }
+                        BatchProcessResult::Success
                     }
                     Err(e) => {
                         debug!(
@@ -200,13 +189,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             service = "sync",
                             "Backfill batch processing failed"
                         );
-                        match e.peer_action {
-                            Some(peer_action) => BatchProcessResult::FaultyFailure {
-                                imported_blocks: 0,
-                                peer_action,
-                                error: e.message,
-                            },
-                            None => BatchProcessResult::NonFaultyFailure,
+                        BatchProcessResult::Failure {
+                            peer_action: e.peer_action,
+                            error: e.message,
                         }
                     }
                 }

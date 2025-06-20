@@ -296,13 +296,13 @@ impl<T: BeaconChainTypes> Router<T> {
                         .send_status_message(peer_id, status_message),
                 )
             }
-            Response::BlocksByRange(beacon_block) => {
+            Response::BlocksByRange(_) => {
                 crit!(id = ?app_request_id, "No BlocksByRange response expected");
             }
             Response::BlocksByRoot(beacon_block) => {
                 self.on_blocks_by_root_response(peer_id, app_request_id, beacon_block);
             }
-            Response::BlobsByRange(blob) => {
+            Response::BlobsByRange(_) => {
                 crit!(id = ?app_request_id, "No BlobsByRange response expected");
             }
             Response::BlobsByRoot(blob) => {
@@ -311,7 +311,7 @@ impl<T: BeaconChainTypes> Router<T> {
             Response::DataColumnsByRoot(data_column) => {
                 self.on_data_columns_by_root_response(peer_id, app_request_id, data_column);
             }
-            Response::DataColumnsByRange(data_column) => {
+            Response::DataColumnsByRange(_) => {
                 crit!(id = ?app_request_id, "No DataColumnsByRange response expected");
             }
             // Light client responses should not be received

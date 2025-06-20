@@ -4,9 +4,9 @@
 use self::custody_by_root::ActiveCustodyByRootRequest;
 use super::SyncMessage;
 use crate::metrics;
-use crate::network_beacon_processor::NetworkBeaconProcessor;
 #[cfg(test)]
 use crate::network_beacon_processor::TestBeaconChainType;
+use crate::network_beacon_processor::{NetworkBeaconProcessor, PeerGroupAction};
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use beacon_chain::block_verification_types::RpcBlock;
@@ -15,6 +15,7 @@ pub use block_components_by_range::BlockComponentsByRootRequest;
 #[cfg(test)]
 pub use block_components_by_range::BlockComponentsByRootRequestStep;
 use fnv::FnvHashMap;
+use itertools::Itertools;
 use lighthouse_network::rpc::methods::{
     BlobsByRootRequest, BlocksByRootRequest, DataColumnsByRootRequest,
 };
@@ -125,20 +126,13 @@ pub struct PeerGroup {
 }
 
 impl PeerGroup {
-    pub fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             peers: HashMap::new(),
         }
     }
 
-    /// Return a peer group where a single peer returned all parts of a block component. For
-    /// example, a block has a single component (the block = index 0/1).
-    pub fn from_single(peer: PeerId) -> Self {
-        Self {
-            peers: HashMap::from_iter([(0, peer)]),
-        }
-    }
-    pub fn from_set(peer_to_indices: HashMap<PeerId, Vec<usize>>) -> Self {
+    pub(crate) fn from_set(peer_to_indices: HashMap<PeerId, Vec<usize>>) -> Self {
         let mut peers = HashMap::new();
         for (peer, indices) in peer_to_indices {
             for index in indices {
@@ -147,15 +141,9 @@ impl PeerGroup {
         }
         Self { peers }
     }
-    pub fn all(&self) -> impl Iterator<Item = &PeerId> + '_ {
-        self.peers.values()
-    }
-    pub fn of_index(&self, index: &usize) -> Option<&PeerId> {
-        self.peers.get(index)
-    }
 
-    pub fn as_map(&self) -> &HashMap<usize, PeerId> {
-        &self.peers
+    pub(crate) fn of_index(&self, index: &usize) -> Option<&PeerId> {
+        self.peers.get(index)
     }
 }
 
@@ -166,50 +154,50 @@ pub struct BatchPeers {
 }
 
 impl BatchPeers {
-    pub fn new_from_block_peer(block_peer: PeerId) -> Self {
+    pub(crate) fn new_from_block_peer(block_peer: PeerId) -> Self {
         Self {
             block_peer,
             column_peers: PeerGroup::empty(),
         }
     }
-    pub fn new(block_peer: PeerId, column_peers: PeerGroup) -> Self {
+    pub(crate) fn new(block_peer: PeerId, column_peers: PeerGroup) -> Self {
         Self {
             block_peer,
             column_peers,
         }
     }
 
-    pub fn block(&self) -> PeerId {
+    pub(crate) fn blame(&self, peer_action: PeerGroupAction) -> Vec<(PeerId, PeerAction)> {
+        // Penalize each peer only once. Currently a peer_action does not mix different
+        // PeerAction levels.
+        let mut peer_penalties = peer_action
+            .column_peer
+            .iter()
+            .filter_map(|(column_index, penalty)| {
+                self.column(column_index).map(|peer| (*peer, *penalty))
+            })
+            .unique()
+            .collect::<Vec<_>>();
+
+        if let Some(penalty) = peer_action.block_peer {
+            // Penalize the peer appropiately.
+            peer_penalties.push((self.block(), penalty));
+        }
+
+        peer_penalties
+    }
+
+    fn block(&self) -> PeerId {
         self.block_peer
     }
 
-    pub fn column(&self, index: &ColumnIndex) -> Option<&PeerId> {
+    fn column(&self, index: &ColumnIndex) -> Option<&PeerId> {
         self.column_peers.of_index(&((*index) as usize))
     }
 }
 
 /// Sequential ID that uniquely identifies ReqResp outgoing requests
 pub type ReqId = u32;
-
-pub enum LookupRequestResult<I = ReqId> {
-    /// A request is sent. Sync MUST receive an event from the network in the future for either:
-    /// completed response or failed request
-    RequestSent(I),
-    /// No request is sent, and no further action is necessary to consider this request completed.
-    /// Includes a reason why this request is not needed.
-    NoRequestNeeded(&'static str),
-    /// No request is sent, but the request is not completed. Sync MUST receive some future event
-    /// that makes progress on the request. For example: request is processing from a different
-    /// source (i.e. block received from gossip) and sync MUST receive an event with that processing
-    /// result.
-    Pending(&'static str),
-}
-
-#[derive(Clone)]
-pub struct BlocksByRootSameForkRequest {
-    pub block_roots: Vec<Hash256>,
-    pub fork: ForkName,
-}
 
 /// Wraps a Network channel to employ various RPC related network functionality for the Sync manager. This includes management of a global RPC request Id.
 pub struct SyncNetworkContext<T: BeaconChainTypes> {
@@ -493,7 +481,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         block_root: Hash256,
         indices: Vec<ColumnIndex>,
         expect_max_responses: bool,
-    ) -> Result<LookupRequestResult<DataColumnsByRootRequestId>, &'static str> {
+    ) -> Result<DataColumnsByRootRequestId, &'static str> {
         let span = span!(
             Level::INFO,
             "SyncNetworkContext",
@@ -536,7 +524,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             DataColumnsByRootRequestItems::new(block_root, indices),
         );
 
-        Ok(LookupRequestResult::RequestSent(id))
+        Ok(id)
     }
 
     /// Request to fetch all needed custody columns of a specific block. This function may not send
@@ -1045,18 +1033,4 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             metrics::set_gauge_vec(&metrics::SYNC_ACTIVE_NETWORK_REQUESTS, &[id], count as i64);
         }
     }
-}
-
-fn to_fixed_blob_sidecar_list<E: EthSpec>(
-    blobs: Vec<Arc<BlobSidecar<E>>>,
-    max_len: usize,
-) -> Result<FixedBlobSidecarList<E>, LookupVerifyError> {
-    let mut fixed_list = FixedBlobSidecarList::new(vec![None; max_len]);
-    for blob in blobs.into_iter() {
-        let index = blob.index as usize;
-        *fixed_list
-            .get_mut(index)
-            .ok_or(LookupVerifyError::UnrequestedIndex(index as u64))? = Some(blob)
-    }
-    Ok(fixed_list)
 }
