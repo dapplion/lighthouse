@@ -17,11 +17,8 @@ use crate::metrics;
 
 use super::{RpcEvent, RpcResponseResult};
 
-mod blobs_by_range;
 mod blobs_by_root;
-mod blocks_by_range;
 mod blocks_by_root;
-mod data_columns_by_range;
 mod data_columns_by_root;
 
 #[derive(Debug, Clone, PartialEq, Eq, IntoStaticStr)]

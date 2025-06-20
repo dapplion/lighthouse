@@ -2,7 +2,7 @@ use super::*;
 use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::status::ToStatusMessage;
 use crate::sync::manager::SLOT_IMPORT_TOLERANCE;
-use crate::sync::network_context::{BlockComponentsByRangeRequestStep, RangeRequestId};
+use crate::sync::network_context::{BlockComponentsByRootRequestStep, RangeRequestId};
 use crate::sync::range_sync::{BatchId, BatchState, RangeSyncType};
 use crate::sync::tests::lookups::TestOptions;
 use crate::sync::BatchProcessResult;
@@ -14,14 +14,10 @@ use beacon_chain::{
     PayloadVerificationStatus,
 };
 use beacon_processor::WorkType;
-use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, BlocksByRootRequest, DataColumnsByRangeRequest, DataColumnsByRootRequest,
-    OldBlocksByRangeRequest,
-};
+use lighthouse_network::rpc::methods::{BlocksByRootRequest, DataColumnsByRootRequest};
 use lighthouse_network::rpc::{RequestType, StatusMessage};
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, BlocksByRootRequestId,
-    BlocksByRootRequester, ComponentsByRangeRequestId, DataColumnsByRangeRequestId,
+    AppRequestId, BlocksByRootRequestId, BlocksByRootRequester, ComponentsByRootRequestId,
     DataColumnsByRootRequestId, HeaderLookupId, SyncRequestId,
 };
 use lighthouse_network::types::SyncState;
@@ -41,19 +37,13 @@ pub(crate) enum DataSidecars<E: EthSpec> {
     DataColumns(Vec<CustodyDataColumn<E>>),
 }
 
-enum ByRangeDataRequestIds {
+enum ByRootDataRequestIds {
     PreDeneb,
-    PrePeerDAS(BlobsByRangeRequestId, PeerId, BlobsByRangeRequest),
-    PostPeerDAS(
-        Vec<(
-            DataColumnsByRangeRequestId,
-            PeerId,
-            DataColumnsByRangeRequest,
-        )>,
-    ),
+    PrePeerDAS(BlobsByRootRequestId, PeerId, BlobsByRootRequest),
+    PostPeerDAS(Vec<(DataColumnsByRootRequestId, PeerId, DataColumnsByRootRequest)>),
 }
 
-impl ByRangeDataRequestIds {
+impl ByRootDataRequestIds {
     /// If there's a single active request, returns its peer, else panics
     fn peer(&self) -> PeerId {
         match self {
@@ -73,15 +63,7 @@ struct Config {
     peers: PeersConfig,
 }
 
-type BlocksByRangeRequestData = (BlocksByRangeRequestId, PeerId, OldBlocksByRangeRequest);
-
 type BlocksByRootRequestData = (BlocksByRootRequestId, PeerId, BlocksByRootRequest);
-
-type DataColumnsByRangeRequestData = (
-    DataColumnsByRangeRequestId,
-    PeerId,
-    DataColumnsByRangeRequest,
-);
 
 type DataColumnsByRootRequestData = (DataColumnsByRootRequestId, PeerId, DataColumnsByRootRequest);
 
@@ -122,20 +104,6 @@ impl RequestFilter {
         self
     }
 
-    fn blocks_by_range_requests<E: EthSpec>(
-        &self,
-        ev: &NetworkMessage<E>,
-    ) -> Option<BlocksByRangeRequestData> {
-        match ev {
-            NetworkMessage::SendRequest {
-                peer_id,
-                request: RequestType::BlocksByRange(req),
-                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRange(id)),
-            } if self.matches_blocks_by_range(peer_id, req) => Some((*id, *peer_id, req.clone())),
-            _ => None,
-        }
-    }
-
     fn blocks_by_root_requests<E: EthSpec>(
         &self,
         ev: &NetworkMessage<E>,
@@ -146,22 +114,6 @@ impl RequestFilter {
                 request: RequestType::BlocksByRoot(req),
                 app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRoot(id)),
             } if self.matches_blocks_by_root(peer_id, req) => Some((*id, *peer_id, req.clone())),
-            _ => None,
-        }
-    }
-
-    fn data_columns_by_range_requests<E: EthSpec>(
-        &self,
-        ev: &NetworkMessage<E>,
-    ) -> Option<DataColumnsByRangeRequestData> {
-        match ev {
-            NetworkMessage::SendRequest {
-                peer_id,
-                request: RequestType::DataColumnsByRange(req),
-                app_request_id: AppRequestId::Sync(SyncRequestId::DataColumnsByRange(id)),
-            } if self.matches_data_columns_by_range(peer_id, req) => {
-                Some((*id, *peer_id, req.clone()))
-            }
             _ => None,
         }
     }
@@ -184,27 +136,6 @@ impl RequestFilter {
 
     fn matches_blocks_by_root(&self, peer: &PeerId, _req: &BlocksByRootRequest) -> bool {
         self.matches_peer(peer)
-    }
-
-    fn matches_blocks_by_range(&self, peer: &PeerId, req: &OldBlocksByRangeRequest) -> bool {
-        self.matches_common(peer, *req.start_slot())
-    }
-
-    fn matches_blobs_by_range(&self, peer: &PeerId, req: &BlobsByRangeRequest) -> bool {
-        self.matches_common(peer, req.start_slot)
-    }
-
-    fn matches_data_columns_by_range(
-        &self,
-        peer: &PeerId,
-        req: &DataColumnsByRangeRequest,
-    ) -> bool {
-        if let Some(index) = self.column_index {
-            if !req.columns.contains(&index) {
-                return false;
-            }
-        }
-        self.matches_common(peer, req.start_slot)
     }
 
     fn matches_data_columns_by_root(&self, peer: &PeerId, req: &DataColumnsByRootRequest) -> bool {
@@ -420,7 +351,7 @@ impl TestRig {
             panic!("No active block_components_by_range requests");
         }
         for (id, step) in requests {
-            if !matches!(step, BlockComponentsByRangeRequestStep::CustodyRequest) {
+            if !matches!(step, BlockComponentsByRootRequestStep::CustodyRequest) {
                 panic!("block_components_by_range request {id} is not on CustodyRequest step: {step:?}");
             }
         }
@@ -557,47 +488,12 @@ impl TestRig {
 
     fn last_sent_blocks_by_range(
         &mut self,
-        id: ComponentsByRangeRequestId,
+        id: ComponentsByRootRequestId,
     ) -> Vec<Arc<SignedBeaconBlock<E>>> {
         self.sent_blocks_by_range
             .get(&id)
             .cloned()
-            .unwrap_or_else(|| panic!("No blocks for ComponentsByRangeRequestId {id}"))
-    }
-
-    fn send_blocks_by_range_response(
-        &mut self,
-        req_id: BlocksByRangeRequestId,
-        peer_id: PeerId,
-        blocks: &[Arc<SignedBeaconBlock<E>>],
-    ) {
-        let slots = blocks.iter().map(|block| block.slot()).collect::<Vec<_>>();
-        self.log(&format!(
-            "Completing BlocksByRange request {req_id} to {peer_id} with blocks {slots:?}"
-        ));
-
-        for block in blocks {
-            self.send_sync_message(SyncMessage::RpcBlock {
-                sync_request_id: SyncRequestId::BlocksByRange(req_id),
-                peer_id,
-                beacon_block: Some(block.clone()),
-                seen_timestamp: D,
-            });
-        }
-        self.send_sync_message(SyncMessage::RpcBlock {
-            sync_request_id: SyncRequestId::BlocksByRange(req_id),
-            peer_id,
-            beacon_block: None,
-            seen_timestamp: D,
-        });
-
-        if self
-            .sent_blocks_by_range
-            .insert(req_id.parent_request_id, blocks.to_vec())
-            .is_some()
-        {
-            panic!("Sent two blocks_by_range requests in the same epoch. We need better tracking");
-        }
+            .unwrap_or_else(|| panic!("No blocks for ComponentsByRootRequestId {id}"))
     }
 
     fn send_blocks_by_root_response(
@@ -623,37 +519,6 @@ impl TestRig {
             sync_request_id: SyncRequestId::BlocksByRoot(req_id),
             peer_id,
             beacon_block: None,
-            seen_timestamp: D,
-        });
-    }
-
-    fn send_data_columns_by_range_response(
-        &mut self,
-        id: DataColumnsByRangeRequestId,
-        peer_id: PeerId,
-        data_columns: &[Arc<DataColumnSidecar<E>>],
-    ) {
-        let mut ids = data_columns
-            .iter()
-            .map(|d| (d.slot().as_u64(), d.index))
-            .collect::<Vec<_>>();
-        ids.sort_unstable();
-        self.log(&format!(
-            "Completing DataColumnsByRange request {id} to {peer_id} with data_columns {ids:?}"
-        ));
-
-        for data_column in data_columns {
-            self.send_sync_message(SyncMessage::RpcDataColumn {
-                sync_request_id: SyncRequestId::DataColumnsByRange(id),
-                peer_id,
-                data_column: Some(data_column.clone()),
-                seen_timestamp: D,
-            });
-        }
-        self.send_sync_message(SyncMessage::RpcDataColumn {
-            sync_request_id: SyncRequestId::DataColumnsByRange(id),
-            peer_id,
-            data_column: None,
             seen_timestamp: D,
         });
     }
@@ -689,112 +554,6 @@ impl TestRig {
         });
     }
 
-    fn pop_blocks_by_range_request(
-        &mut self,
-        request_filter: RequestFilter,
-    ) -> (BlocksByRangeRequestId, PeerId, OldBlocksByRangeRequest) {
-        self.pop_received_network_event(|ev| request_filter.blocks_by_range_requests(ev))
-            .unwrap_or_else(|e| {
-                panic!("Should have a BlocksByRange request, filter {request_filter:?}: {e:?}")
-            })
-    }
-
-    fn pop_data_columns_by_range_requests(
-        &mut self,
-        request_filter: RequestFilter,
-    ) -> Vec<(
-        DataColumnsByRangeRequestId,
-        PeerId,
-        DataColumnsByRangeRequest,
-    )> {
-        let mut data_columns_requests = vec![];
-        while let Ok(data_columns_request) =
-            self.pop_received_network_event(|ev| request_filter.data_columns_by_range_requests(ev))
-        {
-            data_columns_requests.push(data_columns_request);
-        }
-        data_columns_requests
-    }
-
-    fn find_data_by_range_request(
-        &mut self,
-        request_filter: RequestFilter,
-    ) -> ByRangeDataRequestIds {
-        if self.after_fulu() {
-            let data_columns_requests = self.pop_data_columns_by_range_requests(request_filter);
-            if data_columns_requests.is_empty() {
-                panic!("Found zero DataColumnsByRange requests, filter {request_filter:?}");
-            }
-            ByRangeDataRequestIds::PostPeerDAS(data_columns_requests)
-        } else if self.after_deneb() {
-            let (id, peer, req) = self
-                .pop_received_network_event(|ev| match ev {
-                    NetworkMessage::SendRequest {
-                        peer_id,
-                        request: RequestType::BlobsByRange(req),
-                        app_request_id: AppRequestId::Sync(SyncRequestId::BlobsByRange(id)),
-                    } if request_filter.matches_blobs_by_range(peer_id, req) => {
-                        Some((*id, *peer_id, req.clone()))
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|e| {
-                    panic!("Should have a blobs by range request, filter {request_filter:?}: {e:?}")
-                });
-            ByRangeDataRequestIds::PrePeerDAS(id, peer, req)
-        } else {
-            ByRangeDataRequestIds::PreDeneb
-        }
-    }
-
-    fn find_and_complete_block_components_by_range_request(
-        &mut self,
-        request_filter: RequestFilter,
-        complete_config: CompleteConfig,
-    ) -> RangeRequestId {
-        let id = self.find_and_complete_blocks_by_range_request(request_filter, complete_config);
-        self.find_and_complete_data_by_range_request(request_filter, complete_config);
-        id
-    }
-
-    fn find_and_complete_blocks_by_range_request(
-        &mut self,
-        request_filter: RequestFilter,
-        complete_config: CompleteConfig,
-    ) -> RangeRequestId {
-        let (blocks_req_id, block_peer, blocks_req) =
-            self.pop_blocks_by_range_request(request_filter);
-
-        let start_slot = Slot::new(*blocks_req.start_slot());
-        let blocks = (0..complete_config.block_count)
-            .map(|i| {
-                self.zero_block_at_slot(start_slot + Slot::new(i as u64), complete_config.with_data)
-                    .into()
-            })
-            .collect::<Vec<_>>();
-        self.send_blocks_by_range_response(blocks_req_id, block_peer, &blocks);
-
-        blocks_req_id.parent_request_id.requester
-    }
-
-    fn complete_blocks_by_range_request(
-        &mut self,
-        request: BlocksByRangeRequestData,
-        complete_config: CompleteConfig,
-    ) -> RangeRequestId {
-        let (blocks_req_id, block_peer, blocks_req) = request;
-        let start_slot = Slot::new(*blocks_req.start_slot());
-        let blocks = (0..complete_config.block_count)
-            .map(|i| {
-                self.zero_block_at_slot(start_slot + Slot::new(i as u64), complete_config.with_data)
-                    .into()
-            })
-            .collect::<Vec<_>>();
-        self.send_blocks_by_range_response(blocks_req_id, block_peer, &blocks);
-
-        blocks_req_id.parent_request_id.requester
-    }
-
     fn complete_blocks_by_root_request(
         &mut self,
         request: BlocksByRootRequestData,
@@ -816,66 +575,6 @@ impl TestRig {
         self.send_blocks_by_root_response(blocks_req_id, block_peer, &blocks);
 
         blocks_req_id.parent_request_id
-    }
-
-    fn complete_data_columns_by_range_request(
-        &mut self,
-        (id, peer_id, req): DataColumnsByRangeRequestData,
-        complete_config: CompleteConfig,
-    ) {
-        // To reply with a valid DataColumnsByRange we need to construct
-        // DataColumnsByRange for the block root that we requested the block peer, plus
-        // figure out which exact columns we requested this peer
-
-        let components_by_range_req_id = id.parent_request_id.parent_request_id;
-        let blocks = self.last_sent_blocks_by_range(components_by_range_req_id);
-
-        let data_columns = blocks
-            .iter()
-            .flat_map(|block| {
-                let kzg_commitments_inclusion_proof = block
-                    .message()
-                    .body()
-                    .kzg_commitments_merkle_proof()
-                    .unwrap();
-                let kzg_commitments = block
-                    .message()
-                    .body()
-                    .blob_kzg_commitments()
-                    .unwrap()
-                    .clone();
-                let signed_block_header = block.signed_block_header();
-
-                req.columns.iter().filter_map(move |index| {
-                    // Skip column generation if index is marked as failure
-                    if complete_config.custody_failure_at_index == Some(*index) {
-                        return None;
-                    }
-
-                    // We need to produce a DataColumn with valid inclusion proof, but can
-                    // be with random KZG proof and data as we won't send it for processing
-                    Some(Arc::new(DataColumnSidecar {
-                        index: *index,
-                        column: VariableList::empty(),
-                        kzg_commitments: kzg_commitments.clone(),
-                        kzg_proofs: VariableList::from(vec![]),
-                        signed_block_header: signed_block_header.clone(),
-                        kzg_commitments_inclusion_proof: kzg_commitments_inclusion_proof.clone(),
-                    }))
-                })
-            })
-            .collect::<Vec<_>>();
-
-        // Need to log here because I can't capture &mut self inside the columns iter
-        if !blocks.is_empty() {
-            if let Some(index) = complete_config.custody_failure_at_index {
-                self.log(&format!(
-                    "Forced custody failure at request {id} for peer {peer_id} index {index:?}"
-                ));
-            }
-        }
-
-        self.send_data_columns_by_range_response(id, peer_id, &data_columns);
     }
 
     fn complete_data_columns_by_root_request_range_sync(
@@ -951,85 +650,6 @@ impl TestRig {
     ) {
         let by_range_data_request_ids = self.find_data_by_range_request(request_filter);
         self.complete_data_by_range_request(by_range_data_request_ids, complete_config);
-    }
-
-    fn complete_data_by_range_request(
-        &mut self,
-        by_range_data_request_ids: ByRangeDataRequestIds,
-        complete_config: CompleteConfig,
-    ) {
-        match by_range_data_request_ids {
-            ByRangeDataRequestIds::PreDeneb => {}
-            ByRangeDataRequestIds::PrePeerDAS(id, peer_id, req) => {
-                // Complete the request with a single stream termination
-                self.log(&format!(
-                    "Completing BlobsByRange request {id} {req:?} with empty stream"
-                ));
-                self.send_sync_message(SyncMessage::RpcBlob {
-                    sync_request_id: SyncRequestId::BlobsByRange(id),
-                    peer_id,
-                    blob_sidecar: None,
-                    seen_timestamp: D,
-                });
-            }
-            ByRangeDataRequestIds::PostPeerDAS(data_column_req_ids) => {
-                // Complete the request with a single stream termination
-                for (id, peer_id, req) in data_column_req_ids {
-                    // To reply with a valid DataColumnsByRange we need to construct
-                    // DataColumnsByRange for the block root that we requested the block peer, plus
-                    // figure out which exact columns we requested this peer
-
-                    let components_by_range_req_id = id.parent_request_id.parent_request_id;
-                    let blocks = self.last_sent_blocks_by_range(components_by_range_req_id);
-
-                    let data_columns = blocks
-                        .iter()
-                        .flat_map(|block| {
-                            let kzg_commitments_inclusion_proof = block
-                                .message()
-                                .body()
-                                .kzg_commitments_merkle_proof()
-                                .unwrap();
-                            let kzg_commitments = block
-                                .message()
-                                .body()
-                                .blob_kzg_commitments()
-                                .unwrap()
-                                .clone();
-                            let signed_block_header = block.signed_block_header();
-
-                            req.columns.iter().filter_map(move |index| {
-                                // Skip column generation if index is marked as failure
-                                if complete_config.custody_failure_at_index == Some(*index) {
-                                    return None;
-                                }
-
-                                // We need to produce a DataColumn with valid inclusion proof, but can
-                                // be with random KZG proof and data as we won't send it for processing
-                                Some(Arc::new(DataColumnSidecar {
-                                    index: *index,
-                                    column: VariableList::empty(),
-                                    kzg_commitments: kzg_commitments.clone(),
-                                    kzg_proofs: VariableList::from(vec![]),
-                                    signed_block_header: signed_block_header.clone(),
-                                    kzg_commitments_inclusion_proof:
-                                        kzg_commitments_inclusion_proof.clone(),
-                                }))
-                            })
-                        })
-                        .collect::<Vec<_>>();
-
-                    // Need to log here because I can't capture &mut self inside the columns iter
-                    if !blocks.is_empty() {
-                        if let Some(index) = complete_config.custody_failure_at_index {
-                            self.log(&format!("Forced custody failure at request {id} for peer {peer_id} index {index:?}"));
-                        }
-                    }
-
-                    self.send_data_columns_by_range_response(id, peer_id, &data_columns);
-                }
-            }
-        }
     }
 
     fn complete_block_processing(&mut self, ids: Vec<HeaderLookupId>) {

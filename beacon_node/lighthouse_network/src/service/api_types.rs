@@ -23,12 +23,6 @@ pub enum SyncRequestId {
     BlobsByRoot(BlobsByRootRequestId),
     /// Request searching for a set of data columns given a hash and list of column indices.
     DataColumnsByRoot(DataColumnsByRootRequestId),
-    /// Blocks by range request
-    BlocksByRange(BlocksByRangeRequestId),
-    /// Blobs by range request
-    BlobsByRange(BlobsByRangeRequestId),
-    /// Data columns by range request
-    DataColumnsByRange(DataColumnsByRangeRequestId),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -48,15 +42,7 @@ pub struct BatchId(pub Id);
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct DataColumnsByRootRequestId {
     pub id: Id,
-    pub requester: DataColumnsByRootRequester,
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct BlocksByRangeRequestId {
-    /// Id to identify this attempt at a blocks_by_range request for `parent_request_id`
-    pub id: Id,
-    /// The Id of the overall By Range request for block components.
-    pub parent_request_id: ComponentsByRangeRequestId,
+    pub parent_request_id: DataColumnsByRootRequester,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -64,37 +50,13 @@ pub struct BlobsByRootRequestId {
     /// Id to identify this attempt at a blobs_by_range request for `parent_request_id`
     pub id: Id,
     /// The Id of the overall By Range request for block components.
-    pub parent_request_id: ComponentsByRangeRequestId,
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct BlobsByRangeRequestId {
-    /// Id to identify this attempt at a blobs_by_range request for `parent_request_id`
-    pub id: Id,
-    /// The Id of the overall By Range request for block components.
-    pub parent_request_id: ComponentsByRangeRequestId,
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct DataColumnsByRangeRequestId {
-    /// Id to identify this attempt at a data_columns_by_range request for `parent_request_id`
-    pub id: Id,
-    /// The Id of the parent custody by range request that issued this data_columns_by_range request
-    pub parent_request_id: CustodyByRangeRequestId,
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct CustodyByRangeRequestId {
-    /// Id to identify this attempt at a meta custody by range request for `parent_request_id`
-    pub id: Id,
-    /// The Id of the overall By Range request for block components.
-    pub parent_request_id: ComponentsByRangeRequestId,
+    pub parent_request_id: ComponentsByRootRequestId,
 }
 
 /// Block components by range request for range sync. Includes an ID for downstream consumers to
 /// handle retries and tie all their sub requests together.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct ComponentsByRangeRequestId {
+pub struct ComponentsByRootRequestId {
     /// Each `RangeRequestId` may request the same data in a later retry. This Id identifies the
     /// current attempt.
     pub id: Id,
@@ -112,7 +74,7 @@ pub enum RangeRequestId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum BlocksByRootRequester {
     Header(HeaderLookupId),
-    RangeSync(ComponentsByRangeRequestId),
+    RangeSync(ComponentsByRootRequestId),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -144,7 +106,7 @@ pub struct SamplingRequestId(pub usize);
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct CustodyByRootRequestId {
-    pub parent_request_id: ComponentsByRangeRequestId,
+    pub parent_request_id: ComponentsByRootRequestId,
 }
 
 /// Downstream components that perform custody by root requests.
@@ -252,14 +214,10 @@ macro_rules! impl_display {
 // Since each request Id is deeply nested with various types, if rendered with Debug on logs they
 // take too much visual space. This custom Display implementations make the overall Id short while
 // not losing information
-impl_display!(BlocksByRangeRequestId, "{}/{}", id, parent_request_id);
-impl_display!(BlobsByRangeRequestId, "{}/{}", id, parent_request_id);
-impl_display!(DataColumnsByRangeRequestId, "{}/{}", id, parent_request_id);
-impl_display!(CustodyByRangeRequestId, "{}/{}", id, parent_request_id);
-impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
+impl_display!(ComponentsByRootRequestId, "{}/{}", id, requester);
 impl_display!(BlocksByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(BlobsByRootRequestId, "{}/{}", id, parent_request_id);
-impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
+impl_display!(DataColumnsByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
 impl_display!(CustodyByRootRequestId, "{}", parent_request_id);
 impl_display!(SamplingId, "{}/{}", sampling_request_id, id);
@@ -331,7 +289,7 @@ mod tests {
     fn display_id_data_columns_by_root_custody() {
         let id = DataColumnsByRootRequestId {
             id: 123,
-            requester: DataColumnsByRootRequester::Custody(CustodyId {
+            parent_request_id: DataColumnsByRootRequester::Custody(CustodyId {
                 requester: CustodyRequester(SingleLookupReqId {
                     req_id: 121,
                     lookup_id: 101,
@@ -345,7 +303,7 @@ mod tests {
     fn display_id_data_columns_by_root_sampling() {
         let id = DataColumnsByRootRequestId {
             id: 123,
-            requester: DataColumnsByRootRequester::Sampling(SamplingId {
+            parent_request_id: DataColumnsByRootRequester::Sampling(SamplingId {
                 id: SamplingRequester::ImportedBlock(Hash256::ZERO),
                 sampling_request_id: SamplingRequestId(101),
             }),
@@ -355,11 +313,11 @@ mod tests {
 
     #[test]
     fn display_id_data_columns_by_range() {
-        let id = DataColumnsByRangeRequestId {
+        let id = DataColumnsByRootRequestId {
             id: 123,
-            parent_request_id: CustodyByRangeRequestId {
+            parent_request_id: CustodyByRootRequestId {
                 id: 122,
-                parent_request_id: ComponentsByRangeRequestId {
+                parent_request_id: ComponentsByRootRequestId {
                     id: 121,
                     requester: RangeRequestId::RangeSync {
                         chain_id: 54,

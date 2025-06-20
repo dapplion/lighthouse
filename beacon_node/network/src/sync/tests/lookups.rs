@@ -1,7 +1,4 @@
 use crate::network_beacon_processor::NetworkBeaconProcessor;
-use crate::sync::block_lookups::{
-    BlockLookupSummary, PARENT_DEPTH_TOLERANCE, SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS,
-};
 use crate::sync::range_sync::BATCH_BUFFER_SIZE;
 use crate::sync::{
     manager::{BlockProcessingResult, SyncManager},
@@ -14,7 +11,6 @@ use std::time::Duration;
 
 use super::*;
 
-use crate::sync::block_lookups::common::ResponseType;
 use beacon_chain::observed_data_sidecars::Observe;
 use beacon_chain::{
     blob_verification::GossipVerifiedBlob,
@@ -50,7 +46,9 @@ use types::{
 };
 
 const D: Duration = Duration::new(0, 0);
+const SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS: u8 = 5;
 const PARENT_FAIL_TOLERANCE: u8 = SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS;
+const PARENT_DEPTH_TOLERANCE: usize = 32;
 const SAMPLING_REQUIRED_SUCCESSES: usize = 2;
 type DCByRootIds = Vec<DCByRootId>;
 type DCByRootId = (SyncRequestId, Vec<ColumnIndex>);
@@ -59,6 +57,14 @@ pub enum PeersConfig {
     SupernodeAndRandom,
     SupernodeOnly,
 }
+
+pub enum ResponseType {
+    Block,
+    Blob,
+    CustodyColumn,
+}
+
+struct BlockLookupSummary {}
 
 pub struct TestOptions {
     /// If the node created by this test harness is a supernode
@@ -261,19 +267,19 @@ impl TestRig {
     }
 
     fn active_single_lookups(&self) -> Vec<BlockLookupSummary> {
-        self.sync_manager.active_single_lookups()
+        todo!();
     }
 
     fn active_single_lookups_count(&self) -> usize {
-        self.sync_manager.active_single_lookups().len()
+        self.active_single_lookups().len()
     }
 
     fn active_parent_lookups(&self) -> Vec<Vec<Hash256>> {
-        self.sync_manager.active_parent_lookups()
+        todo!();
     }
 
     fn active_parent_lookups_count(&self) -> usize {
-        self.sync_manager.active_parent_lookups().len()
+        self.active_single_lookups_count()
     }
 
     fn active_range_sync_chain(&mut self) -> (RangeSyncType, Slot, Slot) {
@@ -284,8 +290,7 @@ impl TestRig {
         assert_eq!(
             self.active_single_lookups_count(),
             count,
-            "Unexpected count of single lookups. Current lookups: {:?}",
-            self.active_single_lookups()
+            "Unexpected count of single lookups. Current lookups: -",
         );
     }
 
@@ -314,66 +319,49 @@ impl TestRig {
         assert_eq!(
             self.active_parent_lookups_count(),
             count,
-            "Unexpected count of parent lookups. Parent lookups: {:?}. Current lookups: {:?}",
-            self.active_parent_lookups(),
-            self.active_single_lookups()
+            "Unexpected count of parent lookups. Parent lookups: -. Current lookups: -",
         );
     }
 
     fn assert_lookup_is_active(&self, block_root: Hash256) {
-        let lookups = self.sync_manager.active_single_lookups();
-        if !lookups.iter().any(|l| l.1 == block_root) {
-            panic!("Expected lookup {block_root} to be the only active: {lookups:?}");
-        }
+        todo!();
     }
 
     fn assert_lookup_peers(&self, block_root: Hash256, mut expected_peers: Vec<PeerId>) {
-        let mut lookup = self
-            .sync_manager
-            .active_single_lookups()
-            .into_iter()
-            .find(|l| l.1 == block_root)
-            .unwrap_or_else(|| panic!("no lookup for {block_root}"));
-        lookup.3.sort();
-        expected_peers.sort();
-        assert_eq!(
-            lookup.3, expected_peers,
-            "unexpected peers on lookup {block_root}"
-        );
+        todo!();
     }
 
     fn insert_failed_chain(&mut self, block_root: Hash256) {
-        self.sync_manager.insert_failed_chain(block_root);
+        todo!();
     }
 
     fn assert_not_failed_chain(&mut self, chain_hash: Hash256) {
-        let failed_chains = self.sync_manager.get_failed_chains();
+        let failed_chains = self.get_failed_chains();
         if failed_chains.contains(&chain_hash) {
             panic!("failed chains contain {chain_hash:?}: {failed_chains:?}");
         }
     }
 
+    fn get_failed_chains(&mut self) -> Vec<Hash256> {
+        todo!();
+    }
+
     fn assert_failed_chain(&mut self, chain_hash: Hash256) {
-        let failed_chains = self.sync_manager.get_failed_chains();
+        let failed_chains = self.get_failed_chains();
         if !failed_chains.contains(&chain_hash) {
             panic!("expected failed chains to contain {chain_hash:?}: {failed_chains:?}");
         }
     }
 
     fn find_single_lookup_for(&self, block_root: Hash256) -> Id {
-        self.active_single_lookups()
-            .iter()
-            .find(|l| l.1 == block_root)
-            .unwrap_or_else(|| panic!("no single block lookup found for {block_root}"))
-            .0
+        todo!();
     }
 
     #[track_caller]
     fn expect_no_active_single_lookups(&self) {
         assert!(
             self.active_single_lookups().is_empty(),
-            "expect no single block lookups: {:?}",
-            self.active_single_lookups()
+            "expect no single block lookups",
         );
     }
 
@@ -478,9 +466,7 @@ impl TestRig {
             .find(|chain| chain.first() == Some(&chain_hash))
             .unwrap_or_else(|| {
                 panic!(
-                    "No parent chain with chain_hash {chain_hash:?}: Parent lookups {:?} Single lookups {:?}",
-                    self.active_parent_lookups(),
-                    self.active_single_lookups(),
+                    "No parent chain with chain_hash {chain_hash:?}: Parent lookups - Single lookups -",
                 )
             });
         *parent_chain.last().unwrap()
@@ -738,7 +724,7 @@ impl TestRig {
         let block_root = first_dc.block_root();
         let sampling_request_id = match id.0 {
             SyncRequestId::DataColumnsByRoot(DataColumnsByRootRequestId {
-                requester: DataColumnsByRootRequester::Sampling(sampling_id),
+                parent_request_id: DataColumnsByRootRequester::Sampling(sampling_id),
                 ..
             }) => sampling_id.sampling_request_id,
             _ => unreachable!(),
@@ -765,7 +751,7 @@ impl TestRig {
         _missing_components: bool,
     ) {
         let _lookup_id = if let SyncRequestId::DataColumnsByRoot(DataColumnsByRootRequestId {
-            requester: DataColumnsByRootRequester::Custody(id),
+            parent_request_id: DataColumnsByRootRequester::Custody(id),
             ..
         }) = ids.first().unwrap().0
         {

@@ -6,12 +6,10 @@ use crate::sync::range_sync::BatchPeers;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::{get_block_root, BeaconChainTypes};
-use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, BlocksByRangeRequest, BlocksByRootRequest,
-};
+use lighthouse_network::rpc::methods::BlocksByRootRequest;
 use lighthouse_network::service::api_types::{
     BlobsByRangeRequestId, BlobsByRootRequestId, BlocksByRootRequestId, BlocksByRootRequester,
-    ComponentsByRangeRequestId, CustodyByRangeRequestId, CustodyByRootRequestId,
+    ComponentsByRootRequestId, CustodyByRangeRequestId, CustodyByRootRequestId,
 };
 use lighthouse_network::PeerId;
 use parking_lot::RwLock;
@@ -22,12 +20,12 @@ use types::{
     Hash256, RuntimeVariableList, SignedBeaconBlock, Slot,
 };
 
-/// Given a `BlocksByRangeRequest` (a range of slots) fetches all necessary data to return
-/// potentially available RpcBlocks.
+/// Given a `BlocksByRootRequest` (a collection of block roots) fetches all necessary data to
+/// return potentially available RpcBlocks.
 ///
-/// See [`State`] for the set of `*_by_range` it may issue depending on the fork.
-pub struct BlockComponentsByRangeRequest<T: BeaconChainTypes> {
-    id: ComponentsByRangeRequestId,
+/// See [`State`] for the set of `*_by_root` it may issue depending on the fork.
+pub struct BlockComponentsByRootRequest<T: BeaconChainTypes> {
+    id: ComponentsByRootRequestId,
     peers: Arc<RwLock<HashSet<PeerId>>>,
     block_root: Hash256,
     state: State<T::EthSpec>,
@@ -63,7 +61,7 @@ enum Request<I: PartialEq + std::fmt::Display, T, P = PeerId> {
     Complete(T, P),
 }
 
-pub type BlockComponentsByRangeRequestResult<E> = Result<Option<(RpcBlock<E>, BatchPeers)>, Error>;
+pub type BlockComponentsByRootRequestResult<E> = Result<Option<(RpcBlock<E>, BatchPeers)>, Error>;
 
 pub enum Error {
     InternalError(String),
@@ -88,14 +86,14 @@ impl From<Error> for RpcRequestSendError {
 /// Used to typesafe assertions of state in range sync tests
 #[cfg(test)]
 #[derive(Debug)]
-pub enum BlockComponentsByRangeRequestStep {
+pub enum BlockComponentsByRootRequestStep {
     BlocksRequest,
     CustodyRequest,
 }
 
-impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
+impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
     pub fn new(
-        id: ComponentsByRangeRequestId,
+        id: ComponentsByRootRequestId,
         block_root: Hash256,
         peers: Arc<RwLock<HashSet<PeerId>>>,
         peers_to_deprioritize: &HashSet<PeerId>,
@@ -145,7 +143,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     pub fn continue_requests(
         &mut self,
         cx: &mut SyncNetworkContext<T>,
-    ) -> BlockComponentsByRangeRequestResult<T::EthSpec> {
+    ) -> BlockComponentsByRootRequestResult<T::EthSpec> {
         match &mut self.state {
             State::BlocksRequest {
                 blocks_request: blocks_by_range_request,
@@ -276,7 +274,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
         data: Arc<SignedBeaconBlock<T::EthSpec>>,
         peer_id: PeerId,
         cx: &mut SyncNetworkContext<T>,
-    ) -> BlockComponentsByRangeRequestResult<T::EthSpec> {
+    ) -> BlockComponentsByRootRequestResult<T::EthSpec> {
         match &mut self.state {
             State::BlocksRequest { blocks_request } => {
                 blocks_request.finish(id, data, peer_id)?;
@@ -297,7 +295,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
         data: Vec<Arc<BlobSidecar<T::EthSpec>>>,
         peer_id: PeerId,
         cx: &mut SyncNetworkContext<T>,
-    ) -> BlockComponentsByRangeRequestResult<T::EthSpec> {
+    ) -> BlockComponentsByRootRequestResult<T::EthSpec> {
         match &mut self.state {
             State::DataRequest {
                 data_request: DataRequest::Deneb { blobs_request },
@@ -321,7 +319,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
         data: DataColumnSidecarList<T::EthSpec>,
         peers: PeerGroup,
         cx: &mut SyncNetworkContext<T>,
-    ) -> BlockComponentsByRangeRequestResult<T::EthSpec> {
+    ) -> BlockComponentsByRootRequestResult<T::EthSpec> {
         match &mut self.state {
             State::DataRequest {
                 data_request: DataRequest::Fulu { custody_request },
@@ -340,10 +338,10 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     }
 
     #[cfg(test)]
-    pub fn state_step(&self) -> BlockComponentsByRangeRequestStep {
+    pub fn state_step(&self) -> BlockComponentsByRootRequestStep {
         match &self.state {
-            State::BlocksRequest { .. } => BlockComponentsByRangeRequestStep::BlocksRequest,
-            State::DataRequest { .. } => BlockComponentsByRangeRequestStep::CustodyRequest,
+            State::BlocksRequest { .. } => BlockComponentsByRootRequestStep::BlocksRequest,
+            State::DataRequest { .. } => BlockComponentsByRootRequestStep::CustodyRequest,
         }
     }
 }

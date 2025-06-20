@@ -2,7 +2,6 @@
 //!
 //! Stores the various syncing methods for the beacon chain.
 mod backfill_sync;
-mod block_lookups;
 mod block_tree;
 pub mod manager;
 mod network_context;

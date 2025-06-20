@@ -54,11 +54,9 @@ use beacon_chain::{
 use futures::StreamExt;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
-    BlobsByRangeRequestId, BlobsByRootRequestId, BlocksByRangeRequestId, BlocksByRootRequestId,
-    BlocksByRootRequester, ComponentsByRangeRequestId, CustodyByRangeRequestId,
-    CustodyByRootRequestId, CustodyRequester, DataColumnsByRangeRequestId,
-    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, SamplingId, SamplingRequester,
-    SyncRequestId,
+    BlobsByRootRequestId, BlocksByRootRequestId, BlocksByRootRequester, ComponentsByRootRequestId,
+    CustodyByRootRequestId, CustodyRequester, DataColumnsByRootRequestId,
+    DataColumnsByRootRequester, Id, SamplingId, SamplingRequester, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::PeerId;
@@ -318,26 +316,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn active_single_lookups(&self) -> Vec<super::block_lookups::BlockLookupSummary> {
-        todo!();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active_parent_lookups(&self) -> Vec<Vec<Hash256>> {
-        todo!();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn get_failed_chains(&mut self) -> Vec<Hash256> {
-        todo!();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn insert_failed_chain(&mut self, _block_root: Hash256) {
-        todo!();
-    }
-
-    #[cfg(test)]
     pub(crate) fn active_sampling_requests(&self) -> Vec<Hash256> {
         self.sampling.active_sampling_requests()
     }
@@ -429,9 +407,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         for (id, result) in self.network.continue_custody_by_root_requests() {
             self.on_custody_by_root_result(id, result);
         }
-        for (id, result) in self.network.continue_custody_by_range_requests() {
-            self.on_custody_by_range_result(id, result);
-        }
     }
 
     /// Trigger range sync for a set of peers that claim to have imported a head unknown to us.
@@ -495,15 +470,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncRequestId::DataColumnsByRoot(req_id) => {
                 self.on_data_columns_by_root_response(req_id, peer_id, RpcEvent::RPCError(error))
             }
-            SyncRequestId::BlocksByRange(req_id) => {
-                self.on_blocks_by_range_response(req_id, peer_id, RpcEvent::RPCError(error))
-            }
-            SyncRequestId::BlobsByRange(req_id) => {
-                self.on_blobs_by_range_response(req_id, peer_id, RpcEvent::RPCError(error))
-            }
-            SyncRequestId::DataColumnsByRange(req_id) => {
-                self.on_data_columns_by_range_response(req_id, peer_id, RpcEvent::RPCError(error))
-            }
         }
     }
 
@@ -535,9 +501,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         // `continue_custody_by_root_requests` is just a convenience to have less code.
         for (id, result) in self.network.continue_custody_by_root_requests() {
             self.on_custody_by_root_result(id, result);
-        }
-        for (id, result) in self.network.continue_custody_by_range_requests() {
-            self.on_custody_by_range_result(id, result);
         }
     }
 
@@ -1007,11 +970,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 peer_id,
                 RpcEvent::from_chunk(block, seen_timestamp),
             ),
-            SyncRequestId::BlocksByRange(id) => self.on_blocks_by_range_response(
-                id,
-                peer_id,
-                RpcEvent::from_chunk(block, seen_timestamp),
-            ),
             _ => {
                 crit!(%peer_id, "bad request id for block");
             }
@@ -1073,8 +1031,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         seen_timestamp: Duration,
     ) {
         match sync_request_id {
-            SyncRequestId::BlobsByRoot { .. } => todo!(),
-            SyncRequestId::BlobsByRange(id) => self.on_blobs_by_range_response(
+            SyncRequestId::BlobsByRoot(id) => self.on_blobs_by_root_response(
                 id,
                 peer_id,
                 RpcEvent::from_chunk(blob, seen_timestamp),
@@ -1100,11 +1057,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     RpcEvent::from_chunk(data_column, seen_timestamp),
                 );
             }
-            SyncRequestId::DataColumnsByRange(id) => self.on_data_columns_by_range_response(
-                id,
-                peer_id,
-                RpcEvent::from_chunk(data_column, seen_timestamp),
-            ),
             _ => {
                 crit!(%peer_id, "bad request id for data_column");
             }
@@ -1121,7 +1073,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             self.network
                 .on_data_columns_by_root_response(req_id, peer_id, data_column)
         {
-            match req_id.requester {
+            match req_id.parent_request_id {
                 DataColumnsByRootRequester::Sampling(id) => {
                     if let Some((requester, result)) =
                         self.sampling
@@ -1140,56 +1092,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 }
             }
         }
-    }
-
-    fn on_blocks_by_range_response(
-        &mut self,
-        id: BlocksByRangeRequestId,
-        peer_id: PeerId,
-        block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) {
-        if let Some(resp) = self.network.on_blocks_by_range_response(id, peer_id, block) {
-            todo!();
-        }
-    }
-
-    fn on_blobs_by_range_response(
-        &mut self,
-        id: BlobsByRangeRequestId,
-        peer_id: PeerId,
-        blob: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
-    ) {
-        if let Some(resp) = self.network.on_blobs_by_range_response(id, peer_id, blob) {
-            todo!();
-        }
-    }
-
-    fn on_data_columns_by_range_response(
-        &mut self,
-        id: DataColumnsByRangeRequestId,
-        peer_id: PeerId,
-        data_column: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
-    ) {
-        // data_columns_by_range returns either an Ok list of data columns, or an RpcResponseError
-        if let Some(resp) = self
-            .network
-            .on_data_columns_by_range_response(id, peer_id, data_column)
-        {
-            // custody_by_range accumulates the results of multiple data_columns_by_range requests
-            // returning a bigger list of data columns across all the column indices this node has
-            // to custody
-            if let Some(result) = self.network.on_custody_by_range_response(id, peer_id, resp) {
-                self.on_custody_by_range_result(id.parent_request_id, result);
-            }
-        }
-    }
-
-    fn on_custody_by_range_result(
-        &mut self,
-        _id: CustodyByRangeRequestId,
-        _result: CustodyRequestResult<T::EthSpec>,
-    ) {
-        todo!();
     }
 
     fn on_custody_by_root_result(
@@ -1230,14 +1132,14 @@ impl<T: BeaconChainTypes> SyncManager<T> {
 
     /// Handles receiving a response for a range sync request that should have both blocks and
     /// blobs.
-    fn on_block_components_by_range_response(
+    fn on_block_components_by_root_response(
         &mut self,
-        range_request_id: ComponentsByRangeRequestId,
+        range_request_id: ComponentsByRootRequestId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
     ) {
         if let Some(result) = self
             .network
-            .on_block_components_by_range_response(range_request_id, range_block_component)
+            .on_block_components_by_root_response(range_request_id, range_block_component)
         {
             match range_request_id.requester {
                 RangeRequestId::RangeSync(id) => {

@@ -6,7 +6,7 @@ use beacon_chain::builder::Witness;
 use beacon_chain::eth1_chain::CachingEth1Backend;
 use beacon_chain::test_utils::{BeaconChainHarness, EphemeralHarnessType};
 use beacon_processor::WorkEvent;
-use lighthouse_network::service::api_types::ComponentsByRangeRequestId;
+use lighthouse_network::service::api_types::ComponentsByRootRequestId;
 use lighthouse_network::NetworkGlobals;
 pub use lookups::PeersConfig;
 use rand_chacha::ChaCha20Rng;
@@ -74,7 +74,7 @@ struct TestRig {
     spec: Arc<ChainSpec>,
 
     // Cache of sent blocks for PeerDAS responses
-    sent_blocks_by_range: HashMap<ComponentsByRangeRequestId, Vec<Arc<SignedBeaconBlock<E>>>>,
+    sent_blocks_by_range: HashMap<ComponentsByRootRequestId, Vec<Arc<SignedBeaconBlock<E>>>>,
     blocks_by_root: HashMap<Hash256, Arc<SignedBeaconBlock<E>>>,
 }
 
