@@ -4,7 +4,6 @@ use crate::sync::network_context::{
 use beacon_chain::validator_monitor::timestamp_now;
 use beacon_chain::BeaconChainTypes;
 use fnv::FnvHashMap;
-use lighthouse_network::rpc::methods::DataColumnsByRootRequest;
 use lighthouse_network::service::api_types::{CustodyByRootRequestId, DataColumnsByRootRequester};
 use lighthouse_network::PeerId;
 use lru_cache::LRUTimeCache;
@@ -15,10 +14,7 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 use strum::IntoStaticStr;
 use tracing::{debug, warn};
-use types::{
-    data_column_sidecar::ColumnIndex, DataColumnSidecar, DataColumnSidecarList,
-    DataColumnsByRootIdentifier, Hash256, RuntimeVariableList,
-};
+use types::{data_column_sidecar::ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Hash256};
 
 use super::{LookupRequestResult, PeerGroup, RpcResponseResult, SyncNetworkContext};
 

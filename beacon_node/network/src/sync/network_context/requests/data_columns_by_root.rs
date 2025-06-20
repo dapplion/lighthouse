@@ -1,9 +1,5 @@
-use lighthouse_network::rpc::methods::DataColumnsByRootRequest;
 use std::sync::Arc;
-use types::{
-    ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier, EthSpec, ForkName, Hash256,
-    RuntimeVariableList,
-};
+use types::{DataColumnSidecar, EthSpec, Hash256};
 
 use super::{ActiveRequestItems, LookupVerifyError};
 

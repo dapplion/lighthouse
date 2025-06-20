@@ -1,21 +1,21 @@
-use crate::metrics::{self, register_process_result_metrics};
+use crate::metrics::{self};
 use crate::network_beacon_processor::{NetworkBeaconProcessor, FUTURE_SLOT_TOLERANCE};
+use crate::sync::manager::SyncMessage;
 use crate::sync::BatchProcessResult;
-use crate::sync::{manager::SyncMessage, ChainId};
 use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
 use beacon_chain::data_availability_checker::AvailabilityCheckError;
 use beacon_chain::data_column_verification::verify_kzg_for_data_column_list;
 use beacon_chain::{
     BeaconChainTypes, BlockError, ChainSegmentResult, HistoricalBlockError, NotifyExecutionLayer,
 };
-use lighthouse_network::service::api_types::HeaderLookupId;
+use lighthouse_network::service::api_types::{HeaderLookupId, Id};
 use lighthouse_network::PeerAction;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
-use types::{ColumnIndex, DataColumnSidecar, Epoch, Hash256};
+use types::{ColumnIndex, DataColumnSidecar, Hash256};
 
 /// Id associated to a batch processing request, either a sync batch or a parent lookup.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,7 +23,7 @@ pub enum ChainSegmentProcessId {
     /// Processing Id of a range syncing batch.
     RangeBatchId(HeaderLookupId),
     /// Processing ID for a backfill syncing batch.
-    BackSyncBatchId(Epoch),
+    BackSyncBatchId(Id),
 }
 
 /// Returned when a chain segment import fails.

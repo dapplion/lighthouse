@@ -14,11 +14,13 @@ use beacon_chain::{
     PayloadVerificationStatus,
 };
 use beacon_processor::WorkType;
-use lighthouse_network::rpc::methods::{BlocksByRootRequest, DataColumnsByRootRequest};
+use lighthouse_network::rpc::methods::{
+    BlobsByRootRequest, BlocksByRootRequest, DataColumnsByRootRequest,
+};
 use lighthouse_network::rpc::{RequestType, StatusMessage};
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlocksByRootRequestId, BlocksByRootRequester, ComponentsByRootRequestId,
-    DataColumnsByRootRequestId, HeaderLookupId, SyncRequestId,
+    AppRequestId, BlobsByRootRequestId, BlocksByRootRequestId, BlocksByRootRequester,
+    ComponentsByRootRequestId, DataColumnsByRootRequestId, HeaderLookupId, SyncRequestId,
 };
 use lighthouse_network::types::SyncState;
 use lighthouse_network::{PeerId, SyncInfo};

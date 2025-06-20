@@ -2,7 +2,6 @@
 //! channel and stores a global RPC ID to perform requests.
 
 use self::custody_by_root::ActiveCustodyByRootRequest;
-use super::range_sync::BatchPeers;
 use super::SyncMessage;
 use crate::metrics;
 use crate::network_beacon_processor::NetworkBeaconProcessor;
@@ -11,22 +10,20 @@ use crate::network_beacon_processor::TestBeaconChainType;
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use beacon_chain::block_verification_types::RpcBlock;
-use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
+use beacon_chain::{BeaconChain, BeaconChainTypes, EngineState};
 pub use block_components_by_range::BlockComponentsByRootRequest;
 #[cfg(test)]
 pub use block_components_by_range::BlockComponentsByRootRequestStep;
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, BlobsByRootRequest, BlocksByRootRequest, DataColumnsByRangeRequest,
-    DataColumnsByRootRequest,
+    BlobsByRootRequest, BlocksByRootRequest, DataColumnsByRootRequest,
 };
-use lighthouse_network::rpc::{BlocksByRangeRequest, GoodbyeReason, RPCError, RequestType};
+use lighthouse_network::rpc::{GoodbyeReason, RPCError, RequestType};
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
     AppRequestId, BlobsByRootRequestId, BlocksByRootRequestId, BlocksByRootRequester,
-    ComponentsByRootRequestId, CustodyByRootRequestId, CustodyRequester,
-    DataColumnsByRootRequestId, DataColumnsByRootRequester, HeaderLookupId, Id, SingleLookupReqId,
-    SyncRequestId,
+    ComponentsByRootRequestId, CustodyByRootRequestId, DataColumnsByRootRequestId,
+    DataColumnsByRootRequester, Id, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
@@ -49,7 +46,7 @@ use types::blob_sidecar::FixedBlobSidecarList;
 use types::{
     BlobIdentifier, BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnSidecarList,
     DataColumnsByRootIdentifier, EthSpec, ForkContext, ForkName, Hash256, RuntimeVariableList,
-    SignedBeaconBlock, SignedBeaconBlockHeader, Slot,
+    SignedBeaconBlock,
 };
 
 pub mod block_components_by_range;
@@ -159,6 +156,35 @@ impl PeerGroup {
 
     pub fn as_map(&self) -> &HashMap<usize, PeerId> {
         &self.peers
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BatchPeers {
+    block_peer: PeerId,
+    column_peers: PeerGroup,
+}
+
+impl BatchPeers {
+    pub fn new_from_block_peer(block_peer: PeerId) -> Self {
+        Self {
+            block_peer,
+            column_peers: PeerGroup::empty(),
+        }
+    }
+    pub fn new(block_peer: PeerId, column_peers: PeerGroup) -> Self {
+        Self {
+            block_peer,
+            column_peers,
+        }
+    }
+
+    pub fn block(&self) -> PeerId {
+        self.block_peer
+    }
+
+    pub fn column(&self, index: &ColumnIndex) -> Option<&PeerId> {
+        self.column_peers.of_index(&((*index) as usize))
     }
 }
 

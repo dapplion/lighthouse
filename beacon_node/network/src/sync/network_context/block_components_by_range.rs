@@ -1,23 +1,20 @@
 use crate::sync::network_context::{
-    BlocksByRootSameForkRequest, PeerGroup, RpcRequestSendError, RpcResponseError,
-    SyncNetworkContext,
+    BatchPeers, PeerGroup, RpcRequestSendError, RpcResponseError, SyncNetworkContext,
 };
-use crate::sync::range_sync::BatchPeers;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::{get_block_root, BeaconChainTypes};
-use lighthouse_network::rpc::methods::BlocksByRootRequest;
 use lighthouse_network::service::api_types::{
-    BlobsByRangeRequestId, BlobsByRootRequestId, BlocksByRootRequestId, BlocksByRootRequester,
-    ComponentsByRootRequestId, CustodyByRangeRequestId, CustodyByRootRequestId,
+    BlobsByRootRequestId, BlocksByRootRequestId, BlocksByRootRequester, ComponentsByRootRequestId,
+    CustodyByRootRequestId,
 };
 use lighthouse_network::PeerId;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use types::{
-    BeaconBlockHeader, BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecarList, EthSpec,
-    Hash256, RuntimeVariableList, SignedBeaconBlock, Slot,
+    BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecarList, EthSpec, Hash256,
+    RuntimeVariableList, SignedBeaconBlock,
 };
 
 /// Given a `BlocksByRootRequest` (a collection of block roots) fetches all necessary data to

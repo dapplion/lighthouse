@@ -6,11 +6,8 @@ use lighthouse_network::PeerId;
 use strum::IntoStaticStr;
 use types::{Hash256, Slot};
 
-pub use blobs_by_range::BlobsByRangeRequestItems;
 pub use blobs_by_root::BlobsByRootRequestItems;
-pub use blocks_by_range::BlocksByRangeRequestItems;
 pub use blocks_by_root::BlocksByRootRequestItems;
-pub use data_columns_by_range::DataColumnsByRangeRequestItems;
 pub use data_columns_by_root::DataColumnsByRootRequestItems;
 
 use crate::metrics;

@@ -1,14 +1,10 @@
-use super::network_context::{LookupRequestResult, RpcResponseError, SyncNetworkContext};
+use super::network_context::{RpcResponseError, SyncNetworkContext};
 use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::sync::network_context::custody_by_root::ColumnRequest;
-use crate::sync::network_context::{
-    BlocksByRootSameForkRequest, RpcResponseBatchResult, RpcResponseResult,
-};
-use crate::sync::range_sync::{BatchInfo, BatchPeers};
+use crate::sync::network_context::{BatchPeers, RpcResponseResult};
 use crate::sync::BatchProcessResult;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
-use lighthouse_network::rpc::BlocksByRootRequest;
 use lighthouse_network::service::api_types::{
     BlocksByRootRequestId, BlocksByRootRequester, HeaderLookupId, Id, RangeRequestId,
 };
@@ -17,11 +13,10 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::debug;
-use types::{BeaconBlockHeader, Epoch, EthSpec, ForkName, Hash256, SignedBeaconBlock, Slot};
+use types::{BeaconBlockHeader, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 pub struct BlockTree<T: BeaconChainTypes> {
     blocks: HashMap<Hash256, Block<T::EthSpec>>,
-    batches: HashMap<Id, BatchInfo<T::EthSpec>>,
     chain: Arc<BeaconChain<T>>,
 }
 
@@ -54,16 +49,6 @@ impl<E: EthSpec> Block<E> {
             peers: HashSet::from_iter(peers.iter().copied()),
             status: Status::DownloadingHeader(ColumnRequest::new()),
         }
-    }
-
-    fn start<T: BeaconChainTypes>(&mut self, cx: &mut SyncNetworkContext<T>) {}
-
-    fn on_error(&mut self, _e: RpcResponseError) {
-        todo!();
-    }
-
-    fn root(&self) -> Hash256 {
-        todo!();
     }
 
     fn peer_count(&self) -> usize {
@@ -127,7 +112,6 @@ impl<T: BeaconChainTypes> BlockTree<T> {
     pub fn new(chain: Arc<BeaconChain<T>>) -> Self {
         Self {
             blocks: <_>::default(),
-            batches: <_>::default(),
             chain,
         }
     }
@@ -147,11 +131,13 @@ impl<T: BeaconChainTypes> BlockTree<T> {
     }
 
     pub fn pause(&mut self) {
-        todo!()
+        todo!();
     }
 
-    pub fn remove_peer(&mut self, _peer: PeerId) {
-        todo!();
+    pub fn remove_peer(&mut self, peer: PeerId) {
+        for block in self.blocks.values_mut() {
+            block.peers.remove(&peer);
+        }
     }
 
     pub fn search(
@@ -204,32 +190,6 @@ impl<T: BeaconChainTypes> BlockTree<T> {
 
             self.blocks.insert(block_root, lookup);
             true
-        }
-    }
-
-    fn oldest_known_ancestor(&self, mut block_root: Hash256) -> Hash256 {
-        let Some(mut parent_root) = self
-            .blocks
-            .get(&block_root)
-            .and_then(|lookup| lookup.parent_root())
-        else {
-            return block_root;
-        };
-
-        loop {
-            if let Some(lookup) = self.blocks.get(&parent_root) {
-                if let Some(next_parent_root) = lookup.parent_root() {
-                    // Continue iterating the parent chain
-                    block_root = parent_root;
-                    parent_root = next_parent_root;
-                } else {
-                    // There's an entry for parent_root but it's not downloaded yet
-                    return parent_root;
-                }
-            } else {
-                // There's no entry in the DAG for parent_root, thus block_root is the root node
-                return block_root;
-            }
         }
     }
 
@@ -443,9 +403,8 @@ impl<T: BeaconChainTypes> BlockTree<T> {
             match &mut lookup.status {
                 Status::Syncing(header, syncing_status) => match syncing_status {
                     SyncingStatus::AwaitingDownload => {
-                        // TODO(tree-sync): pick the right ID
-                        let chain_id = cx.next_id();
                         let requester = RangeRequestId::RangeSync(lookup.id);
+                        // TODO(tree-sync) use RwLock or manually add to active request
                         let peers = Arc::new(RwLock::new(HashSet::from_iter(
                             lookup.peers.iter().copied(),
                         )));
@@ -461,7 +420,8 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                                 *syncing_status = SyncingStatus::Downloading(req_id);
                             }
                             Err(e) => {
-                                // Log failed chain, mark blocks as not syncing
+                                // Handle send error
+                                todo!("Error sending {e:?}");
                             }
                         };
                     }
@@ -485,7 +445,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
         }
     }
 
-    pub fn on_blocks_response(
+    pub fn on_block_response(
         &mut self,
         id: HeaderLookupId,
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
@@ -505,7 +465,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                     *request = SyncingStatus::AwaitingProcessing(block, peers);
                 }
                 Err(e) => {
-                    debug!(%id, "Sync block download error");
+                    debug!(%id, error = ?e, "Sync block download error");
                     *request = SyncingStatus::AwaitingDownload;
                 }
             },
@@ -528,13 +488,18 @@ impl<T: BeaconChainTypes> BlockTree<T> {
 
         let request = lookup.block_request().unwrap();
         match request {
-            SyncingStatus::Processing(peers) => match result {
+            SyncingStatus::Processing(_peers) => match result {
                 BatchProcessResult::Success { .. } => {
                     debug!(%id, "Sync block process success");
                     self.blocks.remove(&id.0);
                     self.trigger_forward_sync(cx);
                 }
-                BatchProcessResult::FaultyFailure { .. } | BatchProcessResult::NonFaultyFailure => {
+                BatchProcessResult::FaultyFailure { .. } => {
+                    debug!(%id, "Sync block process error");
+                    *request = SyncingStatus::AwaitingDownload;
+                    // TODO(tree-sync): add peer to failed peers and downscore
+                }
+                BatchProcessResult::NonFaultyFailure => {
                     debug!(%id, "Sync block process error");
                     *request = SyncingStatus::AwaitingDownload;
                     // TODO(tree-sync): add peer to failed peers and downscore
@@ -542,5 +507,8 @@ impl<T: BeaconChainTypes> BlockTree<T> {
             },
             _ => panic!("Bad state"),
         }
+
+        // Continue batches
+        self.continue_syncing_blocks(cx);
     }
 }

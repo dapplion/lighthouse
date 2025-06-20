@@ -5,7 +5,6 @@ use super::network_context::{RpcResponseError, SyncNetworkContext};
 use crate::metrics;
 use beacon_chain::BeaconChainTypes;
 use fnv::FnvHashMap;
-use lighthouse_network::rpc::methods::DataColumnsByRootRequest;
 use lighthouse_network::service::api_types::{
     DataColumnsByRootRequester, SamplingId, SamplingRequestId, SamplingRequester,
 };
@@ -16,10 +15,7 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, error, instrument, warn};
-use types::{
-    data_column_sidecar::ColumnIndex, ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier,
-    Hash256, RuntimeVariableList,
-};
+use types::{data_column_sidecar::ColumnIndex, ChainSpec, DataColumnSidecar, Hash256};
 
 pub type SamplingResult = Result<(), SamplingError>;
 

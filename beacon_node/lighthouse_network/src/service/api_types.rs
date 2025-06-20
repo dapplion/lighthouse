@@ -68,7 +68,7 @@ pub struct ComponentsByRootRequestId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum RangeRequestId {
     RangeSync(HeaderLookupId),
-    BackfillSync { batch_id: Epoch },
+    BackfillSync(Id),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -253,7 +253,7 @@ impl Display for RangeRequestId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
-            Self::BackfillSync { batch_id } => write!(f, "BackfillSync/{batch_id}"),
+            Self::BackfillSync(id) => write!(f, "BackfillSync/{id}"),
         }
     }
 }
