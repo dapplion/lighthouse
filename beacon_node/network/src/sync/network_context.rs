@@ -12,7 +12,6 @@ use crate::network_beacon_processor::TestBeaconChainType;
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::block_lookups::SingleLookupId;
-use crate::sync::network_context::requests::BlobCountPerBlock;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
 pub use block_components_by_range::BlockComponentsByRangeRequest;
@@ -488,7 +487,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     /// A blocks by range request sent by the range sync algorithm
     pub fn block_components_by_range_request(
         &mut self,
-        request: BlocksByRootSameForkRequest,
+        block_root: Hash256,
         requester: RangeRequestId,
         peers: Arc<RwLock<HashSet<PeerId>>>,
         peers_to_deprioritize: &HashSet<PeerId>,
@@ -499,7 +498,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         };
 
         let req =
-            BlockComponentsByRangeRequest::new(id, request, peers, peers_to_deprioritize, self)?;
+            BlockComponentsByRangeRequest::new(id, block_root, peers, peers_to_deprioritize, self)?;
 
         self.block_components_by_range_requests.insert(id, req);
 
@@ -575,7 +574,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         &mut self,
         requester: DataColumnsByRootRequester,
         peer_id: PeerId,
-        block_roots: Vec<Hash256>,
+        block_root: Hash256,
         indices: Vec<ColumnIndex>,
         expect_max_responses: bool,
     ) -> Result<LookupRequestResult<DataColumnsByRootRequestId>, &'static str> {
@@ -592,13 +591,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         };
 
         let request = DataColumnsByRootRequest::new(
-            block_roots
-                .iter()
-                .map(|block_root| DataColumnsByRootIdentifier {
-                    block_root: *block_root,
-                    columns: RuntimeVariableList::from_vec(indices.clone(), usize::MAX),
-                })
-                .collect(),
+            vec![DataColumnsByRootIdentifier {
+                block_root,
+                columns: RuntimeVariableList::from_vec(indices.clone(), usize::MAX),
+            }],
             usize::MAX,
         );
 
@@ -611,7 +607,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         debug!(
             method = "DataColumnsByRoot",
             peer = %peer_id,
-            ?block_roots,
+            ?block_root,
             ?indices,
             %id,
             "Sync RPC request sent"
@@ -621,7 +617,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             id,
             peer_id,
             expect_max_responses,
-            DataColumnsByRootRequestItems::new(block_roots, indices),
+            DataColumnsByRootRequestItems::new(block_root, indices),
         );
 
         Ok(LookupRequestResult::RequestSent(id))
@@ -634,7 +630,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     pub fn send_custody_by_root_request(
         &mut self,
         parent_request_id: ComponentsByRangeRequestId,
-        request: BlocksByRootRequest,
+        block_root: Hash256,
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Result<CustodyByRootRequestId, RpcRequestSendError> {
         let span = span!(
@@ -656,12 +652,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .into_iter()
             .collect::<Vec<_>>();
 
-        let mut request = ActiveCustodyByRootRequest::new(
-            request.block_roots().to_vec(),
-            id,
-            &custody_indices,
-            lookup_peers,
-        );
+        let mut request =
+            ActiveCustodyByRootRequest::new(block_root, id, &custody_indices, lookup_peers);
 
         // Note that you can only send, but not handle a response here
         match request.continue_requests(self) {
@@ -679,13 +671,15 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     pub fn send_blocks_by_root_request(
         &mut self,
         peer_id: PeerId,
-        request: BlocksByRootRequest,
+        block_root: Hash256,
         parent_request_id: BlocksByRootRequester,
     ) -> Result<BlocksByRootRequestId, RpcRequestSendError> {
         let id = BlocksByRootRequestId {
             id: self.next_id(),
             parent_request_id,
         };
+
+        let request = BlocksByRootRequest::new(vec![block_root], self.spec(), ForkName::Fulu);
 
         // Lookup sync event safety: If network_send.send() returns Ok(_) we are guaranteed that
         // eventually at least one this 3 events will be received:
@@ -696,7 +690,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.network_send
             .send(NetworkMessage::SendRequest {
                 peer_id,
-                request: RequestType::BlocksByRoot(request.clone().into()),
+                request: RequestType::BlocksByRoot(request),
                 app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRoot(id)),
             })
             .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
@@ -714,7 +708,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             // true = enforce max_requests as returned for blocks_by_root. We always request from
             // peers to claim to have these blocks
             true,
-            BlocksByRootRequestItems::new(request),
+            BlocksByRootRequestItems::new(block_root),
         );
         Ok(id)
     }
@@ -760,7 +754,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     fn send_blobs_by_root_request(
         &mut self,
         peer_id: PeerId,
-        request: BlobCountPerBlock,
+        block_root: Hash256,
+        blobs_per_block: usize,
         parent_request_id: ComponentsByRangeRequestId,
     ) -> Result<BlobsByRootRequestId, RpcRequestSendError> {
         let id = BlobsByRootRequestId {
@@ -768,14 +763,12 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             parent_request_id,
         };
 
-        let blob_identifiers = request
-            .0
+        let indices = (0..(blobs_per_block as u64)).collect::<Vec<_>>();
+        let blob_identifiers = indices
             .iter()
-            .flat_map(|(block_root, blob_count)| {
-                (0..(*blob_count as u64)).map(|index| BlobIdentifier {
-                    block_root: *block_root,
-                    index,
-                })
+            .map(|index| BlobIdentifier {
+                block_root,
+                index: *index,
             })
             .collect::<Vec<_>>();
 
@@ -802,7 +795,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             peer_id,
             // true = we know exactly how many blobs total we expect
             true,
-            BlobsByRootRequestItems::new(request),
+            BlobsByRootRequestItems::new(block_root, indices),
         );
         Ok(id)
     }
@@ -1349,7 +1342,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         &mut self,
         id: ComponentsByRangeRequestId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
-    ) -> Option<Result<(Vec<RpcBlock<T::EthSpec>>, BatchPeers), RpcResponseError>> {
+    ) -> Option<Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>> {
         // Note: need to remove the request to borrow self again below. Otherwise we can't
         // do nested requests
         let Some(mut request) = self.block_components_by_range_requests.remove(&id) else {
@@ -1362,8 +1355,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         let result = match range_block_component {
             RangeBlockComponent::Block(req_id, resp, peer_id) => resp.and_then(|(blocks, _)| {
+                let block = blocks.first().ok_or(RpcResponseError::InternalError(
+                    "blocks_by_root returned zero blocks".to_owned(),
+                ))?;
                 request
-                    .on_blocks_by_root_result(req_id, blocks, peer_id, self)
+                    .on_blocks_by_root_result(req_id, block.clone(), peer_id, self)
                     .map_err(Into::<RpcResponseError>::into)
             }),
             RangeBlockComponent::Blob(req_id, resp, peer_id) => resp.and_then(|(blobs, _)| {
@@ -1384,18 +1380,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         .transpose();
 
         match result.as_ref() {
-            Some(Ok((blocks, peer_group))) => {
-                let blocks_with_data = blocks
-                    .iter()
-                    .filter(|block| block.as_block().has_data())
-                    .count();
+            Some(Ok((block, peer_group))) => {
                 // Don't log the peer_group here, it's very long (could be up to 128 peers). If you
                 // want to trace which peer sent the column at index X, search for the log:
                 // `Sync RPC request sent method="DataColumnsByRange" ...`
                 debug!(
                     %id,
-                    blocks = blocks.len(),
-                    blocks_with_data,
+                    slot = %block.as_block().slot(),
+                    block_has_data = block.as_block().has_data(),
                     block_peer = ?peer_group.block(),
                     "Block components by range request success, removing"
                 )

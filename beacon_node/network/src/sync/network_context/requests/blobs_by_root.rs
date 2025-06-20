@@ -1,24 +1,20 @@
 use lighthouse_network::rpc::methods::BlobsByRootRequest;
-use std::collections::HashMap;
 use std::sync::Arc;
 use types::{blob_sidecar::BlobIdentifier, BlobSidecar, EthSpec, ForkContext, Hash256};
 
 use super::{ActiveRequestItems, LookupVerifyError};
 
-pub struct BlobCountPerBlock(pub HashMap<Hash256, usize>);
-
 pub struct BlobsByRootRequestItems<E: EthSpec> {
-    // TODO(tree-sync): we know ahead of time how many blobs each block has, track it
-    block_roots: Vec<Hash256>,
+    block_root: Hash256,
     indices: Vec<u64>,
     items: Vec<Arc<BlobSidecar<E>>>,
 }
 
 impl<E: EthSpec> BlobsByRootRequestItems<E> {
-    pub fn new(request: BlobCountPerBlock) -> Self {
+    pub fn new(block_root: Hash256, indices: Vec<u64>) -> Self {
         Self {
-            block_roots: todo!(),
-            indices: todo!(),
+            block_root,
+            indices,
             items: vec![],
         }
     }
@@ -32,7 +28,7 @@ impl<E: EthSpec> ActiveRequestItems for BlobsByRootRequestItems<E> {
     /// The active request SHOULD be dropped after `add_response` returns an error
     fn add(&mut self, blob: Self::Item) -> Result<bool, LookupVerifyError> {
         let block_root = blob.block_root();
-        if !self.block_roots.contains(&block_root) {
+        if self.block_root != block_root {
             return Err(LookupVerifyError::UnrequestedBlockRoot(block_root));
         }
         if !blob.verify_blob_sidecar_inclusion_proof() {
@@ -47,7 +43,7 @@ impl<E: EthSpec> ActiveRequestItems for BlobsByRootRequestItems<E> {
 
         self.items.push(blob);
 
-        Ok(self.items.len() >= self.block_roots.len() * self.indices.len())
+        Ok(self.items.len() >= self.indices.len())
     }
 
     fn consume(&mut self) -> Vec<Self::Item> {

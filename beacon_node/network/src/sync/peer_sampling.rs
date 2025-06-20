@@ -578,7 +578,7 @@ impl<T: BeaconChainTypes> ActiveSamplingRequest<T> {
                     sampling_request_id: self.current_sampling_request_id,
                 }),
                 peer_id,
-                vec![self.block_root],
+                self.block_root,
                 column_indexes.clone(),
                 // false = We issue request to custodians who may or may not have received the
                 // samples yet. We don't any signal (like an attestation or status messages that the

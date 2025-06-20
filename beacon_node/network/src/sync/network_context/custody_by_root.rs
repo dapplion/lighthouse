@@ -30,7 +30,7 @@ const MAX_CUSTODY_COLUMN_DOWNLOAD_ATTEMPTS: usize = 3;
 
 pub struct ActiveCustodyByRootRequest<T: BeaconChainTypes> {
     start_time: Instant,
-    block_roots: Vec<Hash256>,
+    block_root: Hash256,
     custody_id: CustodyByRootRequestId,
     /// List of column indices this request needs to download to complete successfully
     #[allow(clippy::type_complexity)]
@@ -92,14 +92,14 @@ pub type CustodyByRootRequestResult<E> =
 
 impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
     pub(crate) fn new(
-        block_roots: Vec<Hash256>,
+        block_root: Hash256,
         custody_id: CustodyByRootRequestId,
         column_indices: &[ColumnIndex],
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Self {
         Self {
             start_time: Instant::now(),
-            block_roots,
+            block_root,
             custody_id,
             column_requests: HashMap::from_iter(
                 column_indices
@@ -311,7 +311,7 @@ impl<T: BeaconChainTypes> ActiveCustodyByRootRequest<T> {
                 .data_columns_by_root_request(
                     DataColumnsByRootRequester::Custody(self.custody_id),
                     peer_id,
-                    self.block_roots.clone(),
+                    self.block_root,
                     indices.clone(),
                     // If peer is in the lookup peer set, it claims to have imported the block and
                     // must have its columns in custody. In that case, set `true = enforce max_requests`

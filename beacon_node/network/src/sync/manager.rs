@@ -1252,7 +1252,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                                 batch_id,
                                 batch_peers,
                                 range_request_id.id,
-                                blocks,
+                                vec![blocks],
                             ) {
                                 Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
                                 Ok(ProcessResult::Successful) => {}

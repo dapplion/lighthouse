@@ -1,4 +1,3 @@
-use crate::sync::network_context::requests::BlobCountPerBlock;
 use crate::sync::network_context::{
     BlocksByRootSameForkRequest, PeerGroup, RpcRequestSendError, RpcResponseError,
     SyncNetworkContext,
@@ -19,8 +18,8 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use types::{
-    BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecarList, EthSpec, Hash256,
-    RuntimeVariableList, SignedBeaconBlock, Slot,
+    BeaconBlockHeader, BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecarList, EthSpec,
+    Hash256, RuntimeVariableList, SignedBeaconBlock, Slot,
 };
 
 /// Given a `BlocksByRangeRequest` (a range of slots) fetches all necessary data to return
@@ -30,7 +29,7 @@ use types::{
 pub struct BlockComponentsByRangeRequest<T: BeaconChainTypes> {
     id: ComponentsByRangeRequestId,
     peers: Arc<RwLock<HashSet<PeerId>>>,
-    request: BlocksByRootSameForkRequest,
+    block_root: Hash256,
     state: State<T::EthSpec>,
 }
 
@@ -39,10 +38,10 @@ pub struct BlockComponentsByRangeRequest<T: BeaconChainTypes> {
 // peer assumption in the future, see https://github.com/sigp/lighthouse/issues/6258
 enum State<E: EthSpec> {
     BlocksRequest {
-        blocks_request: Request<BlocksByRootRequestId, Vec<Arc<SignedBeaconBlock<E>>>>,
+        blocks_request: Request<BlocksByRootRequestId, Arc<SignedBeaconBlock<E>>>,
     },
     DataRequest {
-        blocks: Vec<Arc<SignedBeaconBlock<E>>>,
+        block: Arc<SignedBeaconBlock<E>>,
         block_peer: PeerId,
         data_request: DataRequest<E>,
     },
@@ -64,8 +63,7 @@ enum Request<I: PartialEq + std::fmt::Display, T, P = PeerId> {
     Complete(T, P),
 }
 
-pub type BlockComponentsByRangeRequestResult<E> =
-    Result<Option<(Vec<RpcBlock<E>>, BatchPeers)>, Error>;
+pub type BlockComponentsByRangeRequestResult<E> = Result<Option<(RpcBlock<E>, BatchPeers)>, Error>;
 
 pub enum Error {
     InternalError(String),
@@ -98,13 +96,11 @@ pub enum BlockComponentsByRangeRequestStep {
 impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     pub fn new(
         id: ComponentsByRangeRequestId,
-        request: BlocksByRootSameForkRequest,
+        block_root: Hash256,
         peers: Arc<RwLock<HashSet<PeerId>>>,
         peers_to_deprioritize: &HashSet<PeerId>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<Self, RpcRequestSendError> {
-        let batch_fork = request.fork;
-
         // TODO(das): a change of behaviour here is that if the SyncingChain has a single peer we
         // will request all blocks for the first 5 epochs to that same single peer. Before we would
         // query only idle peers in the syncing chain.
@@ -130,7 +126,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
 
         let blocks_req_id = cx.send_blocks_by_root_request(
             block_peer,
-            BlocksByRootRequest::new(request.block_roots.clone(), cx.spec(), request.fork),
+            block_root,
             BlocksByRootRequester::RangeSync(id),
         )?;
 
@@ -141,7 +137,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
         Ok(Self {
             id,
             peers,
-            request,
+            block_root,
             state,
         })
     }
@@ -154,11 +150,11 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
             State::BlocksRequest {
                 blocks_request: blocks_by_range_request,
             } => {
-                if let Some((blocks, block_peer)) = blocks_by_range_request.to_finished() {
-                    let fork = self.request.fork;
-                    let blocks_have_data = blocks.iter().any(|block| block.has_data());
+                if let Some((block, block_peer)) = blocks_by_range_request.to_finished() {
+                    let fork = cx.spec().fork_name_at_slot::<T::EthSpec>(block.slot());
+                    let block_has_data = block.has_data();
 
-                    if blocks_have_data && fork.fulu_enabled() {
+                    if block_has_data && fork.fulu_enabled() {
                         let mut column_indices = cx
                             .network_globals()
                             .sampling_columns()
@@ -167,21 +163,12 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                             .collect::<Vec<_>>();
                         column_indices.sort_unstable();
 
-                        let block_roots_with_data = blocks
-                            .iter()
-                            .filter(|block| block.has_data())
-                            // TODO(tree-sync): cache block root
-                            .map(|block| get_block_root(block))
-                            .collect::<Vec<_>>();
-
-                        let request = BlocksByRootRequest::new(
-                            block_roots_with_data,
-                            cx.spec(),
-                            self.request.fork,
-                        );
-
                         let req_id = cx
-                            .send_custody_by_root_request(self.id, request, self.peers.clone())
+                            .send_custody_by_root_request(
+                                self.id,
+                                self.block_root,
+                                self.peers.clone(),
+                            )
                             .map_err(|e| match e {
                                 RpcRequestSendError::InternalError(e) => Error::InternalError(e),
                                 RpcRequestSendError::NoPeers => Error::InternalError(
@@ -191,21 +178,14 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                             })?;
 
                         self.state = State::DataRequest {
-                            blocks: blocks.to_vec(),
+                            block: block.clone(),
                             block_peer: *block_peer,
                             data_request: DataRequest::Fulu {
                                 custody_request: Request::Active(req_id),
                             },
                         };
                         Ok(None)
-                    } else if blocks_have_data && fork.deneb_enabled() {
-                        let blob_count_per_block = blocks
-                            .iter()
-                            .filter(|block| block.has_data())
-                            // TODO(tree-sync): cache block root
-                            .map(|block| (get_block_root(block), block.num_expected_blobs()))
-                            .collect::<HashMap<_, _>>();
-
+                    } else if block_has_data && fork.deneb_enabled() {
                         // TODO(deneb): is it okay to send blobs_by_range requests outside the DA window? I
                         // would like the beacon processor / da_checker to be the one that decides if an
                         // RpcBlock is valid or not with respect to containing blobs. Having sync not even
@@ -213,7 +193,8 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                         let req_id = cx
                             .send_blobs_by_root_request(
                                 *block_peer,
-                                BlobCountPerBlock(blob_count_per_block),
+                                self.block_root,
+                                block.num_expected_blobs(),
                                 self.id,
                             )
                             .map_err(|e| match e {
@@ -225,7 +206,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                             })?;
 
                         self.state = State::DataRequest {
-                            blocks: blocks.to_vec(),
+                            block: block.clone(),
                             block_peer: *block_peer,
                             data_request: DataRequest::Deneb {
                                 blobs_request: Request::Active(req_id),
@@ -234,8 +215,8 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                         Ok(None)
                     } else {
                         let peer_group = BatchPeers::new_from_block_peer(*block_peer);
-                        let rpc_blocks = couple_blocks_base(blocks.to_vec());
-                        Ok(Some((rpc_blocks, peer_group)))
+                        let rpc_block = couple_block_base(block.clone());
+                        Ok(Some((rpc_block, peer_group)))
                     }
                 } else {
                     // Wait for blocks_by_range requests to complete
@@ -243,7 +224,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                 }
             }
             State::DataRequest {
-                blocks,
+                block,
                 block_peer,
                 data_request,
             } => match data_request {
@@ -253,9 +234,9 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                     if let Some((blobs, _)) = blobs_by_range_request.to_finished() {
                         // We use the same block_peer for the blobs request
                         let peer_group = BatchPeers::new_from_block_peer(*block_peer);
-                        let rpc_blocks =
-                            couple_blocks_deneb(blocks.to_vec(), blobs.to_vec(), cx.spec())?;
-                        Ok(Some((rpc_blocks, peer_group)))
+                        let rpc_block =
+                            couple_block_deneb(block.clone(), blobs.to_vec(), cx.spec())?;
+                        Ok(Some((rpc_block, peer_group)))
                     } else {
                         // Wait for blocks_by_range and blobs_by_range requests to complete
                         Ok(None)
@@ -273,13 +254,13 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
                             .collect();
 
                         let peer_group = BatchPeers::new(*block_peer, column_peers.clone());
-                        let rpc_blocks = couple_blocks_fulu(
-                            blocks.to_vec(),
+                        let rpc_block = couple_block_fulu(
+                            block.clone(),
                             columns.to_vec(),
                             custody_column_indices,
                             cx.spec(),
                         )?;
-                        Ok(Some((rpc_blocks, peer_group)))
+                        Ok(Some((rpc_block, peer_group)))
                     } else {
                         // Wait for the custody_by_range request to complete
                         Ok(None)
@@ -292,7 +273,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     pub fn on_blocks_by_root_result(
         &mut self,
         id: BlocksByRootRequestId,
-        data: Vec<Arc<SignedBeaconBlock<T::EthSpec>>>,
+        data: Arc<SignedBeaconBlock<T::EthSpec>>,
         peer_id: PeerId,
         cx: &mut SyncNetworkContext<T>,
     ) -> BlockComponentsByRangeRequestResult<T::EthSpec> {
@@ -367,18 +348,15 @@ impl<T: BeaconChainTypes> BlockComponentsByRangeRequest<T> {
     }
 }
 
-fn couple_blocks_base<E: EthSpec>(blocks: Vec<Arc<SignedBeaconBlock<E>>>) -> Vec<RpcBlock<E>> {
-    blocks
-        .into_iter()
-        .map(|block| RpcBlock::new_without_blobs(None, block))
-        .collect()
+fn couple_block_base<E: EthSpec>(block: Arc<SignedBeaconBlock<E>>) -> RpcBlock<E> {
+    RpcBlock::new_without_blobs(None, block)
 }
 
-fn couple_blocks_deneb<E: EthSpec>(
-    blocks: Vec<Arc<SignedBeaconBlock<E>>>,
+fn couple_block_deneb<E: EthSpec>(
+    block: Arc<SignedBeaconBlock<E>>,
     blobs: Vec<Arc<BlobSidecar<E>>>,
     spec: &ChainSpec,
-) -> Result<Vec<RpcBlock<E>>, Error> {
+) -> Result<RpcBlock<E>, Error> {
     let mut blobs_by_block = HashMap::<Hash256, Vec<Arc<BlobSidecar<E>>>>::new();
     for blob in blobs {
         let block_root = blob.block_root();
@@ -395,28 +373,21 @@ fn couple_blocks_deneb<E: EthSpec>(
     // wasting theirs and our bandwidth 1:1. Therefore blobs that don't pair well are just ignored.
     //
     // RpcBlock::new ensures that the count of blobs is consistent with the block
-    blocks
-        .into_iter()
-        .map(|block| {
-            let block_root = get_block_root(&block);
-            let max_blobs_per_block = spec.max_blobs_per_block(block.epoch()) as usize;
-            let blobs = blobs_by_block.remove(&block_root).unwrap_or_default();
-            // BlobsByRange request handler enforces that blobs are sorted by index
-            let blobs = RuntimeVariableList::new(blobs, max_blobs_per_block).map_err(|_| {
-                Error::InternalError("Blobs returned exceeds max length".to_string())
-            })?;
-            Ok(RpcBlock::new(Some(block_root), block, Some(blobs))
-                .expect("TODO: don't do matching here"))
-        })
-        .collect::<Result<Vec<RpcBlock<E>>, Error>>()
+    let block_root = get_block_root(&block);
+    let max_blobs_per_block = spec.max_blobs_per_block(block.epoch()) as usize;
+    let blobs = blobs_by_block.remove(&block_root).unwrap_or_default();
+    // BlobsByRange request handler enforces that blobs are sorted by index
+    let blobs = RuntimeVariableList::new(blobs, max_blobs_per_block)
+        .map_err(|_| Error::InternalError("Blobs returned exceeds max length".to_string()))?;
+    Ok(RpcBlock::new(Some(block_root), block, Some(blobs)).expect("TODO: don't do matching here"))
 }
 
-fn couple_blocks_fulu<E: EthSpec>(
-    blocks: Vec<Arc<SignedBeaconBlock<E>>>,
+fn couple_block_fulu<E: EthSpec>(
+    block: Arc<SignedBeaconBlock<E>>,
     data_columns: DataColumnSidecarList<E>,
     custody_column_indices: Vec<ColumnIndex>,
     spec: &ChainSpec,
-) -> Result<Vec<RpcBlock<E>>, Error> {
+) -> Result<RpcBlock<E>, Error> {
     // Group data columns by block_root and index
     let mut custody_columns_by_block = HashMap::<Hash256, Vec<CustodyDataColumn<E>>>::new();
 
@@ -435,24 +406,14 @@ fn couple_blocks_fulu<E: EthSpec>(
     }
 
     // Now iterate all blocks ensuring that the block roots of each block and data column match,
-    blocks
-        .into_iter()
-        .map(|block| {
-            let block_root = get_block_root(&block);
-            let data_columns_with_block_root = custody_columns_by_block
-                // Remove to only use columns once
-                .remove(&block_root)
-                .unwrap_or_default();
+    let block_root = get_block_root(&block);
+    let data_columns_with_block_root = custody_columns_by_block
+        // Remove to only use columns once
+        .remove(&block_root)
+        .unwrap_or_default();
 
-            RpcBlock::new_with_custody_columns(
-                Some(block_root),
-                block,
-                data_columns_with_block_root,
-                spec,
-            )
-            .map_err(Error::InternalError)
-        })
-        .collect::<Result<Vec<_>, _>>()
+    RpcBlock::new_with_custody_columns(Some(block_root), block, data_columns_with_block_root, spec)
+        .map_err(Error::InternalError)
 }
 
 impl<I: PartialEq + std::fmt::Display, T, P> Request<I, T, P> {

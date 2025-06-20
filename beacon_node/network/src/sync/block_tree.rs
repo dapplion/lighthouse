@@ -191,7 +191,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
             let req_id = cx
                 .send_blocks_by_root_request(
                     *peer,
-                    BlocksByRootRequest::new(vec![block_root], cx.spec(), ForkName::Fulu),
+                    block_root,
                     BlocksByRootRequester::Header(lookup.id),
                 )
                 .unwrap();
@@ -310,7 +310,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                 let req_id = cx
                     .send_blocks_by_root_request(
                         *peer,
-                        BlocksByRootRequest::new(vec![block_root], cx.spec(), ForkName::Fulu),
+                        block_root,
                         BlocksByRootRequester::Header(lookup.id),
                     )
                     .unwrap();
@@ -443,13 +443,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
             match &mut lookup.status {
                 Status::Syncing(header, syncing_status) => match syncing_status {
                     SyncingStatus::AwaitingDownload => {
-                        let request = BlocksByRootSameForkRequest {
-                            // TODO(tree-sync): cache block root
-                            block_roots: vec![header.canonical_root()],
-                            fork: cx.spec().fork_name_at_slot::<T::EthSpec>(header.slot),
-                        };
-
-                        // TODO
+                        // TODO(tree-sync): pick the right ID
                         let chain_id = cx.next_id();
                         let requester = RangeRequestId::RangeSync(lookup.id);
                         let peers = Arc::new(RwLock::new(HashSet::from_iter(
@@ -458,7 +452,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                         let failed_peers = HashSet::new();
 
                         match cx.block_components_by_range_request(
-                            request,
+                            header.canonical_root(),
                             requester,
                             peers,
                             &failed_peers,
@@ -494,7 +488,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
     pub fn on_blocks_response(
         &mut self,
         id: HeaderLookupId,
-        result: Result<(Vec<RpcBlock<T::EthSpec>>, BatchPeers), RpcResponseError>,
+        result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
         // TODO(tree-sync): attach an ID to the block entry to make sure we are querying the right
@@ -502,16 +496,6 @@ impl<T: BeaconChainTypes> BlockTree<T> {
         let Some(lookup) = self.blocks.get_mut(&id.0) else {
             panic!("Unknown batch id {id}");
         };
-
-        let result = result.and_then(|(blocks, peers)| {
-            let block = blocks
-                .first()
-                .cloned()
-                .ok_or(RpcResponseError::InternalError(
-                    "blocks_by_root response contains zero blocks".to_owned(),
-                ))?;
-            Ok((block, peers))
-        });
 
         let request = lookup.block_request().unwrap();
         match request {
