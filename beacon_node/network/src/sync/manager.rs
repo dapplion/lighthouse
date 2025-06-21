@@ -45,6 +45,7 @@ use crate::network_beacon_processor::{
 };
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
+use crate::sync::backfill_sync::SyncStart;
 use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::{
     AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes, BlockError, EngineState,
@@ -56,16 +57,15 @@ use lighthouse_network::service::api_types::{
     CustodyByRootRequestId, DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, SamplingId,
     SamplingRequester, SyncRequestId,
 };
-use lighthouse_network::types::NetworkGlobals;
-use lighthouse_network::PeerId;
-use lighthouse_network::SyncInfo;
+use lighthouse_network::types::{NetworkGlobals, SyncState};
+use lighthouse_network::{PeerId, SyncInfo};
 use logging::crit;
 use lru_cache::LRUTimeCache;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info_span, trace, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use types::{
     BlobSidecar, DataColumnSidecar, EthSpec, ForkContext, Hash256, SignedBeaconBlock, Slot,
 };
@@ -349,6 +349,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             finalized_root: status.finalized_root,
         };
 
+        // Search for any block that is unknown and more recent than finality
         debug!(?remote, ?local, "new peer");
         if !self.chain.block_is_known_to_fork_choice(&remote.head_root)
             && remote.head_slot
@@ -362,16 +363,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
 
         let sync_type = remote_sync_type(&local, &remote, &self.chain);
 
-        // update the state of the peer.
-        let is_still_connected = self.update_peer_sync_state(&peer_id, &local, &remote, &sync_type);
-        if is_still_connected {
-            match sync_type {
-                PeerSyncType::Behind => {}
-                PeerSyncType::Advanced | PeerSyncType::FullySynced => {
-                    self.backfill_sync.add_peer(peer_id);
-                }
-            }
-        }
+        // TODO(tree-sync): Okay to add all peers to backfill sync? How can we know which have the
+        // blocks we need?
+        self.backfill_sync.add_peer(peer_id);
 
         self.update_sync_state();
 
@@ -493,8 +487,91 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     /// - If there is no range sync and no required backfill and we have synced up to the currently
     ///   known peers, we consider ourselves synced.
     fn update_sync_state(&mut self) {
-        // TODO(tree-sync): re-think how to set a sync state
-        todo!();
+        // TODO(tree-sync): We could just iterate the PeerDB and count the most common head as the
+        // sync target.
+
+        let forward_sync_active = if self.block_tree.block_count() > 32 {
+            self.block_tree.max_slot_to_sync()
+        } else {
+            None
+        };
+
+        let new_state: SyncState = match forward_sync_active {
+            None => {
+                // No range sync, so we decide if we are stalled or synced.
+                // For this we check if there is at least one advanced peer. An advanced peer
+                // with Idle range is possible since a peer's status is updated periodically.
+                // If we synced a peer between status messages, most likely the peer has
+                // advanced and will produce a head chain on re-status. Otherwise it will shift
+                // to being synced
+                let mut sync_state = {
+                    let head = self.chain.best_slot();
+                    let current_slot = self.chain.slot().unwrap_or_else(|_| Slot::new(0));
+
+                    let peers = self.network_globals().peers.read();
+                    if current_slot >= head
+                        && current_slot.sub(head) <= (SLOT_IMPORT_TOLERANCE as u64)
+                        && head > 0
+                    {
+                        SyncState::Synced
+                    } else if peers.advanced_peers().next().is_some() {
+                        SyncState::SyncTransition
+                    } else if peers.synced_peers().next().is_none() {
+                        SyncState::Stalled
+                    } else {
+                        // There are no peers that require syncing and we have at least one synced
+                        // peer
+                        SyncState::Synced
+                    }
+                };
+
+                // If we would otherwise be synced, first check if we need to perform or
+                // complete a backfill sync.
+                #[cfg(not(feature = "disable-backfill"))]
+                if matches!(sync_state, SyncState::Synced) {
+                    // Determine if we need to start/resume/restart a backfill sync.
+                    match self.backfill_sync.start(&mut self.network) {
+                        Ok(SyncStart::Syncing) => {
+                            sync_state = SyncState::BackFillSyncing;
+                        }
+                        Ok(SyncStart::NotSyncing) => {} // Ignore updating the state if the backfill sync state didn't start.
+                        Err(e) => {
+                            error!(error = ?e, "Backfill sync failed to start");
+                        }
+                    }
+                }
+
+                // Return the sync state if backfilling is not required.
+                sync_state
+            }
+            Some(target_slot) => {
+                // If there is a backfill sync in progress pause it.
+                #[cfg(not(feature = "disable-backfill"))]
+                self.backfill_sync.pause();
+
+                SyncState::Syncing {
+                    start_slot: self.chain.best_slot(),
+                    target_slot,
+                }
+            }
+        };
+
+        let old_state = self.network_globals().set_sync_state(new_state);
+        let new_state = self.network_globals().sync_state.read().clone();
+        if !new_state.eq(&old_state) {
+            info!(%old_state, %new_state, "Sync state updated");
+            // If we have become synced - Subscribe to all the core subnet topics
+            // We don't need to subscribe if the old state is a state that would have already
+            // invoked this call.
+            if new_state.is_synced()
+                && !matches!(
+                    old_state,
+                    SyncState::Synced | SyncState::BackFillSyncing { .. }
+                )
+            {
+                self.network.subscribe_core_topics();
+            }
+        }
     }
 
     /// The main driving future for the sync manager.

@@ -94,6 +94,17 @@ impl<E: EthSpec> Block<E> {
             )),
         }
     }
+
+    fn assert_expected_lookup_id(&self, lookup_id: HeaderLookupId) -> Result<(), Error> {
+        if self.id == lookup_id {
+            Ok(())
+        } else {
+            Err(Error::InternalError(format!(
+                "Unexpected lookup ID {} != {}",
+                self.id, lookup_id
+            )))
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -114,12 +125,34 @@ impl From<RpcRequestSendError> for Error {
     }
 }
 
+pub(crate) enum SyncState {
+    Synced,
+    Syncing { max_slot: Slot },
+}
+
 impl<T: BeaconChainTypes> BlockTree<T> {
     pub fn new(chain: Arc<BeaconChain<T>>) -> Self {
         Self {
             blocks: <_>::default(),
             chain,
         }
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    pub fn max_slot_to_sync(&self) -> Option<Slot> {
+        // TODO(tree-sync): weak metric, who have a better heuristic for sync? Now that lookups
+        // count here
+        self.blocks
+            .values()
+            .filter_map(|block| match &block.status {
+                Status::DownloadingHeader(..) => None,
+                Status::Header(header) => Some(header.slot),
+                Status::Syncing { .. } => None,
+            })
+            .max()
     }
 
     #[cfg(test)]
@@ -199,6 +232,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                 debug!(id = ?req_id, "Received header request for unknown lookup");
                 return Ok(());
             };
+            lookup.assert_expected_lookup_id(lookup_id)?;
 
             let response = response.and_then(|(blocks, timestamp)| {
                 let block = blocks
@@ -455,6 +489,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                 debug!(?id, "Received block request for unknown lookup");
                 return Ok(());
             };
+            lookup.assert_expected_lookup_id(id)?;
 
             let request = lookup.block_request()?;
             match request {
@@ -492,6 +527,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                 debug!(?id, "Received block process result for unknown lookup");
                 return Ok(());
             };
+            lookup.assert_expected_lookup_id(id)?;
 
             let request = lookup.block_request()?;
             match request {

@@ -34,12 +34,7 @@ const MAX_BATCH_PROCESSING_ATTEMPTS: u8 = 10;
 /// Return type when attempting to start the backfill sync process.
 pub enum SyncStart {
     /// The chain started syncing or is already syncing.
-    Syncing {
-        /// The number of slots that have been processed so far.
-        completed: usize,
-        /// The number of slots still to be processed.
-        remaining: usize,
-    },
+    Syncing,
     /// The chain didn't start syncing.
     NotSyncing,
 }
@@ -184,12 +179,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             BackFillState::Completed => return Ok(SyncStart::NotSyncing),
         }
 
-        Ok(SyncStart::Syncing {
-            // TODO(tree-sync): is this actually used? The remaining does not account for the 6
-            // months of data expiration
-            completed: todo!(),
-            remaining: todo!(),
-        })
+        Ok(SyncStart::Syncing)
     }
 
     /// A fully synced peer has joined us.

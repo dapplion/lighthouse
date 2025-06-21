@@ -79,10 +79,7 @@ impl<E: EthSpec> NetworkBehaviour for PeerManager<E> {
             }
         }
 
-        if !matches!(
-            self.network_globals.sync_state(),
-            SyncState::SyncingFinalized { .. } | SyncState::SyncingHead { .. }
-        ) {
+        if !matches!(self.network_globals.sync_state(), SyncState::Syncing { .. }) {
             loop {
                 match self.status_peers.poll_next_unpin(cx) {
                     Poll::Ready(Some(Ok(peer_id))) => {

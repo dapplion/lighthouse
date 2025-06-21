@@ -525,16 +525,11 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
 
         let processor = self.clone();
         let process_fn = async move {
-            let notify_execution_layer = if processor
-                .network_globals
-                .sync_state
-                .read()
-                .is_syncing_finalized()
-            {
-                NotifyExecutionLayer::No
-            } else {
-                NotifyExecutionLayer::Yes
-            };
+            // TODO(tree-sync): Now that we group peers in a header tree they could have diverging
+            // opinions on what's finalized and what's not. So don't have a clear yes / no to guess
+            // if this block is finalized or not. Review the optimization of NOT notifying the
+            // execution layer if we belive this block is finalized.
+            let notify_execution_layer = NotifyExecutionLayer::Yes;
             processor
                 .process_chain_segment(process_id, blocks, notify_execution_layer)
                 .await;
