@@ -468,6 +468,10 @@ impl<I: std::fmt::Display + PartialEq, T> ColumnRequest<I, T> {
         }
     }
 
+    pub fn is_complete(&self) -> Option<T> {
+        todo!()
+    }
+
     pub fn complete(self) -> Result<(PeerId, T, Duration), Error> {
         match self.status {
             Status::Downloaded(peer_id, data_column, seen_timestamp) => {

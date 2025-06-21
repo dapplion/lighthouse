@@ -21,9 +21,9 @@ use types::{ColumnIndex, DataColumnSidecar, Hash256};
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChainSegmentProcessId {
     /// Processing Id of a range syncing batch.
-    RangeBatchId(HeaderLookupId),
+    ForwardSync(HeaderLookupId),
     /// Processing ID for a backfill syncing batch.
-    BackSyncBatchId(Id),
+    BackfillSync(Id),
 }
 
 /// Returned when a chain segment import fails.
@@ -117,7 +117,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     ) {
         let result = match sync_type {
             // this a request from the range sync
-            ChainSegmentProcessId::RangeBatchId(id) => {
+            ChainSegmentProcessId::ForwardSync(id) => {
                 let start_slot = downloaded_blocks.first().map(|b| b.slot().as_u64());
                 let end_slot = downloaded_blocks.last().map(|b| b.slot().as_u64());
                 let sent_blocks = downloaded_blocks.len();
@@ -152,7 +152,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 }
             }
             // this a request from the Backfill sync
-            ChainSegmentProcessId::BackSyncBatchId(epoch) => {
+            ChainSegmentProcessId::BackfillSync(epoch) => {
                 let start_slot = downloaded_blocks.first().map(|b| b.slot().as_u64());
                 let end_slot = downloaded_blocks.last().map(|b| b.slot().as_u64());
                 let sent_blocks = downloaded_blocks.len();
@@ -417,8 +417,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
 impl Display for ChainSegmentProcessId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::RangeBatchId(id) => write!(f, "RangeBatchId/{id}"),
-            Self::BackSyncBatchId(id) => write!(f, "BackSyncBatchId/{id}"),
+            Self::ForwardSync(id) => write!(f, "ForwardSync/{id}"),
+            Self::BackfillSync(id) => write!(f, "BackfillSync/{id}"),
         }
     }
 }

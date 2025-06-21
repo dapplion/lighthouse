@@ -350,6 +350,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         };
 
         // Search for any block that is unknown and more recent than finality
+        // TODO(tree-sync): we could prioritize the finalized_root if it's unknown as a way to
+        // detect finalized sync
         debug!(?remote, ?local, "new peer");
         if !self.chain.block_is_known_to_fork_choice(&remote.head_root)
             && remote.head_slot
@@ -706,15 +708,15 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 imported,
             } => self.block_tree.prune_root(block_root, imported),
             SyncMessage::BatchProcessed { sync_type, result } => match sync_type {
-                ChainSegmentProcessId::RangeBatchId(id) => {
+                ChainSegmentProcessId::ForwardSync(id) => {
                     self.block_tree
-                        .handle_block_process_result(id, result, &mut self.network);
+                        .on_block_process_result(id, result, &mut self.network);
                     self.update_sync_state();
                 }
-                ChainSegmentProcessId::BackSyncBatchId(id) => {
+                ChainSegmentProcessId::BackfillSync(id) => {
                     // TODO(tree-sync): should update sync state
                     self.backfill_sync
-                        .handle_block_process_result(id, result, &mut self.network)
+                        .on_block_process_result(id, result, &mut self.network)
                 }
             },
             SyncMessage::SampleVerified { id, result } => {
@@ -863,7 +865,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         {
             match req_id.parent_request_id {
                 BlocksByRootRequester::Header(lookup_id) => {
-                    self.block_tree.on_block_header(
+                    self.block_tree.on_header_download_result(
                         req_id,
                         lookup_id,
                         result,
@@ -871,7 +873,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         &mut self.network,
                     );
                 }
-                BlocksByRootRequester::RangeSync(batch_id) => {
+                BlocksByRootRequester::ForwardSync(batch_id) => {
                     self.on_block_components_by_root_response(
                         batch_id,
                         RangeBlockComponent::Block(req_id, result, peer_id),
@@ -1017,13 +1019,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             .on_block_components_by_root_response(range_request_id, range_block_component)
         {
             match range_request_id.requester {
-                RangeRequestId::RangeSync(id) => {
+                RangeRequestId::ForwardSync(id) => {
                     self.block_tree
-                        .on_block_response(id, result, &mut self.network);
+                        .on_block_download_result(id, result, &mut self.network);
                 }
                 RangeRequestId::BackfillSync(id) => {
                     self.backfill_sync
-                        .on_block_response(id, result, &mut self.network)
+                        .on_block_download_result(id, result, &mut self.network)
                 }
             }
         }

@@ -122,7 +122,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
         let blocks_req_id = cx.send_blocks_by_root_request(
             block_peer,
             block_root,
-            BlocksByRootRequester::RangeSync(id),
+            BlocksByRootRequester::ForwardSync(id),
         )?;
 
         let state = State::BlocksRequest {

@@ -2,7 +2,7 @@ use crate::rpc::methods::{ResponseTermination, RpcResponse, RpcSuccessResponse, 
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use types::{
-    BlobSidecar, DataColumnSidecar, Epoch, EthSpec, Hash256, LightClientBootstrap,
+    BlobSidecar, DataColumnSidecar, EthSpec, Hash256, LightClientBootstrap,
     LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock,
 };
 
@@ -67,26 +67,20 @@ pub struct ComponentsByRootRequestId {
 /// Range sync chain or backfill batch
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum RangeRequestId {
-    RangeSync(HeaderLookupId),
+    ForwardSync(HeaderLookupId),
     BackfillSync(Id),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum BlocksByRootRequester {
     Header(HeaderLookupId),
-    RangeSync(ComponentsByRootRequestId),
+    ForwardSync(ComponentsByRootRequestId),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum DataColumnsByRootRequester {
     Sampling(SamplingId),
     Custody(CustodyByRootRequestId),
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum RangeRequester {
-    RangeSync { chain_id: u64, batch_id: Epoch },
-    BackfillSync { batch_id: Epoch },
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -252,7 +246,7 @@ impl Display for CustodyRequester {
 impl Display for RangeRequestId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
+            Self::ForwardSync(id) => write!(f, "ForwardSync/{id}"),
             Self::BackfillSync(id) => write!(f, "BackfillSync/{id}"),
         }
     }
@@ -262,7 +256,7 @@ impl Display for BlocksByRootRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Header(id) => write!(f, "Header/{id}"),
-            Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
+            Self::ForwardSync(id) => write!(f, "ForwardSync/{id}"),
         }
     }
 }

@@ -8,7 +8,7 @@
 //! If a batch fails, the backfill sync cannot progress. In this scenario, we mark the backfill
 //! sync as failed, log an error and attempt to retry once a new peer joins the node.
 
-use crate::network_beacon_processor::ChainSegmentProcessId;
+use crate::sync::block_tree::{Error as TempError, SyncBlock, SyncBlockResult};
 use crate::sync::manager::BatchProcessResult;
 use crate::sync::network_context::{
     BatchPeers, RangeRequestId, RpcResponseError, SyncNetworkContext,
@@ -22,7 +22,7 @@ use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
-use types::{Epoch, EthSpec, Hash256};
+use types::{EthSpec, Hash256};
 
 /// The number of times to retry a batch before it is considered failed.
 const MAX_BATCH_DOWNLOAD_ATTEMPTS: u8 = 10;
@@ -71,13 +71,11 @@ enum SyncingStatus<E: EthSpec> {
 }
 
 pub struct BackFillSync<T: BeaconChainTypes> {
-    status: SyncingStatus<T::EthSpec>,
+    status: SyncBlock<T>,
 
     /// When a backfill sync fails, we keep track of whether a new fully synced peer has joined.
     /// This signifies that we are able to attempt to restart a failed chain.
     restart_failed_sync: bool,
-
-    peers: Arc<RwLock<HashSet<PeerId>>>,
 
     /// Reference to the beacon chain to obtain initial starting points for the backfill sync.
     beacon_chain: Arc<BeaconChain<T>>,
@@ -108,9 +106,12 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         };
 
         let bfs = BackFillSync {
-            status: SyncingStatus::AwaitingDownload(anchor_info.oldest_block_parent),
+            status: SyncBlock::new(
+                RangeRequestId::BackfillSync(0),
+                anchor_info.oldest_block_parent,
+                &[],
+            ),
             restart_failed_sync: false,
-            peers: <_>::default(),
             beacon_chain,
             network_globals,
         };
@@ -198,7 +199,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     }
 
     pub fn add_peer(&mut self, peer_id: PeerId) {
-        self.peers.write().insert(peer_id);
+        self.status.peers.write().insert(peer_id);
     }
 
     pub fn peer_disconnected(&mut self, peer_id: &PeerId) {
@@ -213,102 +214,54 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         }
     }
 
-    pub fn on_block_response(
+    pub fn on_block_download_result(
         &mut self,
         id: Id,
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        match self.status {
-            SyncingStatus::Downloading(block_root, expected_id) => {
-                if id != expected_id {
-                    panic!("unexpected ID");
-                }
-                match result {
-                    Ok((block, peers)) => {
-                        // TODO(tree-sync): check that id matches
-                        debug!(%id, "Sync block downloaded");
-                        self.status = SyncingStatus::Processing(block, peers);
-                    }
-                    Err(e) => {
-                        // TODO(tree-sync): Handle the error explicitly with a match, check unstable
-                        debug!(%id, error = ?e, "Sync block download error");
-                        self.status = SyncingStatus::AwaitingDownload(block_root);
-                    }
-                }
-            }
-            _ => panic!("Bad state"),
-        }
-
-        // Continue batches
-        self.continue_syncing_blocks(cx);
+        let outcome = self.status.on_download_result(result, cx);
+        self.handle_outcome(outcome, cx);
     }
 
-    pub fn handle_block_process_result(
+    pub fn on_block_process_result(
         &mut self,
         id: Id,
         result: BatchProcessResult,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        match &mut self.status {
-            SyncingStatus::Processing(block, _peers) => match result {
-                BatchProcessResult::Success => {
-                    debug!(%id, "Sync block process success");
-                    self.status = SyncingStatus::AwaitingDownload(block.as_block().parent_root())
-                }
-                BatchProcessResult::Failure { .. } => {
-                    debug!(%id, "Sync block process error");
-                    self.status = SyncingStatus::AwaitingDownload(block.block_root())
-                    // TODO(tree-sync): add peer to failed peers and downscore
-                }
-            },
-            _ => panic!("Bad state"),
-        }
-
-        // Continue batches
-        self.continue_syncing_blocks(cx);
+        let outcome = self.status.on_process_result(result, cx);
+        self.handle_outcome(outcome, cx);
     }
 
     fn continue_syncing_blocks(&mut self, cx: &mut SyncNetworkContext<T>) {
-        match &mut self.status {
-            SyncingStatus::AwaitingDownload(block_root) => {
-                // TODO(tree-sync): pick the right ID
-                let requester = RangeRequestId::BackfillSync(cx.next_id());
-                let failed_peers = HashSet::new();
+        let outcome = self.status.continue_request(&self.peers, cx);
+        self.handle_outcome(outcome, cx);
+    }
 
-                match cx.block_components_by_range_request(
-                    *block_root,
-                    requester,
-                    self.peers.clone(),
-                    &failed_peers,
-                ) {
-                    Ok(req_id) => {
-                        self.status = SyncingStatus::Downloading(*block_root, req_id);
-                    }
-                    Err(e) => {
-                        // TODO(tree-sync): Match error explicitly
-                        // Log failed chain, mark blocks as not syncing
-                        todo!("error sending {e:?}");
-                    }
-                };
-            }
-            SyncingStatus::Downloading(..) => {} // wait for event
-            SyncingStatus::AwaitingProcessing(block, peers) => {
-                let id = cx.next_id();
-                let Some(beacon_processor) = cx.beacon_processor_if_enabled() else {
-                    todo!("processor disabled");
-                };
-                // TODO(tree-sync): pick the right ID
-                if let Err(e) = beacon_processor.send_chain_segment(
-                    ChainSegmentProcessId::BackSyncBatchId(id),
-                    vec![block.clone()],
-                ) {
-                    todo!("error sending {e:?}");
+    fn handle_outcome(
+        &mut self,
+        result: Result<SyncBlockResult, TempError>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        match result {
+            Ok(SyncBlockResult::Done { parent_root, slot }) => {
+                if is_done(slot) {
+                    todo!("done");
+                } else {
+                    self.status =
+                        SyncBlock::new(RangeRequestId::BackfillSync(cx.next_id()), parent_root)
                 }
-                self.status = SyncingStatus::Processing(block.clone(), peers.clone());
             }
-            SyncingStatus::Processing(..) => {} // wait for event
+            Ok(SyncBlockResult::Wait) => {
+                // Do nothing wait for future event
+            }
+            Err(e) => match e {
+                TempError::InternalError(_) => {}
+                TempError::BlockConflictsWithFinality(_) => {}
+            },
         }
+        self.continue_syncing_blocks(cx);
     }
 
     /// Updates the global network state indicating the current state of a backfill sync.
