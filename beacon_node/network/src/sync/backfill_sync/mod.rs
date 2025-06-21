@@ -106,17 +106,11 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         // If, for some reason a backfill has already been completed (or we've used a trusted
         // genesis root) then backfill has been completed.
         let anchor_info = beacon_chain.store.get_anchor_info();
-        let (state, current_start) =
-            if anchor_info.block_backfill_complete(beacon_chain.genesis_backfill_slot) {
-                (BackFillState::Completed, Epoch::new(0))
-            } else {
-                (
-                    BackFillState::Paused,
-                    anchor_info
-                        .oldest_block_slot
-                        .epoch(T::EthSpec::slots_per_epoch()),
-                )
-            };
+        let state = if anchor_info.block_backfill_complete(beacon_chain.genesis_backfill_slot) {
+            BackFillState::Completed
+        } else {
+            BackFillState::Paused
+        };
 
         let bfs = BackFillSync {
             status: SyncingStatus::AwaitingDownload(anchor_info.oldest_block_parent),
@@ -248,7 +242,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     }
                     Err(e) => {
                         // TODO(tree-sync): Handle the error explicitly with a match, check unstable
-                        debug!(%id, "Sync block download error");
+                        debug!(%id, error = ?e, "Sync block download error");
                         self.status = SyncingStatus::AwaitingDownload(block_root);
                     }
                 }

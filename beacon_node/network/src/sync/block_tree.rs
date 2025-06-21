@@ -194,7 +194,7 @@ impl<T: BeaconChainTypes> BlockTree<T> {
         let block_root = lookup_id.0;
 
         let result = (|| {
-            let Some(mut lookup) = self.blocks.get_mut(&block_root) else {
+            let Some(lookup) = self.blocks.get_mut(&block_root) else {
                 // TODO(tree-sync): register metric
                 debug!(id = ?req_id, "Received header request for unknown lookup");
                 return Ok(());
@@ -278,27 +278,6 @@ impl<T: BeaconChainTypes> BlockTree<T> {
 
     pub fn prune_root(&mut self, _block_root: Hash256, _imported: bool) {
         todo!();
-    }
-
-    fn mark_descendants_as_rooted(&mut self, _block_root: Hash256) {
-        // TODO: iterate all blocks and mark descendants of `block_root` as rooted
-    }
-
-    fn mark_as_syncing(&mut self, _blocks: &[Hash256]) {
-        // TODO: mark all this block entries as syncing
-    }
-
-    fn collect_ancestors(&self, mut block_root: Hash256) -> Vec<Hash256> {
-        let mut ancestors = vec![];
-        while let Some(block) = self.blocks.get(&block_root) {
-            ancestors.push(block_root);
-            if let Some(parent_root) = block.parent_root() {
-                block_root = parent_root;
-            } else {
-                break;
-            }
-        }
-        ancestors
     }
 
     /// Marks blocks ready for download as syncing
@@ -423,21 +402,28 @@ impl<T: BeaconChainTypes> BlockTree<T> {
                     }
                     SyncingStatus::Downloading(_) => Ok(()), // wait for event
                     SyncingStatus::AwaitingProcessing(block, peers) => {
-                        if let Some(beacon_processor) = cx.beacon_processor_if_enabled() {
-                            if let Err(e) = beacon_processor.send_chain_segment(
-                                ChainSegmentProcessId::RangeBatchId(lookup.id),
-                                vec![block.clone()],
-                            ) {
-                                Err(format!("Error sending block to processor: {e:?}"))
+                        if cx
+                            .chain
+                            .block_is_known_to_fork_choice(&block.as_block().parent_root())
+                        {
+                            if let Some(beacon_processor) = cx.beacon_processor_if_enabled() {
+                                if let Err(e) = beacon_processor.send_chain_segment(
+                                    ChainSegmentProcessId::RangeBatchId(lookup.id),
+                                    vec![block.clone()],
+                                ) {
+                                    Err(format!("Error sending block to processor: {e:?}"))
+                                } else {
+                                    *request = SyncingStatus::Processing(peers.clone());
+                                    Ok(())
+                                }
                             } else {
-                                *request = SyncingStatus::Processing(peers.clone());
-                                Ok(())
+                                // TODO(tree-sync): This error will cause the full chain of headers to
+                                // be dropped if the beacon processor goes offline. When can that
+                                // happen?
+                                Err("Beacon processor is disabled".to_owned())
                             }
                         } else {
-                            // TODO(tree-sync): This error will cause the full chain of headers to
-                            // be dropped if the beacon processor goes offline. When can that
-                            // happen?
-                            Err("Beacon processor is disabled".to_owned())
+                            Ok(())
                         }
                     }
                     SyncingStatus::Processing(_) => Ok(()), // wait for event

@@ -166,7 +166,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     .sum::<usize>();
 
                 match self.process_backfill_blocks(downloaded_blocks) {
-                    Ok(imported_blocks) => {
+                    Ok(_imported_blocks) => {
                         debug!(
                             batch_epoch = %epoch,
                             first_block_slot = start_slot,
