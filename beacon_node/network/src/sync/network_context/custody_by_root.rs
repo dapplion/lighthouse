@@ -468,8 +468,11 @@ impl<I: std::fmt::Display + PartialEq, T> ColumnRequest<I, T> {
         }
     }
 
-    pub fn is_complete(&self) -> Option<T> {
-        todo!()
+    pub fn is_complete(&self) -> Option<&T> {
+        match &self.status {
+            Status::Downloaded(_, data, _) => Some(data),
+            other => None,
+        }
     }
 
     pub fn complete(self) -> Result<(PeerId, T, Duration), Error> {

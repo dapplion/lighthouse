@@ -27,6 +27,7 @@ pub enum SyncBlockResult {
     Wait,
 }
 
+#[derive(Debug)]
 pub enum Error {
     InternalError(String),
 }

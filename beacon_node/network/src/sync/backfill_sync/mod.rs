@@ -244,8 +244,9 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     ) {
         match result {
             Ok(SyncBlockResult::Done { parent_root, slot }) => {
-                if self.is_done(slot) {
-                    todo!("done");
+                if self.is_complete(slot) {
+                    info!("Backfill sync completed");
+                    self.set_state(BackFillState::Completed);
                 } else {
                     let peers = self.status.clone_peers();
                     self.status = SyncBlock::new(
@@ -259,7 +260,10 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 // Do nothing wait for future event
             }
             Err(e) => match e {
-                SyncBlockError::InternalError(_) => {}
+                SyncBlockError::InternalError(_) => {
+                    debug!(error = ?e, "Backfill synced failed");
+                    self.set_state(BackFillState::Failed);
+                }
             },
         }
         self.continue_syncing_blocks(cx);
@@ -279,8 +283,10 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         self.network_globals.backfill_state.read().clone()
     }
 
-    fn is_done(&self, slot: Slot) -> bool {
-        todo!();
+    fn is_complete(&self, slot: Slot) -> bool {
+        let anchor_info = self.beacon_chain.store.get_anchor_info();
+        // Conditions that we have completed a backfill sync
+        anchor_info.block_backfill_complete(self.beacon_chain.genesis_backfill_slot)
     }
 }
 

@@ -17,7 +17,7 @@ use types::{BeaconBlockHeader, EthSpec, Hash256, SignedBeaconBlock, Slot};
 const MAX_LOOKUP_COUNT: usize = 1_000_000;
 const PRUNE_COUNT: usize = 100_000;
 
-pub struct BlockTree<T: BeaconChainTypes> {
+pub struct ForwardSync<T: BeaconChainTypes> {
     blocks: HashMap<Hash256, ForwardSyncBlock<T>>,
     chain: Arc<BeaconChain<T>>,
 }
@@ -232,7 +232,7 @@ pub(crate) enum SyncState {
     Syncing { max_slot: Slot },
 }
 
-impl<T: BeaconChainTypes> BlockTree<T> {
+impl<T: BeaconChainTypes> ForwardSync<T> {
     pub fn new(chain: Arc<BeaconChain<T>>) -> Self {
         Self {
             blocks: <_>::default(),

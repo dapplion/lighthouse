@@ -34,7 +34,7 @@
 //! search for the block and subsequently search for parents if needed.
 
 use super::backfill_sync::BackFillSync;
-use super::block_tree::BlockTree;
+use super::forward_sync::ForwardSync;
 use super::network_context::{
     CustodyRequestResult, RangeBlockComponent, RangeRequestId, RpcEvent, SyncNetworkContext,
 };
@@ -216,7 +216,7 @@ pub struct SyncManager<T: BeaconChainTypes> {
 
     /// Backfill syncing.
     backfill_sync: BackFillSync<T>,
-    block_tree: BlockTree<T>,
+    forward_sync: ForwardSync<T>,
 
     /// debounce duplicated `UnknownBlockHashFromAttestation` for the same root peer tuple. A peer
     /// may forward us thousands of a attestations, each one triggering an individual event. Only
@@ -278,7 +278,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 beacon_chain.clone(),
                 fork_context.clone(),
             ),
-            block_tree: BlockTree::new(beacon_chain.clone()),
+            forward_sync: ForwardSync::new(beacon_chain.clone()),
             backfill_sync: BackFillSync::new(beacon_chain.clone(), network_globals),
             notified_unknown_roots: LRUTimeCache::new(Duration::from_secs(
                 NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS,
@@ -307,16 +307,10 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         &mut self.network
     }
 
-    // Leak the full range_sync to prevent having to add many cfg(test) methods here
-    #[cfg(test)]
-    pub(crate) fn range_sync(&mut self) -> &mut RangeSync<T> {
-        &mut self.range_sync
-    }
-
     // Leak the full struct to prevent having to add many cfg(test) methods here
     #[cfg(test)]
-    pub(crate) fn block_tree(&mut self) -> &mut BlockTree<T> {
-        &mut self.block_tree
+    pub(crate) fn forward_sync(&mut self) -> &mut ForwardSync<T> {
+        &mut self.forward_sync
     }
 
     #[cfg(test)]
@@ -359,7 +353,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     .finalized_epoch
                     .start_slot(T::EthSpec::slots_per_epoch())
         {
-            self.block_tree
+            self.forward_sync
                 .search(remote.head_root, &[peer_id], &mut self.network);
         }
 
@@ -414,7 +408,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
 
         // Remove peer from all data structures
         self.backfill_sync.peer_disconnected(peer_id);
-        self.block_tree.remove_peer(*peer_id);
+        self.forward_sync.remove_peer(*peer_id);
 
         // Regardless of the outcome, we update the sync status.
         self.update_sync_state();
@@ -492,8 +486,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         // TODO(tree-sync): We could just iterate the PeerDB and count the most common head as the
         // sync target.
 
-        let forward_sync_active = if self.block_tree.block_count() > 32 {
-            self.block_tree.max_slot_to_sync()
+        let forward_sync_active = if self.forward_sync.block_count() > 32 {
+            self.forward_sync.max_slot_to_sync()
         } else {
             None
         };
@@ -609,7 +603,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     self.handle_new_execution_engine_state(engine_state);
                 }
                 _ = prune_lookups_interval.tick() => {
-                    self.block_tree.prune();
+                    self.forward_sync.prune();
                 }
                 _ = prune_requests.tick() => {
                     self.prune_requests();
@@ -706,10 +700,10 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncMessage::GossipBlockProcessResult {
                 block_root,
                 imported,
-            } => self.block_tree.prune_root(block_root, imported),
+            } => self.forward_sync.prune_root(block_root, imported),
             SyncMessage::BatchProcessed { sync_type, result } => match sync_type {
                 ChainSegmentProcessId::ForwardSync(id) => {
-                    self.block_tree
+                    self.forward_sync
                         .on_block_process_result(id, result, &mut self.network);
                     self.update_sync_state();
                 }
@@ -739,7 +733,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     ) {
         match self.should_search_for_block(Some(slot), &peer_id) {
             Ok(_) => {
-                self.block_tree
+                self.forward_sync
                     .search(block_root, &[peer_id], &mut self.network);
             }
             Err(reason) => {
@@ -751,7 +745,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     fn handle_unknown_block_root(&mut self, peer_id: PeerId, block_root: Hash256) {
         match self.should_search_for_block(None, &peer_id) {
             Ok(_) => {
-                self.block_tree
+                self.forward_sync
                     .search(block_root, &[peer_id], &mut self.network);
             }
             Err(reason) => {
@@ -819,7 +813,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 //   Disabled while in this state. We drop current requests and don't search for new
                 //   blocks.
                 // TODO(tree-sync): should we pause it instead?
-                self.block_tree.pause();
+                self.forward_sync.pause();
 
                 // - Range:
                 //   We still send found peers to range so that it can keep track of potential chains
@@ -865,7 +859,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         {
             match req_id.parent_request_id {
                 BlocksByRootRequester::Header(lookup_id) => {
-                    self.block_tree.on_header_download_result(
+                    self.forward_sync.on_header_download_result(
                         req_id,
                         lookup_id,
                         result,
@@ -1020,7 +1014,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         {
             match range_request_id.requester {
                 RangeRequestId::ForwardSync(id) => {
-                    self.block_tree
+                    self.forward_sync
                         .on_block_download_result(id, result, &mut self.network);
                 }
                 RangeRequestId::BackfillSync(id) => {
