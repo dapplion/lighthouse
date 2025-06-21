@@ -700,7 +700,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncMessage::GossipBlockProcessResult {
                 block_root,
                 imported,
-            } => self.forward_sync.prune_root(block_root, imported),
+            } => self.forward_sync.prune_imported_block(block_root, imported),
             SyncMessage::BatchProcessed { sync_type, result } => match sync_type {
                 ChainSegmentProcessId::ForwardSync(id) => {
                     self.forward_sync
@@ -708,9 +708,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     self.update_sync_state();
                 }
                 ChainSegmentProcessId::BackfillSync(id) => {
-                    // TODO(tree-sync): should update sync state
                     self.backfill_sync
-                        .on_block_process_result(id, result, &mut self.network)
+                        .on_block_process_result(id, result, &mut self.network);
+                    self.update_sync_state();
                 }
             },
             SyncMessage::SampleVerified { id, result } => {

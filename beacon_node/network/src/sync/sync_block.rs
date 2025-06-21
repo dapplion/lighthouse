@@ -12,6 +12,9 @@ use std::sync::Arc;
 use tracing::debug;
 use types::{EthSpec, Hash256, Slot};
 
+const MAX_DOWNLOAD_ATTEMPTS: usize = 5;
+const MAX_PROCESS_ATTEMPTS: usize = 5;
+
 // TODO(tree-sync): have the peer set inside here when syncing add dedup logic
 // TODO(tree-sync): for backfill sync use the sync state to check the peers have this block or not
 pub struct SyncBlock<T: BeaconChainTypes> {
@@ -20,6 +23,15 @@ pub struct SyncBlock<T: BeaconChainTypes> {
     failed_peers: HashSet<PeerId>,
     peers: Arc<RwLock<HashSet<PeerId>>>,
     request: SyncingStatus<T::EthSpec>,
+    download_errors: usize,
+    process_errors: usize,
+}
+
+enum SyncingStatus<E: EthSpec> {
+    AwaitingDownload,
+    Downloading(Id),
+    AwaitingProcessing(RpcBlock<E>, BatchPeers),
+    Processing(RpcBlock<E>, BatchPeers),
 }
 
 pub enum SyncBlockResult {
@@ -30,6 +42,7 @@ pub enum SyncBlockResult {
 #[derive(Debug)]
 pub enum Error {
     InternalError(String),
+    TooManyErrors,
 }
 
 impl<T: BeaconChainTypes> SyncBlock<T> {
@@ -42,6 +55,8 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                 initial_peers.iter().copied(),
             ))),
             request: SyncingStatus::AwaitingDownload,
+            download_errors: 0,
+            process_errors: 0,
         }
     }
 
@@ -67,20 +82,31 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<SyncBlockResult, Error> {
         match &mut self.request {
-            SyncingStatus::Downloading(_) => match result {
-                // TODO(tree-sync): check that the request ID matches
-                Ok((block, peers)) => {
-                    debug!(id = %self.id, "Sync block downloaded");
-                    self.request = SyncingStatus::AwaitingProcessing(block, peers);
-                    self.continue_request(cx)
+            SyncingStatus::Downloading(expected_id) => {
+                if id != expected_id {
+                    return Err(Error::InternalError(format!(
+                        "Unexpected request ID {id} !{expected_id}"
+                    )));
                 }
-                Err(e) => {
-                    // TODO(tree-sync): increase error counter
-                    debug!(id = %self.id, error = ?e, "Sync block download error");
-                    self.request = SyncingStatus::AwaitingDownload;
-                    self.continue_request(cx)
+                match result {
+                    Ok((block, peers)) => {
+                        debug!(id = %self.id, "Sync block downloaded");
+                        self.request = SyncingStatus::AwaitingProcessing(block, peers);
+                        self.continue_request(cx)
+                    }
+                    Err(e) => {
+                        debug!(id = %self.id, error = ?e, "Sync block download error");
+                        self.request = SyncingStatus::AwaitingDownload;
+
+                        self.download_errors += 1;
+                        if self.download_errors > MAX_DOWNLOAD_ATTEMPTS {
+                            return Err(Error::TooManyErrors);
+                        }
+
+                        self.continue_request(cx)
+                    }
                 }
-            },
+            }
             _ => Err(Error::InternalError(
                 "Lookup not in expected state Downloading".to_owned(),
             )),
@@ -107,7 +133,13 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                     if let Some(peer_action) = peer_action {
                         for (peer, penalty) in peers.blame(peer_action) {
                             cx.report_peer(peer, penalty, "faulty_batch");
+                            self.failed_peers.insert(peers);
                         }
+                    }
+
+                    self.process_errors += 1;
+                    if self.process_errors > MAX_PROCESS_ATTEMPTS {
+                        return Err(Error::TooManyErrors);
                     }
 
                     self.request = SyncingStatus::AwaitingDownload;
@@ -190,11 +222,4 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
     pub fn is_processing(&self) -> bool {
         matches!(self.request, SyncingStatus::Processing(..))
     }
-}
-
-enum SyncingStatus<E: EthSpec> {
-    AwaitingDownload,
-    Downloading(Id),
-    AwaitingProcessing(RpcBlock<E>, BatchPeers),
-    Processing(RpcBlock<E>, BatchPeers),
 }

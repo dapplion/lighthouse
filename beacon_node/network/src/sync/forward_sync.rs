@@ -1,5 +1,7 @@
-use super::network_context::{RpcRequestSendError, RpcResponseError, SyncNetworkContext};
-use crate::sync::network_context::custody_by_root::{ColumnRequest, Error as ColumnRequestError};
+use super::network_context::{
+    DownloadRequest, DownloadRequestError, RpcRequestSendError, RpcResponseError,
+    SyncNetworkContext,
+};
 use crate::sync::network_context::{BatchPeers, RpcResponseResult};
 use crate::sync::sync_block::{Error as SyncBlockError, SyncBlock, SyncBlockResult};
 use crate::sync::BatchProcessResult;
@@ -31,7 +33,7 @@ enum Status<T: BeaconChainTypes> {
     // TODO(tree-sync): Make the "waiting" completed header requests as memory cheap as possible
     BackfillHeader {
         peers: HashSet<PeerId>,
-        request: ColumnRequest<BlocksByRootRequestId, BeaconBlockHeader>,
+        request: DownloadRequest<BlocksByRootRequestId, BeaconBlockHeader>,
     },
     ForwardSyncBlock {
         header: BeaconBlockHeader,
@@ -48,7 +50,7 @@ impl<T: BeaconChainTypes> ForwardSyncBlock<T> {
             id: HeaderLookupId(block_root, id),
             status: Status::BackfillHeader {
                 peers: HashSet::from_iter(peers.iter().copied()),
-                request: ColumnRequest::new(),
+                request: DownloadRequest::new(),
             },
         }
     }
@@ -109,7 +111,7 @@ impl<T: BeaconChainTypes> ForwardSyncBlock<T> {
 
     fn header_request(
         &mut self,
-    ) -> Result<&mut ColumnRequest<BlocksByRootRequestId, BeaconBlockHeader>, Error> {
+    ) -> Result<&mut DownloadRequest<BlocksByRootRequestId, BeaconBlockHeader>, Error> {
         match &mut self.status {
             Status::BackfillHeader { request, .. } => Ok(request),
             _ => Err(Error::InternalError(
@@ -207,15 +209,21 @@ pub enum Error {
     BlockConflictsWithFinality(String),
 }
 
-impl From<ColumnRequestError> for Error {
-    fn from(_e: ColumnRequestError) -> Self {
-        todo!();
+impl From<DownloadRequestError> for Error {
+    fn from(e: DownloadRequestError) -> Self {
+        match e {
+            DownloadRequestError::InternalError(e) => Self::InternalError(e),
+        }
     }
 }
 
 impl From<RpcRequestSendError> for Error {
-    fn from(_e: RpcRequestSendError) -> Self {
-        todo!();
+    fn from(e: RpcRequestSendError) -> Self {
+        match e {
+            RpcRequestSendError::InternalError(e) => Self::InternalError(e),
+            // TODO(tree-sync): Should we allow lookups to have zero peers
+            RpcRequestSendError::NoPeers => Self::InternalError(format!("No peers")),
+        }
     }
 }
 
@@ -334,11 +342,11 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     ) {
         let block_root = id.0;
 
-        let result = (|| {
+        let result: Result<SyncBlockResult, Error> = (|| {
             let Some(lookup) = self.blocks.get_mut(&block_root) else {
                 // TODO(tree-sync): register metric
                 debug!(id = ?req_id, "Received header request for unknown lookup");
-                return Ok(());
+                return Ok(SyncBlockResult::Wait);
             };
             lookup.assert_expected_lookup_id(id)?;
 
@@ -404,9 +412,12 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     lookup.send_block_header_request(block_root, cx)?;
                 }
             }
-            Ok(())
+            Ok(SyncBlockResult::Wait)
         })();
-        self.handle_result(id.0, result);
+
+        // Map result Ok to Wait as completing the header request does not complete the overall
+        // ForwardSyncBlock request.
+        self.handle_result(id.0, result.map(|_| SyncBlockResult::Wait), cx);
     }
 
     pub fn on_block_download_result(
@@ -415,24 +426,20 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = (|| {
-            // TODO(tree-sync): attach an ID to the block entry to make sure we are querying the right
-            // one, while still indexing by block_root only
-            let Some(lookup) = self.blocks.get_mut(&id.0) else {
-                // TODO(tree-sync): register metric
-                debug!(?id, "Received block request for unknown lookup");
-                return Ok(());
-            };
-            lookup.assert_expected_lookup_id(id)?;
+        let Some(lookup) = self.blocks.get_mut(&id.0) else {
+            // TODO(tree-sync): register metric
+            debug!(?id, "Received block request for unknown lookup");
+            return;
+        };
+        if let Err(e) = lookup.assert_expected_lookup_id(id) {
+            debug!(?id, "Unexpected lookup ID");
+            return;
+        }
 
-            let request = lookup.block_request()?;
-            request.on_download_result(result, cx)?;
-            Ok(())
-        })();
-        self.handle_result(id.0, result);
-
-        // Continue batches
-        self.continue_syncing_blocks(cx);
+        let outcome = lookup
+            .block_request()
+            .and_then(|block| Ok(block.on_download_result(result, cx)?));
+        self.handle_result(id.0, outcome, cx);
     }
 
     pub fn on_block_process_result(
@@ -441,43 +448,50 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         result: BatchProcessResult,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = (|| {
-            let Some(lookup) = self.blocks.get_mut(&id.0) else {
-                debug!(?id, "Received block process result for unknown lookup");
-                return Ok(());
-            };
-            lookup.assert_expected_lookup_id(id)?;
+        let Some(lookup) = self.blocks.get_mut(&id.0) else {
+            debug!(?id, "Received block process result for unknown lookup");
+            return;
+        };
+        if let Err(e) = lookup.assert_expected_lookup_id(id) {
+            debug!(?id, "Unexpected lookup ID");
+            return;
+        }
 
-            let request = lookup.block_request()?;
-            match request.on_process_result(result, cx) {
-                Ok(SyncBlockResult::Done { .. }) => {
-                    self.blocks.remove(&id.0);
-                    self.trigger_forward_sync(cx);
-                }
-                Ok(SyncBlockResult::Wait) => {
-                    // continue same block
-                }
-                _ => {}
-            }
-            todo!();
-        })();
-        self.handle_result(id.0, result);
-
-        // Continue batches
-        self.continue_syncing_blocks(cx);
+        let outcome = lookup
+            .block_request()
+            .and_then(|block| Ok(block.on_process_result(result, cx)?));
+        self.handle_result(id.0, outcome, cx);
     }
 
     pub fn prune(&mut self) {
         // Prune blocks once imported, and once finality advances
     }
 
-    pub fn prune_root(&mut self, _block_root: Hash256, _imported: bool) {
-        todo!();
+    pub fn prune_imported_block(&mut self, block_root: Hash256, _imported: bool) {
+        let mut block_to_delete = block_root;
+        while let Some(block) = self.blocks.remove(&block_root) {
+            debug!(?block_root, "Deleted imported block lookup");
+            if let Some(parent_root) = block.parent_root() {
+                block_to_delete = parent_root;
+            } else {
+                break;
+            }
+        }
     }
 
-    fn handle_result(&mut self, block_root: Hash256, result: Result<(), Error>) {
+    fn handle_result(
+        &mut self,
+        block_root: Hash256,
+        result: Result<SyncBlockResult, Error>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
         match result {
-            Ok(_) => {}
+            Ok(SyncBlockResult::Done { .. }) => {
+                self.blocks.remove(&block_root);
+                self.trigger_forward_sync(cx);
+            }
+            // Wait for next event
+            Ok(SyncBlockResult::Wait) => {}
             Err(e) => {
                 debug!(error = ?e, "Dropping forward sync block header lookup");
                 match e {

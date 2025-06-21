@@ -14,6 +14,7 @@ use beacon_chain::{BeaconChain, BeaconChainTypes, EngineState};
 pub use block_components_by_range::BlockComponentsByRootRequest;
 #[cfg(test)]
 pub use block_components_by_range::BlockComponentsByRootRequestStep;
+pub use download_request::{DownloadRequest, Error as DownloadRequestError};
 use fnv::FnvHashMap;
 use itertools::Itertools;
 use lighthouse_network::rpc::methods::{
@@ -51,6 +52,7 @@ use types::{
 
 pub mod block_components_by_range;
 pub mod custody_by_root;
+mod download_request;
 mod requests;
 
 #[derive(Debug)]
