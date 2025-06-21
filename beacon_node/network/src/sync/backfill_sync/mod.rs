@@ -8,21 +8,19 @@
 //! If a batch fails, the backfill sync cannot progress. In this scenario, we mark the backfill
 //! sync as failed, log an error and attempt to retry once a new peer joins the node.
 
-use crate::sync::block_tree::{Error as TempError, SyncBlock, SyncBlockResult};
 use crate::sync::manager::BatchProcessResult;
 use crate::sync::network_context::{
     BatchPeers, RangeRequestId, RpcResponseError, SyncNetworkContext,
 };
+use crate::sync::sync_block::{Error as SyncBlockError, SyncBlock, SyncBlockResult};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::service::api_types::Id;
 use lighthouse_network::types::{BackFillState, NetworkGlobals};
 use lighthouse_network::PeerId;
-use parking_lot::RwLock;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
-use types::{EthSpec, Hash256};
+use types::{EthSpec, Hash256, Slot};
 
 /// The number of times to retry a batch before it is considered failed.
 const MAX_BATCH_DOWNLOAD_ATTEMPTS: u8 = 10;
@@ -152,7 +150,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         match self.state() {
             BackFillState::Syncing => {} // already syncing ignore.
             BackFillState::Paused => {
-                if !self.peers.read().is_empty() {
+                if self.status.peer_count() == 0 {
                     // If there are peers to resume with, begin the resume.
                     debug!("Resuming backfill sync");
                     self.set_state(BackFillState::Syncing);
@@ -199,13 +197,13 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     }
 
     pub fn add_peer(&mut self, peer_id: PeerId) {
-        self.status.peers.write().insert(peer_id);
+        self.status.add_peer(peer_id);
     }
 
     pub fn peer_disconnected(&mut self, peer_id: &PeerId) {
-        self.peers.write().remove(peer_id);
+        self.status.remove_peer(peer_id);
 
-        if self.peers.read().is_empty() {
+        if self.status.peer_count() == 0 {
             info!(
                 "reason" = "insufficient_synced_peers",
                 "Backfill sync paused"
@@ -235,30 +233,33 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     }
 
     fn continue_syncing_blocks(&mut self, cx: &mut SyncNetworkContext<T>) {
-        let outcome = self.status.continue_request(&self.peers, cx);
+        let outcome = self.status.continue_request(cx);
         self.handle_outcome(outcome, cx);
     }
 
     fn handle_outcome(
         &mut self,
-        result: Result<SyncBlockResult, TempError>,
+        result: Result<SyncBlockResult, SyncBlockError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
         match result {
             Ok(SyncBlockResult::Done { parent_root, slot }) => {
-                if is_done(slot) {
+                if self.is_done(slot) {
                     todo!("done");
                 } else {
-                    self.status =
-                        SyncBlock::new(RangeRequestId::BackfillSync(cx.next_id()), parent_root)
+                    let peers = self.status.clone_peers();
+                    self.status = SyncBlock::new(
+                        RangeRequestId::BackfillSync(cx.next_id()),
+                        parent_root,
+                        &peers.into_iter().collect::<Vec<_>>(),
+                    )
                 }
             }
             Ok(SyncBlockResult::Wait) => {
                 // Do nothing wait for future event
             }
             Err(e) => match e {
-                TempError::InternalError(_) => {}
-                TempError::BlockConflictsWithFinality(_) => {}
+                SyncBlockError::InternalError(_) => {}
             },
         }
         self.continue_syncing_blocks(cx);
@@ -276,6 +277,10 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
 
     fn state(&self) -> BackFillState {
         self.network_globals.backfill_state.read().clone()
+    }
+
+    fn is_done(&self, slot: Slot) -> bool {
+        todo!();
     }
 }
 
