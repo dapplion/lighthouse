@@ -3145,10 +3145,14 @@ pub enum NumBlobs {
 pub fn generate_rand_block_and_blobs<E: EthSpec>(
     fork_name: ForkName,
     num_blobs: NumBlobs,
+    parent_root: Option<Hash256>,
     rng: &mut impl Rng,
     spec: &ChainSpec,
 ) -> (SignedBeaconBlock<E, FullPayload<E>>, Vec<BlobSidecar<E>>) {
-    let inner = map_fork_name!(fork_name, BeaconBlock, <_>::random_for_test(rng));
+    let mut inner = map_fork_name!(fork_name, BeaconBlock, <_>::random_for_test(rng));
+    if let Some(parent_root) = parent_root {
+        *inner.parent_root_mut() = parent_root;
+    }
 
     let mut block = SignedBeaconBlock::from_block(inner, types::Signature::random_for_test(rng));
     let max_blobs = spec.max_blobs_per_block(block.epoch()) as usize;
@@ -3247,13 +3251,15 @@ pub fn generate_rand_block_and_blobs<E: EthSpec>(
 pub fn generate_rand_block_and_data_columns<E: EthSpec>(
     fork_name: ForkName,
     num_blobs: NumBlobs,
+    parent_root: Option<Hash256>,
     rng: &mut impl Rng,
     spec: &ChainSpec,
 ) -> (
     SignedBeaconBlock<E, FullPayload<E>>,
     DataColumnSidecarList<E>,
 ) {
-    let (block, _blobs) = generate_rand_block_and_blobs(fork_name, num_blobs, rng, spec);
+    let (block, _blobs) =
+        generate_rand_block_and_blobs(fork_name, num_blobs, parent_root, rng, spec);
     let data_columns = generate_data_column_sidecars_from_block(&block, spec);
     (block, data_columns)
 }

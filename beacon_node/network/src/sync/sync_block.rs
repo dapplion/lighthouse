@@ -42,7 +42,7 @@ pub enum SyncBlockResult {
 #[derive(Debug)]
 pub enum Error {
     InternalError(String),
-    TooManyErrors,
+    TooManyErrors(String),
 }
 
 impl<T: BeaconChainTypes> SyncBlock<T> {
@@ -68,6 +68,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
         self.peers.read().clone()
     }
 
+    /// Returns whether the value was newly inserted
     pub fn add_peer(&self, peer: PeerId) -> bool {
         self.peers.write().insert(peer)
     }
@@ -107,7 +108,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
 
                         self.download_errors += 1;
                         if self.download_errors > MAX_DOWNLOAD_ATTEMPTS {
-                            return Err(Error::TooManyErrors);
+                            return Err(Error::TooManyErrors("download errors".to_owned()));
                         }
 
                         self.continue_request(cx)
@@ -146,7 +147,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
 
                     self.process_errors += 1;
                     if self.process_errors > MAX_PROCESS_ATTEMPTS {
-                        return Err(Error::TooManyErrors);
+                        return Err(Error::TooManyErrors("process errors".to_owned()));
                     }
 
                     self.request = SyncingStatus::AwaitingDownload;

@@ -49,7 +49,7 @@ enum Status<T: BeaconChainTypes> {
 impl<T: BeaconChainTypes> ForwardSyncBlock<T> {
     fn new(block_root: Hash256, id: Id, peers: &[PeerId]) -> Self {
         Self {
-            id: HeaderLookupId(block_root, id),
+            id: HeaderLookupId { id, block_root },
             status: Status::BackfillHeader {
                 peers: HashSet::from_iter(peers.iter().copied()),
                 request: DownloadRequest::new(),
@@ -57,14 +57,11 @@ impl<T: BeaconChainTypes> ForwardSyncBlock<T> {
         }
     }
 
-    fn add_peer(&mut self, peer: PeerId) {
+    /// Returns whether the value was newly inserted
+    fn add_peer(&mut self, peer: PeerId) -> bool {
         match &mut self.status {
-            Status::BackfillHeader { peers, .. } => {
-                peers.insert(peer);
-            }
-            Status::ForwardSyncBlock { request, .. } => {
-                request.add_peer(peer);
-            }
+            Status::BackfillHeader { peers, .. } => peers.insert(peer),
+            Status::ForwardSyncBlock { request, .. } => request.add_peer(peer),
         }
     }
 
@@ -208,7 +205,7 @@ impl<T: BeaconChainTypes> ForwardSyncBlock<T> {
 #[derive(Debug)]
 pub enum Error {
     InternalError(String),
-    TooManyErrors,
+    TooManyErrors(String),
     BlockConflictsWithFinality(String),
 }
 
@@ -216,6 +213,7 @@ impl From<DownloadRequestError> for Error {
     fn from(e: DownloadRequestError) -> Self {
         match e {
             DownloadRequestError::InternalError(e) => Self::InternalError(e),
+            DownloadRequestError::TooManyErrors(e) => Self::TooManyErrors(format!("{e:?}")),
         }
     }
 }
@@ -234,7 +232,7 @@ impl From<SyncBlockError> for Error {
     fn from(e: SyncBlockError) -> Self {
         match e {
             SyncBlockError::InternalError(e) => Self::InternalError(e),
-            SyncBlockError::TooManyErrors => Self::TooManyErrors,
+            SyncBlockError::TooManyErrors(e) => Self::TooManyErrors(e),
         }
     }
 }
@@ -250,6 +248,16 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             blocks: <_>::default(),
             chain,
         }
+    }
+
+    #[cfg(test)]
+    pub fn block_peers(&self, block_root: &Hash256) -> Option<Vec<PeerId>> {
+        self.blocks.get(block_root).map(|block| block.get_peers())
+    }
+
+    #[cfg(test)]
+    pub fn get_lookups(&self) -> Vec<Hash256> {
+        self.blocks.keys().copied().collect()
     }
 
     pub fn block_count(&self) -> usize {
@@ -308,9 +316,14 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             while let Some(lookup) = self.blocks.get_mut(&target_block_root) {
                 for peer in peers {
                     // TODO(tree-sync): If peer already in set no need to add to its ancestors
-                    lookup.add_peer(*peer);
-                    // TODO(tree-sync): This log can be very noisy maybe log once per peer
-                    debug!(block_root = ?target_block_root, ?peer, "Adding peer to existing header lookup");
+                    if lookup.add_peer(*peer) {
+                        // TODO(tree-sync): This log can be very noisy maybe log once per peer
+                        debug!(block_root = ?target_block_root, ?peer, "Adding peer to existing header lookup");
+                    } else {
+                        // Peer already part of this lookup, therefore it must be part of the peer
+                        // set of all of its ancestors: stop
+                        break;
+                    }
                 }
                 if let Some(parent_root) = lookup.parent_root() {
                     target_block_root = parent_root;
@@ -323,9 +336,10 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 self.prune_least_popular_lookups();
             }
 
-            debug!(?block_root, ?peers, "Creating new header lookup");
+            let id = cx.next_id();
+            debug!(?block_root, id, ?peers, "Creating new header lookup");
 
-            let mut lookup = ForwardSyncBlock::new(block_root, cx.next_id(), peers);
+            let mut lookup = ForwardSyncBlock::new(block_root, id, peers);
             match lookup.send_block_header_request(block_root, cx) {
                 Ok(_) => {
                     self.blocks.insert(block_root, lookup);
@@ -345,7 +359,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         peer_id: PeerId,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let block_root = id.0;
+        let block_root = id.block_root;
 
         let result: Result<SyncBlockResult, Error> = (|| {
             let Some(lookup) = self.blocks.get_mut(&block_root) else {
@@ -412,8 +426,10 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     }
                 }
                 Err(e) => {
-                    debug!(%req_id, error = ?e, "Forward sync block header downloaded error");
-                    lookup.header_request()?.on_download_error(req_id)?;
+                    // Request errors are logged in `SyncNetworkContext::on_rpc_response_result`
+                    lookup
+                        .header_request()?
+                        .on_download_error(req_id, Some(e))?;
                     lookup.send_block_header_request(block_root, cx)?;
                 }
             }
@@ -422,7 +438,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
         // Map result Ok to Wait as completing the header request does not complete the overall
         // ForwardSyncBlock request.
-        self.handle_result(id.0, result.map(|_| SyncBlockResult::Wait), cx);
+        self.handle_result(id.block_root, result.map(|_| SyncBlockResult::Wait), cx);
     }
 
     pub fn on_block_download_result(
@@ -432,7 +448,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let Some(lookup) = self.blocks.get_mut(&id.0) else {
+        let Some(lookup) = self.blocks.get_mut(&id.block_root) else {
             // TODO(tree-sync): register metric
             debug!(?id, "Received block request for unknown lookup");
             return;
@@ -445,7 +461,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         let outcome = lookup
             .block_request()
             .and_then(|block| Ok(block.on_download_result(req_id, result, cx)?));
-        self.handle_result(id.0, outcome, cx);
+        self.handle_result(id.block_root, outcome, cx);
     }
 
     pub fn on_block_process_result(
@@ -454,7 +470,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         result: BatchProcessResult,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let Some(lookup) = self.blocks.get_mut(&id.0) else {
+        let Some(lookup) = self.blocks.get_mut(&id.block_root) else {
             debug!(?id, "Received block process result for unknown lookup");
             return;
         };
@@ -466,7 +482,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         let outcome = lookup
             .block_request()
             .and_then(|block| Ok(block.on_process_result(result, cx)?));
-        self.handle_result(id.0, outcome, cx);
+        self.handle_result(id.block_root, outcome, cx);
     }
 
     pub fn prune(&mut self) {
@@ -499,9 +515,9 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             // Wait for next event
             Ok(SyncBlockResult::Wait) => {}
             Err(e) => {
-                debug!(error = ?e, "Dropping forward sync block header lookup");
+                debug!(error = ?e, ?block_root, "Dropping forward sync block lookup");
                 match e {
-                    Error::InternalError(_) | Error::TooManyErrors => {
+                    Error::InternalError(_) | Error::TooManyErrors(_) => {
                         let block_to_children = self.compute_children();
                         self.drop_lookup_and_children(block_root, &block_to_children);
                     }

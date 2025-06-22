@@ -204,11 +204,13 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         self.status.remove_peer(peer_id);
 
         if self.status.peer_count() == 0 {
-            info!(
-                "reason" = "insufficient_synced_peers",
-                "Backfill sync paused"
-            );
-            self.set_state(BackFillState::Paused);
+            if self.state() == BackFillState::Syncing {
+                info!(
+                    "reason" = "insufficient_synced_peers",
+                    "Backfill sync paused"
+                );
+                self.set_state(BackFillState::Paused);
+            }
         }
     }
 
@@ -260,13 +262,12 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 // Do nothing wait for future event
             }
             Err(e) => match e {
-                SyncBlockError::InternalError(_) | SyncBlockError::TooManyErrors => {
+                SyncBlockError::InternalError(_) | SyncBlockError::TooManyErrors(_) => {
                     debug!(error = ?e, "Backfill synced failed");
                     self.set_state(BackFillState::Failed);
                 }
             },
         }
-        self.continue_syncing_blocks(cx);
     }
 
     /// Updates the global network state indicating the current state of a backfill sync.

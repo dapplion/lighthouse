@@ -32,7 +32,10 @@ pub struct BlocksByRootRequestId {
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct HeaderLookupId(pub Hash256, pub Id);
+pub struct HeaderLookupId {
+    pub id: Id,
+    pub block_root: Hash256,
+}
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct BatchId(pub Id);
@@ -210,6 +213,9 @@ impl_display!(DataColumnsByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
 impl_display!(CustodyByRootRequestId, "{}", parent_request_id);
 impl_display!(SamplingId, "{}/{}", sampling_request_id, id);
+// Print only the ID to make logs succint. On lookup creation we log the ID and the block root to
+// link them.
+impl_display!(HeaderLookupId, "{}", id);
 
 impl Display for DataColumnsByRootRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -217,12 +223,6 @@ impl Display for DataColumnsByRootRequester {
             Self::Custody(id) => write!(f, "Custody/{id}"),
             Self::Sampling(id) => write!(f, "Sampling/{id}"),
         }
-    }
-}
-
-impl Display for HeaderLookupId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.0, self.1)
     }
 }
 

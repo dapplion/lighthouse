@@ -353,8 +353,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     .finalized_epoch
                     .start_slot(T::EthSpec::slots_per_epoch())
         {
-            self.forward_sync
-                .search(remote.head_root, &[peer_id], &mut self.network);
+            self.add_peer_with_imported_block_root(peer_id, remote.head_root);
         }
 
         let sync_type = remote_sync_type(&local, &remote, &self.chain);
@@ -364,6 +363,18 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         self.backfill_sync.add_peer(peer_id);
 
         self.update_sync_state();
+
+        // Try to make progress on custody requests that are waiting for peers
+        for (id, result) in self.network.continue_custody_by_root_requests() {
+            self.on_custody_by_root_result(id, result);
+        }
+    }
+
+    // Adds a peer to forward sync. Since its possible that a lookup just gained a new peer we
+    // attempt to continue idle custody by root requests that are waiting for peers.
+    fn add_peer_with_imported_block_root(&mut self, peer_id: PeerId, block_root: Hash256) {
+        self.forward_sync
+            .search(block_root, &[peer_id], &mut self.network);
 
         // Try to make progress on custody requests that are waiting for peers
         for (id, result) in self.network.continue_custody_by_root_requests() {
@@ -733,8 +744,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     ) {
         match self.should_search_for_block(Some(slot), &peer_id) {
             Ok(_) => {
-                self.forward_sync
-                    .search(block_root, &[peer_id], &mut self.network);
+                self.add_peer_with_imported_block_root(peer_id, block_root);
             }
             Err(reason) => {
                 debug!(%block_root, %parent_root, reason, "Ignoring unknown parent request");
@@ -745,8 +755,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     fn handle_unknown_block_root(&mut self, peer_id: PeerId, block_root: Hash256) {
         match self.should_search_for_block(None, &peer_id) {
             Ok(_) => {
-                self.forward_sync
-                    .search(block_root, &[peer_id], &mut self.network);
+                self.add_peer_with_imported_block_root(peer_id, block_root);
             }
             Err(reason) => {
                 debug!(%block_root, reason, "Ignoring unknown block request");

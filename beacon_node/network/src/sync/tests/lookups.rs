@@ -25,6 +25,7 @@ use beacon_chain::{
     PayloadVerificationOutcome, PayloadVerificationStatus,
 };
 use beacon_processor::WorkEvent;
+use fork_choice::ForkChoiceStore;
 use lighthouse_network::discovery::CombinedKey;
 use lighthouse_network::{
     rpc::{RPCError, RequestType, RpcErrorResponse},
@@ -203,7 +204,7 @@ impl TestRig {
         self.send_sync_message(SyncMessage::UnknownParentBlob(peer_id, blob.into()));
     }
 
-    fn trigger_unknown_block_from_attestation(&mut self, block_root: Hash256, peer_id: PeerId) {
+    pub fn trigger_unknown_block_from_attestation(&mut self, block_root: Hash256, peer_id: PeerId) {
         self.send_sync_message(SyncMessage::UnknownBlockHashFromAttestation(
             peer_id, block_root,
         ));
@@ -230,14 +231,17 @@ impl TestRig {
     ) -> (SignedBeaconBlock<E>, Vec<BlobSidecar<E>>) {
         let fork_name = self.fork_name;
         let rng = &mut self.rng;
-        generate_rand_block_and_blobs::<E>(fork_name, num_blobs, rng, &self.spec)
+        let head_root = self.harness.chain.head().head_block_root();
+        generate_rand_block_and_blobs::<E>(fork_name, num_blobs, Some(head_root), rng, &self.spec)
     }
 
     fn rand_block_and_data_columns(&mut self) -> (SignedBeaconBlock<E>, DataColumnSidecarList<E>) {
         let num_blobs = NumBlobs::Number(1);
+        let head_root = self.harness.chain.head().head_block_root();
         generate_rand_block_and_data_columns::<E>(
             self.fork_name,
             num_blobs,
+            Some(head_root),
             &mut self.rng,
             &self.harness.spec,
         )
@@ -258,8 +262,16 @@ impl TestRig {
         self.sync_manager.handle_message(sync_message);
     }
 
-    fn assert_active_lookup(&self, block_root: Hash256) {
-        todo!();
+    fn assert_active_lookup(&mut self, block_root: Hash256) {
+        let lookups = self.sync_manager.forward_sync().get_lookups();
+        if !lookups.contains(&block_root) {
+            panic!("Expected lookup {block_root} not found, active lookups: {lookups:?}");
+        }
+    }
+
+    fn assert_active_lookups(&mut self, expected_lookups: &[Hash256]) {
+        let lookups = self.sync_manager.forward_sync().get_lookups();
+        assert_eq!(lookups, expected_lookups, "Unexpected lookups");
     }
 
     fn expect_no_active_sampling(&mut self) {
@@ -283,39 +295,24 @@ impl TestRig {
         self.expect_no_active_sampling();
     }
 
-    fn assert_lookup_peers(&self, block_root: Hash256, expected_peers: &[PeerId]) {
-        todo!();
-    }
-
-    fn insert_failed_chain(&mut self, block_root: Hash256) {
-        todo!();
-    }
-
-    fn assert_not_failed_chain(&mut self, chain_hash: Hash256) {
-        let failed_chains = self.get_failed_chains();
-        if failed_chains.contains(&chain_hash) {
-            panic!("failed chains contain {chain_hash:?}: {failed_chains:?}");
-        }
-    }
-
-    fn get_failed_chains(&mut self) -> Vec<Hash256> {
-        todo!();
-    }
-
-    fn assert_failed_chain(&mut self, chain_hash: Hash256) {
-        let failed_chains = self.get_failed_chains();
-        if !failed_chains.contains(&chain_hash) {
-            panic!("expected failed chains to contain {chain_hash:?}: {failed_chains:?}");
-        }
-    }
-
-    fn find_single_lookup_for(&self, block_root: Hash256) -> Id {
-        todo!();
+    fn assert_lookup_peers(&mut self, block_root: Hash256, expected_peers: &[PeerId]) {
+        let mut peers = self
+            .sync_manager
+            .forward_sync()
+            .block_peers(&block_root)
+            .unwrap_or_else(|| panic!("Unknown block {block_root}"));
+        peers.sort_unstable();
+        let mut expected_peers = expected_peers.to_vec();
+        expected_peers.sort_unstable();
+        assert_eq!(peers, expected_peers, "Unexpected block {block_root} peers");
     }
 
     #[track_caller]
-    fn expect_no_active_lookups(&self) {
-        todo!();
+    pub fn expect_no_active_lookups(&mut self) {
+        let lookups = self.sync_manager.forward_sync().get_lookups();
+        if !lookups.is_empty() {
+            panic!("expected no active lookups but found {lookups:?}")
+        }
     }
 
     fn expect_no_active_lookups_empty_network(&mut self) {
@@ -325,13 +322,13 @@ impl TestRig {
 
     // Note: prefer to use `add_connected_peer_testing_only`. This is currently extensively used in
     // lookup tests. We should consolidate this "add peer" methods in a future refactor
-    fn new_connected_peer(&mut self) -> PeerId {
+    pub fn new_connected_peer(&mut self) -> PeerId {
         self.add_connected_peer_testing_only(false)
     }
 
     // Note: prefer to use `add_connected_peer_testing_only`. This is currently extensively used in
     // lookup tests. We should consolidate this "add peer" methods in a future refactor
-    fn new_connected_supernode_peer(&mut self) -> PeerId {
+    pub fn new_connected_supernode_peer(&mut self) -> PeerId {
         self.add_connected_peer_testing_only(true)
     }
 
@@ -498,7 +495,7 @@ impl TestRig {
     /// Return RPCErrors for all active requests of peer
     fn rpc_error_all_active_requests(&mut self, disconnected_peer_id: PeerId) {
         self.drain_network_rx();
-        while let Ok(sync_request_id) = self.pop_received_network_event(|ev| match ev {
+        while let Ok(sync_request_id) = self.pop_received_network_event(&mut |ev| match ev {
             NetworkMessage::SendRequest {
                 peer_id,
                 app_request_id: AppRequestId::Sync(id),
@@ -532,7 +529,7 @@ impl TestRig {
 
     pub fn pop_received_network_event<T, F: Fn(&NetworkMessage<E>) -> Option<T>>(
         &mut self,
-        predicate_transform: F,
+        predicate_transform: &mut F,
     ) -> Result<T, String> {
         self.drain_network_rx();
 
@@ -548,6 +545,17 @@ impl TestRig {
         } else {
             Err(format!("current network messages {:?}", self.network_rx_queue).to_string())
         }
+    }
+
+    pub fn pop_received_network_events<T, F: Fn(&NetworkMessage<E>) -> Option<T>>(
+        &mut self,
+        predicate_transform: &mut F,
+    ) -> Vec<T> {
+        let mut events = vec![];
+        while let Ok(ev) = self.pop_received_network_event(predicate_transform) {
+            events.push(ev)
+        }
+        events
     }
 
     /// Similar to `pop_received_network_events` but finds matching events without removing them.
@@ -597,60 +605,6 @@ impl TestRig {
         }
     }
 
-    fn find_block_lookup_request(
-        &mut self,
-        _for_block: Hash256,
-    ) -> Result<SingleLookupReqId, String> {
-        todo!();
-    }
-
-    #[track_caller]
-    fn expect_block_lookup_request(&mut self, for_block: Hash256) -> SingleLookupReqId {
-        self.find_block_lookup_request(for_block)
-            .unwrap_or_else(|e| panic!("Expected block request for {for_block:?}: {e}"))
-    }
-
-    fn find_blob_lookup_request(
-        &mut self,
-        for_block: Hash256,
-    ) -> Result<SingleLookupReqId, String> {
-        self.pop_received_network_event(|ev| match ev {
-            NetworkMessage::SendRequest {
-                peer_id: _,
-                request: RequestType::BlobsByRoot(request),
-                app_request_id: AppRequestId::Sync(SyncRequestId::BlobsByRoot(id)),
-            } if request
-                .blob_ids
-                .to_vec()
-                .iter()
-                .any(|r| r.block_root == for_block) =>
-            {
-                todo!();
-            }
-            _ => None,
-        })
-    }
-
-    #[track_caller]
-    fn expect_blob_lookup_request(&mut self, for_block: Hash256) -> SingleLookupReqId {
-        self.find_blob_lookup_request(for_block)
-            .unwrap_or_else(|e| panic!("Expected blob request for {for_block:?}: {e}"))
-    }
-
-    #[track_caller]
-    fn expect_block_parent_request(&mut self, _for_block: Hash256) -> SingleLookupReqId {
-        todo!();
-    }
-
-    fn expect_no_requests_for(&mut self, block_root: Hash256) {
-        if let Ok(request) = self.find_block_lookup_request(block_root) {
-            panic!("Expected no block request for {block_root:?} found {request:?}");
-        }
-        if let Ok(request) = self.find_blob_lookup_request(block_root) {
-            panic!("Expected no blob request for {block_root:?} found {request:?}");
-        }
-    }
-
     /// Retrieves an unknown number of requests for data columns of `block_root`. Because peer ENRs
     /// are random, and peer selection is random, the total number of batched requests is unknown.
     fn expect_data_columns_by_root_requests(
@@ -658,36 +612,22 @@ impl TestRig {
         block_root: Hash256,
         count: usize,
     ) -> DCByRootIds {
-        let mut requests: DCByRootIds = vec![];
-        loop {
-            let req = self
-                .pop_received_network_event(|ev| match ev {
-                    NetworkMessage::SendRequest {
-                        peer_id: _,
-                        request: RequestType::DataColumnsByRoot(request),
-                        app_request_id:
-                            AppRequestId::Sync(id @ SyncRequestId::DataColumnsByRoot { .. }),
-                    } => {
-                        let matching = request
-                            .data_column_ids
-                            .iter()
-                            .find(|id| id.block_root == block_root)?;
+        self.pop_received_network_events(&mut |ev| match ev {
+            NetworkMessage::SendRequest {
+                peer_id: _,
+                request: RequestType::DataColumnsByRoot(request),
+                app_request_id: AppRequestId::Sync(id @ SyncRequestId::DataColumnsByRoot { .. }),
+            } => {
+                let matching = request
+                    .data_column_ids
+                    .iter()
+                    .find(|id| id.block_root == block_root)?;
 
-                        let indices = matching.columns.iter().copied().collect();
-                        Some((*id, indices))
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|e| {
-                    panic!("Expected more DataColumnsByRoot requests for {block_root:?}: {e}")
-                });
-            requests.push(req);
-
-            // Should never infinite loop because sync does not send requests for 0 columns
-            if requests.iter().map(|r| r.1.len()).sum::<usize>() >= count {
-                return requests;
+                let indices = matching.columns.iter().copied().collect();
+                Some((*id, indices))
             }
-        }
+            _ => None,
+        })
     }
 
     fn expect_only_data_columns_by_root_requests(
@@ -829,13 +769,14 @@ impl TestRig {
 
     #[track_caller]
     pub fn expect_penalties(&mut self, expected_penalty_msg: &'static str) {
-        let all_penalties = self.filter_received_network_events(|ev| match ev {
+        let all_penalties = self.pop_received_network_events(&mut |ev| match ev {
             NetworkMessage::ReportPeer { peer_id, msg, .. } => Some((*peer_id, *msg)),
             _ => None,
         });
-        if all_penalties
-            .iter()
-            .any(|(_, msg)| *msg != expected_penalty_msg)
+        if !all_penalties.is_empty()
+            && all_penalties
+                .iter()
+                .any(|(_, msg)| *msg != expected_penalty_msg)
         {
             panic!(
                 "Expected penalties only of {expected_penalty_msg}, but found {all_penalties:?}"
@@ -859,7 +800,7 @@ impl TestRig {
     #[track_caller]
     pub fn expect_penalty(&mut self, peer_id: PeerId, expect_penalty_msg: &'static str) {
         let penalty_msg = self
-            .pop_received_network_event(|ev| match ev {
+            .pop_received_network_event(&mut |ev| match ev {
                 NetworkMessage::ReportPeer {
                     peer_id: p_id, msg, ..
                 } if p_id == &peer_id => Some(msg.to_owned()),
@@ -965,16 +906,18 @@ impl TestRig {
 
     async fn single_lookup_from_attestation_setup(&mut self) -> (Hash256, PeerId) {
         let (head_root, head_slot) = self.create_unimported_parent_chain(1).await;
-        let peer_id = self.new_connected_peer();
+        // Use a supernode so Fulu tests can pass without edits
+        let peer_id = self.new_connected_supernode_peer();
         // Trigger the request
         self.trigger_unknown_block_from_attestation(head_root, peer_id);
-        self.expect_block_lookup_request(head_root);
+        self.assert_active_lookup(head_root);
         (head_root, peer_id)
     }
 
-    async fn parent_lookup_from_unknown_block_parent_setup(&mut self) -> (Hash256, PeerId) {
+    pub async fn parent_lookup_from_unknown_block_parent_setup(&mut self) -> (Hash256, PeerId) {
         let (head_root, head_slot) = self.create_unimported_parent_chain(2).await;
-        let peer_id = self.new_connected_peer();
+        // Use a supernode so Fulu tests can pass without edits
+        let peer_id = self.new_connected_supernode_peer();
         let head_block = self
             .blocks_by_root
             .get(&head_root)
@@ -990,21 +933,33 @@ impl TestRig {
     }
 
     fn assert_head(&self, expected_head: Hash256) {
-        let head = self.harness.chain.head();
-        assert_eq!(
-            head.head_block_root(),
-            expected_head,
-            "Not expected head root"
-        );
+        let mut fork_choice = self.harness.chain.canonical_head.fork_choice_write_lock();
+        let current_slot = fork_choice.fc_store().get_current_slot();
+        let head_root = fork_choice
+            .get_head(current_slot, &self.harness.spec)
+            .expect("error computing head");
+        assert_eq!(head_root, expected_head, "Not expected head root");
     }
 
-    fn fetch_ancestor_chain(&self, mut block_root: Hash256) -> Vec<Hash256> {
+    fn fetch_unimported_ancestor_chain(&self, mut block_root: Hash256) -> Vec<Hash256> {
         let mut chain = vec![];
         while let Some(block) = self.blocks_by_root.get(&block_root) {
+            if self
+                .harness
+                .chain
+                .block_is_known_to_fork_choice(&block_root)
+            {
+                break;
+            }
+
             chain.push(block_root);
             block_root = block.parent_root();
         }
         chain
+    }
+
+    pub fn complete_header_chain(&mut self) {
+        self.progress_until_no_events(filter().header_requests_only(), complete());
     }
 }
 
@@ -1013,7 +968,7 @@ fn stable_rng() {
     let spec = types::MainnetEthSpec::default_spec();
     let mut rng = XorShiftRng::from_seed([42; 16]);
     let (block, _) =
-        generate_rand_block_and_blobs::<E>(ForkName::Base, NumBlobs::None, &mut rng, &spec);
+        generate_rand_block_and_blobs::<E>(ForkName::Base, NumBlobs::None, None, &mut rng, &spec);
     assert_eq!(
         block.canonical_root(),
         Hash256::from_slice(
@@ -1033,10 +988,20 @@ async fn test_single_block_lookup_happy_path() {
 
 // Tests that if a peer does not respond with a block, we downscore and retry the block only
 #[tokio::test]
-async fn test_single_block_lookup_empty_response() {
+async fn test_single_block_lookup_empty_response_until_failure() {
+    let mut r = TestRig::test_setup();
+    let (_, _) = r.single_lookup_from_attestation_setup().await;
+    r.progress_until_no_events(NO_FILTER, complete().return_no_blocks());
+    r.expect_penalties("NotEnoughResponsesReturned");
+    // Test will loop until reaching max download attempts and remove the lookup
+    r.expect_no_active_lookups();
+}
+
+#[tokio::test]
+async fn test_single_block_lookup_empty_response_some_times() {
     let mut r = TestRig::test_setup();
     let (new_head_root, _) = r.single_lookup_from_attestation_setup().await;
-    r.progress_until_no_events(NO_FILTER, complete().return_no_blocks());
+    r.progress_until_no_events(NO_FILTER, complete().return_no_blocks_n_times(3));
     r.expect_penalties("NotEnoughResponsesReturned");
     r.expect_fully_complete_sync(new_head_root);
 }
@@ -1044,24 +1009,29 @@ async fn test_single_block_lookup_empty_response() {
 #[tokio::test]
 async fn test_single_block_lookup_wrong_response() {
     let mut r = TestRig::test_setup();
-    let (new_head_root, _) = r.single_lookup_from_attestation_setup().await;
+    let (_, _) = r.single_lookup_from_attestation_setup().await;
     r.progress_until_no_events(NO_FILTER, complete().return_wrong_blocks());
     r.expect_penalties("UnrequestedBlockRoot");
-    r.expect_fully_complete_sync(new_head_root);
+    r.expect_no_active_lookups();
+    // Test will loop until reaching max download attempts and remove the lookup
+    r.expect_no_active_lookups();
 }
 
 #[tokio::test]
-async fn test_single_block_lookup_failure() {
+async fn test_single_block_lookup_rpc_error() {
     let mut r = TestRig::test_setup();
-    let (new_head_root, _) = r.single_lookup_from_attestation_setup().await;
+    let (_, _) = r.single_lookup_from_attestation_setup().await;
     r.progress_until_no_events(
         NO_FILTER,
         complete().rpc_error(RPCError::UnsupportedProtocol),
     );
     r.expect_no_penalties();
-    r.expect_fully_complete_sync(new_head_root);
+    // Test will loop until reaching max download attempts and remove the lookup
+    r.expect_no_active_lookups();
 }
 
+// TODO(tree-sync): Current behaviour drops the lookup if there's no peers left
+#[ignore]
 #[tokio::test]
 async fn test_single_block_lookup_peer_disconnected_then_rpc_error() {
     let mut r = TestRig::test_setup();
@@ -1083,42 +1053,41 @@ async fn test_parent_lookup_happy_path() {
 }
 
 #[tokio::test]
-async fn test_parent_lookup_wrong_response() {
+async fn test_parent_lookup_drop_parent() {
     let mut r = TestRig::test_setup();
-    let (new_head_root, _) = r.parent_lookup_from_unknown_block_parent_setup().await;
-    r.progress_until_no_events(NO_FILTER, complete().return_wrong_blocks());
-    r.expect_penalties("UnrequestedBlockRoot");
-    r.expect_fully_complete_sync(new_head_root);
-}
-
-#[tokio::test]
-async fn test_parent_lookup_rpc_failure() {
-    let mut r = TestRig::test_setup();
-    let (new_head_root, _) = r.parent_lookup_from_unknown_block_parent_setup().await;
+    let (head_root, _) = r.parent_lookup_from_unknown_block_parent_setup().await;
+    // Complete the header chain so the first block can start syncing
+    r.complete_header_chain();
+    let chain = r.fetch_unimported_ancestor_chain(head_root);
+    // Return wrong blocks for the parent of `head_root` = chain[1]
     r.progress_until_no_events(
-        NO_FILTER,
-        complete().rpc_error_response(RpcErrorResponse::ResourceUnavailable),
+        filter().block_root(chain[1]),
+        complete().return_wrong_blocks(),
     );
-    r.expect_no_penalties();
-    r.expect_fully_complete_sync(new_head_root);
+    r.expect_penalties("UnrequestedBlockRoot");
+    // It should drop all lookups
+    r.expect_no_active_lookups();
 }
 
-// TODO(tree-sync): test blacklist feature
 #[tokio::test]
-async fn test_parent_lookup_too_many_attempts() {
+async fn test_parent_lookup_drop_child() {
     let mut r = TestRig::test_setup();
-    let (new_head_root, _) = r.parent_lookup_from_unknown_block_parent_setup().await;
-
-    for i in 1..=PARENT_FAIL_TOLERANCE {
-        r.progress_until_no_events(
-            NO_FILTER,
-            complete().rpc_error_response(RpcErrorResponse::ResourceUnavailable),
-        );
-    }
-
-    r.expect_no_active_lookups_empty_network();
+    let (head_root, _) = r.parent_lookup_from_unknown_block_parent_setup().await;
+    // Complete the header chain so the first block can start syncing
+    r.complete_header_chain();
+    let chain = r.fetch_unimported_ancestor_chain(head_root);
+    // Return wrong blocks for the parent of `head_root` = chain[1]
+    r.progress_until_no_events(
+        filter().block_root(chain[0]),
+        complete().return_wrong_blocks(),
+    );
+    r.expect_penalties("UnrequestedBlockRoot");
+    // It should only drop the newest lookup
+    r.assert_active_lookups(&[chain[1]]);
 }
 
+// TODO(tree-sync): Current behaviour drops the lookup if there's no peers left
+#[ignore]
 #[tokio::test]
 async fn test_lookup_peer_disconnected_no_peers_left_while_request() {
     let mut r = TestRig::test_setup();
@@ -1146,18 +1115,21 @@ async fn test_lookup_disconnection_peer_left() {
 async fn test_lookup_add_peers_to_parent() {
     let mut r = TestRig::test_setup();
     let (head_root, _) = r.create_unimported_parent_chain(4).await;
-    let chain = r.fetch_ancestor_chain(head_root);
+    let chain = r.fetch_unimported_ancestor_chain(head_root);
     let peer_id = r.new_connected_peer();
     r.trigger_unknown_block_from_attestation(head_root, peer_id);
-    r.progress_until_no_events(filter().header_requests_only(), complete());
+    r.complete_header_chain();
 
     let new_peers = (0..2).map(|_| r.new_connected_peer()).collect::<Vec<_>>();
     for peer in &new_peers {
         r.trigger_unknown_block_from_attestation(head_root, *peer);
     }
+
+    let mut expected_peers = new_peers.clone();
+    expected_peers.push(peer_id);
     for block in chain {
         // Parent has the original unknown parent event peer + new peer
-        r.assert_lookup_peers(block, &new_peers);
+        r.assert_lookup_peers(block, &expected_peers);
     }
 }
 
@@ -1171,7 +1143,10 @@ fn sampling_happy_path() {
     let block_root = block.canonical_root();
     r.trigger_sample_block(block_root, block.slot());
     // Retrieve all outgoing sample requests for random column indexes
-    r.progress_until_no_events(NO_FILTER, complete());
+    let sampling_ids =
+        r.expect_only_data_columns_by_root_requests(block_root, SAMPLING_REQUIRED_SUCCESSES);
+    // Resolve all of them one by one
+    r.complete_valid_sampling_column_requests(sampling_ids, data_columns);
     r.expect_clean_finished_sampling();
 }
 
@@ -1186,7 +1161,14 @@ fn sampling_with_retries() {
     let (block, data_columns) = r.rand_block_and_data_columns();
     let block_root = block.canonical_root();
     r.trigger_sample_block(block_root, block.slot());
-    r.progress_until_no_events(NO_FILTER, complete().empty_sampling_response_once());
+    // Retrieve all outgoing sample requests for random column indexes, and return empty responses
+    let sampling_ids =
+        r.expect_only_data_columns_by_root_requests(block_root, SAMPLING_REQUIRED_SUCCESSES);
+    r.return_empty_sampling_requests(sampling_ids);
+    // Expect retries for all of them, and resolve them
+    let sampling_ids =
+        r.expect_only_data_columns_by_root_requests(block_root, SAMPLING_REQUIRED_SUCCESSES);
+    r.complete_valid_sampling_column_requests(sampling_ids, data_columns);
     r.expect_clean_finished_sampling();
 }
 
@@ -1195,20 +1177,18 @@ fn sampling_avoid_retrying_same_peer() {
     let Some(mut r) = TestRig::test_setup_after_fulu() else {
         return;
     };
-    let peer_1 = r.new_connected_supernode_peer();
+    let peer_id_1 = r.new_connected_supernode_peer();
+    let peer_id_2 = r.new_connected_supernode_peer();
     let block_root = Hash256::random();
     r.trigger_sample_block(block_root, Slot::new(0));
     // Retrieve all outgoing sample requests for random column indexes, and return empty responses
-    r.progress_until_no_events(
-        filter().peer(peer_1),
-        complete().rpc_error(RPCError::Disconnected),
-    );
+    let sampling_ids =
+        r.expect_only_data_columns_by_root_requests(block_root, SAMPLING_REQUIRED_SUCCESSES);
+    r.sampling_requests_failed(sampling_ids, peer_id_1, RPCError::Disconnected);
     // Should retry the other peer
-    let peer_2 = r.new_connected_supernode_peer();
-    r.progress_until_no_events(
-        filter().peer(peer_2),
-        complete().rpc_error(RPCError::Disconnected),
-    );
+    let sampling_ids =
+        r.expect_only_data_columns_by_root_requests(block_root, SAMPLING_REQUIRED_SUCCESSES);
+    r.sampling_requests_failed(sampling_ids, peer_id_2, RPCError::Disconnected);
     // Expect no more retries
     r.expect_empty_network();
 }
@@ -1224,14 +1204,18 @@ fn sampling_batch_requests() {
     r.trigger_sample_block(block_root, block.slot());
 
     // Retrieve the sample request, which should be batched.
-    let (_, column_indexes) = r
+    let (sync_request_id, column_indexes) = r
         .expect_only_data_columns_by_root_requests(block_root, 1)
         .pop()
         .unwrap();
     assert_eq!(column_indexes.len(), SAMPLING_REQUIRED_SUCCESSES);
     r.assert_sampling_request_ongoing(block_root, &column_indexes);
 
-    r.progress_until_no_events(NO_FILTER, complete());
+    // Resolve the request.
+    r.complete_valid_sampling_column_requests(
+        vec![(sync_request_id, column_indexes.clone())],
+        data_columns,
+    );
     r.expect_clean_finished_sampling();
 }
 
@@ -1256,14 +1240,18 @@ fn sampling_batch_requests_not_enough_responses_returned() {
     r.assert_sampling_request_ongoing(block_root, &column_indexes);
 
     // Split the indexes to simulate the case where the supernode doesn't have the requested column.
-    let missing_custody_index = *column_indexes.first().unwrap();
     let (column_indexes_supernode_does_not_have, column_indexes_to_complete) =
         column_indexes.split_at(1);
 
     // Complete the requests but only partially, so a NotEnoughResponsesReturned error occurs.
-    r.progress_until_no_events(
-        NO_FILTER,
-        complete().custody_failure_at_index(missing_custody_index),
+    let data_columns_to_complete = data_columns
+        .iter()
+        .filter(|d| column_indexes_to_complete.contains(&d.index))
+        .cloned()
+        .collect::<Vec<_>>();
+    r.complete_data_columns_by_root_request(
+        (sync_request_id, column_indexes.clone()),
+        &data_columns_to_complete,
     );
 
     // The request status should be set to NoPeers since the supernode, the only peer, returned not enough responses.

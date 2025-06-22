@@ -548,6 +548,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let id = CustodyByRootRequestId { parent_request_id };
         debug!(
             %id,
+            ?block_root,
+            peers = lookup_peers.read().len(),
             "Starting custody columns request"
         );
 
