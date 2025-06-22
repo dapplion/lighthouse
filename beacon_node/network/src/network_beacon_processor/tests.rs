@@ -22,6 +22,7 @@ use gossipsub::MessageAcceptance;
 use itertools::Itertools;
 use lighthouse_network::rpc::methods::{BlobsByRangeRequest, MetaDataV3};
 use lighthouse_network::rpc::InboundRequestId;
+use lighthouse_network::service::api_types::HeaderLookupId;
 use lighthouse_network::{
     discv5::enr::{self, CombinedKey},
     rpc::methods::{MetaData, MetaDataV2},
@@ -374,52 +375,11 @@ impl TestRig {
     pub fn enqueue_rpc_block(&self) {
         let block_root = self.next_block.canonical_root();
         self.network_beacon_processor
-            .send_rpc_beacon_block(
-                block_root,
-                RpcBlock::new_without_blobs(Some(block_root), self.next_block.clone()),
-                std::time::Duration::default(),
-                BlockProcessType::SingleBlock { id: 0 },
+            .send_chain_segment(
+                ChainSegmentProcessId::ForwardSync(HeaderLookupId { id: 0, block_root }),
+                vec![],
             )
             .unwrap();
-    }
-
-    pub fn enqueue_single_lookup_rpc_block(&self) {
-        let block_root = self.next_block.canonical_root();
-        self.network_beacon_processor
-            .send_rpc_beacon_block(
-                block_root,
-                RpcBlock::new_without_blobs(Some(block_root), self.next_block.clone()),
-                std::time::Duration::default(),
-                BlockProcessType::SingleBlock { id: 1 },
-            )
-            .unwrap();
-    }
-
-    pub fn enqueue_single_lookup_rpc_blobs(&self) {
-        if let Some(blobs) = self.next_blobs.clone() {
-            let blobs = FixedBlobSidecarList::new(blobs.into_iter().map(Some).collect::<Vec<_>>());
-            self.network_beacon_processor
-                .send_rpc_blobs(
-                    self.next_block.canonical_root(),
-                    blobs,
-                    std::time::Duration::default(),
-                    BlockProcessType::SingleBlob { id: 1 },
-                )
-                .unwrap();
-        }
-    }
-
-    pub fn enqueue_single_lookup_rpc_data_columns(&self) {
-        if let Some(data_columns) = self.next_data_columns.clone() {
-            self.network_beacon_processor
-                .send_rpc_custody_columns(
-                    self.next_block.canonical_root(),
-                    data_columns,
-                    Duration::default(),
-                    BlockProcessType::SingleCustodyColumn(1),
-                )
-                .unwrap();
-        }
     }
 
     pub fn enqueue_blobs_by_range_request(&self, count: u64) {
@@ -437,10 +397,7 @@ impl TestRig {
 
     pub fn enqueue_backfill_batch(&self) {
         self.network_beacon_processor
-            .send_chain_segment(
-                ChainSegmentProcessId::BackSyncBatchId(Epoch::default()),
-                Vec::default(),
-            )
+            .send_chain_segment(ChainSegmentProcessId::BackfillSync(0), Vec::default())
             .unwrap();
     }
 
@@ -945,14 +902,6 @@ async fn attestation_to_unknown_block_processed(import_method: BlockImportMethod
         BlockImportMethod::Rpc => {
             rig.enqueue_rpc_block();
             events.push(WorkType::RpcBlock);
-            if num_blobs > 0 {
-                rig.enqueue_single_lookup_rpc_blobs();
-                events.push(WorkType::RpcBlobs);
-            }
-            if num_data_columns > 0 {
-                rig.enqueue_single_lookup_rpc_data_columns();
-                events.push(WorkType::RpcCustodyColumn);
-            }
         }
     };
 
@@ -1031,14 +980,6 @@ async fn aggregate_attestation_to_unknown_block(import_method: BlockImportMethod
         BlockImportMethod::Rpc => {
             rig.enqueue_rpc_block();
             events.push(WorkType::RpcBlock);
-            if num_blobs > 0 {
-                rig.enqueue_single_lookup_rpc_blobs();
-                events.push(WorkType::RpcBlobs);
-            }
-            if num_data_columns > 0 {
-                rig.enqueue_single_lookup_rpc_data_columns();
-                events.push(WorkType::RpcCustodyColumn);
-            }
         }
     };
 
@@ -1219,23 +1160,9 @@ async fn test_rpc_block_reprocessing() {
     let next_block_root = rig.next_block.canonical_root();
     // Insert the next block into the duplicate cache manually
     let handle = rig.duplicate_cache.check_and_insert(next_block_root);
-    rig.enqueue_single_lookup_rpc_block();
+    rig.enqueue_rpc_block();
     rig.assert_event_journal_completes(&[WorkType::RpcBlock])
         .await;
-
-    let num_blobs = rig.next_blobs.as_ref().map(|b| b.len()).unwrap_or(0);
-    if num_blobs > 0 {
-        rig.enqueue_single_lookup_rpc_blobs();
-        rig.assert_event_journal_completes(&[WorkType::RpcBlobs])
-            .await;
-    }
-
-    let num_data_columns = rig.next_data_columns.as_ref().map(|c| c.len()).unwrap_or(0);
-    if num_data_columns > 0 {
-        rig.enqueue_single_lookup_rpc_data_columns();
-        rig.assert_event_journal_completes(&[WorkType::RpcCustodyColumn])
-            .await;
-    }
 
     // next_block shouldn't be processed since it couldn't get the
     // duplicate cache handle
