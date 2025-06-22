@@ -8,7 +8,8 @@ use crate::sync::BatchProcessResult;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::service::api_types::{
-    BlocksByRootRequestId, BlocksByRootRequester, HeaderLookupId, Id, RangeRequestId,
+    BlocksByRootRequestId, BlocksByRootRequester, ComponentsByRootRequestId, HeaderLookupId, Id,
+    RangeRequestId,
 };
 use lighthouse_network::PeerId;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -18,6 +19,7 @@ use types::{BeaconBlockHeader, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 const MAX_LOOKUP_COUNT: usize = 1_000_000;
 const PRUNE_COUNT: usize = 100_000;
+const BLOCK_BUFFER_SIZE: usize = 2;
 
 pub struct ForwardSync<T: BeaconChainTypes> {
     blocks: HashMap<Hash256, ForwardSyncBlock<T>>,
@@ -206,6 +208,7 @@ impl<T: BeaconChainTypes> ForwardSyncBlock<T> {
 #[derive(Debug)]
 pub enum Error {
     InternalError(String),
+    TooManyErrors,
     BlockConflictsWithFinality(String),
 }
 
@@ -231,6 +234,7 @@ impl From<SyncBlockError> for Error {
     fn from(e: SyncBlockError) -> Self {
         match e {
             SyncBlockError::InternalError(e) => Self::InternalError(e),
+            SyncBlockError::TooManyErrors => Self::TooManyErrors,
         }
     }
 }
@@ -267,18 +271,19 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     }
 
     #[cfg(test)]
-    pub fn get_processing_ids(&self) -> Vec<HeaderLookupId> {
-        self.blocks
-            .values()
-            .filter(|block| {
-                block
-                    .header_request()
-                    .ok()
-                    .map(|request| request.is_processing())
-                    .unwrap_or(false)
-            })
-            .map(|block| block.id)
-            .collect()
+    pub fn get_processing_ids(&mut self) -> Vec<HeaderLookupId> {
+        let mut ids = vec![];
+        for block in self.blocks.values_mut() {
+            if block
+                .block_request()
+                .ok()
+                .map(|request| request.is_processing())
+                .unwrap_or(false)
+            {
+                ids.push(block.id);
+            }
+        }
+        ids
     }
 
     pub fn pause(&mut self) {
@@ -422,6 +427,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
     pub fn on_block_download_result(
         &mut self,
+        req_id: ComponentsByRootRequestId,
         id: HeaderLookupId,
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
@@ -438,7 +444,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
         let outcome = lookup
             .block_request()
-            .and_then(|block| Ok(block.on_download_result(result, cx)?));
+            .and_then(|block| Ok(block.on_download_result(req_id, result, cx)?));
         self.handle_result(id.0, outcome, cx);
     }
 
@@ -495,7 +501,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             Err(e) => {
                 debug!(error = ?e, "Dropping forward sync block header lookup");
                 match e {
-                    Error::InternalError(_e) => {
+                    Error::InternalError(_) | Error::TooManyErrors => {
                         let block_to_children = self.compute_children();
                         self.drop_lookup_and_children(block_root, &block_to_children);
                     }
@@ -533,7 +539,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         let mut new_syncing_blocks = false;
 
         // Have up to 2 blocks syncing
-        for _ in blocks_syncing..2 {
+        for _ in blocks_syncing..BLOCK_BUFFER_SIZE {
             // Find the block range with most peers and highest slot. This is the block
             // to be used as tip of the chain of blocks to fetch.
             let Some(block_root) = self

@@ -1,12 +1,11 @@
 use super::*;
 use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::status::ToStatusMessage;
-use crate::sync::manager::SLOT_IMPORT_TOLERANCE;
+use crate::sync::manager::{BlockProcessingResult, SLOT_IMPORT_TOLERANCE};
 use crate::sync::network_context::{BlockComponentsByRootRequestStep, RangeRequestId};
-use crate::sync::range_sync::{BatchId, BatchState, RangeSyncType};
 use crate::sync::tests::lookups::TestOptions;
 use crate::sync::BatchProcessResult;
-use crate::sync::{ChainId, SyncMessage};
+use crate::sync::SyncMessage;
 use beacon_chain::data_column_verification::CustodyDataColumn;
 use beacon_chain::test_utils::{AttestationStrategy, BlockStrategy};
 use beacon_chain::{
@@ -17,7 +16,7 @@ use beacon_processor::WorkType;
 use lighthouse_network::rpc::methods::{
     BlobsByRootRequest, BlocksByRootRequest, DataColumnsByRootRequest,
 };
-use lighthouse_network::rpc::{RequestType, StatusMessage};
+use lighthouse_network::rpc::{RPCError, RequestType, RpcErrorResponse, StatusMessage};
 use lighthouse_network::service::api_types::{
     AppRequestId, BlobsByRootRequestId, BlocksByRootRequestId, BlocksByRootRequester,
     ComponentsByRootRequestId, DataColumnsByRootRequestId, HeaderLookupId, SyncRequestId,
@@ -78,31 +77,38 @@ type DataColumnsByRootRequestData = (DataColumnsByRootRequestId, PeerId, DataCol
 /// _which_ request to complete. Picking the right request is critical for tests to pass, so this
 /// filter allows better expressivity on the criteria to identify the right request.
 #[derive(Default, Debug, Clone, Copy)]
-struct RequestFilter {
+pub struct RequestFilter {
     peer: Option<PeerId>,
     epoch: Option<u64>,
     column_index: Option<u64>,
+    header_requests_only: bool,
 }
 
-const NO_FILTER: RequestFilter = RequestFilter {
+pub const NO_FILTER: RequestFilter = RequestFilter {
     peer: None,
     epoch: None,
     column_index: None,
+    header_requests_only: false,
 };
 
 impl RequestFilter {
-    fn peer(mut self, peer: PeerId) -> Self {
+    pub fn peer(mut self, peer: PeerId) -> Self {
         self.peer = Some(peer);
         self
     }
 
-    fn epoch(mut self, epoch: u64) -> Self {
+    pub fn epoch(mut self, epoch: u64) -> Self {
         self.epoch = Some(epoch);
         self
     }
 
-    fn column_index(mut self, index: u64) -> Self {
+    pub fn column_index(mut self, index: u64) -> Self {
         self.column_index = Some(index);
+        self
+    }
+
+    pub fn header_requests_only(mut self) -> Self {
+        self.header_requests_only = true;
         self
     }
 
@@ -115,7 +121,9 @@ impl RequestFilter {
                 peer_id,
                 request: RequestType::BlocksByRoot(req),
                 app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRoot(id)),
-            } if self.matches_blocks_by_root(peer_id, req) => Some((*id, *peer_id, req.clone())),
+            } if self.matches_blocks_by_root(peer_id, req, id) => {
+                Some((*id, *peer_id, req.clone()))
+            }
             _ => None,
         }
     }
@@ -136,11 +144,26 @@ impl RequestFilter {
         }
     }
 
-    fn matches_blocks_by_root(&self, peer: &PeerId, _req: &BlocksByRootRequest) -> bool {
+    fn matches_blocks_by_root(
+        &self,
+        peer: &PeerId,
+        _req: &BlocksByRootRequest,
+        id: &BlocksByRootRequestId,
+    ) -> bool {
+        if self.header_requests_only {
+            if !matches!(id.parent_request_id, BlocksByRootRequester::Header(_)) {
+                return false;
+            }
+        }
+
         self.matches_peer(peer)
     }
 
     fn matches_data_columns_by_root(&self, peer: &PeerId, req: &DataColumnsByRootRequest) -> bool {
+        if self.header_requests_only {
+            return false;
+        }
+
         if let Some(index) = self.column_index {
             if !req
                 .data_column_ids
@@ -173,30 +196,70 @@ impl RequestFilter {
     }
 }
 
-fn filter() -> RequestFilter {
+pub fn filter() -> RequestFilter {
     RequestFilter::default()
 }
 
 /// Instruct the testing rig how to complete requests for _by_range requests
-#[derive(Debug, Clone, Copy)]
-struct CompleteConfig {
+pub struct CompleteConfig {
     block_count: usize,
     with_data: bool,
     custody_failure_at_index: Option<u64>,
+    rpc_error: Option<RPCError>,
+    empty_sampling_response_once: bool,
+    stop_at_block: Option<Hash256>,
+    return_wrong_blocks: bool,
+    return_no_blocks: bool,
+    process_error: bool,
 }
 
 impl CompleteConfig {
-    fn custody_failure_at_index(mut self, index: u64) -> Self {
+    pub fn custody_failure_at_index(mut self, index: u64) -> Self {
         self.custody_failure_at_index = Some(index);
+        self
+    }
+
+    pub fn rpc_error(mut self, error: RPCError) -> Self {
+        self.rpc_error = Some(error);
+        self
+    }
+
+    pub fn rpc_error_response(mut self, error: RpcErrorResponse) -> Self {
+        self.rpc_error(RPCError::ErrorResponse(error, "".to_owned()))
+    }
+
+    pub fn empty_sampling_response_once(mut self) -> Self {
+        self.empty_sampling_response_once = true;
+        self
+    }
+
+    pub fn stop_at_block(mut self, block: Hash256) -> Self {
+        self.stop_at_block = Some(block);
+        self
+    }
+
+    pub fn return_wrong_blocks(mut self) -> Self {
+        self.return_wrong_blocks = true;
+        self
+    }
+
+    pub fn return_no_blocks(mut self) -> Self {
+        self.return_no_blocks = true;
         self
     }
 }
 
-fn complete() -> CompleteConfig {
+pub fn complete() -> CompleteConfig {
     CompleteConfig {
         block_count: 1,
         with_data: true,
         custody_failure_at_index: None,
+        rpc_error: None,
+        empty_sampling_response_once: false,
+        stop_at_block: None,
+        return_wrong_blocks: false,
+        return_no_blocks: false,
+        process_error: false,
     }
 }
 
@@ -279,51 +342,13 @@ impl TestRig {
         self.add_sync_peer(true, remote_info)
     }
 
-    fn assert_state(&mut self, state: RangeSyncType) {
-        assert_eq!(
-            self.sync_manager
-                .range_sync()
-                .state()
-                .expect("State is ok")
-                .expect("Range should be syncing, there are no chains")
-                .0,
-            state,
-            "not expected range sync state"
-        );
-    }
-
     fn get_sync_state(&mut self) -> SyncState {
         self.sync_manager.network().network_globals().sync_state()
-    }
-
-    fn get_batch_states(&mut self) -> Vec<(ChainId, BatchId, &BatchState<E>)> {
-        self.sync_manager.range_sync().batches_state()
     }
 
     fn assert_sync_state(&mut self, expected_state: SyncState) {
         let current_state = self.sync_manager.network().network_globals().sync_state();
         assert_eq!(current_state, expected_state);
-    }
-
-    fn assert_syncing_finalized(&mut self) {
-        self.assert_sync_state(SyncState::SyncingFinalized {
-            start_slot: Slot::new(0),
-            target_slot: Slot::new(0),
-        });
-    }
-
-    fn assert_no_chains_exist(&mut self) {
-        if let Some(chain) = self.sync_manager.range_sync().state().unwrap() {
-            panic!("There still exists a chain {chain:?}");
-        }
-    }
-
-    fn assert_no_failed_chains(&mut self) {
-        assert_eq!(
-            self.sync_manager.range_sync().failed_chains(),
-            Vec::<Hash256>::new(),
-            "Expected no failed chains"
-        )
     }
 
     #[track_caller]
@@ -336,36 +361,28 @@ impl TestRig {
         }
     }
 
-    fn expect_no_data_columns_by_range_requests(&mut self, request_filter: RequestFilter) {
-        let events = self
-            .filter_received_network_events(|ev| request_filter.data_columns_by_range_requests(ev));
-        if !events.is_empty() {
-            panic!("Expected to not find data_columns_by_range requests {request_filter:?} by found {events:?}")
-        }
-    }
-
-    fn expect_active_block_components_by_range_request_on_custody_step(&mut self) {
+    fn expect_active_block_components_requests_on_custody_step(&mut self) {
         let requests = self
             .sync_manager
             .network()
-            .active_block_components_by_range_requests();
+            .active_block_components_requests();
         if requests.is_empty() {
-            panic!("No active block_components_by_range requests");
+            panic!("No active block components requests");
         }
         for (id, step) in requests {
             if !matches!(step, BlockComponentsByRootRequestStep::CustodyRequest) {
-                panic!("block_components_by_range request {id} is not on CustodyRequest step: {step:?}");
+                panic!("block components request {id} is not on CustodyRequest step: {step:?}");
             }
         }
     }
 
-    fn expect_no_active_block_components_by_range_requests(&mut self) {
+    fn expect_no_active_block_components_requests(&mut self) {
         let requests = self
             .sync_manager
             .network()
-            .active_block_components_by_range_requests();
+            .active_block_components_requests();
         if !requests.is_empty() {
-            panic!("Still active block_components_by_range requests {requests:?}");
+            panic!("Still active block components requests {requests:?}");
         }
     }
 
@@ -378,41 +395,6 @@ impl TestRig {
         if !requests.is_empty() {
             panic!("There are still active RPC requests {requests:?}");
         }
-    }
-
-    fn expect_all_batches_in_state<F: Fn(&BatchState<E>) -> bool>(
-        &mut self,
-        predicate: F,
-        expected_state: &'static str,
-    ) {
-        let batches = self.get_batch_states();
-        if batches.is_empty() {
-            panic!("no batches");
-        }
-        for (chain_id, batch_id, state) in &batches {
-            if !predicate(state) {
-                panic!("batch {chain_id} {batch_id} not in state {expected_state}, {state}");
-            }
-        }
-    }
-
-    fn expect_all_batches_downloading(&mut self) {
-        self.expect_all_batches_in_state(
-            |state| matches!(state, BatchState::Downloading { .. }),
-            "Downloading",
-        );
-    }
-
-    fn expect_all_batches_processing_or_awaiting(&mut self) {
-        self.expect_all_batches_in_state(
-            |state| {
-                matches!(
-                    state,
-                    BatchState::Processing { .. } | BatchState::AwaitingProcessing { .. }
-                )
-            },
-            "Processing or AwaitingProcessing",
-        );
     }
 
     fn update_execution_engine_state(&mut self, state: EngineState) {
@@ -433,8 +415,7 @@ impl TestRig {
         SignedBeaconBlock::from_block(block, Signature::empty())
     }
 
-    async fn create_unimported_parent_chain(&mut self) -> (Hash256, Slot) {
-        let block_count = 8;
+    pub async fn create_unimported_parent_chain(&mut self, block_count: usize) -> (Hash256, Slot) {
         self.log(&format!(
             "Creating unimported chain of {block_count} blocks"
         ));
@@ -488,14 +469,15 @@ impl TestRig {
         (parent_root, slot)
     }
 
-    fn last_sent_blocks_by_range(
-        &mut self,
-        id: ComponentsByRootRequestId,
-    ) -> Vec<Arc<SignedBeaconBlock<E>>> {
-        self.sent_blocks_by_range
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| panic!("No blocks for ComponentsByRootRequestId {id}"))
+    fn send_rpc_error(&mut self, id: SyncRequestId, peer_id: PeerId, error: RPCError) {
+        self.log(&format!(
+            "Completing request {id:?} to {peer_id} with RPCError {error:?}"
+        ));
+        self.send_sync_message(SyncMessage::RpcError {
+            sync_request_id: id,
+            peer_id,
+            error,
+        });
     }
 
     fn send_blocks_by_root_response(
@@ -559,30 +541,41 @@ impl TestRig {
     fn complete_blocks_by_root_request(
         &mut self,
         request: BlocksByRootRequestData,
-        complete_config: CompleteConfig,
-    ) -> BlocksByRootRequester {
-        let (blocks_req_id, block_peer, blocks_req) = request;
+        config: &CompleteConfig,
+    ) {
+        let (req_id, peer, req) = request;
+        if let Some(error) = &config.rpc_error {
+            self.send_rpc_error(SyncRequestId::BlocksByRoot(req_id), peer, error.clone());
+            return;
+        }
 
-        let blocks = blocks_req
+        if config.return_no_blocks {
+            self.send_blocks_by_root_response(req_id, peer, &[]);
+            return;
+        }
+
+        let blocks = req
             .block_roots()
             .iter()
             .map(|block_root| {
-                self.blocks_by_root
-                    .get(block_root)
-                    .expect("Test consumer requested unknown block")
-                    .clone()
+                if config.return_wrong_blocks {
+                    Arc::new(self.rand_block())
+                } else {
+                    self.blocks_by_root
+                        .get(block_root)
+                        .expect("Test consumer requested unknown block")
+                        .clone()
+                }
             })
             .collect::<Vec<_>>();
 
-        self.send_blocks_by_root_response(blocks_req_id, block_peer, &blocks);
-
-        blocks_req_id.parent_request_id
+        self.send_blocks_by_root_response(req_id, peer, &blocks);
     }
 
     fn complete_data_columns_by_root_request_range_sync(
         &mut self,
         (id, peer_id, req): DataColumnsByRootRequestData,
-        complete_config: CompleteConfig,
+        complete_config: &CompleteConfig,
     ) {
         // To reply with a valid DataColumnsByRange we need to construct
         // DataColumnsByRange for the block root that we requested the block peer, plus
@@ -634,10 +627,14 @@ impl TestRig {
             .collect::<Vec<_>>();
 
         // Need to log here because I can't capture &mut self inside the columns iter
-        if triggered_custody_failure {
-            if let Some(index) = complete_config.custody_failure_at_index {
+        if let Some(target_index) = complete_config.custody_failure_at_index {
+            if req
+                .data_column_ids
+                .iter()
+                .any(|id| id.columns.iter().any(|index| *index == target_index))
+            {
                 self.log(&format!(
-                    "Forced custody failure at request {id} for peer {peer_id} index {index:?}"
+                    "Forced custody failure at request {id} for peer {peer_id} index {target_index:?}"
                 ));
             }
         }
@@ -645,16 +642,19 @@ impl TestRig {
         self.send_data_columns_by_root_response(id, peer_id, &data_columns);
     }
 
-    fn find_and_complete_data_by_range_request(
-        &mut self,
-        request_filter: RequestFilter,
-        complete_config: CompleteConfig,
-    ) {
-        let by_range_data_request_ids = self.find_data_by_range_request(request_filter);
-        self.complete_data_by_range_request(by_range_data_request_ids, complete_config);
-    }
+    fn complete_block_processing(&mut self, ids: Vec<HeaderLookupId>, config: &CompleteConfig) {
+        if config.process_error {
+            for id in &ids {
+                self.send_sync_message(SyncMessage::BatchProcessed {
+                    sync_type: ChainSegmentProcessId::ForwardSync(*id),
+                    result: BatchProcessResult::Failure {
+                        peer_action: None,
+                        error: "test error".to_owned(),
+                    },
+                });
+            }
+        }
 
-    fn complete_block_processing(&mut self, ids: Vec<HeaderLookupId>) {
         // Sort ids first as we need to process blocks in order of ancestors. This only works if the
         // test does not send blocks of two parallel chains at once.
         let mut blocks = ids
@@ -695,53 +695,36 @@ impl TestRig {
             }
 
             self.send_sync_message(SyncMessage::BatchProcessed {
-                sync_type: ChainSegmentProcessId::RangeBatchId(id),
-                result: BatchProcessResult::Success {
-                    sent_blocks: 1,
-                    imported_blocks: 1,
-                },
+                sync_type: ChainSegmentProcessId::ForwardSync(id),
+                result: BatchProcessResult::Success,
             });
         }
     }
 
-    fn progress_until_no_events(
+    pub fn progress_until_no_events(
         &mut self,
         request_filter: RequestFilter,
         complete_config: CompleteConfig,
     ) {
         loop {
             if let Ok(request) =
-                self.pop_received_network_event(|ev| request_filter.blocks_by_range_requests(ev))
-            {
-                self.complete_blocks_by_range_request(request, complete_config);
-                continue;
-            }
-
-            if let Ok(request) =
                 self.pop_received_network_event(|ev| request_filter.blocks_by_root_requests(ev))
             {
-                self.complete_blocks_by_root_request(request, complete_config);
-                continue;
-            }
-
-            if let Ok(request) = self
-                .pop_received_network_event(|ev| request_filter.data_columns_by_range_requests(ev))
-            {
-                self.complete_data_columns_by_range_request(request, complete_config);
+                self.complete_blocks_by_root_request(request, &complete_config);
                 continue;
             }
 
             if let Ok(request) = self
                 .pop_received_network_event(|ev| request_filter.data_columns_by_root_requests(ev))
             {
-                self.complete_data_columns_by_root_request_range_sync(request, complete_config);
+                self.complete_data_columns_by_root_request_range_sync(request, &complete_config);
                 continue;
             }
 
             // TODO(tree-sync): find a way to get this info from the beacon processor events
-            let ids = self.sync_manager.block_tree().get_processing_ids();
+            let ids = self.sync_manager.forward_sync().get_processing_ids();
             if !ids.is_empty() {
-                self.complete_block_processing(ids);
+                self.complete_block_processing(ids, &complete_config);
                 continue;
             }
 
@@ -749,61 +732,6 @@ impl TestRig {
             self.log(&format!("Progressed sync, current state: {:?}", sync_state,));
 
             return;
-        }
-    }
-
-    fn find_and_complete_processing_chain_segment(&mut self, id: ChainSegmentProcessId) {
-        self.pop_received_processor_event(|ev| {
-            (ev.work_type() == WorkType::ChainSegment).then_some(())
-        })
-        .unwrap_or_else(|e| panic!("Expected chain segment work event: {e}"));
-
-        self.log(&format!(
-            "Completing ChainSegment processing work {id:?} with success"
-        ));
-        self.send_sync_message(SyncMessage::BatchProcessed {
-            sync_type: id,
-            result: crate::sync::BatchProcessResult::Success {
-                sent_blocks: 8,
-                imported_blocks: 8,
-            },
-        });
-    }
-
-    fn complete_and_process_range_sync_until(
-        &mut self,
-        last_epoch: u64,
-        request_filter: RequestFilter,
-        complete_config: CompleteConfig,
-    ) {
-        for epoch in 0..last_epoch {
-            // Note: In this test we can't predict the block peer
-            let id = self.find_and_complete_block_components_by_range_request(
-                request_filter.epoch(epoch),
-                complete_config,
-            );
-            if let RangeRequestId::RangeSync { .. } = id {
-                todo!();
-            } else {
-                panic!("unexpected RangeRequestId {id}");
-            }
-
-            let id = match id {
-                RangeRequestId::RangeSync(id) => {
-                    todo!();
-                }
-                RangeRequestId::BackfillSync { batch_id } => {
-                    ChainSegmentProcessId::BackSyncBatchId(batch_id)
-                }
-            };
-
-            self.find_and_complete_processing_chain_segment(id);
-            if epoch < last_epoch - 1 {
-                self.assert_state(RangeSyncType::Finalized);
-            } else {
-                self.assert_no_chains_exist();
-                self.assert_no_failed_chains();
-            }
         }
     }
 
@@ -889,126 +817,9 @@ fn build_rpc_block(
     }
 }
 
-#[test]
-fn head_chain_removed_while_finalized_syncing() {
-    // NOTE: this is a regression test.
-    // Added in PR https://github.com/sigp/lighthouse/pull/2821
-    let mut rig = TestRig::test_setup();
-
-    // Get a peer with an advanced head
-    let head_peer = rig.add_head_peer();
-    rig.assert_state(RangeSyncType::Head);
-
-    // Sync should have requested a batch, grab the request.
-    let _ = rig.pop_blocks_by_range_request(filter().peer(head_peer));
-
-    // Now get a peer with an advanced finalized epoch.
-    let finalized_peer = rig.add_finalized_peer();
-    rig.assert_state(RangeSyncType::Finalized);
-
-    // Sync should have requested a batch, grab the request
-    let _ = rig.pop_blocks_by_range_request(filter().peer(finalized_peer));
-
-    // Fail the head chain by disconnecting the peer.
-    rig.peer_disconnected(head_peer);
-    rig.assert_state(RangeSyncType::Finalized);
-}
-
-#[tokio::test]
-async fn state_update_while_purging() {
-    // NOTE: this is a regression test.
-    // Added in PR https://github.com/sigp/lighthouse/pull/2827
-    let mut rig = TestRig::test_setup();
-
-    // Create blocks on a separate harness
-    let mut rig_2 = TestRig::test_setup();
-    // Need to create blocks that can be inserted into the fork-choice and fit the "known
-    // conditions" below.
-    let head_peer_block = rig_2.create_canonical_block().await;
-    let head_peer_root = head_peer_block.0.canonical_root();
-    let finalized_peer_block = rig_2.create_canonical_block().await;
-    let finalized_peer_root = finalized_peer_block.0.canonical_root();
-
-    // Get a peer with an advanced head
-    let head_peer = rig.add_head_peer_with_root(head_peer_root);
-    rig.assert_state(RangeSyncType::Head);
-
-    // Sync should have requested a batch, grab the request.
-    let _ = rig.pop_blocks_by_range_request(filter().peer(head_peer));
-
-    // Now get a peer with an advanced finalized epoch.
-    let finalized_peer = rig.add_finalized_peer_with_root(finalized_peer_root);
-    rig.assert_state(RangeSyncType::Finalized);
-
-    // Sync should have requested a batch, grab the request
-    let _ = rig.pop_blocks_by_range_request(filter().peer(finalized_peer));
-
-    // Now the chain knows both chains target roots.
-    rig.remember_block(head_peer_block).await;
-    rig.remember_block(finalized_peer_block).await;
-
-    // Add an additional peer to the second chain to make range update it's status
-    rig.add_finalized_peer();
-}
-
-#[test]
-fn pause_and_resume_on_ee_offline() {
-    let mut rig = TestRig::test_setup();
-
-    // add some peers
-    let peer1 = rig.add_head_peer();
-    // make the ee offline
-    rig.update_execution_engine_state(EngineState::Offline);
-    // send the response to the request
-    rig.find_and_complete_block_components_by_range_request(
-        filter().peer(peer1).epoch(0),
-        complete(),
-    );
-    // the beacon processor shouldn't have received any work
-    rig.expect_empty_processor();
-
-    // while the ee is offline, more peers might arrive. Add a new finalized peer.
-    let _peer2 = rig.add_finalized_peer();
-
-    // send the response to the request
-    // Don't filter requests and the columns requests may be sent to peer1 or peer2
-    // We need to filter by epoch, because the previous batch eagerly sent requests for the next
-    // epoch for the other batch. So we can either filter by epoch of by sync type.
-    rig.find_and_complete_block_components_by_range_request(filter().epoch(0), complete());
-    // the beacon processor shouldn't have received any work
-    rig.expect_empty_processor();
-    // make the beacon processor available again.
-    // update_execution_engine_state implicitly calls resume
-    // now resume range, we should have two processing requests in the beacon processor.
-    rig.update_execution_engine_state(EngineState::Online);
-
-    // The head chain and finalized chain (2) should be in the processing queue
-    rig.expect_chain_segments(2);
-}
-
 /// To attempt to finalize the peer's status finalized checkpoint we synced to its finalized epoch +
 /// 2 epochs + 1 slot.
 const EXTRA_SYNCED_EPOCHS: u64 = 2 + 1;
-
-#[test]
-fn finalized_sync_enough_global_custody_peers_few_chain_peers() {
-    // Run for all forks
-    let mut r = TestRig::test_setup();
-    // This test creates enough global custody peers to satisfy column queries but only adds few
-    // peers to the chain
-    r.new_connected_peers_for_peerdas();
-
-    let advanced_epochs: u64 = 2;
-    let remote_info = r.finalized_remote_info_advanced_by(advanced_epochs.into());
-
-    // Current priorization only sends batches to idle peers, so we need enough peers for each batch
-    // TODO: Test this with a single peer in the chain, it should still work
-    r.add_sync_peer(false, remote_info);
-    r.assert_state(RangeSyncType::Finalized);
-
-    let last_epoch = advanced_epochs + EXTRA_SYNCED_EPOCHS;
-    r.complete_and_process_range_sync_until(last_epoch, filter(), complete());
-}
 
 // Same test with different types of peers:
 // - 100 peers
@@ -1042,7 +853,6 @@ fn finalized_sync_not_enough_custody_peers_on_start(config: Config) {
     // Unikely that the single peer we added has enough columns for us. Tests are determinstic and
     // this error should never be hit
     r.add_connected_sync_peer_not_supernode(remote_info.clone());
-    r.assert_syncing_finalized();
 
     // The SyncingChain has a single peer, so it can issue blocks_by_range requests. However, it
     // doesn't have enough peers to cover all columns
@@ -1052,7 +862,7 @@ fn finalized_sync_not_enough_custody_peers_on_start(config: Config) {
     // Here we have a batch with partially completed block_components_by_range requests. The batch
     // should not have failed, we are still syncing, and there are no downscoring events.
     r.expect_no_penalty_for_anyone();
-    r.expect_active_block_components_by_range_request_on_custody_step();
+    r.expect_active_block_components_requests_on_custody_step();
 
     // Generate enough peers and supernodes to cover all custody columns
     r.add_sync_peers(config.peers, remote_info.clone());
@@ -1062,7 +872,7 @@ fn finalized_sync_not_enough_custody_peers_on_start(config: Config) {
 
     r.progress_until_no_events(NO_FILTER, complete());
     r.expect_no_active_rpc_requests();
-    r.expect_no_active_block_components_by_range_requests();
+    r.expect_no_active_block_components_requests();
     // TOOD(das): For now this tests don't complete sync. We can't track beacon processor Work
     // events from here easily. What we pop from the beacon processor queue is an opaque closure
     // wihtout any information. We don't know what batch it is for.
@@ -1081,7 +891,6 @@ fn finalized_sync_single_custody_peer_failure() {
     let column_index_to_fail = r.our_custody_indices().first().copied().unwrap();
 
     r.add_sync_peer(true, remote_info.clone());
-    r.assert_state(RangeSyncType::Finalized);
 
     // Progress all blocks_by_range and columns_by_range requests but respond empty for a single
     // column index
@@ -1095,8 +904,7 @@ fn finalized_sync_single_custody_peer_failure() {
     // another request yet.
     r.expect_no_active_rpc_requests();
     // Ensure that the block components by range request have not failed
-    r.expect_active_block_components_by_range_request_on_custody_step();
-    r.expect_all_batches_downloading();
+    r.expect_active_block_components_requests_on_custody_step();
 
     // After adding a new peer we will try to fetch from it
     r.add_sync_peer(true, remote_info.clone());
@@ -1108,73 +916,13 @@ fn finalized_sync_single_custody_peer_failure() {
     );
 
     r.expect_no_active_rpc_requests();
-    r.expect_no_active_block_components_by_range_requests();
-    r.expect_all_batches_processing_or_awaiting();
-}
-
-#[test]
-fn finalized_sync_permanent_custody_peer_failure() {
-    let mut r = TestRig::test_setup_with_options(TestOptions {
-        is_supernode: false,
-        // The default buffer size is 5, but we want to manually complete only the batch for epoch
-        // 0. By setting this buffer to 1 sync will create a single batch until it completes. We can
-        // do better assertions of state assuming there's only one batch and logs are cleaner.
-        batch_buffer_size: 1,
-    });
-    // Only run post-PeerDAS
-    if !r.fork_name.fulu_enabled() {
-        return;
-    }
-
-    let advanced_epochs: u64 = 2;
-    let remote_info = r.finalized_remote_info_advanced_by(advanced_epochs.into());
-    let column_index_to_fail = r.our_custody_indices().first().copied().unwrap();
-    const PEERS_IN_BATCH: usize = 4;
-
-    for _ in 0..PEERS_IN_BATCH {
-        r.add_connected_sync_random_peer(remote_info.clone());
-    }
-    r.assert_state(RangeSyncType::Finalized);
-
-    // Some peer had a costudy failure at `column_index` so sync should do a single extra request
-    // for that index and epoch.
-    r.find_and_complete_block_components_by_range_request(
-        filter().epoch(0),
-        complete().custody_failure_at_index(column_index_to_fail),
-    );
-
-    let mut requested_peers = HashSet::new();
-
-    for i in 0..PEERS_IN_BATCH - 1 {
-        r.log(&format!("Loop {i} of custody failure round"));
-
-        // Some peer had a costudy failure at `column_index` so sync should do a single extra request
-        // for that index and epoch. We want to make sure that the request goes to different peer
-        // than the attempted before.
-        let reqs =
-            r.find_data_by_range_request(filter().epoch(0).column_index(column_index_to_fail));
-        let req_peer = reqs.peer();
-        if requested_peers.contains(&req_peer) {
-            panic!("Re-requested the same peer {req_peer} again after a custody failure");
-        }
-        requested_peers.insert(req_peer);
-
-        // Find the requests first to assert that this is the only request that exists
-        r.expect_no_data_columns_by_range_requests(filter().epoch(0));
-        r.complete_data_by_range_request(
-            reqs,
-            complete().custody_failure_at_index(column_index_to_fail),
-        );
-    }
-
-    // custody_by_range request is still active waiting for a new peer to connect
-    r.expect_active_block_components_by_range_request_on_custody_step();
+    r.expect_no_active_block_components_requests();
 }
 
 #[tokio::test]
 async fn tree_sync_happy_path() {
     let mut r = TestRig::test_setup();
-    let (head_root, head_slot) = r.create_unimported_parent_chain().await;
+    let (head_root, head_slot) = r.create_unimported_parent_chain(8).await;
     let remote_info = SyncInfo {
         finalized_epoch: Epoch::new(0),
         finalized_root: Hash256::ZERO,

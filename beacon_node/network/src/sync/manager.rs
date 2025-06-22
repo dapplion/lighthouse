@@ -1005,21 +1005,25 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     /// blobs.
     fn on_block_components_by_root_response(
         &mut self,
-        range_request_id: ComponentsByRootRequestId,
+        req_id: ComponentsByRootRequestId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
     ) {
         if let Some(result) = self
             .network
-            .on_block_components_by_root_response(range_request_id, range_block_component)
+            .on_block_components_by_root_response(req_id, range_block_component)
         {
-            match range_request_id.requester {
+            match req_id.requester {
                 RangeRequestId::ForwardSync(id) => {
-                    self.forward_sync
-                        .on_block_download_result(id, result, &mut self.network);
+                    self.forward_sync.on_block_download_result(
+                        req_id,
+                        id,
+                        result,
+                        &mut self.network,
+                    );
                 }
                 RangeRequestId::BackfillSync(id) => {
                     self.backfill_sync
-                        .on_block_download_result(id, result, &mut self.network)
+                        .on_block_download_result(req_id, result, &mut self.network)
                 }
             }
         }

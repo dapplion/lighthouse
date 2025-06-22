@@ -260,7 +260,7 @@ impl<E: EthSpec> SyncNetworkContext<TestBeaconChainType<E>> {
         task_executor: TaskExecutor,
     ) -> Self {
         let fork_context = Arc::new(ForkContext::new::<E>(
-            beacon_chain.slot_clock.now().unwrap_or(Slot::new(0)),
+            beacon_chain.slot_clock.now().unwrap_or(types::Slot::new(0)),
             beacon_chain.genesis_validators_root,
             &beacon_chain.spec,
         ));
@@ -359,7 +359,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     }
 
     #[cfg(test)]
-    pub fn active_block_components_by_root_requests(
+    pub fn active_block_components_requests(
         &self,
     ) -> Vec<(ComponentsByRootRequestId, BlockComponentsByRootRequestStep)> {
         self.block_components_by_root_requests
@@ -460,7 +460,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         requester: RangeRequestId,
         peers: Arc<RwLock<HashSet<PeerId>>>,
         peers_to_deprioritize: &HashSet<PeerId>,
-    ) -> Result<Id, RpcRequestSendError> {
+    ) -> Result<ComponentsByRootRequestId, RpcRequestSendError> {
         let id = ComponentsByRootRequestId {
             id: self.next_id(),
             requester,
@@ -471,7 +471,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         self.block_components_by_root_requests.insert(id, req);
 
-        Ok(id.id)
+        Ok(id)
     }
 
     /// Request to send a single `data_columns_by_root` request to the network.

@@ -43,10 +43,7 @@ impl PartialEq for SyncState {
                 | (SyncState::Synced, SyncState::Synced)
                 | (SyncState::Stalled, SyncState::Stalled)
                 | (SyncState::SyncTransition, SyncState::SyncTransition)
-                | (
-                    SyncState::BackFillSyncing { .. },
-                    SyncState::BackFillSyncing { .. }
-                )
+                | (SyncState::BackFillSyncing, SyncState::BackFillSyncing)
         )
     }
 }
@@ -58,7 +55,7 @@ impl SyncState {
             SyncState::Syncing { .. } => true,
             SyncState::SyncTransition => true,
             // Backfill doesn't effect any logic, we consider this state, not syncing.
-            SyncState::BackFillSyncing { .. } => false,
+            SyncState::BackFillSyncing => false,
             SyncState::Synced => false,
             SyncState::Stalled => false,
         }
@@ -68,7 +65,7 @@ impl SyncState {
     ///
     /// NOTE: We consider the node synced if it is fetching old historical blocks.
     pub fn is_synced(&self) -> bool {
-        matches!(self, SyncState::Synced | SyncState::BackFillSyncing { .. })
+        matches!(self, SyncState::Synced | SyncState::BackFillSyncing)
     }
 
     /// Returns true if the node is *stalled*, i.e. has no synced peers.
@@ -87,7 +84,7 @@ impl std::fmt::Display for SyncState {
             SyncState::Synced => write!(f, "Synced"),
             SyncState::Stalled => write!(f, "Stalled"),
             SyncState::SyncTransition => write!(f, "Evaluating known peers"),
-            SyncState::BackFillSyncing { .. } => write!(f, "Syncing Historical Blocks"),
+            SyncState::BackFillSyncing => write!(f, "Syncing Historical Blocks"),
         }
     }
 }

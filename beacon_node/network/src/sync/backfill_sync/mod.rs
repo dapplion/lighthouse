@@ -15,7 +15,7 @@ use crate::sync::network_context::{
 use crate::sync::sync_block::{Error as SyncBlockError, SyncBlock, SyncBlockResult};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
-use lighthouse_network::service::api_types::Id;
+use lighthouse_network::service::api_types::{ComponentsByRootRequestId, Id};
 use lighthouse_network::types::{BackFillState, NetworkGlobals};
 use lighthouse_network::PeerId;
 use std::sync::Arc;
@@ -214,11 +214,11 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
 
     pub fn on_block_download_result(
         &mut self,
-        id: Id,
+        req_id: ComponentsByRootRequestId,
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let outcome = self.status.on_download_result(result, cx);
+        let outcome = self.status.on_download_result(req_id, result, cx);
         self.handle_outcome(outcome, cx);
     }
 
@@ -260,7 +260,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 // Do nothing wait for future event
             }
             Err(e) => match e {
-                SyncBlockError::InternalError(_) => {
+                SyncBlockError::InternalError(_) | SyncBlockError::TooManyErrors => {
                     debug!(error = ?e, "Backfill synced failed");
                     self.set_state(BackFillState::Failed);
                 }
@@ -285,6 +285,14 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
 
     fn is_complete(&self, slot: Slot) -> bool {
         let anchor_info = self.beacon_chain.store.get_anchor_info();
+
+        if anchor_info.oldest_block_slot != slot {
+            warn!(
+                "oldest_block_slot not at expected value {} != {}",
+                anchor_info.oldest_block_slot, slot
+            );
+        }
+
         // Conditions that we have completed a backfill sync
         anchor_info.block_backfill_complete(self.beacon_chain.genesis_backfill_slot)
     }

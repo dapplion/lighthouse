@@ -4,7 +4,7 @@ use crate::sync::network_context::BatchPeers;
 use crate::sync::BatchProcessResult;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::BeaconChainTypes;
-use lighthouse_network::service::api_types::{Id, RangeRequestId};
+use lighthouse_network::service::api_types::{ComponentsByRootRequestId, RangeRequestId};
 use lighthouse_network::PeerId;
 use parking_lot::RwLock;
 use std::collections::HashSet;
@@ -29,7 +29,7 @@ pub struct SyncBlock<T: BeaconChainTypes> {
 
 enum SyncingStatus<E: EthSpec> {
     AwaitingDownload,
-    Downloading(Id),
+    Downloading(ComponentsByRootRequestId),
     AwaitingProcessing(RpcBlock<E>, BatchPeers),
     Processing(RpcBlock<E>, BatchPeers),
 }
@@ -76,16 +76,23 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
         self.peers.write().remove(peer)
     }
 
+    #[cfg(test)]
+    pub fn is_processing(&self) -> bool {
+        matches!(self.request, SyncingStatus::Processing(..))
+    }
+
     pub fn on_download_result(
         &mut self,
+        req_id: ComponentsByRootRequestId,
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<SyncBlockResult, Error> {
         match &mut self.request {
             SyncingStatus::Downloading(expected_id) => {
-                if id != expected_id {
+                if req_id != *expected_id {
                     return Err(Error::InternalError(format!(
-                        "Unexpected request ID {id} !{expected_id}"
+                        "Unexpected request ID {} != {}",
+                        req_id, expected_id,
                     )));
                 }
                 match result {
@@ -133,7 +140,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                     if let Some(peer_action) = peer_action {
                         for (peer, penalty) in peers.blame(peer_action) {
                             cx.report_peer(peer, penalty, "faulty_batch");
-                            self.failed_peers.insert(peers);
+                            self.failed_peers.insert(peer);
                         }
                     }
 
@@ -217,9 +224,5 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
             }
             SyncingStatus::Processing(..) => Ok(SyncBlockResult::Wait),
         }
-    }
-
-    pub fn is_processing(&self) -> bool {
-        matches!(self.request, SyncingStatus::Processing(..))
     }
 }

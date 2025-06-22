@@ -103,11 +103,6 @@ pub struct CustodyByRootRequestId {
     pub parent_request_id: ComponentsByRootRequestId,
 }
 
-/// Downstream components that perform custody by root requests.
-/// Currently, it's only single block lookups, so not using an enum
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct CustodyRequester(pub SingleLookupReqId);
-
 /// Application level requests sent to the network.
 #[derive(Debug, Clone, Copy)]
 pub enum AppRequestId {
@@ -237,12 +232,6 @@ impl Display for BatchId {
     }
 }
 
-impl Display for CustodyRequester {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 impl Display for RangeRequestId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -283,11 +272,11 @@ mod tests {
     fn display_id_data_columns_by_root_custody() {
         let id = DataColumnsByRootRequestId {
             id: 123,
-            parent_request_id: DataColumnsByRootRequester::Custody(CustodyId {
-                requester: CustodyRequester(SingleLookupReqId {
-                    req_id: 121,
-                    lookup_id: 101,
-                }),
+            parent_request_id: DataColumnsByRootRequester::Custody(CustodyByRootRequestId {
+                parent_request_id: ComponentsByRootRequestId {
+                    id: 121,
+                    requester: RangeRequestId::ForwardSync(HeaderLookupId(Hash256::ZERO, 1)),
+                },
             }),
         };
         assert_eq!(format!("{id}"), "123/Custody/121/Lookup/101");
@@ -303,23 +292,5 @@ mod tests {
             }),
         };
         assert_eq!(format!("{id}"), "123/Sampling/101/ImportedBlock/0x0000000000000000000000000000000000000000000000000000000000000000");
-    }
-
-    #[test]
-    fn display_id_data_columns_by_range() {
-        let id = DataColumnsByRootRequestId {
-            id: 123,
-            parent_request_id: CustodyByRootRequestId {
-                id: 122,
-                parent_request_id: ComponentsByRootRequestId {
-                    id: 121,
-                    requester: RangeRequestId::RangeSync {
-                        chain_id: 54,
-                        batch_id: Epoch::new(0),
-                    },
-                },
-            },
-        };
-        assert_eq!(format!("{id}"), "123/122/121/RangeSync/0/54");
     }
 }

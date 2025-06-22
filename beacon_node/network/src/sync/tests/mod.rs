@@ -1,5 +1,4 @@
 use crate::sync::manager::SyncManager;
-use crate::sync::range_sync::RangeSyncType;
 use crate::sync::SyncMessage;
 use crate::NetworkMessage;
 use beacon_chain::builder::Witness;
@@ -73,8 +72,7 @@ struct TestRig {
     fork_name: ForkName,
     spec: Arc<ChainSpec>,
 
-    // Cache of sent blocks for PeerDAS responses
-    sent_blocks_by_range: HashMap<ComponentsByRootRequestId, Vec<Arc<SignedBeaconBlock<E>>>>,
+    // Cache for produced blocks to serve
     blocks_by_root: HashMap<Hash256, Arc<SignedBeaconBlock<E>>>,
 }
 
