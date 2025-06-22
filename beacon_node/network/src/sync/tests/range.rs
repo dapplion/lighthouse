@@ -26,9 +26,9 @@ use lighthouse_network::{PeerId, SyncInfo};
 use std::collections::HashSet;
 use std::time::Duration;
 use types::{
-    BeaconBlock, BlobSidecarList, BlockImportSource, ColumnIndex, DataColumnSidecar, Epoch,
-    EthSpec, Hash256, KzgCommitment, MinimalEthSpec as E, Signature, SignedBeaconBlock,
-    SignedBeaconBlockHash, Slot, VariableList,
+    BeaconBlock, Blob, BlobSidecar, BlobSidecarList, BlockImportSource, ColumnIndex,
+    DataColumnSidecar, Epoch, EthSpec, Hash256, KzgCommitment, KzgProof, MinimalEthSpec as E,
+    Signature, SignedBeaconBlock, SignedBeaconBlockHash, Slot, VariableList,
 };
 
 const D: Duration = Duration::new(0, 0);
@@ -65,6 +65,8 @@ struct Config {
 }
 
 type BlocksByRootRequestData = (BlocksByRootRequestId, PeerId, BlocksByRootRequest);
+
+type BlobsByRootRequestData = (BlobsByRootRequestId, PeerId, BlobsByRootRequest);
 
 type DataColumnsByRootRequestData = (DataColumnsByRootRequestId, PeerId, DataColumnsByRootRequest);
 
@@ -135,6 +137,20 @@ impl RequestFilter {
         }
     }
 
+    fn blobs_by_root_requests<E: EthSpec>(
+        &self,
+        ev: &NetworkMessage<E>,
+    ) -> Option<BlobsByRootRequestData> {
+        match ev {
+            NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::BlobsByRoot(req),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlobsByRoot(id)),
+            } if self.matches_blobs_by_root(peer_id, req) => Some((*id, *peer_id, req.clone())),
+            _ => None,
+        }
+    }
+
     fn data_columns_by_root_requests<E: EthSpec>(
         &self,
         ev: &NetworkMessage<E>,
@@ -165,6 +181,20 @@ impl RequestFilter {
 
         if let Some(block_root) = self.block_root {
             if !req.block_roots().iter().any(|b| *b == block_root) {
+                return false;
+            }
+        }
+
+        self.matches_peer(peer)
+    }
+
+    fn matches_blobs_by_root(&self, peer: &PeerId, req: &BlobsByRootRequest) -> bool {
+        if self.header_requests_only {
+            return false;
+        }
+
+        if let Some(block_root) = self.block_root {
+            if !req.blob_ids.iter().any(|id| id.block_root == block_root) {
                 return false;
             }
         }
@@ -492,6 +522,37 @@ impl TestRig {
         });
     }
 
+    fn send_blobs_by_root_response(
+        &mut self,
+        id: BlobsByRootRequestId,
+        peer_id: PeerId,
+        blobs: &[Arc<BlobSidecar<E>>],
+    ) {
+        let mut ids = blobs
+            .iter()
+            .map(|d| (d.slot().as_u64(), d.index))
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        self.log(&format!(
+            "Completing BlobsByRoot request {id} to {peer_id} with data_columns {ids:?}"
+        ));
+
+        for blob in blobs {
+            self.send_sync_message(SyncMessage::RpcBlob {
+                sync_request_id: SyncRequestId::BlobsByRoot(id),
+                peer_id,
+                blob_sidecar: Some(blob.clone()),
+                seen_timestamp: D,
+            });
+        }
+        self.send_sync_message(SyncMessage::RpcBlob {
+            sync_request_id: SyncRequestId::BlobsByRoot(id),
+            peer_id,
+            blob_sidecar: None,
+            seen_timestamp: D,
+        });
+    }
+
     fn send_data_columns_by_root_response(
         &mut self,
         id: DataColumnsByRootRequestId,
@@ -556,6 +617,52 @@ impl TestRig {
             .collect::<Vec<_>>();
 
         self.send_blocks_by_root_response(req_id, peer, &blocks);
+    }
+
+    fn complete_blobs_by_root_request_range_sync(
+        &mut self,
+        (id, peer_id, req): BlobsByRootRequestData,
+        complete_config: &CompleteConfig,
+    ) {
+        let blobs = req
+            .blob_ids
+            .iter()
+            .flat_map(|blob_id| {
+                let block = self
+                    .blocks_by_root
+                    .get(&blob_id.block_root)
+                    .expect("Test consumer requested unknown block")
+                    .clone();
+
+                let kzg_commitment_inclusion_proof = block
+                    .message()
+                    .body()
+                    .kzg_commitment_merkle_proof(blob_id.index as usize)
+                    .unwrap();
+                let kzg_commitment = block
+                    .message()
+                    .body()
+                    .blob_kzg_commitments()
+                    .unwrap()
+                    .get(blob_id.index as usize)
+                    .unwrap()
+                    .clone();
+                let signed_block_header = block.signed_block_header();
+
+                // We need to produce a DataColumn with valid inclusion proof, but can
+                // be with random KZG proof and data as we won't send it for processing
+                Some(Arc::new(BlobSidecar {
+                    index: blob_id.index,
+                    blob: Blob::<E>::default(),
+                    kzg_commitment,
+                    kzg_proof: KzgProof::empty(),
+                    signed_block_header,
+                    kzg_commitment_inclusion_proof,
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        self.send_blobs_by_root_response(id, peer_id, &blobs);
     }
 
     fn complete_data_columns_by_root_request_range_sync(
@@ -698,6 +805,13 @@ impl TestRig {
                 .pop_received_network_event(&mut |ev| request_filter.blocks_by_root_requests(ev))
             {
                 self.complete_blocks_by_root_request(request, &mut complete_config);
+                continue;
+            }
+
+            if let Ok(request) =
+                self.pop_received_network_event(&mut |ev| request_filter.blobs_by_root_requests(ev))
+            {
+                self.complete_blobs_by_root_request_range_sync(request, &complete_config);
                 continue;
             }
 
