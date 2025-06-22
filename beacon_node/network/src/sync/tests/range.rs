@@ -432,48 +432,16 @@ impl TestRig {
         SignedBeaconBlock::from_block(block, Signature::empty())
     }
 
-    pub async fn create_unimported_parent_chain(&mut self, block_count: usize) -> (Hash256, Slot) {
+    pub fn create_unimported_parent_chain(&mut self, block_count: usize) -> (Hash256, Slot) {
         self.log(&format!(
             "Creating unimported chain of {block_count} blocks"
         ));
 
-        let mut r = TestRig::test_setup();
-
-        r.harness.advance_slot();
-        let head_root = r
-            .harness
-            .extend_chain(
-                block_count,
-                BlockStrategy::OnCanonicalHead,
-                AttestationStrategy::AllValidators,
-            )
-            .await;
-
-        let store = &r.harness.chain.store;
-        let head_block = store.get_full_block(&head_root).unwrap().unwrap();
-
-        let mut target_block_root = head_root;
-        while let Some(block) = store.get_full_block(&target_block_root).unwrap() {
-            self.log(&format!(
-                "Adding block {target_block_root:?} slot {} to known blocks",
-                block.slot()
-            ));
-            let parent_root = block.parent_root();
-            self.blocks_by_root.insert(target_block_root, block.into());
-            if parent_root == Hash256::ZERO {
-                break;
-            }
-            target_block_root = parent_root;
-        }
-
-        (head_root, head_block.slot())
-    }
-
-    fn create_not_rooted_parent_chain(&mut self) -> (Hash256, Slot) {
         let current_head = self.harness.chain.head();
         let mut parent_root = current_head.head_block_root();
-        let mut slot = current_head.head_slot();
-        for _ in 0..64 {
+        let mut prev_slot = current_head.head_slot();
+        for _ in 0..block_count {
+            let slot = prev_slot + Slot::new(1);
             let mut block = self.zero_block_at_slot(slot, true);
             *block.message_mut().parent_root_mut() = parent_root;
             *block.message_mut().slot_mut() = slot;
@@ -481,9 +449,9 @@ impl TestRig {
             self.blocks_by_root.insert(block_root, block.into());
 
             parent_root = block_root;
-            slot = slot + Slot::new(1);
+            prev_slot = slot;
         }
-        (parent_root, slot)
+        (parent_root, prev_slot)
     }
 
     fn send_rpc_error(&mut self, id: SyncRequestId, peer_id: PeerId, error: RPCError) {
@@ -854,28 +822,28 @@ const EXTRA_SYNCED_EPOCHS: u64 = 2 + 1;
 // - 1 supernode
 // - perfectly distributed peer ids
 
-#[tokio::test]
-async fn finalized_sync_not_enough_custody_peers_on_start_supernode_only() {
+#[test]
+fn finalized_sync_not_enough_custody_peers_on_start_supernode_only() {
     finalized_sync_not_enough_custody_peers_on_start(Config {
         peers: PeersConfig::SupernodeOnly,
     });
 }
 
-#[tokio::test]
-async fn finalized_sync_not_enough_custody_peers_on_start_supernode_and_random() {
+#[test]
+fn finalized_sync_not_enough_custody_peers_on_start_supernode_and_random() {
     finalized_sync_not_enough_custody_peers_on_start(Config {
         peers: PeersConfig::SupernodeAndRandom,
     });
 }
 
-async fn finalized_sync_not_enough_custody_peers_on_start(config: Config) {
+fn finalized_sync_not_enough_custody_peers_on_start(config: Config) {
     let mut r = TestRig::test_setup_as_supernode();
     // Only run post-PeerDAS
     if !r.fork_name.fulu_enabled() {
         return;
     }
 
-    let (head_root, head_slot) = r.create_unimported_parent_chain(2).await;
+    let (head_root, head_slot) = r.create_unimported_parent_chain(2);
     let remote_info = sync_info_with_head_root(head_root);
     r.add_sync_peer(false, remote_info.clone());
 
@@ -903,15 +871,15 @@ async fn finalized_sync_not_enough_custody_peers_on_start(config: Config) {
     // wihtout any information. We don't know what batch it is for.
 }
 
-#[tokio::test]
-async fn finalized_sync_single_custody_peer_failure() {
+#[test]
+fn finalized_sync_single_custody_peer_failure() {
     let mut r = TestRig::test_setup();
     // Only run post-PeerDAS
     if !r.fork_name.fulu_enabled() {
         return;
     }
 
-    let (head_root, head_slot) = r.create_unimported_parent_chain(2).await;
+    let (head_root, head_slot) = r.create_unimported_parent_chain(2);
     let peer_1 = r.new_connected_supernode_peer();
     // Trigger the request
     r.trigger_unknown_block_from_attestation(head_root, peer_1);
@@ -943,10 +911,10 @@ async fn finalized_sync_single_custody_peer_failure() {
     r.expect_no_active_block_components_requests();
 }
 
-#[tokio::test]
-async fn tree_sync_happy_path() {
+#[test]
+fn tree_sync_happy_path() {
     let mut r = TestRig::test_setup();
-    let (head_root, head_slot) = r.create_unimported_parent_chain(8).await;
+    let (head_root, head_slot) = r.create_unimported_parent_chain(8);
     let remote_info = SyncInfo {
         finalized_epoch: Epoch::new(0),
         finalized_root: Hash256::ZERO,

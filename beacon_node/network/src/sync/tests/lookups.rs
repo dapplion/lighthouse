@@ -904,8 +904,8 @@ impl TestRig {
         ));
     }
 
-    async fn single_lookup_from_attestation_setup(&mut self) -> (Hash256, PeerId) {
-        let (head_root, head_slot) = self.create_unimported_parent_chain(1).await;
+    fn single_lookup_from_attestation_setup(&mut self) -> (Hash256, PeerId) {
+        let (head_root, head_slot) = self.create_unimported_parent_chain(1);
         // Use a supernode so Fulu tests can pass without edits
         let peer_id = self.new_connected_supernode_peer();
         // Trigger the request
@@ -914,8 +914,8 @@ impl TestRig {
         (head_root, peer_id)
     }
 
-    pub async fn parent_lookup_from_unknown_block_parent_setup(&mut self) -> (Hash256, PeerId) {
-        let (head_root, head_slot) = self.create_unimported_parent_chain(2).await;
+    pub fn parent_lookup_from_unknown_block_parent_setup(&mut self) -> (Hash256, PeerId) {
+        let (head_root, head_slot) = self.create_unimported_parent_chain(2);
         // Use a supernode so Fulu tests can pass without edits
         let peer_id = self.new_connected_supernode_peer();
         let head_block = self
@@ -979,37 +979,37 @@ fn stable_rng() {
     );
 }
 
-#[tokio::test]
-async fn test_single_block_lookup_happy_path() {
+#[test]
+fn test_single_block_lookup_happy_path() {
     let mut r = TestRig::test_setup();
-    let (new_head_root, _) = r.single_lookup_from_attestation_setup().await;
+    let (new_head_root, _) = r.single_lookup_from_attestation_setup();
     r.expect_fully_complete_sync(new_head_root);
 }
 
 // Tests that if a peer does not respond with a block, we downscore and retry the block only
-#[tokio::test]
-async fn test_single_block_lookup_empty_response_until_failure() {
+#[test]
+fn test_single_block_lookup_empty_response_until_failure() {
     let mut r = TestRig::test_setup();
-    let (_, _) = r.single_lookup_from_attestation_setup().await;
+    let (_, _) = r.single_lookup_from_attestation_setup();
     r.progress_until_no_events(NO_FILTER, complete().return_no_blocks());
     r.expect_penalties("NotEnoughResponsesReturned");
     // Test will loop until reaching max download attempts and remove the lookup
     r.expect_no_active_lookups();
 }
 
-#[tokio::test]
-async fn test_single_block_lookup_empty_response_some_times() {
+#[test]
+fn test_single_block_lookup_empty_response_some_times() {
     let mut r = TestRig::test_setup();
-    let (new_head_root, _) = r.single_lookup_from_attestation_setup().await;
+    let (new_head_root, _) = r.single_lookup_from_attestation_setup();
     r.progress_until_no_events(NO_FILTER, complete().return_no_blocks_n_times(3));
     r.expect_penalties("NotEnoughResponsesReturned");
     r.expect_fully_complete_sync(new_head_root);
 }
 
-#[tokio::test]
-async fn test_single_block_lookup_wrong_response() {
+#[test]
+fn test_single_block_lookup_wrong_response() {
     let mut r = TestRig::test_setup();
-    let (_, _) = r.single_lookup_from_attestation_setup().await;
+    let (_, _) = r.single_lookup_from_attestation_setup();
     r.progress_until_no_events(NO_FILTER, complete().return_wrong_blocks());
     r.expect_penalties("UnrequestedBlockRoot");
     r.expect_no_active_lookups();
@@ -1017,10 +1017,10 @@ async fn test_single_block_lookup_wrong_response() {
     r.expect_no_active_lookups();
 }
 
-#[tokio::test]
-async fn test_single_block_lookup_rpc_error() {
+#[test]
+fn test_single_block_lookup_rpc_error() {
     let mut r = TestRig::test_setup();
-    let (_, _) = r.single_lookup_from_attestation_setup().await;
+    let (_, _) = r.single_lookup_from_attestation_setup();
     r.progress_until_no_events(
         NO_FILTER,
         complete().rpc_error(RPCError::UnsupportedProtocol),
@@ -1032,10 +1032,10 @@ async fn test_single_block_lookup_rpc_error() {
 
 // TODO(tree-sync): Current behaviour drops the lookup if there's no peers left
 #[ignore]
-#[tokio::test]
-async fn test_single_block_lookup_peer_disconnected_then_rpc_error() {
+#[test]
+fn test_single_block_lookup_peer_disconnected_then_rpc_error() {
     let mut r = TestRig::test_setup();
-    let (new_head_root, peer_id) = r.single_lookup_from_attestation_setup().await;
+    let (new_head_root, peer_id) = r.single_lookup_from_attestation_setup();
     // The peer disconnect event reaches sync before the rpc error.
     r.peer_disconnected(peer_id);
     // The lookup is not removed as it can still potentially make progress.
@@ -1045,17 +1045,17 @@ async fn test_single_block_lookup_peer_disconnected_then_rpc_error() {
     r.expect_fully_complete_sync(new_head_root);
 }
 
-#[tokio::test]
-async fn test_parent_lookup_happy_path() {
+#[test]
+fn test_parent_lookup_happy_path() {
     let mut r = TestRig::test_setup();
-    let (new_head_root, _) = r.parent_lookup_from_unknown_block_parent_setup().await;
+    let (new_head_root, _) = r.parent_lookup_from_unknown_block_parent_setup();
     r.expect_fully_complete_sync(new_head_root);
 }
 
-#[tokio::test]
-async fn test_parent_lookup_drop_parent() {
+#[test]
+fn test_parent_lookup_drop_parent() {
     let mut r = TestRig::test_setup();
-    let (head_root, _) = r.parent_lookup_from_unknown_block_parent_setup().await;
+    let (head_root, _) = r.parent_lookup_from_unknown_block_parent_setup();
     // Complete the header chain so the first block can start syncing
     r.complete_header_chain();
     let chain = r.fetch_unimported_ancestor_chain(head_root);
@@ -1069,10 +1069,10 @@ async fn test_parent_lookup_drop_parent() {
     r.expect_no_active_lookups();
 }
 
-#[tokio::test]
-async fn test_parent_lookup_drop_child() {
+#[test]
+fn test_parent_lookup_drop_child() {
     let mut r = TestRig::test_setup();
-    let (head_root, _) = r.parent_lookup_from_unknown_block_parent_setup().await;
+    let (head_root, _) = r.parent_lookup_from_unknown_block_parent_setup();
     // Complete the header chain so the first block can start syncing
     r.complete_header_chain();
     let chain = r.fetch_unimported_ancestor_chain(head_root);
@@ -1088,10 +1088,10 @@ async fn test_parent_lookup_drop_child() {
 
 // TODO(tree-sync): Current behaviour drops the lookup if there's no peers left
 #[ignore]
-#[tokio::test]
-async fn test_lookup_peer_disconnected_no_peers_left_while_request() {
+#[test]
+fn test_lookup_peer_disconnected_no_peers_left_while_request() {
     let mut r = TestRig::test_setup();
-    let (head_root, peer_id) = r.single_lookup_from_attestation_setup().await;
+    let (head_root, peer_id) = r.single_lookup_from_attestation_setup();
     r.peer_disconnected(peer_id);
     r.rpc_error_all_active_requests(peer_id);
     // Erroring all rpc requests and disconnecting the peer shouldn't remove the requests
@@ -1099,10 +1099,10 @@ async fn test_lookup_peer_disconnected_no_peers_left_while_request() {
     r.assert_active_lookup(head_root);
 }
 
-#[tokio::test]
-async fn test_lookup_disconnection_peer_left() {
+#[test]
+fn test_lookup_disconnection_peer_left() {
     let mut r = TestRig::test_setup();
-    let (head_root, peer_1) = r.single_lookup_from_attestation_setup().await;
+    let (head_root, peer_1) = r.single_lookup_from_attestation_setup();
     let peer_2 = r.new_connected_peer();
     r.trigger_unknown_block_from_attestation(head_root, peer_2);
     // Disconnect the first peer only, which is the one handling the request
@@ -1111,10 +1111,10 @@ async fn test_lookup_disconnection_peer_left() {
     r.assert_active_lookup(head_root);
 }
 
-#[tokio::test]
-async fn test_lookup_add_peers_to_parent() {
+#[test]
+fn test_lookup_add_peers_to_parent() {
     let mut r = TestRig::test_setup();
-    let (head_root, _) = r.create_unimported_parent_chain(4).await;
+    let (head_root, _) = r.create_unimported_parent_chain(4);
     let chain = r.fetch_unimported_ancestor_chain(head_root);
     let peer_id = r.new_connected_peer();
     r.trigger_unknown_block_from_attestation(head_root, peer_id);
