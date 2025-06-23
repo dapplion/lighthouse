@@ -37,6 +37,7 @@ enum Status<T: BeaconChainTypes> {
     // TODO(tree-sync): Make the "waiting" completed header requests as memory cheap as possible
     BackfillHeader {
         peers: HashSet<PeerId>,
+        failed_peers: HashSet<PeerId>,
         request: DownloadRequest<BlocksByRootRequestId, BeaconBlockHeader>,
     },
     ForwardSyncBlock {
@@ -54,6 +55,7 @@ impl<T: BeaconChainTypes> ForwardSyncBlock<T> {
             id: HeaderLookupId { id, block_root },
             status: Status::BackfillHeader {
                 peers: HashSet::from_iter(peers.iter().copied()),
+                failed_peers: <_>::default(),
                 request: DownloadRequest::new(),
             },
         }
@@ -143,7 +145,7 @@ impl<T: BeaconChainTypes> ForwardSyncBlock<T> {
 
     fn to_foward_sync_block(&mut self, block_root: Hash256) -> Result<(), Error> {
         let (peers, request) = match &mut self.status {
-            Status::BackfillHeader { peers, request } => (peers, request),
+            Status::BackfillHeader { peers, request, .. } => (peers, request),
             _ => {
                 return Err(Error::InternalError(
                     "Expected lookup to be in DownloadingHeader state".to_owned(),
@@ -179,27 +181,45 @@ impl<T: BeaconChainTypes> ForwardSyncBlock<T> {
         block_root: Hash256,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), Error> {
-        let peers = match &self.status {
-            Status::BackfillHeader { peers, .. } => peers,
-            Status::ForwardSyncBlock { request, .. } => {
+        let (peers, failed_peers, request) = match &mut self.status {
+            Status::BackfillHeader {
+                peers,
+                failed_peers,
+                request,
+            } => (peers, failed_peers, request),
+            Status::ForwardSyncBlock { .. } => {
                 return Err(Error::InternalError(
                     "Lookup not in forward sync block status".to_owned(),
                 ))
             }
         };
 
-        // TODO(tree-sync): have good peer selection
-        let Some(peer) = peers.iter().next() else {
+        let Some(peer) = peers
+            .iter()
+            .map(|peer| {
+                (
+                    // If contains -> 1 (order after), not contains -> 0 (order first)
+                    failed_peers.contains(peer),
+                    // Random factor to break ties, otherwise the PeerID breaks ties
+                    rand::random::<u32>(),
+                    peer,
+                )
+            })
+            .min()
+            .map(|(_, _, peer)| *peer)
+        else {
+            // When a peer disconnects and is removed from the SyncingChain peer set, if the set
+            // reaches zero the lookup is removed
             return Err(Error::InternalError("No peers".to_owned()));
         };
 
         let req_id = cx.send_blocks_by_root_request(
-            *peer,
+            peer,
             block_root,
             BlocksByRootRequester::Header(self.id),
         )?;
 
-        self.header_request()?.on_download_start(req_id)?;
+        request.on_download_start(req_id)?;
         Ok(())
     }
 }
@@ -313,6 +333,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         cx: &mut SyncNetworkContext<T>,
     ) {
         if self.blocks.contains_key(&block_root) {
+            let mut counts = HashMap::<&PeerId, usize>::new();
             // Add peer to `block`'s entry and all its ancestors
             let mut target_block_root = block_root;
             while let Some(lookup) = self.blocks.get_mut(&target_block_root) {
@@ -320,7 +341,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     // TODO(tree-sync): If peer already in set no need to add to its ancestors
                     if lookup.add_peer(*peer) {
                         // TODO(tree-sync): This log can be very noisy maybe log once per peer
-                        debug!(block_root = ?target_block_root, ?peer, "Adding peer to existing header lookup");
+                        *counts.entry(peer).or_default() += 1;
                     } else {
                         // Peer already part of this lookup, therefore it must be part of the peer
                         // set of all of its ancestors: stop
@@ -333,18 +354,30 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     break;
                 }
             }
+            for (peer, count) in counts {
+                debug!(block_root = ?target_block_root, %peer, count, "Adding peer to existing header lookup and ancestors");
+            }
         } else {
             if self.blocks.len() > MAX_LOOKUP_COUNT {
                 self.prune_least_popular_lookups();
             }
 
             let id = cx.next_id();
-            debug!(?block_root, id, ?peers, "Creating new header lookup");
+            match peers {
+                [peer] => debug!(?block_root, id, %peer, "Creating new header lookup"),
+                _ => debug!(
+                    ?block_root,
+                    id,
+                    peers = peers.len(),
+                    "Creating new header lookup"
+                ),
+            }
 
             let mut lookup = ForwardSyncBlock::new(block_root, id, peers);
             match lookup.send_block_header_request(block_root, cx) {
                 Ok(_) => {
                     self.blocks.insert(block_root, lookup);
+                    metrics::inc_counter(&metrics::SYNC_LOOKUPS_CREATED);
                 }
                 Err(e) => {
                     warn!(id = ?lookup.id, error = ?e, "Error sending initial lookup request");
@@ -644,18 +677,19 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     /// Drop lookup `block_root` if it exists and all its children
     fn drop_lookup_and_children(
         &mut self,
-        block_root: Hash256,
+        initial_block_root: Hash256,
         block_to_children: &HashMap<Hash256, Vec<Hash256>>,
     ) {
-        // Change to `Vec::new()` if you want depth-first order.
-        let mut queue: VecDeque<Hash256> = VecDeque::from([block_root]);
+        let mut queue: VecDeque<Hash256> = VecDeque::from([initial_block_root]);
 
-        while let Some(node) = queue.pop_front() {
+        while let Some(block_root) = queue.pop_front() {
             // Remove the node itself.
-            if self.blocks.remove(&node).is_some() {
+            if let Some(block) = self.blocks.remove(&block_root) {
+                debug!(?block_root, id = %block.id, "Dropping forward sync block lookup");
+                metrics::inc_counter(&metrics::SYNC_LOOKUPS_DROPPED);
                 // Only remove children if the node still existed
                 // Push its children—if any—onto the work list.
-                if let Some(children) = block_to_children.get(&node) {
+                if let Some(children) = block_to_children.get(&block_root) {
                     queue.extend(children.iter().cloned());
                 }
             }
@@ -683,7 +717,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             .iter()
             .filter_map(|(block_root, block)| match &block.status {
                 // Prune only lookups that are not syncing and we know the header
-                Status::BackfillHeader { peers, request } => request
+                Status::BackfillHeader { peers, request, .. } => request
                     .is_complete()
                     .map(|header| (block.peer_count(), header.slot, *block_root)),
                 Status::ForwardSyncBlock { .. } => None,

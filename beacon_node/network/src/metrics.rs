@@ -530,6 +530,18 @@ pub static SYNC_BLOCKS_PROCESSED: LazyLock<Result<IntCounter>> = LazyLock::new(|
         "Total count of forward sync blocks processed",
     )
 });
+pub static SYNC_LOOKUPS_CREATED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_lookups_created_total",
+        "Total count of forward sync lookups created",
+    )
+});
+pub static SYNC_LOOKUPS_DROPPED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_lookups_dropped_total",
+        "Total count of forward sync lookups dropped",
+    )
+});
 pub static SYNC_HEADER_MIN_SLOT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
     try_create_int_gauge(
         "sync_header_min_slot",

@@ -136,7 +136,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                     })
                 }
                 BatchProcessResult::Failure { peer_action, error } => {
-                    debug!(id = %self.id, "Sync block process error");
+                    debug!(id = %self.id, error, "Sync block process error");
 
                     if let Some(peer_action) = peer_action {
                         for (peer, penalty) in peers.blame(peer_action) {
