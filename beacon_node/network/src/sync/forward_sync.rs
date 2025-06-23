@@ -2,11 +2,13 @@ use super::network_context::{
     DownloadRequest, DownloadRequestError, RpcRequestSendError, RpcResponseError,
     SyncNetworkContext,
 };
+use crate::metrics;
 use crate::sync::network_context::{BatchPeers, RpcResponseResult};
 use crate::sync::sync_block::{Error as SyncBlockError, SyncBlock, SyncBlockResult};
 use crate::sync::BatchProcessResult;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
+use itertools::Itertools;
 use lighthouse_network::service::api_types::{
     BlocksByRootRequestId, BlocksByRootRequester, ComponentsByRootRequestId, HeaderLookupId, Id,
     RangeRequestId,
@@ -393,6 +395,8 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                         received,
                     )?;
 
+                    metrics::inc_counter(&metrics::SYNC_HEADERS_DOWNLOADED);
+
                     // Once we discover the parent_root of this block three things can happen
                     // 1. The parent root is a known block -> stop
                     // 2. We conflicts with finality -> reject
@@ -509,6 +513,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     ) {
         match result {
             Ok(SyncBlockResult::Done { .. }) => {
+                metrics::inc_counter(&metrics::SYNC_BLOCKS_PROCESSED);
                 self.blocks.remove(&block_root);
                 self.trigger_forward_sync(cx);
             }
@@ -693,5 +698,28 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 break;
             }
         }
+    }
+
+    pub fn register_metrics(&self) {
+        if let Some((min_slot, max_slot)) = self
+            .blocks
+            .values()
+            .filter_map(|lookup| {
+                if let Status::BackfillHeader { request, .. } = &lookup.status {
+                    request.is_complete().map(|header| header.slot)
+                } else {
+                    None
+                }
+            })
+            .minmax()
+            .into_option()
+        {
+            metrics::set_gauge(&metrics::SYNC_HEADER_MIN_SLOT, min_slot.as_u64() as i64);
+            metrics::set_gauge(&metrics::SYNC_HEADER_MAX_SLOT, max_slot.as_u64() as i64);
+        }
+
+        // Min header
+        // Highest known header
+        // Current head
     }
 }

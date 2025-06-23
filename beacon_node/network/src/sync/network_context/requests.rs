@@ -1,3 +1,4 @@
+use std::time::Instant;
 use std::{collections::hash_map::Entry, hash::Hash};
 
 use beacon_chain::validator_monitor::timestamp_now;
@@ -48,6 +49,7 @@ struct ActiveRequest<T: ActiveRequestItems> {
     peer_id: PeerId,
     // Error if the request terminates before receiving max expected responses
     expect_max_responses: bool,
+    start_instant: Instant,
 }
 
 enum State<T> {
@@ -71,6 +73,7 @@ impl<K: Eq + Hash, T: ActiveRequestItems> ActiveRequests<K, T> {
                 state: State::Active(items),
                 peer_id,
                 expect_max_responses,
+                start_instant: Instant::now(),
             },
         );
     }
@@ -94,7 +97,7 @@ impl<K: Eq + Hash, T: ActiveRequestItems> ActiveRequests<K, T> {
             return None;
         };
 
-        match rpc_event {
+        let result = match rpc_event {
             // Handler of a success ReqResp chunk. Adds the item to the request accumulator.
             // `ActiveRequestItems` validates the item before appending to its internal state.
             RpcEvent::Response(item, seen_timestamp) => {
@@ -107,7 +110,7 @@ impl<K: Eq + Hash, T: ActiveRequestItems> ActiveRequests<K, T> {
                             Ok(true) => {
                                 let items = items.consume();
                                 request.state = State::CompletedEarly;
-                                Some(Ok((items, seen_timestamp)))
+                                Some(Ok((items, seen_timestamp, request.start_instant.elapsed())))
                             }
                             // Received item, but we are still expecting more
                             Ok(false) => None,
@@ -143,7 +146,11 @@ impl<K: Eq + Hash, T: ActiveRequestItems> ActiveRequests<K, T> {
                             }
                             .into()))
                         } else {
-                            Some(Ok((items.consume(), timestamp_now())))
+                            Some(Ok((
+                                items.consume(),
+                                timestamp_now(),
+                                request.start_instant.elapsed(),
+                            )))
                         }
                     }
                     // Items already returned, ignore stream termination
@@ -166,7 +173,19 @@ impl<K: Eq + Hash, T: ActiveRequestItems> ActiveRequests<K, T> {
                     State::Errored => None,
                 }
             }
-        }
+        };
+
+        result.map(|result| match result {
+            Ok((items, seen_timestamp, duration)) => {
+                metrics::inc_counter_vec(&metrics::SYNC_RPC_REQUEST_SUCCESSES, &[self.name]);
+                metrics::observe_timer_vec(&metrics::SYNC_RPC_REQUEST_TIME, &[self.name], duration);
+                Ok((items, seen_timestamp))
+            }
+            Err(e) => {
+                metrics::inc_counter_vec(&metrics::SYNC_RPC_REQUEST_ERRORS, &[self.name]);
+                Err(e)
+            }
+        })
     }
 
     pub fn active_requests(&self) -> impl Iterator<Item = (&K, &PeerId)> {

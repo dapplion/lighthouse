@@ -621,6 +621,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 }
                 _ = register_metrics_interval.tick() => {
                     self.network.register_metrics();
+                    self.forward_sync.register_metrics();
                 }
             }
         }
