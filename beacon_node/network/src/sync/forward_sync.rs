@@ -442,6 +442,12 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     let finalized_checkpoint = self.chain.head().finalized_checkpoint();
                     let parent_known = self.blocks.contains_key(&parent_root);
 
+                    // TODO(tree-sync): check that the slots are decreasing, so we don't end up in
+                    // an infinite loop. But note that the wrong block will be the descendant.
+                    // - We get header A with parent B and slot 10
+                    // - We get header B with parent C and slot 11
+                    // - That makes header A invalid
+
                     if block_header.slot
                         <= finalized_checkpoint
                             .epoch
