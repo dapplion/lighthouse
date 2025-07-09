@@ -808,6 +808,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     /// - If the event completes the request, it returns `Some(Ok)` with a vec of blocks
     /// - If the event is an error it fails the request and returns `Some(Err)`
     /// - else it appends the response chunk to the active request state and returns `None`
+    #[allow(clippy::type_complexity)]
     pub(crate) fn on_blocks_by_root_response(
         &mut self,
         id: BlocksByRootRequestId,
@@ -820,6 +821,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     /// Processes a single `RpcEvent` blobs_by_root RPC request.
     /// Same logic as [`on_blocks_by_root_response`]
+    #[allow(clippy::type_complexity)]
     pub(crate) fn on_blobs_by_root_response(
         &mut self,
         id: BlobsByRootRequestId,

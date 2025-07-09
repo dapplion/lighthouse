@@ -275,7 +275,10 @@ mod tests {
             parent_request_id: DataColumnsByRootRequester::Custody(CustodyByRootRequestId {
                 parent_request_id: ComponentsByRootRequestId {
                     id: 121,
-                    requester: RangeRequestId::ForwardSync(HeaderLookupId(Hash256::ZERO, 1)),
+                    requester: RangeRequestId::ForwardSync(HeaderLookupId {
+                        id: 1,
+                        block_root: Hash256::ZERO,
+                    }),
                 },
             }),
         };

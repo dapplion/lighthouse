@@ -126,7 +126,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     .process_blocks(downloaded_blocks.iter(), notify_execution_layer)
                     .await
                 {
-                    (_imported_blocks, Ok(_)) => {
+                    (imported_blocks, Ok(_)) => {
+                        let ignored_blocks = sent_blocks - imported_blocks;
+                        metrics::inc_gauge(&metrics::SYNCING_CHAINS_IGNORED_BLOCKS);
                         debug!(
                             %id,
                             first_block_slot = start_slot,

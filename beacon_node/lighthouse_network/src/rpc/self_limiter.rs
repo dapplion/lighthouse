@@ -323,7 +323,10 @@ mod tests {
     use types::{EthSpec, ForkContext, Hash256, MainnetEthSpec, Slot};
 
     fn get_parent_request_id() -> BlocksByRootRequester {
-        BlocksByRootRequester::Header(HeaderLookupId(Hash256::ZERO, 0))
+        BlocksByRootRequester::Header(HeaderLookupId {
+            id: 0,
+            block_root: Hash256::ZERO,
+        })
     }
 
     /// Test that `next_peer_request_ready` correctly maintains the queue.

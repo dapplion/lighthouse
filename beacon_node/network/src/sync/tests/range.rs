@@ -267,7 +267,7 @@ impl CompleteConfig {
         self
     }
 
-    pub fn rpc_error_response(mut self, error: RpcErrorResponse) -> Self {
+    pub fn rpc_error_response(self, error: RpcErrorResponse) -> Self {
         self.rpc_error(RPCError::ErrorResponse(error, "".to_owned()))
     }
 
@@ -286,7 +286,7 @@ impl CompleteConfig {
         self
     }
 
-    pub fn return_no_blocks(mut self) -> Self {
+    pub fn return_no_blocks(self) -> Self {
         self.return_no_blocks_n_times(usize::MAX)
     }
 
@@ -476,6 +476,7 @@ impl TestRig {
             *block.message_mut().parent_root_mut() = parent_root;
             *block.message_mut().slot_mut() = slot;
             let block_root = block.canonical_root();
+            self.log(&format!("Block slot {slot} root {block_root:?}"));
             self.blocks_by_root.insert(block_root, block.into());
 
             parent_root = block_root;
@@ -645,8 +646,7 @@ impl TestRig {
                     .blob_kzg_commitments()
                     .unwrap()
                     .get(blob_id.index as usize)
-                    .unwrap()
-                    .clone();
+                    .unwrap();
                 let signed_block_header = block.signed_block_header();
 
                 // We need to produce a DataColumn with valid inclusion proof, but can
@@ -957,7 +957,7 @@ fn finalized_sync_not_enough_custody_peers_on_start(config: Config) {
         return;
     }
 
-    let (head_root, head_slot) = r.create_unimported_parent_chain(2);
+    let (head_root, _) = r.create_unimported_parent_chain(2);
     let remote_info = sync_info_with_head_root(head_root);
     r.add_sync_peer(false, remote_info.clone());
 
@@ -993,7 +993,7 @@ fn finalized_sync_single_custody_peer_failure() {
         return;
     }
 
-    let (head_root, head_slot) = r.create_unimported_parent_chain(2);
+    let (head_root, _) = r.create_unimported_parent_chain(2);
     let peer_1 = r.new_connected_supernode_peer();
     // Trigger the request
     r.trigger_unknown_block_from_attestation(head_root, peer_1);

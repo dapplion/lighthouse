@@ -403,25 +403,16 @@ pub static SYNCING_CHAINS_COUNT: LazyLock<Result<IntGaugeVec>> = LazyLock::new(|
         &["range_type"],
     )
 });
-pub static SYNCING_CHAINS_REMOVED: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
-    try_create_int_counter_vec(
-        "sync_range_removed_chains_total",
-        "Total count of range syncing chains removed per range type",
-        &["range_type"],
+pub static SYNC_CHAINS_REMOVED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_removed_chains_total",
+        "Total count of forward sync chains removed",
     )
 });
-pub static SYNCING_CHAINS_ADDED: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
-    try_create_int_counter_vec(
-        "sync_range_added_chains_total",
-        "Total count of range syncing chains added per range type",
-        &["range_type"],
-    )
-});
-pub static SYNCING_CHAINS_DROPPED_BLOCKS: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
-    try_create_int_counter_vec(
-        "sync_range_chains_dropped_blocks_total",
-        "Total count of dropped blocks when removing a syncing chain per range type",
-        &["range_type"],
+pub static SYNC_CHAINS_ADDED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_added_chains_total",
+        "Total count of forward sync chains added",
     )
 });
 pub static SYNCING_CHAINS_IGNORED_BLOCKS: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
@@ -552,6 +543,15 @@ pub static SYNC_HEADER_MAX_SLOT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
     try_create_int_gauge(
         "sync_header_max_slot",
         "Current max slot of foward sync headers",
+    )
+});
+pub static SYNC_HEADERS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge("sync_headers_count", "Current count of headers in memory")
+});
+pub static SYNC_CHAINS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "sync_chains_count",
+        "Current count of forward sync chains in memory",
     )
 });
 

@@ -220,8 +220,9 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let outcome = self.status.on_download_result(req_id, result, cx);
-        self.handle_outcome(outcome, cx);
+        if let Err(e) = self.status.on_download_result(req_id, result, cx) {
+            self.handle_outcome(Err(e), cx);
+        }
     }
 
     pub fn on_block_process_result(
@@ -235,8 +236,10 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     }
 
     fn continue_syncing_blocks(&mut self, cx: &mut SyncNetworkContext<T>) {
-        let outcome = self.status.continue_request(cx);
-        self.handle_outcome(outcome, cx);
+        // TODO(tree-sync): only ok to import the newest block
+        let ok_to_import = true;
+        let outcome = self.status.continue_request(cx, ok_to_import);
+        self.handle_outcome(outcome.map(|_| SyncBlockResult::Wait), cx);
     }
 
     fn handle_outcome(

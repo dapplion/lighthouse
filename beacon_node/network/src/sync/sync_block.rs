@@ -21,6 +21,7 @@ pub struct SyncBlock<T: BeaconChainTypes> {
     id: RangeRequestId,
     block_root: Hash256,
     failed_peers: HashSet<PeerId>,
+    // TODO(tree-sync): deprecate this shared state for manual addition and removal
     peers: Arc<RwLock<HashSet<PeerId>>>,
     request: SyncingStatus<T::EthSpec>,
     download_errors: usize,
@@ -34,6 +35,7 @@ enum SyncingStatus<E: EthSpec> {
     Processing(RpcBlock<E>, BatchPeers),
 }
 
+#[must_use]
 pub enum SyncBlockResult {
     Done { parent_root: Hash256, slot: Slot },
     Wait,
@@ -58,6 +60,14 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
             download_errors: 0,
             process_errors: 0,
         }
+    }
+
+    pub fn block_root(&self) -> &Hash256 {
+        &self.block_root
+    }
+
+    pub fn id(&self) -> RangeRequestId {
+        self.id
     }
 
     pub fn peer_count(&self) -> usize {
@@ -87,7 +97,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
         req_id: ComponentsByRootRequestId,
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<SyncBlockResult, Error> {
+    ) -> Result<(), Error> {
         match &mut self.request {
             SyncingStatus::Downloading(expected_id) => {
                 if req_id != *expected_id {
@@ -100,7 +110,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                     Ok((block, peers)) => {
                         debug!(id = %self.id, "Sync block downloaded");
                         self.request = SyncingStatus::AwaitingProcessing(block, peers);
-                        self.continue_request(cx)
+                        Ok(())
                     }
                     Err(e) => {
                         debug!(id = %self.id, error = ?e, "Sync block download error");
@@ -111,7 +121,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                             return Err(Error::TooManyErrors("download errors".to_owned()));
                         }
 
-                        self.continue_request(cx)
+                        Ok(())
                     }
                 }
             }
@@ -151,7 +161,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                     }
 
                     self.request = SyncingStatus::AwaitingDownload;
-                    self.continue_request(cx)
+                    Ok(SyncBlockResult::Wait)
                 }
             },
             _ => Err(Error::InternalError(
@@ -160,10 +170,13 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
         }
     }
 
+    /// Make progress on the request. Note that a request can never finish on this call, thus it
+    /// does not return `SyncBlockResult`.
     pub fn continue_request(
         &mut self,
         cx: &mut SyncNetworkContext<T>,
-    ) -> Result<SyncBlockResult, Error> {
+        ok_to_import: bool,
+    ) -> Result<(), Error> {
         match &mut self.request {
             SyncingStatus::AwaitingDownload => {
                 match cx.block_components_by_range_request(
@@ -174,7 +187,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                 ) {
                     Ok(req_id) => {
                         self.request = SyncingStatus::Downloading(req_id);
-                        Ok(SyncBlockResult::Wait)
+                        Ok(())
                     }
                     Err(e) => match e {
                         RpcRequestSendError::NoPeers | RpcRequestSendError::InternalError(_) => {
@@ -185,7 +198,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                     },
                 }
             }
-            SyncingStatus::Downloading(_) => Ok(SyncBlockResult::Wait),
+            SyncingStatus::Downloading(_) => Ok(()),
             SyncingStatus::AwaitingProcessing(block, peers) => {
                 // No need to check if block is already imported here, we'll get an error
                 // from the beacon processor anyway. No need to add more code to handle this
@@ -197,7 +210,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                         .chain
                         .block_is_known_to_fork_choice(&block.as_block().parent_root())
                 {
-                    return Ok(SyncBlockResult::Wait);
+                    return Ok(());
                 }
 
                 if let Some(beacon_processor) = cx.beacon_processor_if_enabled() {
@@ -212,7 +225,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                         )))
                     } else {
                         self.request = SyncingStatus::Processing(block.clone(), peers.clone());
-                        Ok(SyncBlockResult::Wait)
+                        Ok(())
                     }
                 } else {
                     // TODO(tree-sync): This error will cause the full chain of headers to
@@ -223,7 +236,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                     ))
                 }
             }
-            SyncingStatus::Processing(..) => Ok(SyncBlockResult::Wait),
+            SyncingStatus::Processing(..) => Ok(()),
         }
     }
 }

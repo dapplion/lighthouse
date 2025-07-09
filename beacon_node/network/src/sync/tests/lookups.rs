@@ -300,6 +300,7 @@ impl TestRig {
             .sync_manager
             .forward_sync()
             .block_peers(&block_root)
+            .expect("Error getting block peers")
             .unwrap_or_else(|| panic!("Unknown block {block_root}"));
         peers.sort_unstable();
         let mut expected_peers = expected_peers.to_vec();
@@ -607,11 +608,7 @@ impl TestRig {
 
     /// Retrieves an unknown number of requests for data columns of `block_root`. Because peer ENRs
     /// are random, and peer selection is random, the total number of batched requests is unknown.
-    fn expect_data_columns_by_root_requests(
-        &mut self,
-        block_root: Hash256,
-        count: usize,
-    ) -> DCByRootIds {
+    fn expect_data_columns_by_root_requests(&mut self, block_root: Hash256) -> DCByRootIds {
         self.pop_received_network_events(&mut |ev| match ev {
             NetworkMessage::SendRequest {
                 peer_id: _,
@@ -630,12 +627,8 @@ impl TestRig {
         })
     }
 
-    fn expect_only_data_columns_by_root_requests(
-        &mut self,
-        for_block: Hash256,
-        count: usize,
-    ) -> DCByRootIds {
-        let ids = self.expect_data_columns_by_root_requests(for_block, count);
+    fn expect_only_data_columns_by_root_requests(&mut self, for_block: Hash256) -> DCByRootIds {
+        let ids = self.expect_data_columns_by_root_requests(for_block);
         self.expect_empty_network();
         ids
     }
@@ -905,7 +898,7 @@ impl TestRig {
     }
 
     fn single_lookup_from_attestation_setup(&mut self) -> (Hash256, PeerId) {
-        let (head_root, head_slot) = self.create_unimported_parent_chain(1);
+        let (head_root, _) = self.create_unimported_parent_chain(1);
         // Use a supernode so Fulu tests can pass without edits
         let peer_id = self.new_connected_supernode_peer();
         // Trigger the request
@@ -915,7 +908,7 @@ impl TestRig {
     }
 
     pub fn parent_lookup_from_unknown_block_parent_setup(&mut self) -> (Hash256, PeerId) {
-        let (head_root, head_slot) = self.create_unimported_parent_chain(2);
+        let (head_root, _) = self.create_unimported_parent_chain(2);
         // Use a supernode so Fulu tests can pass without edits
         let peer_id = self.new_connected_supernode_peer();
         let head_block = self
@@ -1058,10 +1051,10 @@ fn test_parent_lookup_drop_parent() {
     let (head_root, _) = r.parent_lookup_from_unknown_block_parent_setup();
     // Complete the header chain so the first block can start syncing
     r.complete_header_chain();
-    let chain = r.fetch_unimported_ancestor_chain(head_root);
+    let blocks = r.fetch_unimported_ancestor_chain(head_root);
     // Return wrong blocks for the parent of `head_root` = chain[1]
     r.progress_until_no_events(
-        filter().block_root(chain[1]),
+        filter().block_root(blocks[1]),
         complete().return_wrong_blocks(),
     );
     r.expect_penalties("UnrequestedBlockRoot");
@@ -1075,15 +1068,15 @@ fn test_parent_lookup_drop_child() {
     let (head_root, _) = r.parent_lookup_from_unknown_block_parent_setup();
     // Complete the header chain so the first block can start syncing
     r.complete_header_chain();
-    let chain = r.fetch_unimported_ancestor_chain(head_root);
+    let blocks = r.fetch_unimported_ancestor_chain(head_root);
     // Return wrong blocks for the parent of `head_root` = chain[1]
     r.progress_until_no_events(
-        filter().block_root(chain[0]),
+        filter().block_root(blocks[0]),
         complete().return_wrong_blocks(),
     );
     r.expect_penalties("UnrequestedBlockRoot");
     // It should only drop the newest lookup
-    r.assert_active_lookups(&[chain[1]]);
+    r.assert_active_lookups(&[blocks[1]]);
 }
 
 // TODO(tree-sync): Current behaviour drops the lookup if there's no peers left
@@ -1115,7 +1108,7 @@ fn test_lookup_disconnection_peer_left() {
 fn test_lookup_add_peers_to_parent() {
     let mut r = TestRig::test_setup();
     let (head_root, _) = r.create_unimported_parent_chain(4);
-    let chain = r.fetch_unimported_ancestor_chain(head_root);
+    let blocks = r.fetch_unimported_ancestor_chain(head_root);
     let peer_id = r.new_connected_peer();
     r.trigger_unknown_block_from_attestation(head_root, peer_id);
     r.complete_header_chain();
@@ -1127,7 +1120,7 @@ fn test_lookup_add_peers_to_parent() {
 
     let mut expected_peers = new_peers.clone();
     expected_peers.push(peer_id);
-    for block in chain {
+    for block in blocks {
         // Parent has the original unknown parent event peer + new peer
         r.assert_lookup_peers(block, &expected_peers);
     }

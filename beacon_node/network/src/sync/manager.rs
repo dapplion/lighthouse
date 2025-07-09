@@ -373,8 +373,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     // Adds a peer to forward sync. Since its possible that a lookup just gained a new peer we
     // attempt to continue idle custody by root requests that are waiting for peers.
     fn add_peer_with_imported_block_root(&mut self, peer_id: PeerId, block_root: Hash256) {
-        self.forward_sync
-            .search(block_root, &[peer_id], &mut self.network);
+        if let Err(e) = self
+            .forward_sync
+            .search(block_root, &[peer_id], &mut self.network)
+        {
+            error!("Error adding peer to forward sync {block_root:?} {peer_id} {e:?}");
+        }
 
         // Try to make progress on custody requests that are waiting for peers
         for (id, result) in self.network.continue_custody_by_root_requests() {
@@ -571,10 +575,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             // We don't need to subscribe if the old state is a state that would have already
             // invoked this call.
             if new_state.is_synced()
-                && !matches!(
-                    old_state,
-                    SyncState::Synced | SyncState::BackFillSyncing { .. }
-                )
+                && !matches!(old_state, SyncState::Synced | SyncState::BackFillSyncing)
             {
                 self.network.subscribe_core_topics();
             }
