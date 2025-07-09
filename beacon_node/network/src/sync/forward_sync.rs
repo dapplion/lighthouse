@@ -7,8 +7,7 @@ use crate::sync::network_context::{BatchPeers, RpcResponseResult};
 use crate::sync::sync_block::{Error as SyncBlockError, SyncBlock, SyncBlockResult};
 use crate::sync::BatchProcessResult;
 use beacon_chain::block_verification_types::RpcBlock;
-use beacon_chain::{BeaconChain, BeaconChainTypes};
-use itertools::Itertools;
+use beacon_chain::BeaconChainTypes;
 use lighthouse_network::service::api_types::{
     BlocksByRootRequestId, BlocksByRootRequester, ComponentsByRootRequestId, HeaderLookupId, Id,
     RangeRequestId,
@@ -37,6 +36,39 @@ struct TipId(u32);
 ///
 /// Goals
 /// - Download multiple blocks at once to increase download speed
+///
+///
+/// ## da_checker oracle
+///
+/// TODO(tree-sync): re-implement if necessary
+///
+///
+/// ## duplicate_cache with gossip blocks
+///
+/// Gossip may receive and process the same block that ForwardSync attempts to process.
+///
+/// a. Gossip receives block X and sends to process
+/// b. ForwardSync downloads block X
+/// c. ForwardSync sends block X for process
+///
+/// Consider the order of events
+/// - [a,b,c]: the gossip block is inserted in the `duplicate_cache` and the RPC block is queued.
+///            Step b could be skipped, but we accept the inneficiency for simplicity.
+/// - [b,a,c]: the RPC block is downloaded, gossip block into `duplicate_cache` and RPC block queued
+/// - [b,c,a]: the RPC block is inserted in the `duplicate_cache` and the gossip block is queued
+///
+/// ## Pruning
+///
+/// So chose to not explicitly implement pruning for forward sync. Chains can be pruned by:
+///
+/// 1. Checking if the conflict with finality once finality advances: If this happens once we
+///    attempt to import the first block of the chain we'll get an unknown parent error. The chain
+///    will fail and be dropped = so this pruning happens by default.
+/// 2. If their blocks are imported through another source: If this happens when we attempt to
+///    process the block we'll get a duplicate_cache hit or a block already known error. In either
+///    case the processing result for the block with be an Ok, and we'll move to the next block.
+///
+///
 pub struct ForwardSync<T: BeaconChainTypes> {
     block_to_tip: HashMap<Hash256, TipId>,
     chains: HashMap<TipId, Chain<T>>,
@@ -45,50 +77,45 @@ pub struct ForwardSync<T: BeaconChainTypes> {
 /// Chain of consecutive blocks that are imported by the same set of peers
 struct Chain<T: BeaconChainTypes> {
     peers: HashSet<PeerId>,
-    status: ChainStatus<T>,
-}
-
-struct ForwardSyncBlock<T: BeaconChainTypes> {
-    id: HeaderLookupId,
     status: Status<T>,
 }
 
-enum ChainStatus<T: BeaconChainTypes> {
-    // Recursively fetch headers until discovering a parent_root that is known, then transition
-    // state to `ForwardSync`.
+type PendingBlock = (Hash256, Slot, Id);
+
+#[allow(clippy::large_enum_variant)]
+enum Status<T: BeaconChainTypes> {
+    /// Recursively fetch headers until discovering a parent_root that is known. Its list of
+    /// block_roots can grow by appending ancestors.
+    /// - Transition to `WaitingParentChain` if the parent is known but not imported
+    /// - Transition to `ForwardSync` if the parent is imported
     BackfillHeaders {
-        /// Headers descendant of `next_block_root` that are already downloaded.
+        /// Headers descendant of `next_header_request.block_root` that are already downloaded.
+        /// Does not include `next_header_request.block_root`.
         /// Sorting: tip first, oldest ancestor last
-        block_roots: Vec<Hash256>,
+        block_roots: Vec<PendingBlock>,
         /// Oldest ancestor block root of this Chain.
         next_header_request: HeaderRequest,
     },
+    /// Waits for a parent block in a different chain to be imported. Its block_root list does not
+    /// change.
+    /// - Transitions to `ForwardSync` once `parent_root` is imported.
     WaitingParentChain {
+        /// Parent root of the last block_root in `block_roots`
         parent_root: Hash256,
         /// Sorting: tip first, oldest ancestor last
-        block_roots: Vec<Hash256>,
+        block_roots: Vec<PendingBlock>,
     },
-    // Sync blocks from old to new buffering some blocks
+    /// Download and process block_roots from oldest ancestor to tip. Its list of block_roots does
+    /// not grow, only removed block roots once processed.
     ForwardSync {
         /// Sorting: tip first, oldest ancestor last
-        block_roots: Vec<Hash256>,
+        block_roots: Vec<PendingBlock>,
         /// Sorting: oldest ancestor first
         syncing_blocks: VecDeque<SyncBlock<T>>,
     },
 }
 
-enum Status<T: BeaconChainTypes> {
-    // TODO(tree-sync): Make the "waiting" completed header requests as memory cheap as possible
-    BackfillHeader {
-        failed_peers: HashSet<PeerId>,
-        request: DownloadRequest<BlocksByRootRequestId, BeaconBlockHeader>,
-    },
-    ForwardSyncBlock {
-        header: BeaconBlockHeader,
-        request: SyncBlock<T>,
-    },
-}
-
+/// Tracks a request to download a BeaconBlockHeader by block root
 struct HeaderRequest {
     id: HeaderLookupId,
     block_root: Hash256,
@@ -154,7 +181,7 @@ impl<T: BeaconChainTypes> Chain<T> {
     fn new(block_root: Hash256, id: Id, initial_peers: &[PeerId]) -> Self {
         Self {
             peers: HashSet::from_iter(initial_peers.iter().copied()),
-            status: ChainStatus::BackfillHeaders {
+            status: Status::BackfillHeaders {
                 block_roots: vec![],
                 next_header_request: HeaderRequest::new(block_root, id),
             },
@@ -171,47 +198,51 @@ impl<T: BeaconChainTypes> Chain<T> {
         self.peers.remove(peer)
     }
 
+    /// Returns a Vec of peers that have imported the blocks in this chain
     fn get_peers(&self) -> Vec<PeerId> {
         self.peers.iter().copied().collect()
     }
 
+    /// Returns the count of peers that have imported the blocks in this chain
     fn peer_count(&self) -> usize {
         self.peers.len()
     }
 
+    /// Returns the parent root of the oldest ancestor of this chain. Returns None if the chain is
+    /// already processing = its parent has already been imported.
     fn parent_root(&self) -> Option<Hash256> {
         match &self.status {
-            ChainStatus::BackfillHeaders {
+            Status::BackfillHeaders {
                 next_header_request,
                 ..
             } => Some(next_header_request.block_root),
-            ChainStatus::WaitingParentChain { parent_root, .. } => Some(*parent_root),
-            ChainStatus::ForwardSync { .. } => None,
+            Status::WaitingParentChain { parent_root, .. } => Some(*parent_root),
+            Status::ForwardSync { .. } => None,
         }
     }
 
-    fn tip(&self) -> Hash256 {
+    /// Returns the tip of this chain. Returns None if the chain is empty (should not happen)
+    fn tip(&self) -> Option<Hash256> {
         match &self.status {
-            ChainStatus::BackfillHeaders {
+            Status::BackfillHeaders {
                 next_header_request,
                 block_roots,
-            } => block_roots
-                .first()
-                .copied()
-                .unwrap_or(next_header_request.block_root),
-            ChainStatus::WaitingParentChain { block_roots, .. } => block_roots
-                .first()
-                .copied()
-                .expect("block roots is not empty"),
-            ChainStatus::ForwardSync {
+            } => Some(
+                block_roots
+                    .first()
+                    .map(|block| block.0)
+                    .unwrap_or(next_header_request.block_root),
+            ),
+            Status::WaitingParentChain { block_roots, .. } => {
+                block_roots.first().map(|block| block.0)
+            }
+            Status::ForwardSync {
                 block_roots,
                 syncing_blocks,
-            } => block_roots.first().copied().unwrap_or_else(|| {
-                syncing_blocks
-                    .back()
-                    .map(|block| *block.block_root())
-                    .expect("blocks are not empty")
-            }),
+            } => block_roots
+                .first()
+                .map(|block| block.0)
+                .or_else(|| syncing_blocks.back().map(|block| *block.block_root())),
         }
     }
 
@@ -219,8 +250,9 @@ impl<T: BeaconChainTypes> Chain<T> {
     /// ancestors, and leaves `self` with only the descendants of `block_root` excluding
     /// `block_root`
     fn split_by(&mut self, block_root: Hash256) -> Result<Self, InternalError> {
+        // TODO(tree-sync): Review this logic, it's sensitive and not trivial
         let status = match &mut self.status {
-            ChainStatus::BackfillHeaders {
+            Status::BackfillHeaders {
                 block_roots,
                 next_header_request,
             } => {
@@ -230,46 +262,46 @@ impl<T: BeaconChainTypes> Chain<T> {
                     std::mem::replace(next_header_request, HeaderRequest::empty());
 
                 let new_block_roots =
-                    if let Some(idx) = block_roots.iter().position(|b| b == &block_root) {
+                    if let Some(idx) = block_roots.iter().position(|b| b.0 == block_root) {
                         // ..= to keep the block_root on the left
                         block_roots.drain(0..=idx).collect::<Vec<_>>()
                     } else {
                         // TODO(tree-sync): check that block_root is the next_root or error
                         vec![]
                     };
-                self.status = ChainStatus::WaitingParentChain {
+                self.status = Status::WaitingParentChain {
                     parent_root: block_root,
                     block_roots,
                 };
-                ChainStatus::BackfillHeaders {
+                Status::BackfillHeaders {
                     block_roots: new_block_roots,
                     next_header_request,
                 }
             }
-            ChainStatus::WaitingParentChain {
+            Status::WaitingParentChain {
                 parent_root,
                 block_roots,
             } => {
                 let idx =
                     block_roots
                         .iter()
-                        .position(|b| b == &block_root)
+                        .position(|b| b.0 == block_root)
                         .ok_or(InternalError(format!(
                             "block_root {block_root:?} no in chain"
                         )))?;
                 // ..= to keep the block_root on the left
                 let new_block_roots = block_roots.drain(0..=idx).collect::<Vec<_>>();
                 let parent_root = *parent_root;
-                self.status = ChainStatus::WaitingParentChain {
+                self.status = Status::WaitingParentChain {
                     parent_root: block_root,
                     block_roots: std::mem::take(block_roots),
                 };
-                ChainStatus::WaitingParentChain {
+                Status::WaitingParentChain {
                     parent_root,
                     block_roots: new_block_roots,
                 }
             }
-            ChainStatus::ForwardSync { .. } => {
+            Status::ForwardSync { .. } => {
                 todo!("How to split a chain that's already syncing?");
             }
         };
@@ -281,36 +313,41 @@ impl<T: BeaconChainTypes> Chain<T> {
         })
     }
 
-    fn to_foward_sync_block(&mut self) -> Result<Hash256, InternalError> {
-        todo!();
-    }
-
+    /// If this chain is waiting for `block_root` it transitions to forward sync.
     fn on_block_imported(&mut self, block_root: &Hash256) {
         match &mut self.status {
-            ChainStatus::BackfillHeaders { .. } => {}
-            ChainStatus::WaitingParentChain {
+            Status::BackfillHeaders { .. } => {}
+            Status::WaitingParentChain {
                 block_roots,
                 parent_root,
             } => {
                 if block_root == parent_root {
-                    self.status = ChainStatus::ForwardSync {
+                    self.status = Status::ForwardSync {
                         block_roots: std::mem::take(block_roots),
                         syncing_blocks: <_>::default(),
                     };
                 }
             }
-            ChainStatus::ForwardSync { .. } => {}
+            Status::ForwardSync { .. } => {}
         }
     }
 
-    fn to_forward_sync(&mut self, parent_root: Hash256) -> Result<(), InternalError> {
+    /// Transitions to forward sync
+    fn backfill_headers_to_forward_sync(
+        &mut self,
+        block: BeaconBlockHeader,
+    ) -> Result<(), InternalError> {
         match &mut self.status {
-            ChainStatus::BackfillHeaders {
+            Status::BackfillHeaders {
                 block_roots,
                 next_header_request,
             } => {
-                block_roots.push(next_header_request.block_root);
-                self.status = ChainStatus::ForwardSync {
+                block_roots.push((
+                    block.canonical_root(),
+                    block.slot,
+                    next_header_request.id.id,
+                ));
+                self.status = Status::ForwardSync {
                     block_roots: std::mem::take(block_roots),
                     syncing_blocks: <_>::default(),
                 };
@@ -322,9 +359,9 @@ impl<T: BeaconChainTypes> Chain<T> {
 
     fn block_count(&self) -> usize {
         match &self.status {
-            ChainStatus::BackfillHeaders { block_roots, .. }
-            | ChainStatus::WaitingParentChain { block_roots, .. } => block_roots.len(),
-            ChainStatus::ForwardSync {
+            Status::BackfillHeaders { block_roots, .. }
+            | Status::WaitingParentChain { block_roots, .. } => block_roots.len(),
+            Status::ForwardSync {
                 block_roots,
                 syncing_blocks,
             } => block_roots.len() + syncing_blocks.len(),
@@ -334,28 +371,31 @@ impl<T: BeaconChainTypes> Chain<T> {
     /// Returns all block roots part of this chain
     fn iter_block_roots(&self) -> Box<dyn Iterator<Item = &Hash256> + '_> {
         match &self.status {
-            ChainStatus::BackfillHeaders {
+            Status::BackfillHeaders {
                 block_roots,
                 next_header_request,
-            } => {
-                Box::new(std::iter::once(&next_header_request.block_root).chain(block_roots.iter()))
+            } => Box::new(
+                std::iter::once(&next_header_request.block_root)
+                    .chain(block_roots.iter().map(|(root, _, _)| root)),
+            ),
+            Status::WaitingParentChain { block_roots, .. } => {
+                Box::new(block_roots.iter().map(|(root, _, _)| root))
             }
-            ChainStatus::WaitingParentChain { block_roots, .. } => Box::new(block_roots.iter()),
-            ChainStatus::ForwardSync {
+            Status::ForwardSync {
                 syncing_blocks,
                 block_roots,
             } => Box::new(
                 syncing_blocks
                     .iter()
                     .map(|block| block.block_root())
-                    .chain(block_roots.iter()),
+                    .chain(block_roots.iter().map(|(root, _, _)| root)),
             ),
         }
     }
 
     /// Returns true if this chain has no blocks
     fn is_empty(&self) -> bool {
-        self.iter_block_roots().is_empty()
+        self.iter_block_roots().next().is_none()
     }
 
     fn min_slot(&self) -> Option<Slot> {
@@ -368,9 +408,9 @@ impl<T: BeaconChainTypes> Chain<T> {
 
     fn syncing_blocks_count(&self) -> usize {
         match &self.status {
-            ChainStatus::BackfillHeaders { .. } => 0,
-            ChainStatus::WaitingParentChain { .. } => 0,
-            ChainStatus::ForwardSync { syncing_blocks, .. } => syncing_blocks.len(),
+            Status::BackfillHeaders { .. } => 0,
+            Status::WaitingParentChain { .. } => 0,
+            Status::ForwardSync { syncing_blocks, .. } => syncing_blocks.len(),
         }
     }
 
@@ -378,7 +418,7 @@ impl<T: BeaconChainTypes> Chain<T> {
         &mut self,
     ) -> Result<&mut DownloadRequest<BlocksByRootRequestId, BeaconBlockHeader>, Error> {
         match &mut self.status {
-            ChainStatus::BackfillHeaders {
+            Status::BackfillHeaders {
                 next_header_request,
                 ..
             } => Ok(&mut next_header_request.request),
@@ -388,14 +428,20 @@ impl<T: BeaconChainTypes> Chain<T> {
         }
     }
 
-    fn add_ancestor(&mut self, parent_root: Hash256, id: Id) -> Result<(), InternalError> {
+    fn add_ancestor(&mut self, block: BeaconBlockHeader, id: Id) -> Result<(), InternalError> {
         match &mut self.status {
-            ChainStatus::BackfillHeaders {
+            Status::BackfillHeaders {
                 block_roots,
                 next_header_request,
             } => {
-                block_roots.push(next_header_request.block_root);
-                *next_header_request = HeaderRequest::new(parent_root, id);
+                block_roots.push((
+                    // Should be the same as `next_header_request.block_root`
+                    block.canonical_root(),
+                    block.slot,
+                    // Persist the request ID of the header for better traceability
+                    next_header_request.id.id,
+                ));
+                *next_header_request = HeaderRequest::new(block.parent_root, id);
                 Ok(())
             }
             _ => Err(InternalError(
@@ -406,8 +452,8 @@ impl<T: BeaconChainTypes> Chain<T> {
 
     fn to_waiting_parent(&mut self, parent_root: Hash256) -> Result<(), Error> {
         match &mut self.status {
-            ChainStatus::BackfillHeaders { block_roots, .. } => {
-                self.status = ChainStatus::WaitingParentChain {
+            Status::BackfillHeaders { block_roots, .. } => {
+                self.status = Status::WaitingParentChain {
                     parent_root,
                     block_roots: std::mem::take(block_roots),
                 };
@@ -431,6 +477,7 @@ impl<T: BeaconChainTypes> Chain<T> {
         Ok(())
     }
 
+    /// Handle the result of a block processing.
     fn on_process_result(
         &mut self,
         id: HeaderLookupId,
@@ -440,13 +487,14 @@ impl<T: BeaconChainTypes> Chain<T> {
         let (ok_to_import, block) = self.block_request(RangeRequestId::ForwardSync(id))?;
         match block.on_process_result(result, cx)? {
             SyncBlockResult::Done { parent_root, slot } => {
-                // This block is complete, remove it from chain
+                // Sanity check: the processed block must be the oldest block in the chain
                 if !ok_to_import {
                     return Err(Error::InternalError(format!(
                         "Block {id} is not the first block"
                     )));
                 }
-                if let ChainStatus::ForwardSync { syncing_blocks, .. } = &mut self.status {
+                // This block processing is complete, remove it from chain
+                if let Status::ForwardSync { syncing_blocks, .. } = &mut self.status {
                     if let Some(block) = syncing_blocks.pop_front() {
                         debug!("Dropping syncing block {}", block.id());
                     } else {
@@ -465,7 +513,7 @@ impl<T: BeaconChainTypes> Chain<T> {
 
     fn block_request(&mut self, id: RangeRequestId) -> Result<(bool, &mut SyncBlock<T>), Error> {
         match &mut self.status {
-            ChainStatus::ForwardSync { syncing_blocks, .. } => {
+            Status::ForwardSync { syncing_blocks, .. } => {
                 if let Some(index) = syncing_blocks.iter().position(|b| b.id() == id) {
                     let block = syncing_blocks.get_mut(index).expect("index just found");
                     return Ok((index == 0, block));
@@ -476,24 +524,21 @@ impl<T: BeaconChainTypes> Chain<T> {
                     "Unknown block for {id}, first few blocks {first_ids:?}"
                 )))
             }
-
             _ => Err(Error::InternalError(
                 "Expected lookup to be in Syncing state".to_owned(),
             )),
         }
     }
 
+    /// Continues the header or blocks requests of this chain
     fn continue_requests(&mut self, cx: &mut SyncNetworkContext<T>) -> Result<(), Error> {
         match &mut self.status {
-            ChainStatus::BackfillHeaders {
+            Status::BackfillHeaders {
                 next_header_request,
                 ..
             } => Ok(next_header_request.continue_request(&self.peers, cx)?),
-            ChainStatus::WaitingParentChain { .. } => Ok(()),
-            ChainStatus::ForwardSync {
-                block_roots,
-                syncing_blocks,
-            } => {
+            Status::WaitingParentChain { .. } => Ok(()),
+            Status::ForwardSync { syncing_blocks, .. } => {
                 for (index, block) in syncing_blocks.iter_mut().enumerate() {
                     let ok_to_import = index == 0;
                     block.continue_request(cx, ok_to_import)?;
@@ -506,11 +551,15 @@ impl<T: BeaconChainTypes> Chain<T> {
 
 #[derive(Debug)]
 pub enum Error {
+    /// Unexpected and unrecoverable error
     InternalError(String),
+    /// Expected and unrecoverable error
     TooManyErrors(String),
+    /// Block is not descendant of the finalized checkpoint
     BlockConflictsWithFinality(String),
 }
 
+/// Unexpected and unrecoverable error
 #[derive(Debug)]
 struct InternalError(String);
 
@@ -554,13 +603,14 @@ pub(crate) enum SyncState {
 }
 
 impl<T: BeaconChainTypes> ForwardSync<T> {
-    pub fn new(chain: Arc<BeaconChain<T>>) -> Self {
+    pub fn new() -> Self {
         Self {
             block_to_tip: <_>::default(),
             chains: <_>::default(),
         }
     }
 
+    /// Returns the peers that claim to have imported a specific block_root
     #[cfg(test)]
     pub fn block_peers(&self, block_root: &Hash256) -> Result<Option<Vec<PeerId>>, String> {
         let Some(chain) = self.block_to_tip.get(block_root) else {
@@ -574,11 +624,13 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         ))
     }
 
+    /// Get all blocks that forward sync intends to sync
     #[cfg(test)]
     pub fn get_lookups(&self) -> Vec<Hash256> {
         self.block_to_tip.keys().copied().collect()
     }
 
+    /// Total count of blocks that forward sync intends to sync
     pub fn block_count(&self) -> usize {
         self.block_to_tip.len()
     }
@@ -590,14 +642,15 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         todo!();
     }
 
+    /// Return all processing ids of syncing blocks
     #[cfg(test)]
     pub fn get_processing_ids(&mut self) -> Vec<HeaderLookupId> {
         let mut ids = vec![];
         for chain in self.chains.values() {
             match &chain.status {
-                ChainStatus::BackfillHeaders { .. } => {}
-                ChainStatus::WaitingParentChain { .. } => {}
-                ChainStatus::ForwardSync { syncing_blocks, .. } => {
+                Status::BackfillHeaders { .. } => {}
+                Status::WaitingParentChain { .. } => {}
+                Status::ForwardSync { syncing_blocks, .. } => {
                     for block in syncing_blocks {
                         if block.is_processing() {
                             if let RangeRequestId::ForwardSync(id) = block.id() {
@@ -615,20 +668,25 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         todo!();
     }
 
+    /// Remove a disconnected peer from all chains
     pub fn remove_peer(&mut self, peer: PeerId) {
         for chain in self.chains.values_mut() {
             chain.remove_peer(&peer);
         }
     }
 
+    /// A set of peers claim to have imported a block_root. Create a new lookup for it or add them
+    /// to an existing one + its ancestors
     pub fn search(
         &mut self,
         block_root: Hash256,
         peers: &[PeerId],
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), Error> {
-        if let Some(initial_chain_id) = self.block_to_tip.get(&block_root) {
+        if let Some(_) = self.block_to_tip.get(&block_root) {
+            let mut peers = HashSet::<&PeerId>::from_iter(peers);
             let mut counts = HashMap::<&PeerId, usize>::new();
+
             // Add peer to `block`'s entry and all its ancestors
             let mut target_block_root = block_root;
             while let Some(chain_id) = self.block_to_tip.get_mut(&target_block_root) {
@@ -637,8 +695,13 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     .get_mut(chain_id)
                     .ok_or(InternalError(format!("Unknown chain {chain_id}")))?;
 
-                // If target_block_root is not the tip of chain, we have to split the chain
-                let chain_to_add_peers = if chain.tip() != target_block_root {
+                let should_split_chain = match chain.tip() {
+                    // If target_block_root is not the tip of chain, we have to split the chain
+                    Some(tip) => tip != target_block_root,
+                    // If the chain has no tip (should not happen) don't split the chain
+                    None => false,
+                };
+                let chain_to_add_peers = if should_split_chain {
                     let new_chain = chain.split_by(target_block_root)?;
                     let new_chain_id = TipId(cx.next_id());
 
@@ -657,23 +720,29 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     chain
                 };
 
-                for peer in peers {
-                    // TODO(tree-sync): If peer already in set no need to add to its ancestors
-                    if chain_to_add_peers.add_peer(*peer) {
-                        // TODO(tree-sync): This log can be very noisy maybe log once per peer
+                peers.retain(|peer| {
+                    if chain_to_add_peers.add_peer(**peer) {
                         *counts.entry(peer).or_default() += 1;
+                        // We added peer to the lookup, retain it for the next ancestor chain
+                        true
                     } else {
                         // Peer already part of this lookup, therefore it must be part of the peer
                         // set of all of its ancestors: stop
-                        break;
+                        false
                     }
+                });
+                // No peers need to be added to ancestors, stop
+                if peers.is_empty() {
+                    break;
                 }
+
                 if let Some(parent_root) = chain_to_add_peers.parent_root() {
                     target_block_root = parent_root;
                 } else {
                     break;
                 }
             }
+            // Log once per peer, as we could add it to a very large number of lookups
             for (peer, count) in counts {
                 debug!(block_root = ?target_block_root, %peer, count, "Adding peer to existing header lookup and ancestors");
             }
@@ -700,13 +769,14 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             let mut chain = Chain::new(block_root, id, peers);
             chain.continue_requests(cx)?;
             // Don't insert until first request is successful
-            metrics::inc_counter(&metrics::SYNC_CHAINS_ADDED);
             self.chains.insert(chain_id, chain);
             self.block_to_tip.insert(block_root, chain_id);
+            metrics::inc_counter(&metrics::SYNC_CHAINS_ADDED);
         }
         Ok(())
     }
 
+    /// Handle the result of a header download.
     pub fn on_header_download_result(
         &mut self,
         req_id: BlocksByRootRequestId,
@@ -717,11 +787,12 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     ) {
         let block_root = id.block_root;
 
-        let result: Result<SyncBlockResult, Error> = (|| {
+        // Invoke a closure to use the ? operator and handle the result consistenlty
+        let result: Result<(), Error> = (|| {
             let Some(chain_id) = self.block_to_tip.get(&block_root) else {
                 // TODO(tree-sync): register metric
                 debug!(id = ?req_id, "Received header request for unknown block_root");
-                return Ok(SyncBlockResult::Wait);
+                return Ok(());
             };
             let chain = self.chains.get_mut(chain_id).ok_or(InternalError(format!(
                 "block_root {block_root:?} references unknown chain {chain_id}"
@@ -788,7 +859,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     if cx.chain.block_is_known_to_fork_choice(&parent_root) {
                         // Parent is imported, we can forward sync this chain
                         // Stop search we reached a known block
-                        chain.to_forward_sync(parent_root)?;
+                        chain.backfill_headers_to_forward_sync(block_header)?;
                         debug!(%chain_id, ?parent_root, block_count = chain.block_count(), "Forward sync chain reached imported block");
                         // Trigger potential foward sync for this chain
                         self.continue_requests(cx);
@@ -800,7 +871,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                         // TODO(tree-sync): Add peers recursively to the chain_id, potentially
                         // splitting the chain when adding peers.
                     } else {
-                        chain.add_ancestor(parent_root, cx.next_id())?;
+                        chain.add_ancestor(block_header, cx.next_id())?;
                         // Add to the block_to_tip mapping to respect the invariant "Each block
                         // root exists in exactly one `Chain::block_roots` list".
                         self.block_to_tip.insert(parent_root, *chain_id);
@@ -816,16 +887,15 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     self.continue_requests(cx);
                 }
             }
-            Ok(SyncBlockResult::Wait)
+            Ok(())
         })();
 
-        // Map result Ok to Wait as completing the header request does not complete the overall
-        // ForwardSyncBlock request.
         if let Err(e) = result {
-            self.handle_result(id.block_root, e, cx);
+            self.handle_error(id.block_root, e);
         }
     }
 
+    /// Handle the result of a block download.
     pub fn on_block_download_result(
         &mut self,
         req_id: ComponentsByRootRequestId,
@@ -843,21 +913,22 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         };
 
         if let Err(e) = chain.on_download_result(req_id, result, cx) {
-            self.handle_result(id.block_root, e, cx);
+            self.handle_error(id.block_root, e);
         }
     }
 
+    /// Handle the result of a block processing.
     pub fn on_block_process_result(
         &mut self,
         id: HeaderLookupId,
         result: BatchProcessResult,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let Some(chain_id) = self.block_to_tip.get(&id.block_root) else {
+        let Some(chain_id) = self.block_to_tip.get(&id.block_root).copied() else {
             debug!(?id, "Received block process result for unknown lookup");
             return;
         };
-        let Some(chain) = self.chains.get_mut(chain_id) else {
+        let Some(chain) = self.chains.get_mut(&chain_id) else {
             error!(%chain_id, block_root = ?id.block_root, "Block references unknown chain");
             return;
         };
@@ -866,35 +937,29 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             Ok(SyncBlockResult::Done { .. }) => {
                 metrics::inc_counter(&metrics::SYNC_BLOCKS_PROCESSED);
                 self.block_to_tip.remove(&id.block_root);
-                // Find all chains that are awaiting this block to process and continue them
-                for other_chain in self.chains.values_mut() {
-                    other_chain.on_block_imported(&id.block_root);
-                }
-                self.continue_requests(cx);
                 // If the chain is empty, remove it
                 if chain.is_empty() {
                     self.chains.remove(&chain_id);
                     metrics::inc_counter(&metrics::SYNC_CHAINS_REMOVED);
                 }
+
+                // Find all chains that are awaiting this block to process and continue them
+                for other_chain in self.chains.values_mut() {
+                    other_chain.on_block_imported(&id.block_root);
+                }
+                self.continue_requests(cx);
             }
             // Wait for next event
             Ok(SyncBlockResult::Wait) => {}
             Err(e) => {
-                self.handle_result(id.block_root, e, cx);
+                self.handle_error(id.block_root, e);
             }
         }
     }
 
-    pub fn prune(&mut self) {
-        // Prune blocks once imported, and once finality advances
-    }
-
-    pub fn prune_imported_block(&mut self, block_root: Hash256, _imported: bool) {
-        // Recursively prune this block and all their ancestors
-        todo!();
-    }
-
-    fn handle_result(&mut self, block_root: Hash256, error: Error, cx: &mut SyncNetworkContext<T>) {
+    /// Common handler for any `forward_sync::Error`. For simplicity it drops the chain that includes
+    /// the block and all of its descendants.
+    fn handle_error(&mut self, block_root: Hash256, error: Error) {
         debug!(?error, ?block_root, "Dropping forward sync block lookup");
         let Some(chain_id) = self.block_to_tip.get(&block_root).copied() else {
             debug!(?block_root, "Handling error for unknown block_root");
@@ -952,7 +1017,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             .chains
             .iter_mut()
             .filter_map(|(_, chain)| {
-                if matches!(chain.status, ChainStatus::ForwardSync { .. }) {
+                if matches!(chain.status, Status::ForwardSync { .. }) {
                     Some((chain.peer_count(), chain))
                 } else {
                     None
@@ -963,19 +1028,20 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         chains_by_peer_count.sort_by_key(|(peer_count, _)| *peer_count);
 
         for (_, chain) in chains_by_peer_count {
-            if let ChainStatus::ForwardSync {
+            if let Status::ForwardSync {
                 block_roots,
                 syncing_blocks,
             } = &mut chain.status
             {
-                /// block_roots sorting: tip first, oldest ancestor last => pop
+                // block_roots sorting: tip first, oldest ancestor last => pop
                 if let Some(next_block) = block_roots.pop() {
                     syncing_blocks.push_back(SyncBlock::new(
                         RangeRequestId::ForwardSync(HeaderLookupId {
-                            id: cx.next_id(),
-                            block_root: next_block,
+                            // Reuse the request ID of the header for better traceability
+                            id: next_block.2,
+                            block_root: next_block.0,
                         }),
-                        next_block,
+                        next_block.0,
                         &chain.peers.iter().copied().collect::<Vec<_>>(),
                     ));
                     blocks_syncing += 1;
@@ -1028,7 +1094,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 for block_root in chain.iter_block_roots() {
                     self.block_to_tip.remove(block_root);
                     debug!(?block_root, id = %chain_id, "Dropping forward sync block lookup");
-                    metrics::inc_counter(&metrics::SYNC_LOOKUPS_DROPPED);
+                    metrics::inc_counter(&metrics::SYNC_FORWARD_BLOCKS_DROPPED);
                 }
                 // Only remove children if the node still existed
                 // Push its children—if any—onto the work list.

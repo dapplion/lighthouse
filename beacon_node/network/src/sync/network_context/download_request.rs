@@ -127,7 +127,7 @@ impl<I: std::fmt::Display + PartialEq, T> DownloadRequest<I, T> {
     pub fn is_complete(&self) -> Option<&T> {
         match &self.status {
             Status::Downloaded(_, data, _) => Some(data),
-            other => None,
+            _ => None,
         }
     }
 

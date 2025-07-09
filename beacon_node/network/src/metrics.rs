@@ -415,11 +415,10 @@ pub static SYNC_CHAINS_ADDED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
         "Total count of forward sync chains added",
     )
 });
-pub static SYNCING_CHAINS_IGNORED_BLOCKS: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
-    try_create_int_counter_vec(
+pub static SYNCING_CHAINS_IGNORED_BLOCKS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
         "sync_range_chains_ignored_blocks_total",
         "Total count of ignored blocks when processing a syncing chain batch per chain type",
-        &["chain_type"],
     )
 });
 pub static SYNCING_CHAINS_PROCESSED_BATCHES: LazyLock<Result<IntCounterVec>> =
@@ -452,23 +451,10 @@ pub static SYNC_LOOKUP_CREATED: LazyLock<Result<IntCounter>> = LazyLock::new(|| 
         "Total count of sync lookups created",
     )
 });
-pub static SYNC_LOOKUP_DROPPED: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
-    try_create_int_counter_vec(
-        "sync_lookups_dropped_total",
-        "Total count of sync lookups dropped by reason",
-        &["reason"],
-    )
-});
-pub static SYNC_LOOKUP_COMPLETED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+pub static SYNC_FORWARD_BLOCKS_DROPPED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
     try_create_int_counter(
-        "sync_lookups_completed_total",
-        "Total count of sync lookups completed",
-    )
-});
-pub static SYNC_LOOKUPS_STUCK: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
-    try_create_int_counter(
-        "sync_lookups_stuck_total",
-        "Total count of sync lookups that are stuck and dropped",
+        "sync_forward_lookups_dropped_total",
+        "Total count of forward sync blocks dropped by reason",
     )
 });
 pub static SYNC_ACTIVE_NETWORK_REQUESTS: LazyLock<Result<IntGaugeVec>> = LazyLock::new(|| {

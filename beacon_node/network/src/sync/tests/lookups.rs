@@ -627,7 +627,11 @@ impl TestRig {
         })
     }
 
-    fn expect_only_data_columns_by_root_requests(&mut self, for_block: Hash256) -> DCByRootIds {
+    fn expect_only_data_columns_by_root_requests(
+        &mut self,
+        for_block: Hash256,
+        _count: usize,
+    ) -> DCByRootIds {
         let ids = self.expect_data_columns_by_root_requests(for_block);
         self.expect_empty_network();
         ids

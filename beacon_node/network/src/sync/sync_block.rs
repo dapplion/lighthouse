@@ -96,7 +96,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
         &mut self,
         req_id: ComponentsByRootRequestId,
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
-        cx: &mut SyncNetworkContext<T>,
+        _cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), Error> {
         match &mut self.request {
             SyncingStatus::Downloading(expected_id) => {
@@ -204,12 +204,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                 // from the beacon processor anyway. No need to add more code to handle this
                 // edge case faster.
 
-                let expect_parent_to_be_imported = false;
-                if expect_parent_to_be_imported
-                    && !cx
-                        .chain
-                        .block_is_known_to_fork_choice(&block.as_block().parent_root())
-                {
+                if !ok_to_import {
                     return Ok(());
                 }
 

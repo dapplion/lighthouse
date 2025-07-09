@@ -173,10 +173,10 @@ impl RequestFilter {
         req: &BlocksByRootRequest,
         id: &BlocksByRootRequestId,
     ) -> bool {
-        if self.header_requests_only {
-            if !matches!(id.parent_request_id, BlocksByRootRequester::Header(_)) {
-                return false;
-            }
+        if self.header_requests_only
+            && !matches!(id.parent_request_id, BlocksByRootRequester::Header(_))
+        {
+            return false;
         }
 
         if let Some(block_root) = self.block_root {
@@ -640,7 +640,7 @@ impl TestRig {
                     .body()
                     .kzg_commitment_merkle_proof(blob_id.index as usize)
                     .unwrap();
-                let kzg_commitment = block
+                let kzg_commitment = *block
                     .message()
                     .body()
                     .blob_kzg_commitments()

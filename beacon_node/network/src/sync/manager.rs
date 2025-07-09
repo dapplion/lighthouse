@@ -39,7 +39,7 @@ use super::network_context::{
     CustodyRequestResult, RangeBlockComponent, RangeRequestId, RpcEvent, SyncNetworkContext,
 };
 use super::peer_sampling::{Sampling, SamplingConfig, SamplingResult};
-use super::peer_sync_info::{remote_sync_type, PeerSyncType};
+use super::peer_sync_info::PeerSyncType;
 use crate::network_beacon_processor::{
     ChainSegmentProcessId, NetworkBeaconProcessor, PeerGroupAction,
 };
@@ -278,7 +278,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 beacon_chain.clone(),
                 fork_context.clone(),
             ),
-            forward_sync: ForwardSync::new(beacon_chain.clone()),
+            forward_sync: ForwardSync::new(),
             backfill_sync: BackFillSync::new(beacon_chain.clone(), network_globals),
             notified_unknown_roots: LRUTimeCache::new(Duration::from_secs(
                 NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS,
@@ -355,8 +355,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         {
             self.add_peer_with_imported_block_root(peer_id, remote.head_root);
         }
-
-        let sync_type = remote_sync_type(&local, &remote, &self.chain);
 
         // TODO(tree-sync): Okay to add all peers to backfill sync? How can we know which have the
         // blocks we need?
@@ -615,7 +613,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     self.handle_new_execution_engine_state(engine_state);
                 }
                 _ = prune_lookups_interval.tick() => {
-                    self.forward_sync.prune();
+                    // TODO(tree-sync): should prune stuck lookups?
                 }
                 _ = prune_requests.tick() => {
                     self.prune_requests();
@@ -713,7 +711,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncMessage::GossipBlockProcessResult {
                 block_root,
                 imported,
-            } => self.forward_sync.prune_imported_block(block_root, imported),
+            } => {
+                // Not used
+            }
             SyncMessage::BatchProcessed { sync_type, result } => match sync_type {
                 ChainSegmentProcessId::ForwardSync(id) => {
                     self.forward_sync
@@ -1032,7 +1032,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         &mut self.network,
                     );
                 }
-                RangeRequestId::BackfillSync(id) => {
+                RangeRequestId::BackfillSync(_) => {
                     self.backfill_sync
                         .on_block_download_result(req_id, result, &mut self.network)
                 }

@@ -203,14 +203,12 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     pub fn peer_disconnected(&mut self, peer_id: &PeerId) {
         self.status.remove_peer(peer_id);
 
-        if self.status.peer_count() == 0 {
-            if self.state() == BackFillState::Syncing {
-                info!(
-                    "reason" = "insufficient_synced_peers",
-                    "Backfill sync paused"
-                );
-                self.set_state(BackFillState::Paused);
-            }
+        if self.status.peer_count() == 0 && self.state() == BackFillState::Syncing {
+            info!(
+                "reason" = "insufficient_synced_peers",
+                "Backfill sync paused"
+            );
+            self.set_state(BackFillState::Paused);
         }
     }
 
@@ -227,7 +225,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
 
     pub fn on_block_process_result(
         &mut self,
-        id: Id,
+        _id: Id,
         result: BatchProcessResult,
         cx: &mut SyncNetworkContext<T>,
     ) {

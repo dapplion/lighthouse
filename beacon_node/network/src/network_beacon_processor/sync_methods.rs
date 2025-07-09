@@ -128,7 +128,10 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 {
                     (imported_blocks, Ok(_)) => {
                         let ignored_blocks = sent_blocks - imported_blocks;
-                        metrics::inc_gauge(&metrics::SYNCING_CHAINS_IGNORED_BLOCKS);
+                        metrics::inc_counter_by(
+                            &metrics::SYNCING_CHAINS_IGNORED_BLOCKS,
+                            ignored_blocks as u64,
+                        );
                         debug!(
                             %id,
                             first_block_slot = start_slot,
