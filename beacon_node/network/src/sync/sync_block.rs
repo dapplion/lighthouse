@@ -20,6 +20,7 @@ const MAX_PROCESS_ATTEMPTS: usize = 5;
 pub struct SyncBlock<T: BeaconChainTypes> {
     id: RangeRequestId,
     block_root: Hash256,
+    block_slot: Slot,
     failed_peers: HashSet<PeerId>,
     // TODO(tree-sync): deprecate this shared state for manual addition and removal
     peers: Arc<RwLock<HashSet<PeerId>>>,
@@ -48,10 +49,16 @@ pub enum Error {
 }
 
 impl<T: BeaconChainTypes> SyncBlock<T> {
-    pub fn new(id: RangeRequestId, block_root: Hash256, initial_peers: &[PeerId]) -> Self {
+    pub fn new(
+        id: RangeRequestId,
+        block_root: Hash256,
+        block_slot: Slot,
+        initial_peers: &[PeerId],
+    ) -> Self {
         Self {
             id,
             block_root,
+            block_slot,
             failed_peers: <_>::default(),
             peers: Arc::new(RwLock::new(HashSet::from_iter(
                 initial_peers.iter().copied(),
@@ -64,6 +71,10 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
 
     pub fn block_root(&self) -> &Hash256 {
         &self.block_root
+    }
+
+    pub fn slot(&self) -> Slot {
+        self.block_slot
     }
 
     pub fn id(&self) -> RangeRequestId {
@@ -85,6 +96,10 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
 
     pub fn remove_peer(&self, peer: &PeerId) -> bool {
         self.peers.write().remove(peer)
+    }
+
+    pub fn is_syncing(&self) -> bool {
+        !matches!(self.request, SyncingStatus::AwaitingDownload)
     }
 
     #[cfg(test)]

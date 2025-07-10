@@ -107,6 +107,8 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             status: SyncBlock::new(
                 RangeRequestId::BackfillSync(0),
                 anchor_info.oldest_block_parent,
+                // TODO(tree-sync): not correct fetch the corrent slot
+                anchor_info.oldest_block_slot,
                 &[],
             ),
             restart_failed_sync: false,
@@ -252,9 +254,12 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     self.set_state(BackFillState::Completed);
                 } else {
                     let peers = self.status.clone_peers();
+                    // TODO(tree-sync): retrieve correct slot from fetching headers first
+                    let parent_block_slot = Slot::new(0);
                     self.status = SyncBlock::new(
                         RangeRequestId::BackfillSync(cx.next_id()),
                         parent_root,
+                        parent_block_slot,
                         &peers.into_iter().collect::<Vec<_>>(),
                     )
                 }

@@ -107,6 +107,12 @@ enum Status<T: BeaconChainTypes> {
     },
     /// Download and process block_roots from oldest ancestor to tip. Its list of block_roots does
     /// not grow, only removed block roots once processed.
+    ///
+    /// Note: Keeping block_roots and syncing_blocks in separate Vecs instead of a single Vec with
+    /// an enum shows the following invariants:
+    /// - The set of PendingBlocks is consecutive
+    /// - The set of SyncBlocks is consecutive
+    /// - The parent of the last item in `block_roots` is the first item in `syncing_blocks`
     ForwardSync {
         /// Sorting: tip first, oldest ancestor last
         block_roots: Vec<PendingBlock>,
@@ -251,6 +257,7 @@ impl<T: BeaconChainTypes> Chain<T> {
     /// `block_root`
     fn split_by(&mut self, block_root: Hash256) -> Result<Self, InternalError> {
         // TODO(tree-sync): Review this logic, it's sensitive and not trivial
+        // TODO(tree-sync): write a prop test for this, check milhouse tests as inspo
         let status = match &mut self.status {
             Status::BackfillHeaders {
                 block_roots,
@@ -301,8 +308,41 @@ impl<T: BeaconChainTypes> Chain<T> {
                     block_roots: new_block_roots,
                 }
             }
-            Status::ForwardSync { .. } => {
-                todo!("How to split a chain that's already syncing?");
+            Status::ForwardSync {
+                block_roots,
+                syncing_blocks,
+            } => {
+                // block_root may be in `block_roots` or in `syncing_blocks`.
+                let block_roots_idx = block_roots.iter().position(|b| b.0 == block_root);
+                let new_block_roots = if let Some(idx) = block_roots_idx {
+                    // ..= to keep the block_root on the left
+                    block_roots.drain(0..=idx).collect::<Vec<_>>()
+                } else {
+                    // `block_root` must be in `syncing_blocks` so the new splitted chain will have
+                    // no `block_roots` items.
+                    vec![]
+                };
+
+                let new_syncing_blocks = if block_roots_idx.is_some() {
+                    // If `block_root` is in `block_roots` all syncing_blocks go to the new chain
+                    std::mem::take(syncing_blocks)
+                } else {
+                    // else find the position
+                    let idx = syncing_blocks
+                        .iter()
+                        .position(|b| *b.block_root() == block_root)
+                        .ok_or(InternalError(format!(
+                            "block_root {block_root:?} not found in chain"
+                        )))?;
+                    // ..= to keep the block_root on the left
+                    syncing_blocks.drain(0..=idx).collect::<VecDeque<_>>()
+                };
+                // This chain remains ForwardSync
+                // New chain is ForwardSync with the splitted Vecs
+                Status::ForwardSync {
+                    block_roots: new_block_roots,
+                    syncing_blocks: new_syncing_blocks,
+                }
             }
         };
 
@@ -399,11 +439,21 @@ impl<T: BeaconChainTypes> Chain<T> {
     }
 
     fn min_slot(&self) -> Option<Slot> {
-        todo!();
+        match &self.status {
+            // TODO(tree-sync): include syncing_blocks for ForwardSync
+            Status::BackfillHeaders { block_roots, .. }
+            | Status::WaitingParentChain { block_roots, .. }
+            | Status::ForwardSync { block_roots, .. } => block_roots.last().map(|b| b.1),
+        }
     }
 
     fn max_slot(&self) -> Option<Slot> {
-        todo!();
+        match &self.status {
+            // TODO(tree-sync): include syncing_blocks for ForwardSync
+            Status::BackfillHeaders { block_roots, .. }
+            | Status::WaitingParentChain { block_roots, .. }
+            | Status::ForwardSync { block_roots, .. } => block_roots.first().map(|b| b.1),
+        }
     }
 
     fn syncing_blocks_count(&self) -> usize {
@@ -639,7 +689,10 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     pub fn max_slot_to_sync(&self) -> Option<Slot> {
         // TODO(tree-sync): weak metric, who have a better heuristic for sync? Now that lookups
         // count here
-        todo!();
+        self.chains
+            .values()
+            .filter_map(|chain| chain.max_slot())
+            .max()
     }
 
     /// Return all processing ids of syncing blocks
@@ -665,7 +718,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     }
 
     pub fn pause(&mut self) {
-        todo!();
+        // TODO(tree-sync): consider if we really need a pausing mechanism for when EL offline
     }
 
     /// Remove a disconnected peer from all chains
@@ -1042,6 +1095,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                             block_root: next_block.0,
                         }),
                         next_block.0,
+                        next_block.1,
                         &chain.peers.iter().copied().collect::<Vec<_>>(),
                     ));
                     blocks_syncing += 1;
