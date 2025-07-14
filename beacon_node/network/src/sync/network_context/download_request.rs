@@ -33,6 +33,10 @@ impl<I: std::fmt::Display + PartialEq, T> DownloadRequest<I, T> {
         }
     }
 
+    pub fn status_str(&self) -> &'static str {
+        (&self.status).into()
+    }
+
     pub fn is_awaiting_download(&self) -> bool {
         match self.status {
             Status::NotStarted => true,

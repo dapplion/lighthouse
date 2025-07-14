@@ -1181,10 +1181,11 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             // Only continue if the node was removed. This prevents infinite loops even if
             // `chain_to_children` items reference themselves
             if let Some(chain) = self.chains.remove(&chain_id) {
+                debug!(%chain_id, %initial_chain_id, reason, "Dropping forward sync chain");
                 metrics::inc_counter_vec(&metrics::SYNC_CHAINS_REMOVED, &[reason]);
                 for block_root in chain.iter_block_roots() {
                     self.block_to_tip.remove(block_root);
-                    debug!(?block_root, %chain_id, %initial_chain_id, reason, "Dropping forward sync block lookup");
+                    debug!(?block_root, %chain_id, %initial_chain_id, reason, "Dropping forward sync block");
                     metrics::inc_counter(&metrics::SYNC_FORWARD_BLOCKS_DROPPED);
                     // Only remove children if the node still existed
                     // Push its children‚Äîif any‚Äîonto the work list.
@@ -1256,6 +1257,42 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
         metrics::set_gauge(&metrics::SYNC_HEADERS_COUNT, self.block_to_tip.len() as i64);
         metrics::set_gauge(&metrics::SYNC_CHAINS_COUNT, self.chains.len() as i64);
+
+        for (chain_id, chain) in &self.chains {
+            let status = match &chain.status {
+                Status::BackfillHeaders {
+                    block_roots,
+                    next_header_request,
+                } => {
+                    format!(
+                        "block_roots {block_roots:?} next_header_request {} {} {}",
+                        next_header_request.id,
+                        next_header_request.block_root,
+                        next_header_request.request.status_str()
+                    )
+                }
+                Status::WaitingParentChain {
+                    parent_root,
+                    block_roots,
+                } => {
+                    format!("parent_root {parent_root:?} block_roots {block_roots:?}")
+                }
+                Status::ForwardSync {
+                    block_roots,
+                    syncing_blocks,
+                } => {
+                    format!(
+                        "block_roots {block_roots:?} syncing_blocks {:?}",
+                        syncing_blocks
+                            .iter()
+                            .map(|b| b.block_root())
+                            .collect::<Vec<_>>()
+                    )
+                }
+            };
+
+            debug!(%chain_id, peers = chain.peers.len(), status, "DEBUG chain");
+        }
 
         // Min header
         // Highest known header
