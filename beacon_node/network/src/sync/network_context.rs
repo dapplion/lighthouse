@@ -816,7 +816,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>> {
         let resp = self.blocks_by_root_requests.on_response(id, rpc_event);
-        self.on_rpc_response_result(id, "BlocksByRoot", resp, peer_id, |_| 1)
+        self.on_rpc_response_result(resp, peer_id)
     }
 
     /// Processes a single `RpcEvent` blobs_by_root RPC request.
@@ -829,7 +829,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         rpc_event: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<Vec<Arc<BlobSidecar<T::EthSpec>>>>> {
         let resp = self.blobs_by_root_requests.on_response(id, rpc_event);
-        self.on_rpc_response_result(id, "BlobsByRoot", resp, peer_id, |_| 1)
+        self.on_rpc_response_result(resp, peer_id)
     }
 
     /// Processes a single `RpcEvent` for a data_columns_by_root RPC request.
@@ -844,38 +844,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let resp = self
             .data_columns_by_root_requests
             .on_response(id, rpc_event);
-        self.on_rpc_response_result(id, "DataColumnsByRoot", resp, peer_id, |_| 1)
+        self.on_rpc_response_result(resp, peer_id)
     }
 
     /// Common logic for `on_*_response` handlers. Ensures we have consistent logging and metrics
     /// and peer reporting for all request types.
-    fn on_rpc_response_result<I: std::fmt::Display, R, F: FnOnce(&R) -> usize>(
+    fn on_rpc_response_result<R>(
         &mut self,
-        id: I,
-        method: &'static str,
         resp: Option<RpcResponseResult<R>>,
         peer_id: PeerId,
-        get_count: F,
     ) -> Option<RpcResponseResult<R>> {
-        match &resp {
-            None => {}
-            Some(Ok((v, _))) => {
-                debug!(
-                    %id,
-                    method,
-                    count = get_count(v),
-                    "Sync RPC request completed"
-                );
-            }
-            Some(Err(e)) => {
-                debug!(
-                    %id,
-                    method,
-                    error = ?e,
-                    "Sync RPC request error"
-                );
-            }
-        }
         if let Some(Err(RpcResponseError::VerifyError(e))) = &resp {
             self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
         }

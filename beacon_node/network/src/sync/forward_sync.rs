@@ -15,6 +15,7 @@ use lighthouse_network::service::api_types::{
 use lighthouse_network::PeerId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use strum::IntoStaticStr;
 use tracing::{debug, error};
 use types::{BeaconBlockHeader, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
@@ -599,7 +600,7 @@ impl<T: BeaconChainTypes> Chain<T> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, IntoStaticStr)]
 pub enum Error {
     /// Unexpected and unrecoverable error
     InternalError(String),
@@ -993,6 +994,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 // If the chain is empty, remove it
                 if chain.is_empty() {
                     self.chains.remove(&chain_id);
+                    debug!(%chain_id, "Removed completed chain");
                     metrics::inc_counter(&metrics::SYNC_CHAINS_REMOVED);
                 }
 
@@ -1018,6 +1020,10 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             debug!(?block_root, "Handling error for unknown block_root");
             return;
         };
+
+        debug!(%chain_id, ?block_root, ?error, "Dropping forward sync chain on error");
+        metrics::inc_counter_vec(&metrics::SYNC_CHAIN_ERROR_COUNT, &[(&error).into()]);
+
         match error {
             Error::InternalError(_) | Error::TooManyErrors(_) => {
                 let block_to_children = self
@@ -1147,7 +1153,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 metrics::inc_counter(&metrics::SYNC_CHAINS_REMOVED);
                 for block_root in chain.iter_block_roots() {
                     self.block_to_tip.remove(block_root);
-                    debug!(?block_root, id = %chain_id, "Dropping forward sync block lookup");
+                    debug!(?block_root, %chain_id, "Dropping forward sync block lookup");
                     metrics::inc_counter(&metrics::SYNC_FORWARD_BLOCKS_DROPPED);
                 }
                 // Only remove children if the node still existed

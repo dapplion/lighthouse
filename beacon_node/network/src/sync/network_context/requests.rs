@@ -5,6 +5,7 @@ use beacon_chain::validator_monitor::timestamp_now;
 use fnv::FnvHashMap;
 use lighthouse_network::PeerId;
 use strum::IntoStaticStr;
+use tracing::debug;
 use types::{Hash256, Slot};
 
 pub use blobs_by_root::BlobsByRootRequestItems;
@@ -58,7 +59,7 @@ enum State<T> {
     Errored,
 }
 
-impl<K: Eq + Hash, T: ActiveRequestItems> ActiveRequests<K, T> {
+impl<K: Copy + Eq + Hash + std::fmt::Display, T: ActiveRequestItems> ActiveRequests<K, T> {
     pub fn new(name: &'static str) -> Self {
         Self {
             requests: <_>::default(),
@@ -179,10 +180,24 @@ impl<K: Eq + Hash, T: ActiveRequestItems> ActiveRequests<K, T> {
             Ok((items, seen_timestamp, duration)) => {
                 metrics::inc_counter_vec(&metrics::SYNC_RPC_REQUEST_SUCCESSES, &[self.name]);
                 metrics::observe_timer_vec(&metrics::SYNC_RPC_REQUEST_TIME, &[self.name], duration);
+                debug!(
+                    %id,
+                    method = self.name,
+                    count = items.len(),
+                    "Sync RPC request completed"
+                );
+
                 Ok((items, seen_timestamp))
             }
             Err(e) => {
                 metrics::inc_counter_vec(&metrics::SYNC_RPC_REQUEST_ERRORS, &[self.name]);
+                debug!(
+                    %id,
+                    method = self.name,
+                    error = ?e,
+                    "Sync RPC request error"
+                );
+
                 Err(e)
             }
         })

@@ -540,6 +540,13 @@ pub static SYNC_CHAINS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
         "Current count of forward sync chains in memory",
     )
 });
+pub static SYNC_CHAIN_ERROR_COUNT: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+    try_create_int_counter_vec(
+        "sync_forward_chain_error_total",
+        "Total count of forward sync chain errors",
+        &["error"],
+    )
+});
 
 /*
  * Block Delay Metrics
