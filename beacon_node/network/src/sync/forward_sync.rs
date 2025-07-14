@@ -887,7 +887,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
             match response {
                 Ok((block, received)) => {
-                    debug!(%req_id, "Forward sync block header downloaded success");
+                    debug!(%req_id, %chain_id, "Forward sync block header downloaded success");
 
                     let block_header = block.message().block_header();
                     let parent_root = block_header.parent_root;
@@ -937,14 +937,15 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                         // Trigger potential foward sync for this chain
                         self.continue_requests(cx);
                     } else if let Some(parent_chain_id) = self.block_to_tip.get(&parent_root) {
-                        debug!(%chain_id, %parent_chain_id, ?parent_root, "Forward sync chain reached known block");
                         // Parent is part of another chain, stop search
                         // Stop search we reached a known block
                         chain.to_waiting_parent(parent_root)?;
+                        debug!(%chain_id, %parent_chain_id, ?parent_root, "Forward sync chain reached known block");
                         // TODO(tree-sync): Add peers recursively to the chain_id, potentially
                         // splitting the chain when adding peers.
                     } else {
                         chain.add_ancestor(block_header, cx.next_id())?;
+                        debug!(%chain_id, ?parent_root, "Forward sync chain continues fetching ancestor");
                         // Add to the block_to_tip mapping to respect the invariant "Each block
                         // root exists in exactly one `Chain::block_roots` list".
                         self.block_to_tip.insert(parent_root, *chain_id);
@@ -1040,12 +1041,13 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             return;
         };
 
-        debug!(%chain_id, ?block_root, ?error, "Dropping forward sync chain on error");
         metrics::inc_counter_vec(&metrics::SYNC_CHAIN_ERROR_COUNT, &[(&error).into()]);
 
         let block_to_children = self
             .compute_children()
             .expect("TODO: handle this error if it can't be avoided");
+        // TODO(tree-sync): logging `block_to_children` for debugging
+        debug!(%chain_id, ?block_root, ?error, ?block_to_children, "Dropping forward sync chain on error");
         self.drop_chain_and_children(chain_id, &block_to_children, (&error).into());
 
         match error {
@@ -1177,7 +1179,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 metrics::inc_counter_vec(&metrics::SYNC_CHAINS_REMOVED, &[reason]);
                 for block_root in chain.iter_block_roots() {
                     self.block_to_tip.remove(block_root);
-                    debug!(?block_root, %chain_id, reason, "Dropping forward sync block lookup");
+                    debug!(?block_root, %chain_id, %initial_chain_id, reason, "Dropping forward sync block lookup");
                     metrics::inc_counter(&metrics::SYNC_FORWARD_BLOCKS_DROPPED);
                 }
                 // Only remove children if the node still existed
