@@ -38,6 +38,11 @@ enum SyncingStatus<E: EthSpec> {
     Processing(RpcBlock<E>, BatchPeers, Instant),
 }
 
+pub enum OkToImport {
+    IfParentImported,
+    Bool(bool),
+}
+
 #[must_use]
 pub enum SyncBlockResult {
     Done { parent_root: Hash256, slot: Slot },
@@ -203,7 +208,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
     pub fn continue_request(
         &mut self,
         cx: &mut SyncNetworkContext<T>,
-        ok_to_import: bool,
+        ok_to_import: OkToImport,
     ) -> Result<(), Error> {
         match &mut self.request {
             SyncingStatus::AwaitingDownload => {
@@ -232,8 +237,20 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                 // from the beacon processor anyway. No need to add more code to handle this
                 // edge case faster.
 
-                if !ok_to_import {
-                    return Ok(());
+                match ok_to_import {
+                    OkToImport::IfParentImported => {
+                        if !cx
+                            .chain
+                            .block_is_known_to_fork_choice(&block.as_block().parent_root())
+                        {
+                            return Ok(());
+                        }
+                    }
+                    OkToImport::Bool(ok_to_import) => {
+                        if !ok_to_import {
+                            return Ok(());
+                        }
+                    }
                 }
 
                 if let Some(beacon_processor) = cx.beacon_processor_if_enabled() {

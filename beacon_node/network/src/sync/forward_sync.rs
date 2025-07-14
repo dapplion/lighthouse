@@ -4,7 +4,7 @@ use super::network_context::{
 };
 use crate::metrics;
 use crate::sync::network_context::{BatchPeers, RpcResponseResult};
-use crate::sync::sync_block::{Error as SyncBlockError, SyncBlock, SyncBlockResult};
+use crate::sync::sync_block::{Error as SyncBlockError, OkToImport, SyncBlock, SyncBlockResult};
 use crate::sync::BatchProcessResult;
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::BeaconChainTypes;
@@ -15,13 +15,14 @@ use lighthouse_network::service::api_types::{
 use lighthouse_network::PeerId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 use strum::IntoStaticStr;
 use tracing::{debug, error};
 use types::{BeaconBlockHeader, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 const MAX_LOOKUP_COUNT: usize = 1_000_000;
 const PRUNE_COUNT: usize = 100_000;
-const BLOCK_BUFFER_SIZE: usize = 2;
+const BLOCK_BUFFER_SIZE: usize = 4;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
 struct TipId(u32);
@@ -81,7 +82,7 @@ struct Chain<T: BeaconChainTypes> {
     status: Status<T>,
 }
 
-type PendingBlock = (Hash256, Slot, Id);
+type PendingBlock = (HeaderLookupId, Slot);
 
 #[allow(clippy::large_enum_variant)]
 enum Status<T: BeaconChainTypes> {
@@ -105,6 +106,8 @@ enum Status<T: BeaconChainTypes> {
         parent_root: Hash256,
         /// Sorting: tip first, oldest ancestor last
         block_roots: Vec<PendingBlock>,
+        /// True if the oldest ancestor can start downloading
+        ready_to_sync: bool,
     },
     /// Download and process block_roots from oldest ancestor to tip. Its list of block_roots does
     /// not grow, only removed block roots once processed.
@@ -115,10 +118,9 @@ enum Status<T: BeaconChainTypes> {
     /// - The set of SyncBlocks is consecutive
     /// - The parent of the last item in `block_roots` is the first item in `syncing_blocks`
     ForwardSync {
-        /// Sorting: tip first, oldest ancestor last
-        block_roots: Vec<PendingBlock>,
         /// Sorting: oldest ancestor first
-        syncing_blocks: VecDeque<SyncBlock<T>>,
+        block: SyncBlock<T>,
+        parent_root: Hash256,
     },
 }
 
@@ -221,7 +223,7 @@ impl<T: BeaconChainTypes> Chain<T> {
         match &self.status {
             Status::BackfillHeaders { .. } => None,
             Status::WaitingParentChain { parent_root, .. } => Some(*parent_root),
-            Status::ForwardSync { .. } => None,
+            Status::ForwardSync { parent_root, .. } => Some(*parent_root),
         }
     }
 
@@ -234,19 +236,13 @@ impl<T: BeaconChainTypes> Chain<T> {
             } => Some(
                 block_roots
                     .first()
-                    .map(|block| block.0)
+                    .map(|block| block.0.block_root)
                     .unwrap_or(next_header_request.block_root),
             ),
             Status::WaitingParentChain { block_roots, .. } => {
-                block_roots.first().map(|block| block.0)
+                block_roots.first().map(|block| block.0.block_root)
             }
-            Status::ForwardSync {
-                block_roots,
-                syncing_blocks,
-            } => block_roots
-                .first()
-                .map(|block| block.0)
-                .or_else(|| syncing_blocks.back().map(|block| *block.block_root())),
+            Status::ForwardSync { block, .. } => Some(*block.block_root()),
         }
     }
 
@@ -266,17 +262,20 @@ impl<T: BeaconChainTypes> Chain<T> {
                 let next_header_request =
                     std::mem::replace(next_header_request, HeaderRequest::empty());
 
-                let new_block_roots =
-                    if let Some(idx) = block_roots.iter().position(|b| b.0 == block_root) {
-                        // ..= to keep the block_root on the left
-                        block_roots.drain(0..=idx).collect::<Vec<_>>()
-                    } else {
-                        // TODO(tree-sync): check that block_root is the next_root or error
-                        vec![]
-                    };
+                let new_block_roots = if let Some(idx) = block_roots
+                    .iter()
+                    .position(|b| b.0.block_root == block_root)
+                {
+                    // ..= to keep the block_root on the left
+                    block_roots.drain(0..=idx).collect::<Vec<_>>()
+                } else {
+                    // TODO(tree-sync): check that block_root is the next_root or error
+                    vec![]
+                };
                 self.status = Status::WaitingParentChain {
                     parent_root: block_root,
                     block_roots,
+                    ready_to_sync: false,
                 };
                 Status::BackfillHeaders {
                     block_roots: new_block_roots,
@@ -286,61 +285,31 @@ impl<T: BeaconChainTypes> Chain<T> {
             Status::WaitingParentChain {
                 parent_root,
                 block_roots,
+                ready_to_sync,
             } => {
-                let idx =
-                    block_roots
-                        .iter()
-                        .position(|b| b.0 == block_root)
-                        .ok_or(InternalError(format!(
-                            "block_root {block_root:?} no in chain"
-                        )))?;
+                let idx = block_roots
+                    .iter()
+                    .position(|b| b.0.block_root == block_root)
+                    .ok_or(InternalError(format!(
+                        "block_root {block_root:?} no in chain"
+                    )))?;
                 // ..= to keep the block_root on the left
                 let new_block_roots = block_roots.drain(0..=idx).collect::<Vec<_>>();
                 let parent_root = *parent_root;
+                let ready_to_sync = *ready_to_sync;
                 self.status = Status::WaitingParentChain {
                     parent_root: block_root,
                     block_roots: std::mem::take(block_roots),
+                    ready_to_sync: false,
                 };
                 Status::WaitingParentChain {
                     parent_root,
                     block_roots: new_block_roots,
+                    ready_to_sync,
                 }
             }
-            Status::ForwardSync {
-                block_roots,
-                syncing_blocks,
-            } => {
-                // block_root may be in `block_roots` or in `syncing_blocks`.
-                let block_roots_idx = block_roots.iter().position(|b| b.0 == block_root);
-                let new_block_roots = if let Some(idx) = block_roots_idx {
-                    // ..= to keep the block_root on the left
-                    block_roots.drain(0..=idx).collect::<Vec<_>>()
-                } else {
-                    // `block_root` must be in `syncing_blocks` so the new splitted chain will have
-                    // no `block_roots` items.
-                    vec![]
-                };
-
-                let new_syncing_blocks = if block_roots_idx.is_some() {
-                    // If `block_root` is in `block_roots` all syncing_blocks go to the new chain
-                    std::mem::take(syncing_blocks)
-                } else {
-                    // else find the position
-                    let idx = syncing_blocks
-                        .iter()
-                        .position(|b| *b.block_root() == block_root)
-                        .ok_or(InternalError(format!(
-                            "block_root {block_root:?} not found in chain"
-                        )))?;
-                    // ..= to keep the block_root on the left
-                    syncing_blocks.drain(0..=idx).collect::<VecDeque<_>>()
-                };
-                // This chain remains ForwardSync
-                // New chain is ForwardSync with the splitted Vecs
-                Status::ForwardSync {
-                    block_roots: new_block_roots,
-                    syncing_blocks: new_syncing_blocks,
-                }
+            Status::ForwardSync { .. } => {
+                todo!("cannot split single block");
             }
         };
 
@@ -351,51 +320,12 @@ impl<T: BeaconChainTypes> Chain<T> {
         })
     }
 
-    /// If this chain is waiting for `block_root` it transitions to forward sync.
-    /// Returns true if the chain transitioned to ForwardSync
-    fn on_block_imported(&mut self, block_root: &Hash256) -> bool {
-        match &mut self.status {
+    /// Return true if this chain is awaiting `block_root`
+    fn is_waiting_parent(&self, block_root: &Hash256) -> bool {
+        match &self.status {
             Status::BackfillHeaders { .. } => false,
-            Status::WaitingParentChain {
-                block_roots,
-                parent_root,
-            } => {
-                if block_root == parent_root {
-                    self.status = Status::ForwardSync {
-                        block_roots: std::mem::take(block_roots),
-                        syncing_blocks: <_>::default(),
-                    };
-                    true
-                } else {
-                    false
-                }
-            }
+            Status::WaitingParentChain { parent_root, .. } => block_root == parent_root,
             Status::ForwardSync { .. } => false,
-        }
-    }
-
-    /// Transitions to forward sync
-    fn backfill_headers_to_forward_sync(
-        &mut self,
-        block: BeaconBlockHeader,
-    ) -> Result<(), InternalError> {
-        match &mut self.status {
-            Status::BackfillHeaders {
-                block_roots,
-                next_header_request,
-            } => {
-                block_roots.push((
-                    block.canonical_root(),
-                    block.slot,
-                    next_header_request.id.id,
-                ));
-                self.status = Status::ForwardSync {
-                    block_roots: std::mem::take(block_roots),
-                    syncing_blocks: <_>::default(),
-                };
-                Ok(())
-            }
-            _ => Err(InternalError("Not in BackfillHeaders state".to_string())),
         }
     }
 
@@ -403,10 +333,7 @@ impl<T: BeaconChainTypes> Chain<T> {
         match &self.status {
             Status::BackfillHeaders { block_roots, .. }
             | Status::WaitingParentChain { block_roots, .. } => block_roots.len(),
-            Status::ForwardSync {
-                block_roots,
-                syncing_blocks,
-            } => block_roots.len() + syncing_blocks.len(),
+            Status::ForwardSync { .. } => 1,
         }
     }
 
@@ -418,20 +345,12 @@ impl<T: BeaconChainTypes> Chain<T> {
                 next_header_request,
             } => Box::new(
                 std::iter::once(&next_header_request.block_root)
-                    .chain(block_roots.iter().map(|(root, _, _)| root)),
+                    .chain(block_roots.iter().map(|(id, _)| &id.block_root)),
             ),
             Status::WaitingParentChain { block_roots, .. } => {
-                Box::new(block_roots.iter().map(|(root, _, _)| root))
+                Box::new(block_roots.iter().map(|(id, _)| &id.block_root))
             }
-            Status::ForwardSync {
-                syncing_blocks,
-                block_roots,
-            } => Box::new(
-                syncing_blocks
-                    .iter()
-                    .map(|block| block.block_root())
-                    .chain(block_roots.iter().map(|(root, _, _)| root)),
-            ),
+            Status::ForwardSync { block, .. } => Box::new(std::iter::once(block.block_root())),
         }
     }
 
@@ -442,19 +361,17 @@ impl<T: BeaconChainTypes> Chain<T> {
 
     fn min_slot(&self) -> Option<Slot> {
         match &self.status {
-            // TODO(tree-sync): include syncing_blocks for ForwardSync
             Status::BackfillHeaders { block_roots, .. }
-            | Status::WaitingParentChain { block_roots, .. }
-            | Status::ForwardSync { block_roots, .. } => block_roots.last().map(|b| b.1),
+            | Status::WaitingParentChain { block_roots, .. } => block_roots.last().map(|b| b.1),
+            Status::ForwardSync { block, .. } => Some(block.slot()),
         }
     }
 
     fn max_slot(&self) -> Option<Slot> {
         match &self.status {
-            // TODO(tree-sync): include syncing_blocks for ForwardSync
             Status::BackfillHeaders { block_roots, .. }
-            | Status::WaitingParentChain { block_roots, .. }
-            | Status::ForwardSync { block_roots, .. } => block_roots.first().map(|b| b.1),
+            | Status::WaitingParentChain { block_roots, .. } => block_roots.first().map(|b| b.1),
+            Status::ForwardSync { block, .. } => Some(block.slot()),
         }
     }
 
@@ -462,7 +379,7 @@ impl<T: BeaconChainTypes> Chain<T> {
         match &self.status {
             Status::BackfillHeaders { .. } => 0,
             Status::WaitingParentChain { .. } => 0,
-            Status::ForwardSync { syncing_blocks, .. } => syncing_blocks.len(),
+            Status::ForwardSync { .. } => 1,
         }
     }
 
@@ -480,20 +397,13 @@ impl<T: BeaconChainTypes> Chain<T> {
         }
     }
 
-    fn add_ancestor(&mut self, block: BeaconBlockHeader, id: Id) -> Result<(), InternalError> {
+    fn add_ancestor(&mut self, parent_root: Hash256, id: Id) -> Result<(), InternalError> {
         match &mut self.status {
             Status::BackfillHeaders {
                 block_roots,
                 next_header_request,
             } => {
-                block_roots.push((
-                    // Should be the same as `next_header_request.block_root`
-                    block.canonical_root(),
-                    block.slot,
-                    // Persist the request ID of the header for better traceability
-                    next_header_request.id.id,
-                ));
-                *next_header_request = HeaderRequest::new(block.parent_root, id);
+                *next_header_request = HeaderRequest::new(parent_root, id);
                 Ok(())
             }
             _ => Err(InternalError(
@@ -502,13 +412,83 @@ impl<T: BeaconChainTypes> Chain<T> {
         }
     }
 
-    fn to_waiting_parent(&mut self, parent_root: Hash256) -> Result<(), Error> {
+    fn to_waiting_parent(
+        &mut self,
+        parent_root: Hash256,
+        ready_to_sync: bool,
+    ) -> Result<(), Error> {
         match &mut self.status {
             Status::BackfillHeaders { block_roots, .. } => {
                 self.status = Status::WaitingParentChain {
                     parent_root,
                     block_roots: std::mem::take(block_roots),
+                    ready_to_sync,
                 };
+                Ok(())
+            }
+            _ => Err(Error::InternalError(
+                "Expected lookup to be in DownloadingHeader state".to_owned(),
+            )),
+        }
+    }
+
+    fn pop_next_block_to_sync(&mut self) -> Option<Self> {
+        match &mut self.status {
+            Status::WaitingParentChain {
+                block_roots,
+                parent_root,
+                ready_to_sync,
+            } => {
+                if !*ready_to_sync {
+                    return None;
+                }
+                let Some(last_block) = block_roots.pop() else {
+                    return None;
+                };
+
+                let last_block_parent_root = *parent_root;
+                *parent_root = last_block.0.block_root;
+
+                let block = SyncBlock::new(
+                    // Reuse the request ID of the header for better traceability
+                    RangeRequestId::ForwardSync(last_block.0),
+                    last_block.0.block_root,
+                    last_block.1,
+                    &self.peers.iter().copied().collect::<Vec<_>>(),
+                );
+
+                Some(Self {
+                    peers: self.peers.clone(),
+                    status: Status::ForwardSync {
+                        block,
+                        parent_root: last_block_parent_root,
+                    },
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn on_header_download(
+        &mut self,
+        req_id: BlocksByRootRequestId,
+        block: BeaconBlockHeader,
+    ) -> Result<(), Error> {
+        match &mut self.status {
+            Status::BackfillHeaders {
+                next_header_request,
+                block_roots,
+            } => {
+                // Call `on_download_success` to assert that the req_id is the expected on
+                next_header_request.request.on_download_success(
+                    req_id,
+                    PeerId::random(),
+                    block.clone(),
+                    Duration::from_secs(0),
+                )?;
+                // Add the downloaded block
+                // Persist the request ID of the header for better traceability
+                block_roots.push((next_header_request.id, block.slot));
                 Ok(())
             }
             _ => Err(Error::InternalError(
@@ -523,9 +503,9 @@ impl<T: BeaconChainTypes> Chain<T> {
         result: Result<(RpcBlock<T::EthSpec>, BatchPeers), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), Error> {
-        let (ok_to_import, block) = self.block_request(req_id.requester)?;
+        let block = self.block_request(req_id.requester)?;
         block.on_download_result(req_id, result, cx)?;
-        block.continue_request(cx, ok_to_import)?;
+        block.continue_request(cx, OkToImport::IfParentImported)?;
         Ok(())
     }
 
@@ -536,45 +516,31 @@ impl<T: BeaconChainTypes> Chain<T> {
         result: BatchProcessResult,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<SyncBlockResult, Error> {
-        let (ok_to_import, block) = self.block_request(RangeRequestId::ForwardSync(id))?;
+        let block = self.block_request(RangeRequestId::ForwardSync(id))?;
         match block.on_process_result(result, cx)? {
             SyncBlockResult::Done { parent_root, slot } => {
-                // Sanity check: the processed block must be the oldest block in the chain
-                if !ok_to_import {
-                    return Err(Error::InternalError(format!(
-                        "Block {id} is not the first block"
-                    )));
-                }
-                // This block processing is complete, remove it from chain
-                if let Status::ForwardSync { syncing_blocks, .. } = &mut self.status {
-                    if let Some(block) = syncing_blocks.pop_front() {
-                        debug!("Dropping syncing block {}", block.id());
-                    } else {
-                        return Err(Error::InternalError("syncing_blocks is empty".to_string()));
-                    }
-                }
+                // Single block, drop the chain
                 Ok(SyncBlockResult::Done { parent_root, slot })
             }
             SyncBlockResult::Wait => {
                 // Not complete yet, continue requests
-                block.continue_request(cx, ok_to_import)?;
+                block.continue_request(cx, OkToImport::IfParentImported)?;
                 Ok(SyncBlockResult::Wait)
             }
         }
     }
 
-    fn block_request(&mut self, id: RangeRequestId) -> Result<(bool, &mut SyncBlock<T>), Error> {
+    fn block_request(&mut self, id: RangeRequestId) -> Result<&mut SyncBlock<T>, Error> {
         match &mut self.status {
-            Status::ForwardSync { syncing_blocks, .. } => {
-                if let Some(index) = syncing_blocks.iter().position(|b| b.id() == id) {
-                    let block = syncing_blocks.get_mut(index).expect("index just found");
-                    return Ok((index == 0, block));
+            Status::ForwardSync { block, .. } => {
+                if block.id() == id {
+                    Ok(block)
+                } else {
+                    Err(Error::InternalError(format!(
+                        "Unknown block for {id} current ID {}",
+                        block.id(),
+                    )))
                 }
-
-                let first_ids: Vec<_> = syncing_blocks.iter().take(5).map(|b| b.id()).collect();
-                Err(Error::InternalError(format!(
-                    "Unknown block for {id}, first few blocks {first_ids:?}"
-                )))
             }
             _ => Err(Error::InternalError(
                 "Expected lookup to be in Syncing state".to_owned(),
@@ -590,11 +556,8 @@ impl<T: BeaconChainTypes> Chain<T> {
                 ..
             } => Ok(next_header_request.continue_request(&self.peers, cx)?),
             Status::WaitingParentChain { .. } => Ok(()),
-            Status::ForwardSync { syncing_blocks, .. } => {
-                for (index, block) in syncing_blocks.iter_mut().enumerate() {
-                    let ok_to_import = index == 0;
-                    block.continue_request(cx, ok_to_import)?;
-                }
+            Status::ForwardSync { block, .. } => {
+                block.continue_request(cx, OkToImport::IfParentImported)?;
                 Ok(())
             }
         }
@@ -705,12 +668,10 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             match &chain.status {
                 Status::BackfillHeaders { .. } => {}
                 Status::WaitingParentChain { .. } => {}
-                Status::ForwardSync { syncing_blocks, .. } => {
-                    for block in syncing_blocks {
-                        if block.is_processing() {
-                            if let RangeRequestId::ForwardSync(id) = block.id() {
-                                ids.push(id);
-                            }
+                Status::ForwardSync { block, .. } => {
+                    if block.is_processing() {
+                        if let RangeRequestId::ForwardSync(id) = block.id() {
+                            ids.push(id);
                         }
                     }
                 }
@@ -780,15 +741,10 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
                     // Update all block references to the new chain
                     for block_root in new_chain.iter_block_roots() {
-                        *self
-                            .block_to_tip
-                            .get_mut(block_root)
-                            .ok_or(InternalError(format!("No block {block_root:?}")))? =
-                            new_chain_id;
+                        self.block_to_tip.insert(*block_root, new_chain_id);
                     }
 
-                    self.chains.insert(new_chain_id, new_chain);
-                    self.chains.get_mut(&new_chain_id).expect("key just added")
+                    self.chains.entry(new_chain_id).or_insert(new_chain)
                 } else {
                     chain
                 };
@@ -888,12 +844,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     let block_header = block.message().block_header();
                     let parent_root = block_header.parent_root;
 
-                    chain.header_request()?.on_download_success(
-                        req_id,
-                        peer_id,
-                        block_header.clone(),
-                        received,
-                    )?;
+                    chain.on_header_download(req_id, block_header.clone())?;
 
                     metrics::inc_counter(&metrics::SYNC_HEADERS_DOWNLOADED);
                     debug!(%req_id, %chain_id, "Forward sync block header downloaded success");
@@ -929,19 +880,19 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     if cx.chain.block_is_known_to_fork_choice(&parent_root) {
                         // Parent is imported, we can forward sync this chain
                         // Stop search we reached a known block
-                        chain.backfill_headers_to_forward_sync(block_header)?;
+                        chain.to_waiting_parent(parent_root, true)?;
                         debug!(%chain_id, ?parent_root, block_count = chain.block_count(), "Forward sync chain reached imported block");
                         // Trigger potential foward sync for this chain
                         self.continue_requests(cx);
                     } else if let Some(parent_chain_id) = self.block_to_tip.get(&parent_root) {
                         // Parent is part of another chain, stop search
                         // Stop search we reached a known block
-                        chain.to_waiting_parent(parent_root)?;
+                        chain.to_waiting_parent(parent_root, false)?;
                         debug!(%chain_id, %parent_chain_id, ?parent_root, "Forward sync chain reached known block");
                         // TODO(tree-sync): Add peers recursively to the chain_id, potentially
                         // splitting the chain when adding peers.
                     } else {
-                        chain.add_ancestor(block_header, cx.next_id())?;
+                        chain.add_ancestor(block_header.parent_root, cx.next_id())?;
                         debug!(%chain_id, ?parent_root, "Forward sync chain continues fetching ancestor");
                         // Add to the block_to_tip mapping to respect the invariant "Each block
                         // root exists in exactly one `Chain::block_roots` list".
@@ -987,6 +938,8 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
         if let Err(e) = chain.on_download_result(req_id, result, cx) {
             self.handle_error(id.block_root, e);
+            // Some syncing blocks may have been dropped so there's space for new chains to sync
+            self.continue_requests(cx);
         }
     }
 
@@ -1012,16 +965,14 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             Ok(SyncBlockResult::Done { .. }) => {
                 metrics::inc_counter(&metrics::SYNC_BLOCKS_PROCESSED);
                 self.block_to_tip.remove(&id.block_root);
-                // If the chain is empty, remove it
-                if chain.is_empty() {
-                    self.chains.remove(&chain_id);
-                    debug!(%chain_id, "Removed completed chain");
-                    metrics::inc_counter_vec(&metrics::SYNC_CHAINS_REMOVED, &["completed"]);
-                }
+                // ForwardSync chains have a single block, remove them on Done
+                self.chains.remove(&chain_id);
+                debug!(%id, %chain_id, "Removed completed chain");
+                metrics::inc_counter_vec(&metrics::SYNC_CHAINS_REMOVED, &["completed"]);
 
                 // Find all chains that are awaiting this block to process and continue them
                 for other_chain in self.chains.values_mut() {
-                    if other_chain.on_block_imported(&id.block_root) {
+                    if other_chain.is_waiting_parent(&id.block_root) {
                         debug!(
                             %chain_id,
                             parent_root = ?id.block_root,
@@ -1035,6 +986,8 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             Ok(SyncBlockResult::Wait) => {}
             Err(e) => {
                 self.handle_error(id.block_root, e);
+                // Some syncing blocks may have been dropped so there's space for new chains to sync
+                self.continue_requests(cx);
             }
         }
     }
@@ -1081,17 +1034,20 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
         // TODO(tree-sync): don't build on demand, cache roots somewhere
 
-        let mut blocks_syncing = self
-            .chains
-            .values()
-            .map(|chain| chain.syncing_blocks_count())
-            .sum::<usize>();
+        let new_blocks_to_sync = BLOCK_BUFFER_SIZE.saturating_sub(
+            self.chains
+                .values()
+                .map(|chain| chain.syncing_blocks_count())
+                .sum::<usize>(),
+        );
+
+        if new_blocks_to_sync == 0 {
+            return;
+        }
 
         // A chain can be in two states:
         // - Active backfill
         // - Oldest ancestor known
-
-        let mut new_syncing_blocks = false;
 
         // Have up to 2 blocks syncing
         // Find the block range with most peers and highest slot. This is the block
@@ -1100,44 +1056,36 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             .chains
             .iter_mut()
             .filter_map(|(_, chain)| {
-                if matches!(chain.status, Status::ForwardSync { .. }) {
+                if matches!(chain.status, Status::WaitingParentChain { .. }) {
                     Some((chain.peer_count(), chain))
                 } else {
                     None
                 }
             })
             .collect::<Vec<_>>();
-
         chains_by_peer_count.sort_by_key(|(peer_count, _)| *peer_count);
 
-        for (_, chain) in chains_by_peer_count {
-            if let Status::ForwardSync {
-                block_roots,
-                syncing_blocks,
-            } = &mut chain.status
-            {
-                // block_roots sorting: tip first, oldest ancestor last => pop
-                if let Some(next_block) = block_roots.pop() {
-                    syncing_blocks.push_back(SyncBlock::new(
-                        RangeRequestId::ForwardSync(HeaderLookupId {
-                            // Reuse the request ID of the header for better traceability
-                            id: next_block.2,
-                            block_root: next_block.0,
-                        }),
-                        next_block.0,
-                        next_block.1,
-                        &chain.peers.iter().copied().collect::<Vec<_>>(),
-                    ));
-                    blocks_syncing += 1;
-                    new_syncing_blocks = true;
-                    if blocks_syncing >= BLOCK_BUFFER_SIZE {
-                        break;
-                    }
+        let mut new_chains = vec![];
+
+        'o: for (id, chain) in chains_by_peer_count {
+            while let Some(new_chain) = chain.pop_next_block_to_sync() {
+                let new_chain_id = TipId(cx.next_id());
+                // Update all block references to the new chain
+                for block_root in new_chain.iter_block_roots() {
+                    self.block_to_tip.insert(*block_root, new_chain_id);
+                    debug!(%new_chain_id, ?block_root, "Transitioned block to forward sync");
+                }
+                new_chains.push((new_chain_id, new_chain));
+                if new_chains.len() >= new_blocks_to_sync {
+                    break 'o;
                 }
             }
         }
 
-        if new_syncing_blocks {
+        if !new_chains.is_empty() {
+            for (chain_id, chain) in new_chains {
+                self.chains.insert(chain_id, chain);
+            }
             self.continue_requests(cx);
         }
     }
@@ -1265,7 +1213,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     next_header_request,
                 } => {
                     format!(
-                        "block_roots {block_roots:?} next_header_request {} {} {}",
+                        "BackfillHeaders block_roots {block_roots:?} next_header_request {} {} {}",
                         next_header_request.id,
                         next_header_request.block_root,
                         next_header_request.request.status_str()
@@ -1274,20 +1222,12 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 Status::WaitingParentChain {
                     parent_root,
                     block_roots,
+                    ready_to_sync,
                 } => {
-                    format!("parent_root {parent_root:?} block_roots {block_roots:?}")
+                    format!("WaitingParentChain ready_to_sync {ready_to_sync} parent_root {parent_root:?} block_roots {block_roots:?}")
                 }
-                Status::ForwardSync {
-                    block_roots,
-                    syncing_blocks,
-                } => {
-                    format!(
-                        "block_roots {block_roots:?} syncing_blocks {:?}",
-                        syncing_blocks
-                            .iter()
-                            .map(|b| b.block_root())
-                            .collect::<Vec<_>>()
-                    )
+                Status::ForwardSync { block, .. } => {
+                    format!("ForwardSync sync_block {:?}", block.block_root())
                 }
             };
 

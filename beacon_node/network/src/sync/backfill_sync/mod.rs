@@ -12,7 +12,7 @@ use crate::sync::manager::BatchProcessResult;
 use crate::sync::network_context::{
     BatchPeers, RangeRequestId, RpcResponseError, SyncNetworkContext,
 };
-use crate::sync::sync_block::{Error as SyncBlockError, SyncBlock, SyncBlockResult};
+use crate::sync::sync_block::{Error as SyncBlockError, OkToImport, SyncBlock, SyncBlockResult};
 use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::service::api_types::{ComponentsByRootRequestId, Id};
@@ -238,7 +238,9 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     fn continue_syncing_blocks(&mut self, cx: &mut SyncNetworkContext<T>) {
         // TODO(tree-sync): only ok to import the newest block
         let ok_to_import = true;
-        let outcome = self.status.continue_request(cx, ok_to_import);
+        let outcome = self
+            .status
+            .continue_request(cx, OkToImport::Bool(ok_to_import));
         self.handle_outcome(outcome.map(|_| SyncBlockResult::Wait), cx);
     }
 
