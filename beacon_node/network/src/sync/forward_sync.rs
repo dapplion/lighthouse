@@ -742,7 +742,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         if !chains_to_remove.is_empty() {
             let chain_to_children = self.compute_children()?;
             for chain_id in chains_to_remove {
-                self.drop_chain_and_children(chain_id, &chain_to_children);
+                self.drop_chain_and_children(chain_id, &chain_to_children, "no_peers");
             }
         }
         Ok(())
@@ -1014,7 +1014,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 if chain.is_empty() {
                     self.chains.remove(&chain_id);
                     debug!(%chain_id, "Removed completed chain");
-                    metrics::inc_counter(&metrics::SYNC_CHAINS_REMOVED);
+                    metrics::inc_counter_vec(&metrics::SYNC_CHAINS_REMOVED, &["completed"]);
                 }
 
                 // Find all chains that are awaiting this block to process and continue them
@@ -1043,18 +1043,16 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         debug!(%chain_id, ?block_root, ?error, "Dropping forward sync chain on error");
         metrics::inc_counter_vec(&metrics::SYNC_CHAIN_ERROR_COUNT, &[(&error).into()]);
 
+        let block_to_children = self
+            .compute_children()
+            .expect("TODO: handle this error if it can't be avoided");
+        self.drop_chain_and_children(chain_id, &block_to_children, (&error).into());
+
         match error {
             Error::InternalError(_) | Error::TooManyErrors(_) => {
-                let block_to_children = self
-                    .compute_children()
-                    .expect("TODO: handle this error if it can't be avoided");
-                self.drop_chain_and_children(chain_id, &block_to_children);
+                //
             }
             Error::BlockConflictsWithFinality(_e) => {
-                let block_to_children = self
-                    .compute_children()
-                    .expect("TODO: handle this error if it can't be avoided");
-                self.drop_chain_and_children(chain_id, &block_to_children);
                 // TODO(tree-sync): penalize peers of this lookups
                 // TODO(tree-sync): add blocks to a failed cache to prevent re-sync
             }
@@ -1141,20 +1139,26 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         // TODO(tree-sync): optimize this call to maybe not do it everytime
         self.trigger_forward_sync(cx);
 
-        let mut chains_to_drop = vec![];
+        let chains_to_drop = self
+            .chains
+            .iter_mut()
+            .filter_map(|(chain_id, chain)| {
+                if let Err(e) = chain.continue_requests(cx) {
+                    // TODO(tree-sync): should log error?
+                    Some((*chain_id, e))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
 
-        for (chain_id, chain) in self.chains.iter_mut() {
-            if let Err(_e) = chain.continue_requests(cx) {
-                // TODO(tree-sync): should log error?
-                chains_to_drop.push(*chain_id);
+        if !chains_to_drop.is_empty() {
+            let chain_to_children = self
+                .compute_children()
+                .expect("Handle this error if it can't be avoided");
+            for (chain_id, e) in chains_to_drop {
+                self.drop_chain_and_children(chain_id, &chain_to_children, e.into());
             }
-        }
-
-        let chain_to_children = self
-            .compute_children()
-            .expect("Handle this error if it can't be avoided");
-        for chain_id in chains_to_drop {
-            self.drop_chain_and_children(chain_id, &chain_to_children);
         }
     }
 
@@ -1163,16 +1167,17 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         &mut self,
         initial_chain_id: TipId,
         chain_to_children: &HashMap<TipId, Vec<TipId>>,
+        reason: &'static str,
     ) {
         let mut queue: VecDeque<TipId> = VecDeque::from([initial_chain_id]);
 
         while let Some(chain_id) = queue.pop_front() {
             // Remove the node itself.
             if let Some(chain) = self.chains.remove(&chain_id) {
-                metrics::inc_counter(&metrics::SYNC_CHAINS_REMOVED);
+                metrics::inc_counter_vec(&metrics::SYNC_CHAINS_REMOVED, &[reason]);
                 for block_root in chain.iter_block_roots() {
                     self.block_to_tip.remove(block_root);
-                    debug!(?block_root, %chain_id, "Dropping forward sync block lookup");
+                    debug!(?block_root, %chain_id, reason, "Dropping forward sync block lookup");
                     metrics::inc_counter(&metrics::SYNC_FORWARD_BLOCKS_DROPPED);
                 }
                 // Only remove children if the node still existed
@@ -1217,7 +1222,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
         let chain_to_children = self.compute_children()?;
         for (_, chain_id) in chains {
-            self.drop_chain_and_children(chain_id, &chain_to_children);
+            self.drop_chain_and_children(chain_id, &chain_to_children, "too_many_blocks");
             if self.block_to_tip.len() < MAX_LOOKUP_COUNT - PRUNE_COUNT {
                 break;
             }

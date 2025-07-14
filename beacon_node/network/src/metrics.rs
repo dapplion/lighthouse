@@ -403,10 +403,11 @@ pub static SYNCING_CHAINS_COUNT: LazyLock<Result<IntGaugeVec>> = LazyLock::new(|
         &["range_type"],
     )
 });
-pub static SYNC_CHAINS_REMOVED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
-    try_create_int_counter(
+pub static SYNC_CHAINS_REMOVED: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+    try_create_int_counter_vec(
         "sync_removed_chains_total",
         "Total count of forward sync chains removed",
+        &["reason"],
     )
 });
 pub static SYNC_CHAINS_ADDED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
