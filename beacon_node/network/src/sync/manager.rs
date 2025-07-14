@@ -343,6 +343,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             finalized_root: status.finalized_root,
         };
 
+        // Handle race condition where peer may disconnect between the peer manager sending the
+        // AddPeer message and sync handling a subsequent Disconnect message
+        if !self.network_globals().peers.read().is_connected(&peer_id) {
+            debug!(%peer_id, "Ignoring AddPeer message for already disconnected peer");
+            return;
+        }
+
         // Search for any block that is unknown and more recent than finality
         // TODO(tree-sync): we could prioritize the finalized_root if it's unknown as a way to
         // detect finalized sync
