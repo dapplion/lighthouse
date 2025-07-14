@@ -421,7 +421,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
 
         // Remove peer from all data structures
         self.backfill_sync.peer_disconnected(peer_id);
-        self.forward_sync.remove_peer(*peer_id);
+        if let Err(e) = self.forward_sync.remove_peer(*peer_id) {
+            error!("Error removing peer from forward sync {peer_id} {e:?}");
+        }
 
         // Regardless of the outcome, we update the sync status.
         self.update_sync_state();

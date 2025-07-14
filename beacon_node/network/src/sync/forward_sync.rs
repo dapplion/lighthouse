@@ -723,10 +723,29 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     }
 
     /// Remove a disconnected peer from all chains
-    pub fn remove_peer(&mut self, peer: PeerId) {
-        for chain in self.chains.values_mut() {
-            chain.remove_peer(&peer);
+    pub fn remove_peer(&mut self, peer: PeerId) -> Result<(), Error> {
+        let chains_to_remove = self
+            .chains
+            .iter_mut()
+            .filter_map(|(chain_id, chain)| {
+                chain.remove_peer(&peer);
+                // TODO(tree-sync): research if it actually useful to keep chains with zero peers for
+                // some time.
+                if chain.peer_count() == 0 {
+                    Some(*chain_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if !chains_to_remove.is_empty() {
+            let chain_to_children = self.compute_children()?;
+            for chain_id in chains_to_remove {
+                self.drop_chain_and_children(chain_id, &chain_to_children);
+            }
         }
+        Ok(())
     }
 
     /// A set of peers claim to have imported a block_root. Create a new lookup for it or add them
