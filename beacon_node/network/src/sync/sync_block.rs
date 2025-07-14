@@ -1,4 +1,5 @@
 use super::network_context::{RpcRequestSendError, RpcResponseError, SyncNetworkContext};
+use crate::metrics;
 use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::sync::network_context::BatchPeers;
 use crate::sync::BatchProcessResult;
@@ -9,6 +10,7 @@ use lighthouse_network::PeerId;
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::debug;
 use types::{EthSpec, Hash256, Slot};
 
@@ -31,9 +33,9 @@ pub struct SyncBlock<T: BeaconChainTypes> {
 
 enum SyncingStatus<E: EthSpec> {
     AwaitingDownload,
-    Downloading(ComponentsByRootRequestId),
-    AwaitingProcessing(RpcBlock<E>, BatchPeers),
-    Processing(RpcBlock<E>, BatchPeers),
+    Downloading(ComponentsByRootRequestId, Instant),
+    AwaitingProcessing(RpcBlock<E>, BatchPeers, Instant),
+    Processing(RpcBlock<E>, BatchPeers, Instant),
 }
 
 #[must_use]
@@ -114,7 +116,11 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
         _cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), Error> {
         match &mut self.request {
-            SyncingStatus::Downloading(expected_id) => {
+            SyncingStatus::Downloading(expected_id, start_time) => {
+                metrics::observe_duration(
+                    &metrics::SYNC_BLOCK_DOWNLOADING_TIME,
+                    start_time.elapsed(),
+                );
                 if req_id != *expected_id {
                     return Err(Error::InternalError(format!(
                         "Unexpected request ID {} != {}",
@@ -124,7 +130,8 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                 match result {
                     Ok((block, peers)) => {
                         debug!(id = %self.id, "Sync block downloaded");
-                        self.request = SyncingStatus::AwaitingProcessing(block, peers);
+                        self.request =
+                            SyncingStatus::AwaitingProcessing(block, peers, Instant::now());
                         Ok(())
                     }
                     Err(e) => {
@@ -152,33 +159,39 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<SyncBlockResult, Error> {
         match &mut self.request {
-            SyncingStatus::Processing(block, peers) => match result {
-                BatchProcessResult::Success => {
-                    debug!(id = %self.id, "Sync block process success");
-                    Ok(SyncBlockResult::Done {
-                        parent_root: block.as_block().parent_root(),
-                        slot: block.as_block().slot(),
-                    })
-                }
-                BatchProcessResult::Failure { peer_action, error } => {
-                    debug!(id = %self.id, error, "Sync block process error");
+            SyncingStatus::Processing(block, peers, start_time) => {
+                metrics::observe_duration(
+                    &metrics::SYNC_BLOCK_PROCESSING_TIME,
+                    start_time.elapsed(),
+                );
+                match result {
+                    BatchProcessResult::Success => {
+                        debug!(id = %self.id, "Sync block process success");
+                        Ok(SyncBlockResult::Done {
+                            parent_root: block.as_block().parent_root(),
+                            slot: block.as_block().slot(),
+                        })
+                    }
+                    BatchProcessResult::Failure { peer_action, error } => {
+                        debug!(id = %self.id, error, "Sync block process error");
 
-                    if let Some(peer_action) = peer_action {
-                        for (peer, penalty) in peers.blame(peer_action) {
-                            cx.report_peer(peer, penalty, "faulty_batch");
-                            self.failed_peers.insert(peer);
+                        if let Some(peer_action) = peer_action {
+                            for (peer, penalty) in peers.blame(peer_action) {
+                                cx.report_peer(peer, penalty, "faulty_batch");
+                                self.failed_peers.insert(peer);
+                            }
                         }
-                    }
 
-                    self.process_errors += 1;
-                    if self.process_errors > MAX_PROCESS_ATTEMPTS {
-                        return Err(Error::TooManyErrors("process errors".to_owned()));
-                    }
+                        self.process_errors += 1;
+                        if self.process_errors > MAX_PROCESS_ATTEMPTS {
+                            return Err(Error::TooManyErrors("process errors".to_owned()));
+                        }
 
-                    self.request = SyncingStatus::AwaitingDownload;
-                    Ok(SyncBlockResult::Wait)
+                        self.request = SyncingStatus::AwaitingDownload;
+                        Ok(SyncBlockResult::Wait)
+                    }
                 }
-            },
+            }
             _ => Err(Error::InternalError(
                 "Lookup not in expected state Processing".to_owned(),
             )),
@@ -201,7 +214,7 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                     &self.failed_peers,
                 ) {
                     Ok(req_id) => {
-                        self.request = SyncingStatus::Downloading(req_id);
+                        self.request = SyncingStatus::Downloading(req_id, Instant::now());
                         Ok(())
                     }
                     Err(e) => match e {
@@ -213,8 +226,8 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                     },
                 }
             }
-            SyncingStatus::Downloading(_) => Ok(()),
-            SyncingStatus::AwaitingProcessing(block, peers) => {
+            SyncingStatus::Downloading(..) => Ok(()),
+            SyncingStatus::AwaitingProcessing(block, peers, start_time) => {
                 // No need to check if block is already imported here, we'll get an error
                 // from the beacon processor anyway. No need to add more code to handle this
                 // edge case faster.
@@ -234,7 +247,13 @@ impl<T: BeaconChainTypes> SyncBlock<T> {
                             "Error sending block to processor: {e:?}"
                         )))
                     } else {
-                        self.request = SyncingStatus::Processing(block.clone(), peers.clone());
+                        metrics::observe_duration(
+                            &metrics::SYNC_BLOCK_AWAITING_PROCESSING_TIME,
+                            start_time.elapsed(),
+                        );
+
+                        self.request =
+                            SyncingStatus::Processing(block.clone(), peers.clone(), Instant::now());
                         Ok(())
                     }
                 } else {

@@ -547,6 +547,27 @@ pub static SYNC_CHAIN_ERROR_COUNT: LazyLock<Result<IntCounterVec>> = LazyLock::n
         &["error"],
     )
 });
+pub static SYNC_BLOCK_DOWNLOADING_TIME: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram_with_buckets(
+        "sync_block_downloading_time_seconds",
+        "Time to complete SyncBlock Downloading state",
+        decimal_buckets(-3, -1),
+    )
+});
+pub static SYNC_BLOCK_AWAITING_PROCESSING_TIME: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram_with_buckets(
+        "sync_block_awaiting_processing_time_seconds",
+        "Time to complete SyncBlock AwaitingProcessing state",
+        decimal_buckets(-3, -1),
+    )
+});
+pub static SYNC_BLOCK_PROCESSING_TIME: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram_with_buckets(
+        "sync_block_processing_time_seconds",
+        "Time to complete SyncBlock Processing state",
+        decimal_buckets(-3, -1),
+    )
+});
 
 /*
  * Block Delay Metrics
