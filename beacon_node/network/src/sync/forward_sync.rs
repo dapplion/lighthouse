@@ -219,10 +219,7 @@ impl<T: BeaconChainTypes> Chain<T> {
     /// already processing = its parent has already been imported.
     fn parent_root(&self) -> Option<Hash256> {
         match &self.status {
-            Status::BackfillHeaders {
-                next_header_request,
-                ..
-            } => Some(next_header_request.block_root),
+            Status::BackfillHeaders { .. } => None,
             Status::WaitingParentChain { parent_root, .. } => Some(*parent_root),
             Status::ForwardSync { .. } => None,
         }
@@ -723,7 +720,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     }
 
     /// Remove a disconnected peer from all chains
-    pub fn remove_peer(&mut self, peer: PeerId) -> Result<(), Error> {
+    pub fn remove_peer(&mut self, peer: PeerId) {
         let chains_to_remove = self
             .chains
             .iter_mut()
@@ -740,12 +737,11 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             .collect::<Vec<_>>();
 
         if !chains_to_remove.is_empty() {
-            let chain_to_children = self.compute_children()?;
+            let chain_to_children = self.compute_children();
             for chain_id in chains_to_remove {
                 self.drop_chain_and_children(chain_id, &chain_to_children, "no_peers");
             }
         }
-        Ok(())
     }
 
     /// A set of peers claim to have imported a block_root. Create a new lookup for it or add them
@@ -821,9 +817,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             }
         } else {
             if self.block_to_tip.len() > MAX_LOOKUP_COUNT {
-                if let Err(e) = self.prune_least_popular_lookups() {
-                    error!("Error on prune_least_popular_lookups {e:?}");
-                }
+                self.prune_least_popular_lookups();
             }
 
             let id = cx.next_id();
@@ -887,8 +881,6 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
             match response {
                 Ok((block, received)) => {
-                    debug!(%req_id, %chain_id, "Forward sync block header downloaded success");
-
                     let block_header = block.message().block_header();
                     let parent_root = block_header.parent_root;
 
@@ -900,6 +892,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     )?;
 
                     metrics::inc_counter(&metrics::SYNC_HEADERS_DOWNLOADED);
+                    debug!(%req_id, %chain_id, "Forward sync block header downloaded success");
 
                     // Once we discover the parent_root of this block three things can happen
                     // 1. The parent root is a known block -> stop
@@ -1007,6 +1000,8 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             return;
         };
 
+        debug!(%id, %chain_id, ?result, "Forward sync block process result");
+
         match chain.on_process_result(id, result, cx) {
             Ok(SyncBlockResult::Done { .. }) => {
                 metrics::inc_counter(&metrics::SYNC_BLOCKS_PROCESSED);
@@ -1043,9 +1038,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
         metrics::inc_counter_vec(&metrics::SYNC_CHAIN_ERROR_COUNT, &[(&error).into()]);
 
-        let block_to_children = self
-            .compute_children()
-            .expect("TODO: handle this error if it can't be avoided");
+        let block_to_children = self.compute_children();
         // TODO(tree-sync): logging `block_to_children` for debugging
         debug!(%chain_id, ?block_root, ?error, ?block_to_children, "Dropping forward sync chain on error");
         self.drop_chain_and_children(chain_id, &block_to_children, (&error).into());
@@ -1155,9 +1148,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             .collect::<Vec<_>>();
 
         if !chains_to_drop.is_empty() {
-            let chain_to_children = self
-                .compute_children()
-                .expect("Handle this error if it can't be avoided");
+            let chain_to_children = self.compute_children();
             for (chain_id, e) in chains_to_drop {
                 self.drop_chain_and_children(chain_id, &chain_to_children, e.into());
             }
@@ -1168,52 +1159,47 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     fn drop_chain_and_children(
         &mut self,
         initial_chain_id: TipId,
-        chain_to_children: &HashMap<TipId, Vec<TipId>>,
+        chain_to_children: &HashMap<Hash256, Vec<TipId>>,
         reason: &'static str,
     ) {
         let mut queue: VecDeque<TipId> = VecDeque::from([initial_chain_id]);
 
         while let Some(chain_id) = queue.pop_front() {
             // Remove the node itself.
+            // Only continue if the node was removed. This prevents infinite loops even if
+            // `chain_to_children` items reference themselves
             if let Some(chain) = self.chains.remove(&chain_id) {
                 metrics::inc_counter_vec(&metrics::SYNC_CHAINS_REMOVED, &[reason]);
                 for block_root in chain.iter_block_roots() {
                     self.block_to_tip.remove(block_root);
                     debug!(?block_root, %chain_id, %initial_chain_id, reason, "Dropping forward sync block lookup");
                     metrics::inc_counter(&metrics::SYNC_FORWARD_BLOCKS_DROPPED);
-                }
-                // Only remove children if the node still existed
-                // Push its children—if any—onto the work list.
-                if let Some(children) = chain_to_children.get(&chain_id) {
-                    queue.extend(children.iter().cloned());
+                    // Only remove children if the node still existed
+                    // Push its children‚Äîif any‚Äîonto the work list.
+                    if let Some(children) = chain_to_children.get(block_root) {
+                        queue.extend(children.iter().cloned());
+                    }
                 }
             }
         }
     }
 
     /// Drop lookup `block_root` if it exists and all its children
-    fn compute_children(&mut self) -> Result<HashMap<TipId, Vec<TipId>>, InternalError> {
-        let mut chain_to_children = HashMap::<TipId, Vec<TipId>>::new();
+    fn compute_children(&mut self) -> HashMap<Hash256, Vec<TipId>> {
+        let mut parent_to_children = HashMap::<Hash256, Vec<TipId>>::new();
         for (chain_id, chain) in self.chains.iter() {
             if let Some(parent_root) = chain.parent_root() {
-                // TODO(tree-sync): Is this error impossible?
-                let parent_chain_id = self.block_to_tip
-                    .get(&parent_root)
-                    .ok_or(InternalError(format!(
-                        "Chain {chain_id} has a parent root that points to an unknown block {parent_root:?}"
-                    )))?;
-
-                chain_to_children
-                    .entry(*parent_chain_id)
+                parent_to_children
+                    .entry(parent_root)
                     .or_default()
                     .push(*chain_id);
             }
         }
-        Ok(chain_to_children)
+        parent_to_children
     }
 
     /// Drop lookups with least amount of peers and slot until we pruned PRUNE_COUNT lookups
-    fn prune_least_popular_lookups(&mut self) -> Result<(), InternalError> {
+    fn prune_least_popular_lookups(&mut self) {
         let mut chains = self
             .chains
             .iter()
@@ -1222,14 +1208,13 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             .collect::<Vec<_>>();
         chains.sort_unstable();
 
-        let chain_to_children = self.compute_children()?;
+        let chain_to_children = self.compute_children();
         for (_, chain_id) in chains {
             self.drop_chain_and_children(chain_id, &chain_to_children, "too_many_blocks");
             if self.block_to_tip.len() < MAX_LOOKUP_COUNT - PRUNE_COUNT {
                 break;
             }
         }
-        Ok(())
     }
 
     pub fn register_metrics(&self) {
