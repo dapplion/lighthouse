@@ -352,9 +352,10 @@ impl<T: BeaconChainTypes> Chain<T> {
     }
 
     /// If this chain is waiting for `block_root` it transitions to forward sync.
-    fn on_block_imported(&mut self, block_root: &Hash256) {
+    /// Returns true if the chain transitioned to ForwardSync
+    fn on_block_imported(&mut self, block_root: &Hash256) -> bool {
         match &mut self.status {
-            Status::BackfillHeaders { .. } => {}
+            Status::BackfillHeaders { .. } => false,
             Status::WaitingParentChain {
                 block_roots,
                 parent_root,
@@ -364,9 +365,12 @@ impl<T: BeaconChainTypes> Chain<T> {
                         block_roots: std::mem::take(block_roots),
                         syncing_blocks: <_>::default(),
                     };
+                    true
+                } else {
+                    false
                 }
             }
-            Status::ForwardSync { .. } => {}
+            Status::ForwardSync { .. } => false,
         }
     }
 
@@ -979,6 +983,8 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             return;
         };
 
+        debug!(%id, %chain_id, result = render_result(&result), "Forward sync block download result");
+
         if let Err(e) = chain.on_download_result(req_id, result, cx) {
             self.handle_error(id.block_root, e);
         }
@@ -1000,7 +1006,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             return;
         };
 
-        debug!(%id, %chain_id, ?result, "Forward sync block process result");
+        debug!(%id, %chain_id, ?result, "Forward sync block download result");
 
         match chain.on_process_result(id, result, cx) {
             Ok(SyncBlockResult::Done { .. }) => {
@@ -1015,7 +1021,13 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
                 // Find all chains that are awaiting this block to process and continue them
                 for other_chain in self.chains.values_mut() {
-                    other_chain.on_block_imported(&id.block_root);
+                    if other_chain.on_block_imported(&id.block_root) {
+                        debug!(
+                            %chain_id,
+                            parent_root = ?id.block_root,
+                            "Forward sync chain awaiting parent transitioned to forward sync"
+                        );
+                    }
                 }
                 self.continue_requests(cx);
             }
@@ -1254,5 +1266,12 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 impl std::fmt::Display for TipId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+fn render_result<T, E: std::fmt::Debug>(result: &Result<T, E>) -> String {
+    match result {
+        Ok(_) => format!("Ok"),
+        Err(e) => format!("Err({e:?})"),
     }
 }
