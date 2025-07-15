@@ -272,6 +272,7 @@ impl<T: BeaconChainTypes> Chain<T> {
                     // TODO(tree-sync): check that block_root is the next_root or error
                     vec![]
                 };
+                // Mutate this chain, which keeps all descendant roots of `block_root`
                 self.status = Status::WaitingParentChain {
                     parent_root: block_root,
                     block_roots,
@@ -287,6 +288,7 @@ impl<T: BeaconChainTypes> Chain<T> {
                 block_roots,
                 ready_to_sync,
             } => {
+                let mut block_roots = std::mem::take(block_roots);
                 let idx = block_roots
                     .iter()
                     .position(|b| b.0.block_root == block_root)
@@ -297,9 +299,10 @@ impl<T: BeaconChainTypes> Chain<T> {
                 let new_block_roots = block_roots.drain(0..=idx).collect::<Vec<_>>();
                 let parent_root = *parent_root;
                 let ready_to_sync = *ready_to_sync;
+                // Mutate this chain, which keeps all descendant roots of `block_root`
                 self.status = Status::WaitingParentChain {
                     parent_root: block_root,
-                    block_roots: std::mem::take(block_roots),
+                    block_roots,
                     ready_to_sync: false,
                 };
                 Status::WaitingParentChain {
@@ -1106,6 +1109,9 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             }
         }
 
+        // Prune chains that become empty after pop_next_block_to_sync
+        self.chains.retain(|_, chain| !chain.is_empty());
+
         if !new_chains.is_empty() {
             for (chain_id, chain) in new_chains {
                 self.chains.insert(chain_id, chain);
@@ -1255,7 +1261,32 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 }
             };
 
-            debug!(%chain_id, peers = chain.peers.len(), status, "DEBUG chain");
+            let recursive_parent_chain = (|| {
+                let mut next_chain_id = *chain_id;
+                loop {
+                    let Some(next_chain) = self.chains.get(&next_chain_id) else {
+                        return Err(format!("Unknown chain {next_chain_id}"));
+                    };
+                    if let Status::WaitingParentChain { parent_root, .. } = next_chain.status {
+                        let Some(parent_chain_id) = self.block_to_tip.get(&parent_root) else {
+                            return Err(format!("Unknown block {parent_root:?}"));
+                        };
+                        next_chain_id = *parent_chain_id;
+                    } else if next_chain_id == *chain_id {
+                        return Ok(format!("itself"));
+                    } else {
+                        return Ok(format!("recursive_parent_chain: {}", next_chain_id));
+                    }
+                }
+            })();
+
+            debug!(%chain_id, peers = chain.peers.len(), status, ?recursive_parent_chain, "DEBUG chain");
+        }
+
+        for (block_root, chain_id) in &self.block_to_tip {
+            if !self.chains.contains_key(chain_id) {
+                debug!("DEBUG block {block_root} points to unknown chain {chain_id}");
+            }
         }
 
         // Min header
@@ -1274,5 +1305,109 @@ fn render_result<T, E: std::fmt::Debug>(result: &Result<T, E>) -> String {
     match result {
         Ok(_) => format!("Ok"),
         Err(e) => format!("Err({e:?})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beacon_chain::builder::Witness;
+    use beacon_chain::eth1_chain::CachingEth1Backend;
+    use slot_clock::ManualSlotClock;
+    use store::MemoryStore;
+    use types::FixedBytesExtended;
+    use types::MinimalEthSpec as E;
+
+    type T = Witness<ManualSlotClock, CachingEth1Backend<E>, E, MemoryStore<E>, MemoryStore<E>>;
+
+    fn to_roots(input: &[u64]) -> Vec<Hash256> {
+        input.iter().map(to_root).collect()
+    }
+
+    fn to_root(u: &u64) -> Hash256 {
+        Hash256::from_low_u64_le(*u)
+    }
+
+    fn from_root(r: &Hash256) -> u64 {
+        r.to_low_u64_le()
+    }
+
+    fn to_block(u: &u64) -> PendingBlock {
+        (
+            HeaderLookupId {
+                id: *u as u32,
+                block_root: to_root(u),
+            },
+            Slot::new(*u),
+        )
+    }
+
+    fn get_roots<T: BeaconChainTypes>(chain: &Chain<T>) -> Vec<u64> {
+        chain.iter_block_roots().map(from_root).collect()
+    }
+
+    /* ------- BackfillHeaders ------------------------------------------------ */
+
+    fn test_split_by(input: &[u64], split: u64, roots_left: &[u64], roots_right: &[u64]) {
+        let mut initial_chain = Chain::<T> {
+            peers: <_>::default(),
+            status: Status::BackfillHeaders {
+                block_roots: input.iter().skip(1).map(to_block).collect::<Vec<_>>(),
+                next_header_request: HeaderRequest::new(to_root(&input[0]), 0),
+            },
+        };
+        let new_chain = initial_chain
+            .split_by(to_root(&split))
+            .expect("error spliting backfill headers");
+
+        assert_eq!(get_roots(&initial_chain), roots_right, "initial backfill");
+        assert_eq!(get_roots(&new_chain), roots_left, "new backfill");
+
+        let mut initial_chain = Chain::<T> {
+            peers: <_>::default(),
+            status: Status::WaitingParentChain {
+                parent_root: to_root(&0),
+                block_roots: input.iter().map(to_block).collect::<Vec<_>>(),
+                ready_to_sync: false,
+            },
+        };
+        let new_chain = initial_chain
+            .split_by(to_root(&split))
+            .expect("error spliting backfill headers");
+
+        assert_eq!(get_roots(&initial_chain), roots_right, "initial waiting");
+        assert_eq!(get_roots(&new_chain), roots_left, "new waiting");
+        assert_eq!(
+            from_root(&initial_chain.parent_root().unwrap()),
+            *roots_left.last().unwrap(),
+            "parent_right"
+        );
+    }
+
+    #[test]
+    fn split_by_only_elem() {
+        // input [A,B] split A → [A] | [B]
+        test_split_by(&[0, 1], 0, &[0], &[1]);
+    }
+
+    #[test]
+    fn split_by_first() {
+        // split first of many
+        test_split_by(&[0, 1, 2, 3], 0, &[0], &[1, 2, 3]);
+    }
+
+    #[test]
+    fn split_by_middle_a() {
+        test_split_by(&[0, 1, 2, 3], 2, &[0, 1, 2], &[3]);
+    }
+
+    #[test]
+    fn split_by_middle_b() {
+        test_split_by(&[0, 1, 2], 1, &[0, 1], &[2]);
+    }
+
+    #[test]
+    fn split_by_last() {
+        test_split_by(&[0, 1, 2], 2, &[0, 1, 2], &[]);
     }
 }
