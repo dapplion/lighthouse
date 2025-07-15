@@ -748,6 +748,14 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 let chain_to_add_peers = if should_split_chain {
                     let new_chain = chain.split_by(target_block_root)?;
                     let new_chain_id = TipId(cx.next_id());
+                    debug!(
+                        block_root = ?target_block_root,
+                        %chain_id,
+                        %new_chain_id,
+                        chain_block_count = chain.block_count(),
+                        new_chain_block_count = new_chain.block_count(),
+                        "Forward sync chain split"
+                    );
 
                     // Update all block references to the new chain
                     for block_root in new_chain.iter_block_roots() {
@@ -1077,13 +1085,19 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
         let mut new_chains = vec![];
 
-        'o: for (id, chain) in chains_by_peer_count {
+        'o: for (chain_id, chain) in chains_by_peer_count {
             while let Some(new_chain) = chain.pop_next_block_to_sync() {
                 let new_chain_id = TipId(cx.next_id());
                 // Update all block references to the new chain
                 for block_root in new_chain.iter_block_roots() {
                     self.block_to_tip.insert(*block_root, new_chain_id);
-                    debug!(%new_chain_id, ?block_root, "Transitioned block to forward sync");
+                    debug!(
+                        %chain_id,
+                        %new_chain_id,
+                        ?block_root,
+                        chain_block_count = chain.block_count(),
+                        "Transitioned block to forward sync"
+                    );
                 }
                 new_chains.push((new_chain_id, new_chain));
                 if new_chains.len() >= new_blocks_to_sync {
