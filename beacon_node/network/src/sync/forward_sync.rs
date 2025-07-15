@@ -1271,13 +1271,20 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     | Status::ForwardSync { parent_root, .. } = next_chain.status
                     {
                         let Some(parent_chain_id) = self.block_to_tip.get(&parent_root) else {
-                            return Err(format!("Unknown block {parent_root:?}"));
+                            if matches!(next_chain.status, Status::ForwardSync { .. }) {
+                                // A ForwardSync chain may point to an already imported block
+                                return Err(format!("{next_chain_id} unknown/imported"));
+                            } else {
+                                return Err(format!(
+                                    "{next_chain_id} Unknown block {parent_root:?}"
+                                ));
+                            }
                         };
                         next_chain_id = *parent_chain_id;
                     } else if next_chain_id == *chain_id {
                         return Ok(format!("itself"));
                     } else {
-                        return Ok(format!("recursive_parent_chain: {}", next_chain_id));
+                        return Ok(format!("{next_chain_id}"));
                     }
                 }
             })();
