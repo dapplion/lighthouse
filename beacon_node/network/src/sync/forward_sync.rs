@@ -118,8 +118,9 @@ enum Status<T: BeaconChainTypes> {
     /// - The set of SyncBlocks is consecutive
     /// - The parent of the last item in `block_roots` is the first item in `syncing_blocks`
     ForwardSync {
-        /// Sorting: oldest ancestor first
         block: SyncBlock<T>,
+        /// The parent root of `block`. Note that it may point to a block that is already imported,
+        /// and is not in the sync headers DAG.
         parent_root: Hash256,
     },
 }
@@ -266,15 +267,20 @@ impl<T: BeaconChainTypes> Chain<T> {
                     .iter()
                     .position(|b| b.0.block_root == block_root)
                 {
-                    // ..= to keep the block_root on the left
-                    block_roots.drain(0..=idx).collect::<Vec<_>>()
+                    // block_roots sorting: tip first, oldest ancestor last
+                    // We want to return the set of blocks including `block_root` and all its
+                    // ancestors into `new_block_roots`, and keep the rest in `block_roots`
+                    block_roots.drain(idx..).collect::<Vec<_>>()
                 } else {
                     // TODO(tree-sync): check that block_root is the next_root or error
                     vec![]
                 };
                 // Mutate this chain, which keeps all descendant roots of `block_root`
                 self.status = Status::WaitingParentChain {
+                    // This chain keeps the descendants of `block_root` so the oldest parent root is
+                    // `block_root`
                     parent_root: block_root,
+                    // `block_roots` has been mutated to have only the descendants of `block_root`
                     block_roots,
                     ready_to_sync: false,
                 };
@@ -295,12 +301,14 @@ impl<T: BeaconChainTypes> Chain<T> {
                     .ok_or(InternalError(format!(
                         "block_root {block_root:?} no in chain"
                     )))?;
-                // ..= to keep the block_root on the left
-                let new_block_roots = block_roots.drain(0..=idx).collect::<Vec<_>>();
+                // See comments in BackfillHeaders variant above
+                let new_block_roots = block_roots.drain(idx..).collect::<Vec<_>>();
                 let parent_root = *parent_root;
                 let ready_to_sync = *ready_to_sync;
                 // Mutate this chain, which keeps all descendant roots of `block_root`
                 self.status = Status::WaitingParentChain {
+                    // This chain keeps the descendants of `block_root` so the oldest parent root is
+                    // `block_root`
                     parent_root: block_root,
                     block_roots,
                     ready_to_sync: false,
@@ -350,15 +358,18 @@ impl<T: BeaconChainTypes> Chain<T> {
         }
     }
 
-    /// Returns all block roots part of this chain
+    /// Returns all block roots part of this chain, in descending slot order
     fn iter_block_roots(&self) -> Box<dyn Iterator<Item = &Hash256> + '_> {
         match &self.status {
             Status::BackfillHeaders {
                 block_roots,
                 next_header_request,
             } => Box::new(
-                std::iter::once(&next_header_request.block_root)
-                    .chain(block_roots.iter().map(|(id, _)| &id.block_root)),
+                block_roots
+                    .iter()
+                    .map(|(id, _)| &id.block_root)
+                    // next_header_request is the oldest ancestor, so chain last
+                    .chain(std::iter::once(&next_header_request.block_root)),
             ),
             Status::WaitingParentChain { block_roots, .. } => {
                 Box::new(block_roots.iter().map(|(id, _)| &id.block_root))
@@ -1355,22 +1366,24 @@ mod tests {
         chain.iter_block_roots().map(from_root).collect()
     }
 
-    /* ------- BackfillHeaders ------------------------------------------------ */
-
-    fn test_split_by(input: &[u64], split: u64, roots_left: &[u64], roots_right: &[u64]) {
-        let mut initial_chain = Chain::<T> {
-            peers: <_>::default(),
-            status: Status::BackfillHeaders {
-                block_roots: input.iter().skip(1).map(to_block).collect::<Vec<_>>(),
-                next_header_request: HeaderRequest::new(to_root(&input[0]), 0),
-            },
+    fn test_split_by(input: &[u64], split: u64, roots_new: &[u64], roots_initial: &[u64]) {
+        let mut initial_chain = {
+            /// input sorting: tip first, oldest ancestor last
+            let (last, rest) = input.split_last().unwrap();
+            Chain::<T> {
+                peers: <_>::default(),
+                status: Status::BackfillHeaders {
+                    block_roots: rest.iter().map(to_block).collect::<Vec<_>>(),
+                    next_header_request: HeaderRequest::new(to_root(&last), 0),
+                },
+            }
         };
         let new_chain = initial_chain
             .split_by(to_root(&split))
             .expect("error spliting backfill headers");
 
-        assert_eq!(get_roots(&initial_chain), roots_right, "initial backfill");
-        assert_eq!(get_roots(&new_chain), roots_left, "new backfill");
+        assert_eq!(get_roots(&new_chain), roots_new, "new backfill");
+        assert_eq!(get_roots(&initial_chain), roots_initial, "initial backfill");
 
         let mut initial_chain = Chain::<T> {
             peers: <_>::default(),
@@ -1384,39 +1397,47 @@ mod tests {
             .split_by(to_root(&split))
             .expect("error spliting backfill headers");
 
-        assert_eq!(get_roots(&initial_chain), roots_right, "initial waiting");
-        assert_eq!(get_roots(&new_chain), roots_left, "new waiting");
+        assert_eq!(get_roots(&new_chain), roots_new, "new waiting");
+        assert_eq!(get_roots(&initial_chain), roots_initial, "initial waiting");
         assert_eq!(
             from_root(&initial_chain.parent_root().unwrap()),
-            *roots_left.last().unwrap(),
-            "parent_right"
+            // The tip of the new chain is the parent of the initial chain
+            *roots_new.first().unwrap(),
+            "parent_initial"
         );
     }
 
     #[test]
-    fn split_by_only_elem() {
-        // input [A,B] split A → [A] | [B]
-        test_split_by(&[0, 1], 0, &[0], &[1]);
+    fn split_by_only_elem_a() {
+        // input [0,1] sorted by tip first
+        test_split_by(&[1, 0], 0, &[0], &[1]);
+    }
+
+    #[test]
+    fn split_by_only_elem_b() {
+        test_split_by(&[1, 0], 1, &[1, 0], &[]);
     }
 
     #[test]
     fn split_by_first() {
-        // split first of many
-        test_split_by(&[0, 1, 2, 3], 0, &[0], &[1, 2, 3]);
-    }
-
-    #[test]
-    fn split_by_middle_a() {
-        test_split_by(&[0, 1, 2, 3], 2, &[0, 1, 2], &[3]);
-    }
-
-    #[test]
-    fn split_by_middle_b() {
-        test_split_by(&[0, 1, 2], 1, &[0, 1], &[2]);
+        test_split_by(&[3, 2, 1, 0], 0, &[0], &[3, 2, 1]);
     }
 
     #[test]
     fn split_by_last() {
-        test_split_by(&[0, 1, 2], 2, &[0, 1, 2], &[]);
+        test_split_by(&[3, 2, 1, 0], 3, &[3, 2, 1, 0], &[]);
+    }
+
+    #[test]
+    fn split_by_middle_a() {
+        test_split_by(&[3, 2, 1, 0], 1, &[1, 0], &[3, 2]);
+    }
+    #[test]
+    fn split_by_middle_b() {
+        test_split_by(&[3, 2, 1, 0], 2, &[2, 1, 0], &[3]);
+    }
+    #[test]
+    fn split_by_middle_c() {
+        test_split_by(&[2, 1, 0], 1, &[1, 0], &[2]);
     }
 }
