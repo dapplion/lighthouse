@@ -1267,7 +1267,9 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     let Some(next_chain) = self.chains.get(&next_chain_id) else {
                         return Err(format!("Unknown chain {next_chain_id}"));
                     };
-                    if let Status::WaitingParentChain { parent_root, .. } = next_chain.status {
+                    if let Status::WaitingParentChain { parent_root, .. }
+                    | Status::ForwardSync { parent_root, .. } = next_chain.status
+                    {
                         let Some(parent_chain_id) = self.block_to_tip.get(&parent_root) else {
                             return Err(format!("Unknown block {parent_root:?}"));
                         };
