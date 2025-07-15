@@ -315,16 +315,26 @@ impl<T: BeaconChainTypes> Chain<T> {
 
         Ok(Self {
             peers: self.peers.clone(),
-            // What to set the status to??
             status,
         })
     }
 
     /// Return true if this chain is awaiting `block_root`
-    fn is_waiting_parent(&self, block_root: &Hash256) -> bool {
-        match &self.status {
+    fn to_ready_to_sync(&mut self, block_root: &Hash256) -> bool {
+        match &mut self.status {
             Status::BackfillHeaders { .. } => false,
-            Status::WaitingParentChain { parent_root, .. } => block_root == parent_root,
+            Status::WaitingParentChain {
+                parent_root,
+                ready_to_sync,
+                ..
+            } => {
+                if block_root == parent_root && !*ready_to_sync {
+                    *ready_to_sync = true;
+                    true
+                } else {
+                    false
+                }
+            }
             Status::ForwardSync { .. } => false,
         }
     }
@@ -972,11 +982,11 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
                 // Find all chains that are awaiting this block to process and continue them
                 for other_chain in self.chains.values_mut() {
-                    if other_chain.is_waiting_parent(&id.block_root) {
+                    if other_chain.to_ready_to_sync(&id.block_root) {
                         debug!(
                             %chain_id,
                             parent_root = ?id.block_root,
-                            "Forward sync chain awaiting parent transitioned to forward sync"
+                            "Forward sync marked chain as ready to sync"
                         );
                     }
                 }
