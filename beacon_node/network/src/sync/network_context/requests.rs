@@ -11,6 +11,7 @@ use types::{Hash256, Slot};
 pub use blobs_by_root::BlobsByRootRequestItems;
 pub use blocks_by_root::BlocksByRootRequestItems;
 pub use data_columns_by_root::DataColumnsByRootRequestItems;
+pub use headers_by_root::HeadersByRootRequestItems;
 
 use crate::metrics;
 
@@ -19,6 +20,7 @@ use super::{RpcEvent, RpcResponseResult};
 mod blobs_by_root;
 mod blocks_by_root;
 mod data_columns_by_root;
+mod headers_by_root;
 
 #[derive(Debug, Clone, PartialEq, Eq, IntoStaticStr)]
 pub enum LookupVerifyError {

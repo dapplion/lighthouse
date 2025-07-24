@@ -3,7 +3,7 @@ use super::network_context::{
     SyncNetworkContext,
 };
 use crate::metrics;
-use crate::sync::network_context::{BatchPeers, RpcResponseResult};
+use crate::sync::network_context::{BatchPeers, LookupVerifyError, RpcResponseResult};
 use crate::sync::sync_block::{Error as SyncBlockError, OkToImport, SyncBlock, SyncBlockResult};
 use crate::sync::BatchProcessResult;
 use beacon_chain::block_verification_types::RpcBlock;
@@ -14,11 +14,10 @@ use lighthouse_network::service::api_types::{
 };
 use lighthouse_network::PeerId;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::time::Duration;
 use strum::IntoStaticStr;
 use tracing::{debug, error};
-use types::{BeaconBlockHeader, EthSpec, Hash256, SignedBeaconBlock, Slot};
+use types::{BeaconBlockHeader, EthSpec, Hash256, Slot};
 
 const MAX_LOOKUP_COUNT: usize = 1_000_000;
 const PRUNE_COUNT: usize = 100_000;
@@ -82,7 +81,7 @@ struct Chain<T: BeaconChainTypes> {
     status: Status<T>,
 }
 
-type PendingBlock = (HeaderLookupId, Slot);
+type PendingBlock = (Hash256, Slot);
 
 #[allow(clippy::large_enum_variant)]
 enum Status<T: BeaconChainTypes> {
@@ -127,16 +126,16 @@ enum Status<T: BeaconChainTypes> {
 
 /// Tracks a request to download a BeaconBlockHeader by block root
 struct HeaderRequest {
-    id: HeaderLookupId,
+    id: Option<Id>,
     block_root: Hash256,
     failed_peers: HashSet<PeerId>,
     request: DownloadRequest<BlocksByRootRequestId, BeaconBlockHeader>,
 }
 
 impl HeaderRequest {
-    fn new(block_root: Hash256, id: Id) -> Self {
+    fn new(block_root: Hash256) -> Self {
         Self {
-            id: HeaderLookupId { id, block_root },
+            id: None,
             block_root,
             failed_peers: <_>::default(),
             request: DownloadRequest::new(),
@@ -144,7 +143,7 @@ impl HeaderRequest {
     }
 
     fn empty() -> Self {
-        Self::new(Hash256::ZERO, 0)
+        Self::new(Hash256::ZERO)
     }
 
     fn continue_request<T: BeaconChainTypes>(
@@ -172,10 +171,16 @@ impl HeaderRequest {
                 return Err(Error::InternalError("No peers".to_owned()));
             };
 
+            let id = self.id.get_or_insert_with(|| cx.next_id()).clone();
+
+            // TODO(tree-sync): send headers_by_root request if available
             let req_id = cx.send_blocks_by_root_request(
                 peer,
                 self.block_root,
-                BlocksByRootRequester::Header(self.id),
+                BlocksByRootRequester::Header(HeaderLookupId {
+                    id,
+                    block_root: self.block_root,
+                }),
             )?;
 
             self.request.on_download_start(req_id)?;
@@ -188,12 +193,12 @@ impl HeaderRequest {
 // through gossip and sync.
 
 impl<T: BeaconChainTypes> Chain<T> {
-    fn new(block_root: Hash256, id: Id, initial_peers: &[PeerId]) -> Self {
+    fn new(block_root: Hash256, initial_peers: &[PeerId]) -> Self {
         Self {
             peers: HashSet::from_iter(initial_peers.iter().copied()),
             status: Status::BackfillHeaders {
                 block_roots: vec![],
-                next_header_request: HeaderRequest::new(block_root, id),
+                next_header_request: HeaderRequest::new(block_root),
             },
         }
     }
@@ -237,11 +242,11 @@ impl<T: BeaconChainTypes> Chain<T> {
             } => Some(
                 block_roots
                     .first()
-                    .map(|block| block.0.block_root)
+                    .map(|block| block.0)
                     .unwrap_or(next_header_request.block_root),
             ),
             Status::WaitingParentChain { block_roots, .. } => {
-                block_roots.first().map(|block| block.0.block_root)
+                block_roots.first().map(|block| block.0)
             }
             Status::ForwardSync { block, .. } => Some(*block.block_root()),
         }
@@ -263,18 +268,16 @@ impl<T: BeaconChainTypes> Chain<T> {
                 let next_header_request =
                     std::mem::replace(next_header_request, HeaderRequest::empty());
 
-                let new_block_roots = if let Some(idx) = block_roots
-                    .iter()
-                    .position(|b| b.0.block_root == block_root)
-                {
-                    // block_roots sorting: tip first, oldest ancestor last
-                    // We want to return the set of blocks including `block_root` and all its
-                    // ancestors into `new_block_roots`, and keep the rest in `block_roots`
-                    block_roots.drain(idx..).collect::<Vec<_>>()
-                } else {
-                    // TODO(tree-sync): check that block_root is the next_root or error
-                    vec![]
-                };
+                let new_block_roots =
+                    if let Some(idx) = block_roots.iter().position(|b| b.0 == block_root) {
+                        // block_roots sorting: tip first, oldest ancestor last
+                        // We want to return the set of blocks including `block_root` and all its
+                        // ancestors into `new_block_roots`, and keep the rest in `block_roots`
+                        block_roots.drain(idx..).collect::<Vec<_>>()
+                    } else {
+                        // TODO(tree-sync): check that block_root is the next_root or error
+                        vec![]
+                    };
                 // Mutate this chain, which keeps all descendant roots of `block_root`
                 self.status = Status::WaitingParentChain {
                     // This chain keeps the descendants of `block_root` so the oldest parent root is
@@ -295,12 +298,13 @@ impl<T: BeaconChainTypes> Chain<T> {
                 ready_to_sync,
             } => {
                 let mut block_roots = std::mem::take(block_roots);
-                let idx = block_roots
-                    .iter()
-                    .position(|b| b.0.block_root == block_root)
-                    .ok_or(InternalError(format!(
-                        "block_root {block_root:?} no in chain"
-                    )))?;
+                let idx =
+                    block_roots
+                        .iter()
+                        .position(|b| b.0 == block_root)
+                        .ok_or(InternalError(format!(
+                            "block_root {block_root:?} no in chain"
+                        )))?;
                 // See comments in BackfillHeaders variant above
                 let new_block_roots = block_roots.drain(idx..).collect::<Vec<_>>();
                 let parent_root = *parent_root;
@@ -395,12 +399,12 @@ impl<T: BeaconChainTypes> Chain<T> {
             } => Box::new(
                 block_roots
                     .iter()
-                    .map(|(id, _)| &id.block_root)
+                    .map(|(block_root, _)| block_root)
                     // next_header_request is the oldest ancestor, so chain last
                     .chain(std::iter::once(&next_header_request.block_root)),
             ),
             Status::WaitingParentChain { block_roots, .. } => {
-                Box::new(block_roots.iter().map(|(id, _)| &id.block_root))
+                Box::new(block_roots.iter().map(|(block_root, _)| block_root))
             }
             Status::ForwardSync { block, .. } => Box::new(std::iter::once(block.block_root())),
         }
@@ -449,13 +453,14 @@ impl<T: BeaconChainTypes> Chain<T> {
         }
     }
 
-    fn add_ancestor(&mut self, parent_root: Hash256, id: Id) -> Result<(), InternalError> {
+    fn add_ancestor(&mut self, header: BeaconBlockHeader) -> Result<(), InternalError> {
         match &mut self.status {
             Status::BackfillHeaders {
                 block_roots,
                 next_header_request,
             } => {
-                *next_header_request = HeaderRequest::new(parent_root, id);
+                block_roots.push((next_header_request.block_root, header.slot));
+                *next_header_request = HeaderRequest::new(header.parent_root);
                 Ok(())
             }
             _ => Err(InternalError(
@@ -484,7 +489,7 @@ impl<T: BeaconChainTypes> Chain<T> {
         }
     }
 
-    fn pop_next_block_to_sync(&mut self) -> Option<Self> {
+    fn pop_next_block_to_sync(&mut self, cx: &mut SyncNetworkContext<T>) -> Option<Self> {
         match &mut self.status {
             Status::WaitingParentChain {
                 block_roots,
@@ -494,18 +499,19 @@ impl<T: BeaconChainTypes> Chain<T> {
                 if !*ready_to_sync {
                     return None;
                 }
-                let Some(last_block) = block_roots.pop() else {
+                let Some((block_root, block_slot)) = block_roots.pop() else {
                     return None;
                 };
 
                 let last_block_parent_root = *parent_root;
-                *parent_root = last_block.0.block_root;
+                *parent_root = block_root;
 
+                let id = cx.next_id();
                 let block = SyncBlock::new(
                     // Reuse the request ID of the header for better traceability
-                    RangeRequestId::ForwardSync(last_block.0),
-                    last_block.0.block_root,
-                    last_block.1,
+                    RangeRequestId::ForwardSync(HeaderLookupId { id, block_root }),
+                    block_root,
+                    block_slot,
                     &self.peers.iter().copied().collect::<Vec<_>>(),
                 );
 
@@ -521,26 +527,19 @@ impl<T: BeaconChainTypes> Chain<T> {
         }
     }
 
-    fn on_header_download(
-        &mut self,
-        req_id: BlocksByRootRequestId,
-        block: BeaconBlockHeader,
-    ) -> Result<(), Error> {
+    fn assert_download_req_id(&mut self, req_id: BlocksByRootRequestId) -> Result<(), Error> {
         match &mut self.status {
             Status::BackfillHeaders {
                 next_header_request,
-                block_roots,
+                ..
             } => {
                 // Call `on_download_success` to assert that the req_id is the expected on
                 next_header_request.request.on_download_success(
                     req_id,
                     PeerId::random(),
-                    block.clone(),
+                    BeaconBlockHeader::empty(),
                     Duration::from_secs(0),
                 )?;
-                // Add the downloaded block
-                // Persist the request ID of the header for better traceability
-                block_roots.push((next_header_request.id, block.slot));
                 Ok(())
             }
             _ => Err(Error::InternalError(
@@ -840,20 +839,18 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 self.prune_least_popular_lookups();
             }
 
-            let id = cx.next_id();
             let chain_id = TipId(cx.next_id());
             match peers {
-                [peer] => debug!(?block_root, id, %chain_id, %peer, "Creating new header lookup"),
+                [peer] => debug!(?block_root, %chain_id, %peer, "Creating new header lookup"),
                 _ => debug!(
                     ?block_root,
-                    id,
                     %chain_id,
                     peers = peers.len(),
                     "Creating new header lookup"
                 ),
             }
 
-            let mut chain = Chain::new(block_root, id, peers);
+            let mut chain = Chain::new(block_root, peers);
             chain.continue_requests(cx)?;
             // Don't insert until first request is successful
             self.chains.insert(chain_id, chain);
@@ -864,35 +861,34 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     }
 
     /// Handle the result of a header download.
-    pub fn on_header_download_result(
+    pub fn on_headers_download_result(
         &mut self,
         req_id: BlocksByRootRequestId,
         id: HeaderLookupId,
-        response: RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>,
-        peer_id: PeerId,
+        response: RpcResponseResult<Vec<BeaconBlockHeader>>,
+        _peer_id: PeerId,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let block_root = id.block_root;
-
         // Invoke a closure to use the ? operator and handle the result consistenlty
         let result: Result<(), Error> = (|| {
-            let Some(chain_id) = self.block_to_tip.get(&block_root) else {
+            let Some(chain_id) = self.block_to_tip.get(&id.block_root).copied() else {
                 // TODO(tree-sync): register metric
                 debug!(id = ?req_id, "Received header request for unknown block_root");
                 return Ok(());
             };
-            let chain = self.chains.get_mut(chain_id).ok_or(InternalError(format!(
-                "block_root {block_root:?} references unknown chain {chain_id}"
+            let chain = self.chains.get_mut(&chain_id).ok_or(InternalError(format!(
+                "block_root {:?} references unknown chain {chain_id}",
+                id.block_root
             )))?;
 
             let response = response.and_then(|(blocks, timestamp)| {
-                let block = blocks
-                    .first()
-                    .cloned()
-                    .ok_or(RpcResponseError::InternalError(
-                        "blocks_by_root response contains zero blocks".to_owned(),
-                    ))?;
-                Ok((block, timestamp))
+                if blocks.is_empty() {
+                    Err(RpcResponseError::VerifyError(
+                        LookupVerifyError::NotEnoughResponsesReturned { actual: 0 },
+                    ))
+                } else {
+                    Ok((blocks, timestamp))
+                }
             });
 
             // TODO(tree-sync): add some check to make sure that distinct lookups for the same
@@ -900,75 +896,78 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             // errors for bad state
 
             match response {
-                Ok((block, received)) => {
-                    let block_header = block.message().block_header();
-                    let parent_root = block_header.parent_root;
-
-                    chain.on_header_download(req_id, block_header.clone())?;
-
-                    metrics::inc_counter(&metrics::SYNC_HEADERS_DOWNLOADED);
+                Ok((headers, _received)) => {
+                    chain.assert_download_req_id(req_id)?;
                     debug!(%req_id, %chain_id, "Forward sync block header downloaded success");
 
-                    // Once we discover the parent_root of this block three things can happen
-                    // 1. The parent root is a known block -> stop
-                    // 2. We conflicts with finality -> reject
-                    // 3. The parent root is unknown -> continue search
+                    for header in headers {
+                        let parent_root = header.parent_root;
+                        let block_root = header.canonical_root();
+                        chain.add_ancestor(header.clone())?;
 
-                    // TODO(tree-sync): should check if the block is descendant of finalized
-                    // TODO(tree-sync): on finalization or every interval we should drop branches that
-                    // conflict with finality
-                    let finalized_checkpoint = cx.chain.head().finalized_checkpoint();
+                        metrics::inc_counter(&metrics::SYNC_HEADERS_DOWNLOADED);
 
-                    // TODO(tree-sync): check that the slots are decreasing, so we don't end up in
-                    // an infinite loop. But note that the wrong block will be the descendant.
-                    // - We get header A with parent B and slot 10
-                    // - We get header B with parent C and slot 11
-                    // - That makes header A invalid
+                        // Once we discover the parent_root of this block three things can happen
+                        // 1. The parent root is a known block -> stop
+                        // 2. We conflicts with finality -> reject
+                        // 3. The parent root is unknown -> continue search
 
-                    if block_header.slot
-                        <= finalized_checkpoint
-                            .epoch
-                            .start_slot(T::EthSpec::slots_per_epoch())
-                        && block_root != finalized_checkpoint.root
-                    {
-                        return Err(Error::BlockConflictsWithFinality(format!(
-                            "Block {:?} {} conflicts with finalized checkpoint {:?}",
-                            block_root, block_header.slot, finalized_checkpoint
-                        )));
-                    }
+                        // TODO(tree-sync): should check if the block is descendant of finalized
+                        // TODO(tree-sync): on finalization or every interval we should drop branches that
+                        // conflict with finality
+                        let finalized_checkpoint = cx.chain.head().finalized_checkpoint();
 
-                    if cx.chain.block_is_known_to_fork_choice(&parent_root) {
-                        // Parent is imported, we can forward sync this chain
-                        // Stop search we reached a known block
-                        chain.to_waiting_parent(parent_root, true)?;
-                        debug!(%chain_id, ?parent_root, block_count = chain.block_count(), "Forward sync chain reached imported block");
-                        // Trigger potential foward sync for this chain
-                        self.continue_requests(cx);
-                    } else if let Some(parent_chain_id) = self.block_to_tip.get(&parent_root) {
-                        // Parent is part of another chain, stop search
-                        // Stop search we reached a known block
-                        chain.to_waiting_parent(parent_root, false)?;
-                        debug!(%chain_id, %parent_chain_id, ?parent_root, "Forward sync chain reached known block");
-                        // TODO(tree-sync): Add peers recursively to the chain_id, potentially
-                        // splitting the chain when adding peers.
-                    } else {
-                        chain.add_ancestor(block_header.parent_root, cx.next_id())?;
-                        debug!(%chain_id, ?parent_root, "Forward sync chain continues fetching ancestor");
-                        // Add to the block_to_tip mapping to respect the invariant "Each block
-                        // root exists in exactly one `Chain::block_roots` list".
-                        self.block_to_tip.insert(parent_root, *chain_id);
-                        // Since the block already points to `chain` we don't need to add peers.
-                        // Just trigger header download for this new root.
-                        self.continue_requests(cx);
+                        // TODO(tree-sync): check that the slots are decreasing, so we don't end up in
+                        // an infinite loop. But note that the wrong block will be the descendant.
+                        // - We get header A with parent B and slot 10
+                        // - We get header B with parent C and slot 11
+                        // - That makes header A invalid
+
+                        if header.slot
+                            <= finalized_checkpoint
+                                .epoch
+                                .start_slot(T::EthSpec::slots_per_epoch())
+                            && block_root != finalized_checkpoint.root
+                        {
+                            return Err(Error::BlockConflictsWithFinality(format!(
+                                "Block {:?} {} conflicts with finalized checkpoint {:?}",
+                                block_root, header.slot, finalized_checkpoint
+                            )));
+                        }
+
+                        if cx.chain.block_is_known_to_fork_choice(&parent_root) {
+                            // Parent is imported, we can forward sync this chain
+                            // Stop search we reached a known block
+                            chain.to_waiting_parent(parent_root, true)?;
+                            debug!(%chain_id, ?parent_root, block_count = chain.block_count(), "Forward sync chain reached imported block");
+                            // Trigger potential foward sync for this chain
+                            self.continue_requests(cx);
+                            break;
+                        } else if let Some(parent_chain_id) = self.block_to_tip.get(&parent_root) {
+                            // Parent is part of another chain, stop search
+                            // Stop search we reached a known block
+                            chain.to_waiting_parent(parent_root, false)?;
+                            debug!(%chain_id, %parent_chain_id, ?parent_root, "Forward sync chain reached known block");
+                            // TODO(tree-sync): Add peers recursively to the chain_id, potentially
+                            // splitting the chain when adding peers.
+                            break;
+                        } else {
+                            debug!(%chain_id, ?parent_root, "Forward sync chain continues fetching ancestor");
+                            // Add to the block_to_tip mapping to respect the invariant "Each block
+                            // root exists in exactly one `Chain::block_roots` list".
+                            self.block_to_tip.insert(parent_root, chain_id);
+                            // Since the block already points to `chain` we don't need to add peers.
+                            // Just trigger header download for this new root.
+                        }
                     }
                 }
                 Err(e) => {
                     // Request errors are logged in `SyncNetworkContext::on_rpc_response_result`
                     chain.header_request()?.on_download_error(req_id, Some(e))?;
                     // Continue this request to potentially resend the header request
-                    self.continue_requests(cx);
                 }
             }
+            self.continue_requests(cx);
             Ok(())
         })();
 
@@ -1128,7 +1127,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         let mut new_chains = vec![];
 
         'o: for (chain_id, chain) in chains_by_peer_count {
-            while let Some(new_chain) = chain.pop_next_block_to_sync() {
+            while let Some(new_chain) = chain.pop_next_block_to_sync(cx) {
                 let new_chain_id = TipId(cx.next_id());
                 // Update all block references to the new chain
                 for block_root in new_chain.iter_block_roots() {
@@ -1358,7 +1357,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     next_header_request,
                 } => {
                     format!(
-                        "BackfillHeaders block_roots {block_roots:?} next_header_request {} {} {}",
+                        "BackfillHeaders block_roots {block_roots:?} next_header_request {:?} {} {}",
                         next_header_request.id,
                         next_header_request.block_root,
                         next_header_request.request.status_str()

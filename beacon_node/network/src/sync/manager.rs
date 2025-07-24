@@ -54,8 +54,8 @@ use futures::StreamExt;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
     BlobsByRootRequestId, BlocksByRootRequestId, BlocksByRootRequester, ComponentsByRootRequestId,
-    CustodyByRootRequestId, DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, SamplingId,
-    SamplingRequester, SyncRequestId,
+    CustodyByRootRequestId, DataColumnsByRootRequestId, DataColumnsByRootRequester,
+    HeadersByRootRequestId, Id, SamplingId, SamplingRequester, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::{PeerId, SyncInfo};
@@ -67,7 +67,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, info_span, trace, warn, Instrument};
 use types::{
-    BlobSidecar, DataColumnSidecar, EthSpec, ForkContext, Hash256, SignedBeaconBlock, Slot,
+    BeaconBlockHeader, BlobSidecar, DataColumnSidecar, EthSpec, ForkContext, Hash256,
+    SignedBeaconBlock, Slot,
 };
 
 #[cfg(test)]
@@ -117,6 +118,13 @@ pub enum SyncMessage<E: EthSpec> {
         sync_request_id: SyncRequestId,
         peer_id: PeerId,
         data_column: Option<Arc<DataColumnSidecar<E>>>,
+        seen_timestamp: Duration,
+    },
+
+    BlockHeader {
+        id: SyncRequestId,
+        peer_id: PeerId,
+        header: Option<BeaconBlockHeader>,
         seen_timestamp: Duration,
     },
 
@@ -411,6 +419,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncRequestId::DataColumnsByRoot(req_id) => {
                 self.on_data_columns_by_root_response(req_id, peer_id, RpcEvent::RPCError(error))
             }
+            SyncRequestId::HeadersByRoot(req_id) => {
+                self.on_headers_by_root_response(req_id, peer_id, RpcEvent::RPCError(error))
+            }
         }
     }
 
@@ -667,6 +678,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             } => {
                 self.rpc_data_column_received(sync_request_id, peer_id, data_column, seen_timestamp)
             }
+            SyncMessage::BlockHeader {
+                id,
+                peer_id,
+                header,
+                seen_timestamp,
+            } => self.rpc_block_header_received(id, peer_id, header, seen_timestamp),
             SyncMessage::UnknownParentBlock(peer_id, block, block_root) => {
                 let block_slot = block.slot();
                 let parent_root = block.parent_root();
@@ -716,8 +733,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 error,
             } => self.inject_error(peer_id, sync_request_id, error),
             SyncMessage::GossipBlockProcessResult {
-                block_root,
-                imported,
+                block_root: _,
+                imported: _,
             } => {
                 // Not used
             }
@@ -877,10 +894,16 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         {
             match req_id.parent_request_id {
                 BlocksByRootRequester::Header(lookup_id) => {
-                    self.forward_sync.on_header_download_result(
+                    self.forward_sync.on_headers_download_result(
                         req_id,
                         lookup_id,
-                        result,
+                        result.map(|(blocks, seen_timestamp)| {
+                            let blocks = blocks
+                                .into_iter()
+                                .map(|block| block.message().block_header())
+                                .collect::<Vec<_>>();
+                            (blocks, seen_timestamp)
+                        }),
                         peer_id,
                         &mut self.network,
                     );
@@ -952,6 +975,27 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         }
     }
 
+    fn rpc_block_header_received(
+        &mut self,
+        id: SyncRequestId,
+        peer_id: PeerId,
+        header: Option<BeaconBlockHeader>,
+        seen_timestamp: Duration,
+    ) {
+        match id {
+            SyncRequestId::HeadersByRoot(req_id) => {
+                self.on_headers_by_root_response(
+                    req_id,
+                    peer_id,
+                    RpcEvent::from_chunk(header, seen_timestamp),
+                );
+            }
+            _ => {
+                crit!(%peer_id, "bad request id for beacon_block_header");
+            }
+        }
+    }
+
     fn on_data_columns_by_root_response(
         &mut self,
         req_id: DataColumnsByRootRequestId,
@@ -980,6 +1024,30 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     }
                 }
             }
+        }
+    }
+
+    fn on_headers_by_root_response(
+        &mut self,
+        req_id: HeadersByRootRequestId,
+        peer_id: PeerId,
+        header: RpcEvent<BeaconBlockHeader>,
+    ) {
+        if let Some(resp) = self
+            .network
+            .on_headers_by_root_response(req_id, peer_id, header)
+        {
+            self.forward_sync.on_headers_download_result(
+                // TODO(tree-sync): handle the two type of requests with distinct IDs
+                BlocksByRootRequestId {
+                    id: req_id.id,
+                    parent_request_id: BlocksByRootRequester::Header(req_id.parent_request_id),
+                },
+                req_id.parent_request_id,
+                resp,
+                peer_id,
+                &mut self.network,
+            );
         }
     }
 

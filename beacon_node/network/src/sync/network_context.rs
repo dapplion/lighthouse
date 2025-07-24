@@ -25,14 +25,14 @@ pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
     AppRequestId, BlobsByRootRequestId, BlocksByRootRequestId, BlocksByRootRequester,
     ComponentsByRootRequestId, CustodyByRootRequestId, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, SyncRequestId,
+    DataColumnsByRootRequester, HeadersByRootRequestId, Id, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
 pub use requests::LookupVerifyError;
 use requests::{
     ActiveRequests, BlobsByRootRequestItems, BlocksByRootRequestItems,
-    DataColumnsByRootRequestItems,
+    DataColumnsByRootRequestItems, HeadersByRootRequestItems,
 };
 #[cfg(test)]
 use slot_clock::SlotClock;
@@ -45,9 +45,9 @@ use task_executor::TaskExecutor;
 use tokio::sync::mpsc;
 use tracing::{debug, span, warn, Level};
 use types::{
-    BlobIdentifier, BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnSidecarList,
-    DataColumnsByRootIdentifier, EthSpec, ForkContext, ForkName, Hash256, RuntimeVariableList,
-    SignedBeaconBlock,
+    BeaconBlockHeader, BlobIdentifier, BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar,
+    DataColumnSidecarList, DataColumnsByRootIdentifier, EthSpec, ForkContext, ForkName, Hash256,
+    RuntimeVariableList, SignedBeaconBlock,
 };
 
 pub mod block_components_by_range;
@@ -217,6 +217,8 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active DataColumnsByRoot requests
     data_columns_by_root_requests:
         ActiveRequests<DataColumnsByRootRequestId, DataColumnsByRootRequestItems<T::EthSpec>>,
+    /// A mapping of active HeadersByRoot requests
+    headers_by_root_requests: ActiveRequests<HeadersByRootRequestId, HeadersByRootRequestItems>,
 
     /// Mapping of active custody column by root requests for a block root
     custody_by_root_requests: FnvHashMap<CustodyByRootRequestId, ActiveCustodyByRootRequest<T>>,
@@ -301,6 +303,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             blocks_by_root_requests: ActiveRequests::new("blocks_by_root"),
             blobs_by_root_requests: ActiveRequests::new("blobs_by_root"),
             data_columns_by_root_requests: ActiveRequests::new("data_columns_by_root"),
+            headers_by_root_requests: ActiveRequests::new("headers_by_root"),
             custody_by_root_requests: <_>::default(),
             block_components_by_root_requests: <_>::default(),
             network_beacon_processor,
@@ -333,6 +336,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             blocks_by_root_requests,
             blobs_by_root_requests,
             data_columns_by_root_requests,
+            headers_by_root_requests,
             // custody_by_root_requests is a meta request of data_columns_by_root_requests
             custody_by_root_requests: _,
             // components_by_root_requests is a meta request of various _by_root requests
@@ -352,10 +356,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let data_column_by_root_ids = data_columns_by_root_requests
             .active_requests()
             .map(|(id, peer)| (SyncRequestId::DataColumnsByRoot(*id), peer));
+        let headers_by_root_ids = headers_by_root_requests
+            .active_requests()
+            .map(|(id, peer)| (SyncRequestId::HeadersByRoot(*id), peer));
 
         blocks_by_root_ids
             .chain(blobs_by_root_ids)
             .chain(data_column_by_root_ids)
+            .chain(headers_by_root_ids)
     }
 
     #[cfg(test)]
@@ -428,6 +436,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             blocks_by_root_requests,
             blobs_by_root_requests,
             data_columns_by_root_requests,
+            headers_by_root_requests,
             // custody_by_root_requests is a meta request of data_columns_by_root_requests
             custody_by_root_requests: _,
             // components_by_range_requests is a meta request of various _by_range requests
@@ -446,6 +455,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .iter_request_peers()
             .chain(blobs_by_root_requests.iter_request_peers())
             .chain(data_columns_by_root_requests.iter_request_peers())
+            .chain(headers_by_root_requests.iter_request_peers())
         {
             *active_request_count_by_peer.entry(peer_id).or_default() += 1;
         }
@@ -844,6 +854,19 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let resp = self
             .data_columns_by_root_requests
             .on_response(id, rpc_event);
+        self.on_rpc_response_result(resp, peer_id)
+    }
+
+    /// Processes a single `RpcEvent` for a data_columns_by_root RPC request.
+    /// Same logic as [`on_blocks_by_root_response`]
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn on_headers_by_root_response(
+        &mut self,
+        id: HeadersByRootRequestId,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<BeaconBlockHeader>,
+    ) -> Option<RpcResponseResult<Vec<BeaconBlockHeader>>> {
+        let resp = self.headers_by_root_requests.on_response(id, rpc_event);
         self.on_rpc_response_result(resp, peer_id)
     }
 

@@ -23,12 +23,20 @@ pub enum SyncRequestId {
     BlobsByRoot(BlobsByRootRequestId),
     /// Request searching for a set of data columns given a hash and list of column indices.
     DataColumnsByRoot(DataColumnsByRootRequestId),
+    /// Request for headers_by_root
+    HeadersByRoot(HeadersByRootRequestId),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct BlocksByRootRequestId {
     pub id: Id,
     pub parent_request_id: BlocksByRootRequester,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct HeadersByRootRequestId {
+    pub id: Id,
+    pub parent_request_id: HeaderLookupId,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -210,6 +218,7 @@ impl_display!(ComponentsByRootRequestId, "{}/{}", id, requester);
 impl_display!(BlocksByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(BlobsByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(DataColumnsByRootRequestId, "{}/{}", id, parent_request_id);
+impl_display!(HeadersByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
 impl_display!(CustodyByRootRequestId, "{}", parent_request_id);
 impl_display!(SamplingId, "{}/{}", sampling_request_id, id);
