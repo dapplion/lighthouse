@@ -330,6 +330,34 @@ impl<T: BeaconChainTypes> Chain<T> {
         })
     }
 
+    /// Given another chain whose parent is the tip of this chain, merge the block of `other` into
+    /// `self`.
+    fn merge(&mut self, child_chain: Self) -> Result<(), InternalError> {
+        let Status::WaitingParentChain {
+            block_roots: child_block_roots,
+            ..
+        } = child_chain.status
+        else {
+            return Err(InternalError("Other not in WaitingParentChain".to_string()));
+        };
+
+        match &mut self.status {
+            Status::BackfillHeaders { block_roots, .. }
+            | Status::WaitingParentChain { block_roots, .. } => {
+                // child_block_roots and block_roots are sorted as tip first, so do
+                // child_block_roots + block_roots
+                *block_roots = child_block_roots
+                    .into_iter()
+                    .chain(block_roots.drain(..))
+                    .collect::<Vec<_>>();
+                Ok(())
+            }
+            Status::ForwardSync { .. } => {
+                Err(InternalError("Cannot merge into ForwardSync".to_string()))
+            }
+        }
+    }
+
     /// Return true if this chain is awaiting `block_root`
     fn to_ready_to_sync(&mut self, block_root: &Hash256) -> bool {
         match &mut self.status {
@@ -1219,6 +1247,82 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         }
     }
 
+    fn merge_chains(&mut self) -> Result<(), InternalError> {
+        // To prevent O(n^2) ops, first compute a hashmap of tips to chains. Each block belongs
+        // exactly to one chain so there must be a single tip -> chain relationship
+        let tip_to_chain = HashMap::<Hash256, (&TipId, &Chain<T>)>::from_iter(
+            self.chains.iter().filter_map(|(chain_id, chain)| {
+                // TODO(tree-sync): exclude ForwardSync
+                if let Some(tip) = chain.tip() {
+                    Some((tip, (chain_id, chain)))
+                } else {
+                    None
+                }
+            }),
+        );
+
+        // Now collect all chains waiting for a parent to sort them by peer_count and block count
+        let mut chains = self
+            .chains
+            .iter()
+            .filter_map(|(chain_id, chain)| {
+                if let Status::WaitingParentChain { parent_root, .. } = chain.status {
+                    Some((chain_id, chain, parent_root))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        chains.sort_unstable_by_key(|(_, chain, _)| (chain.peer_count(), chain.block_count()));
+
+        // Iterate from highest peer count and highest block count first
+        let chains_to_merge =
+            chains
+                .into_iter()
+                .rev()
+                .find_map(|(chain_id, chain, parent_root)| {
+                    // The parent root of chain is exactly the tip of parent_chain
+                    if let Some((parent_chain_id, parent_chain)) = tip_to_chain.get(&parent_root) {
+                        if chain.peers == parent_chain.peers {
+                            // The peer set is the same, schedule to merge them
+                            return Some((**parent_chain_id, *chain_id));
+                        }
+                    }
+                    None
+                });
+
+        // Execute the merge operation. Do a single merge operation per loop as we remove a
+        // chain from the chains map. Is possible that chains are childs of each other so to
+        // safely merge them we would need to iterate them in topological order. For
+        // simplicity we just do one merge at a time.
+        if let Some((parent_chain_id, chain_id)) = chains_to_merge {
+            debug!(%parent_chain_id, %chain_id, "Merging forward sync chains");
+            metrics::inc_counter(&metrics::SYNC_CHAIN_MERGES_COUNT);
+
+            let Some(chain) = self.chains.remove(&chain_id) else {
+                return Err(InternalError(format!("chain {chain_id} does not exist")));
+            };
+            let Some(parent_chain) = self.chains.get_mut(&parent_chain_id) else {
+                return Err(InternalError(format!(
+                    "parent_chain {parent_chain_id} does not exist"
+                )));
+            };
+            // Update all block references to the new chain
+            for block_root in chain.iter_block_roots() {
+                self.block_to_tip.insert(*block_root, parent_chain_id);
+            }
+            parent_chain.merge(chain)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn prune(&mut self) {
+        if let Err(e) = self.merge_chains() {
+            error!(error = ?e, "Error merging forward sync chains");
+        }
+    }
+
     pub fn register_metrics(&self) {
         let (min_slot, max_slot) =
             self.chains
@@ -1407,6 +1511,36 @@ mod tests {
         );
     }
 
+    fn test_merge(left: &[u64], right: &[u64], expected_merged: &[u64]) {
+        let peers = HashSet::from_iter([PeerId::random()]);
+        // Left chain has descendant roots of right
+        let mut left_chain = Chain::<T> {
+            peers: peers.clone(),
+            status: Status::WaitingParentChain {
+                parent_root: to_root(right.first().unwrap()),
+                block_roots: left.iter().map(to_block).collect::<Vec<_>>(),
+                ready_to_sync: false,
+            },
+        };
+        // Right chain has no known parent, so set it to 0xff
+        let mut right_chain = Chain::<T> {
+            peers: peers.clone(),
+            status: Status::WaitingParentChain {
+                parent_root: to_root(&0xff), // rand root to not have conflicts
+                block_roots: right.iter().map(to_block).collect::<Vec<_>>(),
+                ready_to_sync: false,
+            },
+        };
+        let mut sync = ForwardSync {
+            block_to_tip: <_>::default(),
+            chains: HashMap::from_iter([(TipId(0), left_chain), (TipId(1), right_chain)]),
+        };
+        sync.merge_chains();
+        assert_eq!(sync.chains.len(), 1, "Should merge 2 chains into 1");
+        let merged_chain = sync.chains.values().next().unwrap();
+        assert_eq!(get_roots(merged_chain), expected_merged, "merged roots");
+    }
+
     #[test]
     fn split_by_only_elem_a() {
         // input [0,1] sorted by tip first
@@ -1439,5 +1573,20 @@ mod tests {
     #[test]
     fn split_by_middle_c() {
         test_split_by(&[2, 1, 0], 1, &[1, 0], &[2]);
+    }
+
+    #[test]
+    fn merge_left_long() {
+        test_merge(&[2, 1], &[0], &[2, 1, 0]);
+    }
+
+    #[test]
+    fn merge_right_long() {
+        test_merge(&[2], &[1, 0], &[2, 1, 0]);
+    }
+
+    #[test]
+    fn merge_same() {
+        test_merge(&[3, 2], &[1, 0], &[3, 2, 1, 0]);
     }
 }

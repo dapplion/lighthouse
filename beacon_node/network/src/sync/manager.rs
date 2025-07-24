@@ -620,7 +620,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     self.handle_new_execution_engine_state(engine_state);
                 }
                 _ = prune_lookups_interval.tick() => {
-                    // TODO(tree-sync): should prune stuck lookups?
+                    self.forward_sync.prune();
                 }
                 _ = prune_requests.tick() => {
                     self.prune_requests();
