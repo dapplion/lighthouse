@@ -3,8 +3,7 @@ mod ffg_updates;
 mod no_votes;
 mod votes;
 
-use crate::proto_array_fork_choice::{Block, ExecutionStatus, ProtoArrayForkChoice};
-use crate::{InvalidationOperation, JustifiedBalances};
+use crate::{ExecutionStatus, InvalidationOperation, JustifiedBalances, ProtoArray, ProtoNode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use types::{
@@ -79,7 +78,7 @@ impl ForkChoiceTestDefinition {
 
         let junk_shuffling_id =
             AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
-        let mut fork_choice = ProtoArrayForkChoice::new::<MainnetEthSpec>(
+        let mut fork_choice = ProtoArray::new::<MainnetEthSpec>(
             self.finalized_block_slot,
             self.finalized_block_slot,
             Hash256::zero(),
@@ -114,7 +113,7 @@ impl ForkChoiceTestDefinition {
                             &spec,
                         )
                         .unwrap_or_else(|e| {
-                            panic!("find_head op at index {} returned error {}", op_index, e)
+                            panic!("find_head op at index {} returned error {:?}", op_index, e)
                         });
 
                     assert_eq!(
@@ -145,7 +144,7 @@ impl ForkChoiceTestDefinition {
                             &spec,
                         )
                         .unwrap_or_else(|e| {
-                            panic!("find_head op at index {} returned error {}", op_index, e)
+                            panic!("find_head op at index {} returned error {:?}", op_index, e)
                         });
 
                     assert_eq!(
@@ -188,10 +187,10 @@ impl ForkChoiceTestDefinition {
                     justified_checkpoint,
                     finalized_checkpoint,
                 } => {
-                    let block = Block {
+                    let block = ProtoNode {
                         slot,
                         root,
-                        parent_root: Some(parent_root),
+                        parent: fork_choice.get_parent_index(&root),
                         state_root: Hash256::zero(),
                         target_root: Hash256::zero(),
                         current_epoch_shuffling_id: AttestationShufflingId::from_components(
@@ -204,6 +203,9 @@ impl ForkChoiceTestDefinition {
                         ),
                         justified_checkpoint,
                         finalized_checkpoint,
+                        weight: 0,
+                        best_child: None,
+                        best_descendant: None,
                         // All blocks are imported optimistically.
                         execution_status: ExecutionStatus::Optimistic(
                             ExecutionBlockHash::from_root(root),
@@ -212,7 +214,7 @@ impl ForkChoiceTestDefinition {
                         unrealized_finalized_checkpoint: None,
                     };
                     fork_choice
-                        .process_block::<MainnetEthSpec>(block, slot)
+                        .on_block::<MainnetEthSpec>(block, slot)
                         .unwrap_or_else(|e| {
                             panic!(
                                 "process_block op at index {} returned error: {:?}",
@@ -272,7 +274,7 @@ impl ForkChoiceTestDefinition {
                         }
                     };
                     fork_choice
-                        .process_execution_payload_invalidation::<MainnetEthSpec>(&op)
+                        .propagate_execution_payload_invalidation::<MainnetEthSpec>(&op)
                         .unwrap()
                 }
                 Operation::AssertWeight { block_root, weight } => assert_eq!(
@@ -304,9 +306,9 @@ fn get_checkpoint(i: u64) -> Checkpoint {
     }
 }
 
-fn check_bytes_round_trip(original: &ProtoArrayForkChoice) {
+fn check_bytes_round_trip(original: &ProtoArray) {
     let bytes = original.as_bytes();
-    let decoded = ProtoArrayForkChoice::from_bytes(&bytes, original.balances.clone())
+    let decoded = ProtoArray::from_bytes(&bytes, original.balances.clone())
         .expect("fork choice should decode from bytes");
     assert!(
         *original == decoded,

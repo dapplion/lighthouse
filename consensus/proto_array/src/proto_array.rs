@@ -1,15 +1,19 @@
+use crate::compute_deltas::compute_deltas;
 use crate::error::InvalidBestNodeInfo;
-use crate::{Block, ExecutionStatus, JustifiedBalances, error::Error};
+use crate::ssz_container::SszContainer;
+use crate::{ExecutionStatus, JustifiedBalances, error::Error};
 use serde::{Deserialize, Serialize};
-use ssz::Encode;
 use ssz::four_byte_option_impl;
+use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use superstruct::superstruct;
 use types::{
     AttestationShufflingId, ChainSpec, Checkpoint, Epoch, EthSpec, ExecutionBlockHash,
     FixedBytesExtended, Hash256, Slot,
 };
+
+pub const DEFAULT_PRUNE_THRESHOLD: usize = 256;
 
 // Define a "legacy" implementation of `Option<usize>` which uses four bytes for encoding the union
 // selector.
@@ -125,7 +129,41 @@ impl Default for ProposerBoost {
     }
 }
 
-#[derive(PartialEq, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, PartialEq, Clone, Debug, Encode, Decode)]
+pub struct VoteTracker {
+    pub(crate) current_root: Hash256,
+    pub(crate) next_root: Hash256,
+    pub(crate) next_epoch: Epoch,
+}
+
+/// A Vec-wrapper which will grow to match any request.
+///
+/// E.g., a `get` or `insert` to an out-of-bounds element will cause the Vec to grow (using
+/// Default) to the smallest size required to fulfill the request.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct ElasticList<T>(pub Vec<T>);
+
+impl<T> ElasticList<T>
+where
+    T: Default,
+{
+    fn ensure(&mut self, i: usize) {
+        if self.0.len() <= i {
+            self.0.resize_with(i + 1, Default::default);
+        }
+    }
+
+    pub fn get_mut(&mut self, i: usize) -> &mut T {
+        self.ensure(i);
+        &mut self.0[i]
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.0.iter_mut()
+    }
+}
+
+#[derive(PartialEq, Debug, Clone)]
 pub struct ProtoArray {
     /// Do not attempt to prune the tree unless it has at least this many nodes. Small prunes
     /// simply waste time.
@@ -135,9 +173,86 @@ pub struct ProtoArray {
     pub nodes: Vec<ProtoNode>,
     pub indices: HashMap<Hash256, usize>,
     pub previous_proposer_boost: ProposerBoost,
+    pub votes: ElasticList<VoteTracker>,
+    pub balances: JustifiedBalances,
 }
 
 impl ProtoArray {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new<E: EthSpec>(
+        current_slot: Slot,
+        finalized_block_slot: Slot,
+        finalized_block_state_root: Hash256,
+        justified_checkpoint: Checkpoint,
+        finalized_checkpoint: Checkpoint,
+        current_epoch_shuffling_id: AttestationShufflingId,
+        next_epoch_shuffling_id: AttestationShufflingId,
+        execution_status: ExecutionStatus,
+    ) -> Result<Self, String> {
+        let mut proto_array = Self {
+            prune_threshold: DEFAULT_PRUNE_THRESHOLD,
+            justified_checkpoint,
+            finalized_checkpoint,
+            nodes: Vec::with_capacity(1),
+            indices: HashMap::with_capacity(1),
+            previous_proposer_boost: ProposerBoost::default(),
+            votes: ElasticList::default(),
+            balances: JustifiedBalances::default(),
+        };
+
+        let block = ProtoNode {
+            slot: finalized_block_slot,
+            root: finalized_checkpoint.root,
+            parent: None,
+            state_root: finalized_block_state_root,
+            // We are using the finalized_root as the target_root, since it always lies on an
+            // epoch boundary.
+            target_root: finalized_checkpoint.root,
+            current_epoch_shuffling_id,
+            next_epoch_shuffling_id,
+            justified_checkpoint,
+            finalized_checkpoint,
+            weight: 0,
+            best_child: None,
+            best_descendant: None,
+            execution_status,
+            unrealized_justified_checkpoint: Some(justified_checkpoint),
+            unrealized_finalized_checkpoint: Some(finalized_checkpoint),
+        };
+
+        proto_array
+            .on_block::<E>(block, current_slot)
+            .map_err(|e| format!("Failed to add finalized block to proto_array: {:?}", e))?;
+
+        Ok(proto_array)
+    }
+
+    pub fn set_prune_threshold(&mut self, prune_threshold: usize) {
+        self.prune_threshold = prune_threshold;
+    }
+
+    pub fn contains_block(&self, block_root: &Hash256) -> bool {
+        self.indices.contains_key(block_root)
+    }
+
+    /// Returns the weight of a given block.
+    pub fn get_weight(&self, block_root: &Hash256) -> Option<u64> {
+        let block_index = self.indices.get(block_root)?;
+        self.nodes.get(*block_index).map(|node| node.weight)
+    }
+
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    pub fn get_parent_index(&self, parent_root: &Hash256) -> Option<usize> {
+        self.indices.get(parent_root).copied()
+    }
+
     /// Iterate backwards through the array, touching all nodes and their parents and potentially
     /// the best-child of each parent.
     ///
@@ -306,33 +421,17 @@ impl ProtoArray {
     /// Register a block with the fork choice.
     ///
     /// It is only sane to supply a `None` parent for the genesis block.
-    pub fn on_block<E: EthSpec>(&mut self, block: Block, current_slot: Slot) -> Result<(), Error> {
+    pub fn on_block<E: EthSpec>(
+        &mut self,
+        node: ProtoNode,
+        current_slot: Slot,
+    ) -> Result<(), Error> {
         // If the block is already known, simply ignore it.
-        if self.indices.contains_key(&block.root) {
+        if self.indices.contains_key(&node.root) {
             return Ok(());
         }
 
         let node_index = self.nodes.len();
-
-        let node = ProtoNode {
-            slot: block.slot,
-            root: block.root,
-            target_root: block.target_root,
-            current_epoch_shuffling_id: block.current_epoch_shuffling_id,
-            next_epoch_shuffling_id: block.next_epoch_shuffling_id,
-            state_root: block.state_root,
-            parent: block
-                .parent_root
-                .and_then(|parent| self.indices.get(&parent).copied()),
-            justified_checkpoint: block.justified_checkpoint,
-            finalized_checkpoint: block.finalized_checkpoint,
-            weight: 0,
-            best_child: None,
-            best_descendant: None,
-            execution_status: block.execution_status,
-            unrealized_justified_checkpoint: block.unrealized_justified_checkpoint,
-            unrealized_finalized_checkpoint: block.unrealized_finalized_checkpoint,
-        };
 
         // If the parent has an invalid execution status, return an error before adding the block to
         // `self`.
@@ -343,7 +442,7 @@ impl ProtoArray {
                 .ok_or(Error::InvalidNodeIndex(parent_index))?;
             if parent.execution_status.is_invalid() {
                 return Err(Error::ParentExecutionStatusIsInvalid {
-                    block_root: block.root,
+                    block_root: node.root,
                     parent_root: parent.root,
                 });
             }
@@ -359,9 +458,25 @@ impl ProtoArray {
                 current_slot,
             )?;
 
-            if matches!(block.execution_status, ExecutionStatus::Valid(_)) {
+            if matches!(node.execution_status, ExecutionStatus::Valid(_)) {
                 self.propagate_execution_payload_validation_by_index(parent_index)?;
             }
+        }
+
+        Ok(())
+    }
+
+    pub fn process_attestation(
+        &mut self,
+        validator_index: usize,
+        block_root: Hash256,
+        target_epoch: Epoch,
+    ) -> Result<(), String> {
+        let vote = self.votes.get_mut(validator_index);
+
+        if target_epoch > vote.next_epoch || *vote == VoteTracker::default() {
+            vote.next_root = block_root;
+            vote.next_epoch = target_epoch;
         }
 
         Ok(())
@@ -618,6 +733,104 @@ impl ProtoArray {
         Ok(())
     }
 
+    /// For all nodes, regardless of their relationship to the finalized block, set their execution
+    /// status to be optimistic.
+    ///
+    /// In practice this means forgetting any `VALID` or `INVALID` statuses.
+    pub fn set_all_blocks_to_optimistic<E: EthSpec>(
+        &mut self,
+        spec: &ChainSpec,
+    ) -> Result<(), String> {
+        // Iterate backwards through all nodes in the `proto_array`. Whilst it's not strictly
+        // required to do this process in reverse, it seems natural when we consider how LMD votes
+        // are counted.
+        //
+        // This function will touch all blocks, even those that do not descend from the finalized
+        // block. Since this function is expected to run at start-up during very rare
+        // circumstances we prefer simplicity over efficiency.
+        for node_index in (0..self.nodes.len()).rev() {
+            let node = self
+                .nodes
+                .get_mut(node_index)
+                .ok_or("unreachable index out of bounds in proto_array nodes")?;
+
+            match node.execution_status {
+                ExecutionStatus::Invalid(block_hash) => {
+                    node.execution_status = ExecutionStatus::Optimistic(block_hash);
+
+                    // Restore the weight of the node, it would have been set to `0` in
+                    // `apply_score_changes` when it was invalidated.
+                    let mut restored_weight: u64 = self
+                        .votes
+                        .0
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(validator_index, vote)| {
+                            if vote.current_root == node.root {
+                                // Any voting validator that does not have a balance should be
+                                // ignored. This is consistent with `compute_deltas`.
+                                self.balances.effective_balances.get(validator_index)
+                            } else {
+                                None
+                            }
+                        })
+                        .sum();
+
+                    // If the invalid root was boosted, apply the weight to it and
+                    // ancestors.
+                    if let Some(proposer_score_boost) = spec.proposer_score_boost
+                        && self.previous_proposer_boost.root == node.root
+                    {
+                        // Compute the score based upon the current balances. We can't rely on
+                        // the `previous_proposr_boost.score` since it is set to zero with an
+                        // invalid node.
+                        let proposer_score =
+                            calculate_committee_fraction::<E>(&self.balances, proposer_score_boost)
+                                .ok_or("Failed to compute proposer boost")?;
+                        // Store the score we've applied here so it can be removed in
+                        // a later call to `apply_score_changes`.
+                        self.previous_proposer_boost.score = proposer_score;
+                        // Apply this boost to this node.
+                        restored_weight = restored_weight
+                            .checked_add(proposer_score)
+                            .ok_or("Overflow when adding boost to weight")?;
+                    }
+
+                    // Add the restored weight to the node and all ancestors.
+                    if restored_weight > 0 {
+                        let mut node_or_ancestor = node;
+                        loop {
+                            node_or_ancestor.weight = node_or_ancestor
+                                .weight
+                                .checked_add(restored_weight)
+                                .ok_or("Overflow when adding weight to ancestor")?;
+
+                            if let Some(parent_index) = node_or_ancestor.parent {
+                                node_or_ancestor = self
+                                    .nodes
+                                    .get_mut(parent_index)
+                                    .ok_or(format!("Missing parent index: {}", parent_index))?;
+                            } else {
+                                // This is either the finalized block or a block that does not
+                                // descend from the finalized block.
+                                break;
+                            }
+                        }
+                    }
+                }
+                // There are no balance changes required if the node was either valid or
+                // optimistic.
+                ExecutionStatus::Valid(block_hash) | ExecutionStatus::Optimistic(block_hash) => {
+                    node.execution_status = ExecutionStatus::Optimistic(block_hash)
+                }
+                // An irrelevant node cannot become optimistic, this is a no-op.
+                ExecutionStatus::Irrelevant(_) => (),
+            }
+        }
+
+        Ok(())
+    }
+
     /// Follows the best-descendant links to find the best-block (i.e., head-block).
     ///
     /// ## Notes
@@ -627,15 +840,44 @@ impl ProtoArray {
     /// `on_new_block` does not attempt to walk backwards through the tree and update the
     /// best-child/best-descendant links.
     pub fn find_head<E: EthSpec>(
-        &self,
-        justified_root: &Hash256,
+        &mut self,
+        justified_checkpoint: Checkpoint,
+        finalized_checkpoint: Checkpoint,
+        justified_state_balances: &JustifiedBalances,
+        proposer_boost_root: Hash256,
+        equivocating_indices: &BTreeSet<u64>,
         current_slot: Slot,
+        spec: &ChainSpec,
     ) -> Result<Hash256, Error> {
+        let old_balances = &mut self.balances;
+        let new_balances = justified_state_balances;
+        let justified_root = justified_checkpoint.root;
+
+        let deltas = compute_deltas(
+            &self.indices,
+            &mut self.votes,
+            &old_balances.effective_balances,
+            &new_balances.effective_balances,
+            equivocating_indices,
+        )?;
+
+        self.apply_score_changes::<E>(
+            deltas,
+            justified_checkpoint,
+            finalized_checkpoint,
+            new_balances,
+            proposer_boost_root,
+            current_slot,
+            spec,
+        )?;
+
+        self.balances = new_balances.clone();
+
         let justified_index = self
             .indices
-            .get(justified_root)
+            .get(&justified_root)
             .copied()
-            .ok_or(Error::JustifiedNodeUnknown(*justified_root))?;
+            .ok_or(Error::JustifiedNodeUnknown(justified_root))?;
 
         let justified_node = self
             .nodes
@@ -650,9 +892,7 @@ impl ProtoArray {
         //
         // This scenario is *unsupported*. It represents a serious consensus failure.
         if justified_node.execution_status.is_invalid() {
-            return Err(Error::InvalidJustifiedCheckpointExecutionStatus {
-                justified_root: *justified_root,
-            });
+            return Err(Error::InvalidJustifiedCheckpointExecutionStatus { justified_root });
         }
 
         let best_descendant_index = justified_node.best_descendant.unwrap_or(justified_index);
@@ -666,7 +906,7 @@ impl ProtoArray {
         if !self.node_is_viable_for_head::<E>(best_node, current_slot) {
             return Err(Error::InvalidBestNode(Box::new(InvalidBestNodeInfo {
                 current_slot,
-                start_root: *justified_root,
+                start_root: justified_root,
                 justified_checkpoint: self.justified_checkpoint,
                 finalized_checkpoint: self.finalized_checkpoint,
                 head_root: best_node.root,
@@ -1052,6 +1292,43 @@ impl ProtoArray {
                     && self.is_finalized_checkpoint_or_descendant::<E>(node.root)
             })
             .collect()
+    }
+
+    pub fn latest_message(&self, validator_index: usize) -> Option<(Hash256, Epoch)> {
+        if validator_index < self.votes.0.len() {
+            let vote = &self.votes.0[validator_index];
+
+            if *vote == VoteTracker::default() {
+                None
+            } else {
+                Some((vote.next_root, vote.next_epoch))
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn as_ssz_container(&self) -> SszContainer {
+        SszContainer::from(self)
+    }
+
+    pub fn as_bytes(&self) -> Vec<u8> {
+        SszContainer::from(self).as_ssz_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8], balances: JustifiedBalances) -> Result<Self, String> {
+        let container = SszContainer::from_ssz_bytes(bytes)
+            .map_err(|e| format!("Failed to decode ProtoArrayForkChoice: {:?}", e))?;
+        Self::from_container(container, balances)
+    }
+
+    pub fn from_container(
+        container: SszContainer,
+        balances: JustifiedBalances,
+    ) -> Result<Self, String> {
+        (container, balances)
+            .try_into()
+            .map_err(|e| format!("Failed to initialize ProtoArrayForkChoice: {e:?}"))
     }
 }
 
