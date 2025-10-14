@@ -1027,9 +1027,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .process_prune_blobs(data_availability_boundary);
         }
 
-        // Take a write-lock on the canonical head and signal for it to prune.
-        self.canonical_head.fork_choice_write_lock().prune()?;
-
         Ok(())
     }
 

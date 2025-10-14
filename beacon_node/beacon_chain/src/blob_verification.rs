@@ -471,18 +471,13 @@ pub fn validate_blob_sidecar_for_gossip<T: BeaconChainTypes, O: ObservationStrat
     let fork_choice = chain.canonical_head.fork_choice_read_lock();
 
     // We have already verified that the blob is past finalization, so we can
-    // just check fork choice for the block's parent.
+    // just check fork choice for the block's parent. Fork-choice only contains blocks descendant of
+    // finalized.
     let Some(parent_block) = fork_choice.get_block(&block_parent_root) else {
         return Err(GossipBlobError::ParentUnknown {
             parent_root: block_parent_root,
         });
     };
-
-    // Do not process a blob that does not descend from the finalized root.
-    // We just loaded the parent_block, so we can be sure that it exists in fork choice.
-    if !fork_choice.is_finalized_checkpoint_or_descendant(block_parent_root) {
-        return Err(GossipBlobError::NotFinalizedDescendant { block_parent_root });
-    }
     drop(fork_choice);
 
     if parent_block.slot >= blob_slot {

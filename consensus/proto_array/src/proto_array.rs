@@ -464,11 +464,8 @@ impl ProtoArray {
         //
         // 1. The `head_block_root` is a descendant of `latest_valid_ancestor_hash`
         // 2. The `latest_valid_ancestor_hash` is equal to or a descendant of the finalized block.
-        let latest_valid_ancestor_is_descendant =
-            latest_valid_ancestor_root.is_some_and(|ancestor_root| {
-                self.is_descendant(ancestor_root, head_block_root)
-                    && self.is_finalized_checkpoint_or_descendant::<E>(ancestor_root)
-            });
+        let latest_valid_ancestor_is_descendant = latest_valid_ancestor_root
+            .is_some_and(|ancestor_root| self.is_descendant(ancestor_root, head_block_root));
 
         // Collect all *ancestors* which were declared invalid since they reside between the
         // `head_block_root` and the `latest_valid_ancestor_root`.
@@ -905,8 +902,8 @@ impl ProtoArray {
             || voting_source.epoch == self.justified_checkpoint.epoch
             || voting_source.epoch + 2 >= current_epoch;
 
-        let correct_finalized = self.finalized_checkpoint.epoch == genesis_epoch
-            || self.is_finalized_checkpoint_or_descendant::<E>(node.root);
+        // All nodes in the tree are descendant of finalized
+        let correct_finalized = self.finalized_checkpoint.epoch == genesis_epoch;
 
         correct_justified && correct_finalized
     }
@@ -956,72 +953,6 @@ impl ProtoArray {
             .unwrap_or(false)
     }
 
-    /// Returns `true` if `root` is equal to or a descendant of
-    /// `self.finalized_checkpoint`.
-    ///
-    /// Notably, this function is checking ancestory of the finalized
-    /// *checkpoint* not the finalized *block*.
-    pub fn is_finalized_checkpoint_or_descendant<E: EthSpec>(&self, root: Hash256) -> bool {
-        let finalized_root = self.finalized_checkpoint.root;
-        let finalized_slot = self
-            .finalized_checkpoint
-            .epoch
-            .start_slot(E::slots_per_epoch());
-
-        let Some(mut node) = self
-            .indices
-            .get(&root)
-            .and_then(|index| self.nodes.get(*index))
-        else {
-            // An unknown root is not a finalized descendant. This line can only
-            // be reached if the user supplies a root that is not known to fork
-            // choice.
-            return false;
-        };
-
-        // The finalized and justified checkpoints represent a list of known
-        // ancestors of `node` that are likely to coincide with the store's
-        // finalized checkpoint.
-        //
-        // Run this check once, outside of the loop rather than inside the loop.
-        // If the conditions don't match for this node then they're unlikely to
-        // start matching for its ancestors.
-        for checkpoint in &[node.finalized_checkpoint, node.justified_checkpoint] {
-            if checkpoint == &self.finalized_checkpoint {
-                return true;
-            }
-        }
-
-        for checkpoint in &[
-            node.unrealized_finalized_checkpoint,
-            node.unrealized_justified_checkpoint,
-        ] {
-            if checkpoint.is_some_and(|cp| cp == self.finalized_checkpoint) {
-                return true;
-            }
-        }
-
-        loop {
-            // If `node` is less than or equal to the finalized slot then `node`
-            // must be the finalized block.
-            if node.slot <= finalized_slot {
-                return node.root == finalized_root;
-            }
-
-            // Since `node` is from a higher slot that the finalized checkpoint,
-            // replace `node` with the parent of `node`.
-            if let Some(parent) = node.parent.and_then(|index| self.nodes.get(index)) {
-                node = parent
-            } else {
-                // If `node` is not the finalized block and its parent does not
-                // exist in fork choice, then the parent must have been pruned.
-                // Proto-array only prunes blocks prior to the finalized block,
-                // so this means the parent conflicts with finality.
-                return false;
-            };
-        }
-    }
-
     /// Returns the first *beacon block root* which contains an execution payload with the given
     /// `block_hash`, if any.
     pub fn execution_block_hash_to_beacon_block_root(
@@ -1047,10 +978,7 @@ impl ProtoArray {
     pub fn heads_descended_from_finalization<E: EthSpec>(&self) -> Vec<&ProtoNode> {
         self.nodes
             .iter()
-            .filter(|node| {
-                node.best_child.is_none()
-                    && self.is_finalized_checkpoint_or_descendant::<E>(node.root)
-            })
+            .filter(|node| node.best_child.is_none())
             .collect()
     }
 }
