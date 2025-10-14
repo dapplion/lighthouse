@@ -880,15 +880,6 @@ impl ProtoArrayForkChoice {
             .is_descendant(ancestor_root, descendant_root)
     }
 
-    /// See `ProtoArray` documentation.
-    pub fn is_finalized_checkpoint_or_descendant<E: EthSpec>(
-        &self,
-        descendant_root: Hash256,
-    ) -> bool {
-        self.proto_array
-            .is_finalized_checkpoint_or_descendant::<E>(descendant_root)
-    }
-
     pub fn latest_message(&self, validator_index: usize) -> Option<(Hash256, Epoch)> {
         if validator_index < self.votes.0.len() {
             let vote = &self.votes.0[validator_index];

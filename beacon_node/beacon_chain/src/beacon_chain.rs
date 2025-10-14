@@ -1415,6 +1415,25 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .collect()
     }
 
+    pub fn is_descendant_of_local_irreversible_block(&self, block_root: Hash256) -> bool {
+        // If we have a split block newer than finalization then we also ban attestations which are not
+        // descended from that split block. It's important not to try checking `is_descendant` if
+        // finality is ahead of the split and the split block has been pruned, as `is_descendant` will
+        // return `false` in this case.
+        let fork_choice = self.canonical_head.fork_choice_read_lock();
+        let finalized_slot = fork_choice
+            .finalized_checkpoint()
+            .epoch
+            .start_slot(T::EthSpec::slots_per_epoch());
+        let split = self.store.get_split_info();
+        let is_descendant_from_split_block = split.slot == 0
+            || split.slot <= finalized_slot
+            || fork_choice.is_descendant(split.block_root, block_root);
+
+        let is_finalized_checkpoint_or_descendant = fork_choice.get_block(&block_root).is_some();
+        is_finalized_checkpoint_or_descendant && is_descendant_from_split_block
+    }
+
     /// Returns the `BeaconState` at the given slot.
     ///
     /// Returns `None` when the state is not found in the database or there is an error skipping
@@ -3842,13 +3861,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(BlockError::DuplicateFullyImported(block_root));
         }
 
+        // Do not import a block that doesn't descend from the finalized root.
+        let signed_block = check_block_is_finalized_checkpoint_or_descendant(self, signed_block)?;
+
         // Take an exclusive write-lock on fork choice. It's very important to prevent deadlocks by
         // avoiding taking other locks whilst holding this lock.
         let mut fork_choice = parking_lot::RwLockUpgradableReadGuard::upgrade(fork_choice_reader);
 
-        // Do not import a block that doesn't descend from the finalized root.
-        let signed_block =
-            check_block_is_finalized_checkpoint_or_descendant(self, &fork_choice, signed_block)?;
         let block = signed_block.message();
 
         // Register the new block with the fork choice service.
