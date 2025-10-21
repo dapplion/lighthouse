@@ -6,7 +6,8 @@ use std::{
 
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::{
-    NetworkGlobals, PeerId, service::api_types::ByRangeParentRequestId, types::CustodyBackFillState,
+    NetworkGlobals, PeerId, service::api_types::DataColumnsByRangeRequester,
+    types::CustodyBackFillState,
 };
 use lighthouse_tracing::SPAN_CUSTODY_BACKFILL_SYNC_BATCH_REQUEST;
 use logging::crit;
@@ -64,13 +65,13 @@ impl<E: EthSpec> BatchConfig for CustodyBackFillBatchConfig<E> {
 pub enum CustodyBackfillError {
     /// A batch failed to be downloaded.
     BatchDownloadFailed(#[allow(dead_code)] BatchId),
-    // /// A batch could not be processed.
+    /// A batch could not be processed.
     BatchProcessingFailed(#[allow(dead_code)] BatchId),
     /// A batch entered an invalid state.
     BatchInvalidState(#[allow(dead_code)] BatchId, #[allow(dead_code)] String),
     /// The sync algorithm entered an invalid state.
     InvalidSyncState(#[allow(dead_code)] String),
-    // /// The chain became paused.
+    /// The chain became paused.
     Paused,
 }
 
@@ -369,29 +370,24 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
         let mut missing_columns = HashSet::new();
 
         // Skip all batches (Epochs) that don't have missing columns.
-        for i in Epoch::range_inclusive_rev(self.to_be_downloaded, column_da_boundary) {
-            let current_batch = i;
-            missing_columns = self
-                .beacon_chain
-                .get_missing_columns_for_epoch(current_batch);
+        for epoch in Epoch::range_inclusive_rev(self.to_be_downloaded, column_da_boundary) {
+            missing_columns = self.beacon_chain.get_missing_columns_for_epoch(epoch);
 
             if !missing_columns.is_empty() {
-                self.to_be_downloaded = current_batch;
+                self.to_be_downloaded = epoch;
                 break;
             }
 
-            // This batch is being skipped, insert it into the skipped batches mapping.
-            self.skipped_batches.insert(current_batch);
+            // This batch is being skipped, insert it into the skipped batches set.
+            self.skipped_batches.insert(epoch);
 
-            if i == column_da_boundary {
+            if epoch <= column_da_boundary {
                 return None;
             }
         }
 
         // Don't request batches before the column da boundary
-        if let Some(column_da_boundary) = self.beacon_chain.get_column_da_boundary()
-            && self.to_be_downloaded < column_da_boundary
-        {
+        if self.to_be_downloaded < column_da_boundary {
             return None;
         }
 
@@ -421,7 +417,6 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
 
         let batch_id = self.to_be_downloaded;
 
-        // this batch could have been included already being an optimistic batch
         match self.batches.entry(batch_id) {
             Entry::Occupied(_) => {
                 // this batch doesn't need downloading, let this same function decide the next batch
@@ -505,10 +500,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
             self.on_batch_process_result(
                 network,
                 batch_id,
-                &CustodyBatchProcessResult::Error {
-                    batch_id,
-                    peer_action: None,
-                },
+                &CustodyBatchProcessResult::Error { peer_action: None },
             )
         } else {
             Ok(ProcessResult::Successful)
@@ -524,12 +516,12 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
     pub fn on_data_column_response(
         &mut self,
         network: &mut SyncNetworkContext<T>,
-        custody_sync_request_id: ByRangeParentRequestId,
+        custody_sync_request_id: DataColumnsByRangeRequester,
         peer_id: &PeerId,
         data_columns: DataColumnSidecarList<T::EthSpec>,
     ) -> Result<ProcessResult, CustodyBackfillError> {
         match custody_sync_request_id {
-            ByRangeParentRequestId::CustodyBackfillSync(custody_sync_request_id) => {
+            DataColumnsByRangeRequester::CustodyBackfillSync(custody_sync_request_id) => {
                 // check if we have this batch
                 let Some(batch) = self.batches.get_mut(&custody_sync_request_id.epoch) else {
                     if !matches!(self.state(), CustodyBackFillState::Pending(_)) {
@@ -695,10 +687,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                     self.process_completed_batches(network)
                 }
             }
-            CustodyBatchProcessResult::Error {
-                peer_action,
-                batch_id,
-            } => {
+            CustodyBatchProcessResult::Error { peer_action } => {
                 match peer_action {
                     // Faulty failure
                     Some(peer_action) => {
@@ -706,7 +695,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                             Err(e) => {
                                 // Batch was in the wrong state
                                 self.fail_sync(CustodyBackfillError::BatchInvalidState(
-                                    *batch_id, e.0,
+                                    batch_id, e.0,
                                 ))
                                 .map(|_| ProcessResult::Successful)
                             }
@@ -717,15 +706,15 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                                     "Custody backfill batch failed to download. Penalizing peers"
                                 );
                                 self.fail_sync(CustodyBackfillError::BatchProcessingFailed(
-                                    *batch_id,
+                                    batch_id,
                                 ))
                                 .map(|_| ProcessResult::Successful)
                             }
 
                             Ok(BatchOperationOutcome::Continue) => {
-                                self.advance_custody_backfill_sync(*batch_id);
+                                self.advance_custody_backfill_sync(batch_id);
                                 // Handle this invalid batch, that is within the re-process retries limit.
-                                self.handle_invalid_batch(network, *batch_id)
+                                self.handle_invalid_batch(network, batch_id)
                                     .map(|_| ProcessResult::Successful)
                             }
                         }
@@ -735,11 +724,9 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                         if let Err(e) =
                             batch.processing_completed(BatchProcessingResult::NonFaultyFailure)
                         {
-                            self.fail_sync(CustodyBackfillError::BatchInvalidState(
-                                *batch_id, e.0,
-                            ))?;
+                            self.fail_sync(CustodyBackfillError::BatchInvalidState(batch_id, e.0))?;
                         }
-                        self.send_batch(network, *batch_id)?;
+                        self.send_batch(network, batch_id)?;
                         Ok(ProcessResult::Successful)
                     }
                 }
@@ -1076,17 +1063,17 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
     pub fn inject_error(
         &mut self,
         network: &mut SyncNetworkContext<T>,
-        request: ByRangeParentRequestId,
+        request: DataColumnsByRangeRequester,
         peer_id: &PeerId,
         err: RpcResponseError,
     ) -> Result<(), CustodyBackfillError> {
         match request {
-            ByRangeParentRequestId::ComponentsByRange(_) => {
+            DataColumnsByRangeRequester::ComponentsByRange(_) => {
                 // This shouldn't be possible, but we log a crit if it does.
                 crit!("Trying to handle a components by range request during custody sync.");
                 Ok(())
             }
-            ByRangeParentRequestId::CustodyBackfillSync(request) => {
+            DataColumnsByRangeRequester::CustodyBackfillSync(request) => {
                 if let Some(batch) = self.batches.get_mut(&request.epoch) {
                     // A batch could be retried without the peer failing the request (disconnecting/
                     // sending an error /timeout) if the peer is removed from the chain for other
