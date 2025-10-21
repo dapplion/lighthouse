@@ -6,7 +6,6 @@ use lighthouse_network::rpc::methods::DataColumnsByRangeRequest;
 use lighthouse_network::service::api_types::Id;
 use std::collections::HashSet;
 use std::hash::Hash;
-use std::marker::PhantomData;
 use std::ops::Sub;
 use std::time::Duration;
 use std::time::Instant;
@@ -87,7 +86,7 @@ pub struct BatchInfo<E: EthSpec, B: BatchConfig, D: Hash> {
     /// End slot of the batch.
     end_slot: Slot,
     /// The `Attempts` that have been made and failed to send us this batch.
-    failed_processing_attempts: Vec<Attempt<D>>,
+    failed_processing_attempts: Vec<Attempt>,
     /// Number of processing attempts that have failed but we do not count.
     non_faulty_processing_attempts: u8,
     /// The number of download retries this batch has undergone due to a failed request.
@@ -101,9 +100,7 @@ pub struct BatchInfo<E: EthSpec, B: BatchConfig, D: Hash> {
     marker: std::marker::PhantomData<(E, B)>,
 }
 
-impl<E: EthSpec, B: BatchConfig, D: std::fmt::Debug + Hash> std::fmt::Display
-    for BatchInfo<E, B, D>
-{
+impl<E: EthSpec, B: BatchConfig, D: Hash> std::fmt::Display for BatchInfo<E, B, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -123,13 +120,13 @@ pub enum BatchState<D: Hash> {
     /// The batch has been completely downloaded and is ready for processing.
     AwaitingProcessing(PeerId, D, Instant),
     /// The batch is being processed.
-    Processing(Attempt<D>),
+    Processing(Attempt),
     /// The batch was successfully processed and is waiting to be validated.
     ///
     /// It is not sufficient to process a batch successfully to consider it correct. This is
     /// because batches could be erroneously empty, or incomplete. Therefore, a batch is considered
     /// valid, only if the next sequential batch imports at least a block.
-    AwaitingValidation(Attempt<D>),
+    AwaitingValidation(Attempt),
     /// Intermediate state for inner state handling.
     Poisoned,
     /// The batch has maxed out the allowed attempts for either downloading or processing. It
@@ -228,7 +225,7 @@ impl<E: EthSpec, B: BatchConfig, D: Hash> BatchInfo<E, B, D> {
         &self.state
     }
 
-    pub fn attempts(&self) -> &[Attempt<D>] {
+    pub fn attempts(&self) -> &[Attempt] {
         &self.failed_processing_attempts
     }
 
@@ -333,7 +330,7 @@ impl<E: EthSpec, B: BatchConfig, D: Hash> BatchInfo<E, B, D> {
     pub fn start_processing(&mut self) -> Result<(D, Duration), WrongState> {
         match self.state.poison() {
             BatchState::AwaitingProcessing(peer, data_columns, start_instant) => {
-                self.state = BatchState::Processing(Attempt::new::<B>(peer, &data_columns));
+                self.state = BatchState::Processing(Attempt::new::<B, D>(peer, &data_columns));
                 Ok((data_columns, start_instant.elapsed()))
             }
             BatchState::Poisoned => unreachable!("Poisoned batch"),
@@ -467,23 +464,17 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B, DataColumnSidecarList<E>> {
 }
 
 #[derive(Debug)]
-pub struct Attempt<D: Hash> {
+pub struct Attempt {
     /// The peer that made the attempt.
     pub peer_id: PeerId,
     /// The hash of the blocks of the attempt.
     pub hash: u64,
-    /// Pin the generic.
-    marker: PhantomData<D>,
 }
 
-impl<D: Hash> Attempt<D> {
-    fn new<B: BatchConfig>(peer_id: PeerId, data: &D) -> Self {
+impl Attempt {
+    fn new<B: BatchConfig, D: Hash>(peer_id: PeerId, data: &D) -> Self {
         let hash = B::batch_attempt_hash(data);
-        Attempt {
-            peer_id,
-            hash,
-            marker: PhantomData,
-        }
+        Attempt { peer_id, hash }
     }
 }
 
