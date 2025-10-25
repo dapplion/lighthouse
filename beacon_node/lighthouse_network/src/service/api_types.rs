@@ -148,7 +148,7 @@ pub enum AppRequestId {
 //       sent. The main difference is the absense of Pong and Metadata, which don't leave the
 //       Behaviour. For all protocol reponses managed by RPC see `RPCResponse` and
 //       `RPCCodedResponse`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Response<E: EthSpec> {
     /// A Status message.
     Status(StatusMessage),

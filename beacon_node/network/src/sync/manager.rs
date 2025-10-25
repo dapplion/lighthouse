@@ -90,7 +90,6 @@ pub const SLOT_IMPORT_TOLERANCE: usize = 32;
 /// arbitrary number that covers a full slot, but allows recovery if sync get stuck for a few slots.
 const NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS: u64 = 30;
 
-#[derive(Debug)]
 /// A message that can be sent to the sync manager thread.
 pub enum SyncMessage<E: EthSpec> {
     /// A useful peer has been discovered.

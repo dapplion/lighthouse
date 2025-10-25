@@ -125,7 +125,7 @@ pub trait LoadCase: Sized {
     fn load_from_dir(_path: &Path, _fork_name: ForkName) -> Result<Self, Error>;
 }
 
-pub trait Case: Debug + Sync {
+pub trait Case: Sync {
     /// An optional field for implementing a custom description.
     ///
     /// Defaults to "no description".

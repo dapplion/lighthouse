@@ -546,7 +546,10 @@ mod test {
         .unwrap();
 
         for i in 0..E::number_of_columns() {
-            assert_eq!(reconstructed_columns.get(i), column_sidecars.get(i), "{i}");
+            assert!(
+                reconstructed_columns.get(i) == column_sidecars.get(i),
+                "{i}"
+            );
         }
     }
 
@@ -567,7 +570,10 @@ mod test {
         let reconstructed_columns = reconstruct_data_columns(kzg, subset_columns, spec).unwrap();
 
         for i in 0..E::number_of_columns() {
-            assert_eq!(reconstructed_columns.get(i), column_sidecars.get(i), "{i}");
+            assert!(
+                reconstructed_columns.get(i) == column_sidecars.get(i),
+                "{i}"
+            );
         }
     }
 

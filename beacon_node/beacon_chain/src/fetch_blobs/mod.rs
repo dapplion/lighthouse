@@ -43,7 +43,6 @@ use types::{
 /// Result from engine get blobs to be passed onto `DataAvailabilityChecker` and published to the
 /// gossip network. The blobs / data columns have not been marked as observed yet, as they may not
 /// be published immediately.
-#[derive(Debug)]
 pub enum EngineGetBlobsOutput<T: BeaconChainTypes> {
     Blobs(Vec<KzgVerifiedBlob<T::EthSpec>>),
     /// A filtered list of custody data columns to be imported into the `DataAvailabilityChecker`.

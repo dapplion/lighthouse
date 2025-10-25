@@ -17,6 +17,7 @@ use std::fmt::Debug;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
+use strum::AsRefStr;
 use task_executor::TaskExecutor;
 use tracing::{debug, error, instrument};
 use types::blob_sidecar::{BlobIdentifier, BlobSidecar, FixedBlobSidecarList};
@@ -91,7 +92,7 @@ pub struct DataAvailabilityChecker<T: BeaconChainTypes> {
 
 pub type AvailabilityAndReconstructedColumns<E> = (Availability<E>, DataColumnSidecarList<E>);
 
-#[derive(Debug)]
+#[derive(AsRefStr)]
 pub enum DataColumnReconstructionResult<E: EthSpec> {
     Success(AvailabilityAndReconstructedColumns<E>),
     NotStarted(&'static str),
@@ -750,7 +751,6 @@ async fn availability_cache_maintenance_service<T: BeaconChainTypes>(
     }
 }
 
-#[derive(Debug)]
 pub enum AvailableBlockData<E: EthSpec> {
     /// Block is pre-Deneb or has zero blobs
     NoData,
@@ -761,7 +761,6 @@ pub enum AvailableBlockData<E: EthSpec> {
 }
 
 /// A fully available block that is ready to be imported into fork choice.
-#[derive(Debug)]
 pub struct AvailableBlock<E: EthSpec> {
     block_root: Hash256,
     block: Arc<SignedBeaconBlock<E>>,
@@ -839,7 +838,6 @@ impl<E: EthSpec> AvailableBlock<E> {
     }
 }
 
-#[derive(Debug)]
 pub enum MaybeAvailableBlock<E: EthSpec> {
     /// This variant is fully available.
     /// i.e. for pre-deneb blocks, it contains a (`SignedBeaconBlock`, `Blobs::None`) and for
@@ -1153,7 +1151,7 @@ mod test {
         let (_availability, reconstructed_columns) = match reconstruction_result {
             DataColumnReconstructionResult::Success(result) => result,
             e => {
-                panic!("Expected successful reconstruction {:?}", e);
+                panic!("Expected successful reconstruction {}", e.as_ref());
             }
         };
 

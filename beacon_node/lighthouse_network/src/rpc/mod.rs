@@ -481,7 +481,7 @@ where
                             data: self.seq_number,
                         })),
                     )
-                    .expect("Request to exist");
+                    .unwrap_or_else(|_| panic!("Request to exist"));
                 }
 
                 self.events.push(ToSwarm::GenerateEvent(RPCMessage {

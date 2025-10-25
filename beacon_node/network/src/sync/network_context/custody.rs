@@ -384,7 +384,7 @@ struct ColumnRequest<E: EthSpec> {
     download_failures: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum Status<E: EthSpec> {
     NotStarted(Instant),
     Downloading(DataColumnsByRootRequestId),

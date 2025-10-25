@@ -186,7 +186,6 @@ impl From<BeaconStateError> for GossipDataColumnError {
 
 /// A wrapper around a `DataColumnSidecar` that indicates it has been approved for re-gossiping on
 /// the p2p network.
-#[derive(Debug)]
 pub struct GossipVerifiedDataColumn<T: BeaconChainTypes, O: ObservationStrategy = Observe> {
     block_root: Hash256,
     data_column: KzgVerifiedDataColumn<T::EthSpec>,
@@ -296,7 +295,7 @@ impl<T: BeaconChainTypes, O: ObservationStrategy> GossipVerifiedDataColumn<T, O>
 }
 
 /// Wrapper over a `DataColumnSidecar` for which we have completed kzg verification.
-#[derive(Debug, Derivative, Clone, Encode, Decode)]
+#[derive(Derivative, Clone, Encode, Decode)]
 #[derivative(PartialEq, Eq)]
 #[ssz(struct_behaviour = "transparent")]
 pub struct KzgVerifiedDataColumn<E: EthSpec> {
@@ -353,7 +352,7 @@ pub type CustodyDataColumnList<E> =
     VariableList<CustodyDataColumn<E>, <E as EthSpec>::NumberOfColumns>;
 
 /// Data column that we must custody
-#[derive(Debug, Derivative, Clone, Encode, Decode)]
+#[derive(Derivative, Clone, Encode, Decode)]
 #[derivative(PartialEq, Eq, Hash(bound = "E: EthSpec"))]
 #[ssz(struct_behaviour = "transparent")]
 pub struct CustodyDataColumn<E: EthSpec> {
@@ -383,7 +382,7 @@ impl<E: EthSpec> CustodyDataColumn<E> {
 }
 
 /// Data column that we must custody and has completed kzg verification
-#[derive(Debug, Derivative, Clone, Encode, Decode)]
+#[derive(Derivative, Clone, Encode, Decode)]
 #[derivative(PartialEq, Eq)]
 #[ssz(struct_behaviour = "transparent")]
 pub struct KzgVerifiedCustodyDataColumn<E: EthSpec> {

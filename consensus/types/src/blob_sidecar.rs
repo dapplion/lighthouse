@@ -44,14 +44,14 @@ impl Ord for BlobIdentifier {
     }
 }
 
+// Don't derive Debug: a BlobSidecar contains A LOT of binary data that we don't want to dump into
+// the terminal by accident.
 #[cfg_attr(
     feature = "arbitrary",
     derive(arbitrary::Arbitrary),
     arbitrary(bound = "E: EthSpec")
 )]
-#[derive(
-    Debug, Clone, Serialize, Deserialize, Encode, Decode, TreeHash, TestRandom, Derivative,
-)]
+#[derive(Clone, Serialize, Deserialize, Encode, Decode, TreeHash, TestRandom, Derivative)]
 #[context_deserialize(ForkName)]
 #[serde(bound = "E: EthSpec")]
 #[derivative(PartialEq, Eq, Hash(bound = "E: EthSpec"))]

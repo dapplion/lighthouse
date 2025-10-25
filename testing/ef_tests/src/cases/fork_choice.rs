@@ -137,7 +137,6 @@ pub struct Meta {
     _description: String,
 }
 
-#[derive(Debug)]
 pub struct ForkChoiceTest<E: EthSpec> {
     pub description: String,
     pub anchor_state: BeaconState<E>,

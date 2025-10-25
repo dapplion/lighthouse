@@ -80,7 +80,7 @@ impl<E: EthSpec> RpcBlock<E> {
 /// Note: This variant is intentionally private because we want to safely construct the
 /// internal variants after applying consistency checks to ensure that the block and blobs
 /// are consistent with respect to each other.
-#[derive(Debug, Clone, Derivative)]
+#[derive(Clone, Derivative)]
 #[derivative(Hash(bound = "E: EthSpec"))]
 enum RpcBlockInner<E: EthSpec> {
     /// Single block lookup response. This should potentially hit the data availability cache.

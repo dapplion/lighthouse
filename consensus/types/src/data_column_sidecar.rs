@@ -35,14 +35,14 @@ pub struct DataColumnsByRootIdentifier<E: EthSpec> {
 
 pub type DataColumnSidecarList<E> = Vec<Arc<DataColumnSidecar<E>>>;
 
+// Don't derive Debug: a DataColumnSidecar contains A LOT of binary data that we don't want to dump
+// into the terminal by accident.
 #[cfg_attr(
     feature = "arbitrary",
     derive(arbitrary::Arbitrary),
     arbitrary(bound = "E: EthSpec")
 )]
-#[derive(
-    Debug, Clone, Serialize, Deserialize, Encode, Decode, TreeHash, TestRandom, Derivative,
-)]
+#[derive(Clone, Serialize, Deserialize, Encode, Decode, TreeHash, TestRandom, Derivative)]
 #[serde(bound = "E: EthSpec")]
 #[derivative(PartialEq, Eq, Hash(bound = "E: EthSpec"))]
 #[context_deserialize(ForkName)]

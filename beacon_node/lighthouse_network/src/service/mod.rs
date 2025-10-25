@@ -55,7 +55,6 @@ pub const TARGET_SUBNET_PEERS: usize = 3;
 const MAX_IDENTIFY_ADDRESSES: usize = 10;
 
 /// The types of events than can be obtained from polling the behaviour.
-#[derive(Debug)]
 pub enum NetworkEvent<E: EthSpec> {
     /// We have successfully dialed and connected to a peer.
     PeerConnectedOutgoing(PeerId),

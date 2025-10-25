@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use types::{BlobSidecar, BlobSidecarList, EthSpec};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum BlobSidecarListFromRoot<E: EthSpec> {
     /// Valid root that exists in the DB, but has no blobs associated with it.
     NoBlobs,

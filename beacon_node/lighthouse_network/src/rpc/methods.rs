@@ -10,7 +10,7 @@ use std::fmt::Display;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
-use strum::IntoStaticStr;
+use strum::{AsRefStr, IntoStaticStr};
 use superstruct::superstruct;
 use types::blob_sidecar::BlobIdentifier;
 use types::light_client_update::MAX_REQUEST_LIGHT_CLIENT_UPDATES;
@@ -571,7 +571,7 @@ impl LightClientUpdatesByRangeRequest {
 /* RPC Handling and Grouping */
 // Collection of enums and structs used by the Codecs to encode/decode RPC messages
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq, AsRefStr)]
 pub enum RpcSuccessResponse<E: EthSpec> {
     /// A HELLO message.
     Status(StatusMessage),
@@ -612,6 +612,12 @@ pub enum RpcSuccessResponse<E: EthSpec> {
 
     /// A response to a META_DATA request.
     MetaData(Arc<MetaData<E>>),
+}
+
+impl<E: EthSpec> std::fmt::Debug for RpcSuccessResponse<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_ref())
+    }
 }
 
 /// Indicates which response is being terminated by a stream termination response.

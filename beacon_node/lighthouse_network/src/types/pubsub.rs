@@ -18,7 +18,7 @@ use types::{
     SyncCommitteeMessage, SyncSubnetId,
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum PubsubMessage<E: EthSpec> {
     /// Gossipsub message providing notification of a new block.
     BeaconBlock(Arc<SignedBeaconBlock<E>>),

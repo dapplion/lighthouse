@@ -158,7 +158,6 @@ impl From<BeaconStateError> for GossipBlobError {
 
 /// A wrapper around a `BlobSidecar` that indicates it has been approved for re-gossiping on
 /// the p2p network.
-#[derive(Debug)]
 pub struct GossipVerifiedBlob<T: BeaconChainTypes, O: ObservationStrategy = Observe> {
     block_root: Hash256,
     blob: KzgVerifiedBlob<T::EthSpec>,
@@ -245,7 +244,7 @@ impl<T: BeaconChainTypes, O: ObservationStrategy> GossipVerifiedBlob<T, O> {
 
 /// Wrapper over a `BlobSidecar` for which we have completed kzg verification.
 /// i.e. `verify_blob_kzg_proof(blob, commitment, proof) == true`.
-#[derive(Debug, Derivative, Clone, Encode, Decode)]
+#[derive(Derivative, Clone, Encode, Decode)]
 #[derivative(PartialEq, Eq)]
 #[ssz(struct_behaviour = "transparent")]
 pub struct KzgVerifiedBlob<E: EthSpec> {
