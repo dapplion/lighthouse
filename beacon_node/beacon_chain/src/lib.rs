@@ -72,8 +72,8 @@ pub use self::errors::{BeaconChainError, BlockProductionError};
 pub use self::historical_blocks::HistoricalBlockError;
 pub use attestation_verification::Error as AttestationError;
 pub use beacon_fork_choice_store::{
-    BeaconForkChoiceStore, Error as ForkChoiceStoreError, PersistedForkChoiceStoreV17,
-    PersistedForkChoiceStoreV28,
+    BalancesCache, BeaconForkChoiceStore, Error as ForkChoiceStoreError,
+    PersistedForkChoiceStoreV17, PersistedForkChoiceStoreV28,
 };
 pub use block_verification::{
     BlockError, ExecutionPayloadError, ExecutionPendingBlock, GossipVerifiedBlock,

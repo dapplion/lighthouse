@@ -1,7 +1,9 @@
 use proto_array::JustifiedBalances;
+use ssz::{Decode, Encode};
+use ssz_derive::{Decode, Encode};
 use std::collections::BTreeSet;
 use std::fmt::Debug;
-use types::{AbstractExecPayload, BeaconBlockRef, BeaconState, Checkpoint, EthSpec, Hash256, Slot};
+use types::{Checkpoint, Hash256, Slot};
 
 /// Approximates the `Store` in "Ethereum 2.0 Phase 0 -- Beacon Chain Fork Choice":
 ///
@@ -19,74 +21,92 @@ use types::{AbstractExecPayload, BeaconBlockRef, BeaconState, Checkpoint, EthSpe
 /// The primary motivation for defining this as a trait to be implemented upstream rather than a
 /// concrete struct is to allow this crate to be free from "impure" on-disk database logic,
 /// hopefully making auditing easier.
-pub trait ForkChoiceStore<E: EthSpec>: Sized {
-    type Error: Debug;
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+pub struct ForkChoiceStore {
+    pub(crate) time: Slot,
+    pub(crate) finalized_checkpoint: Checkpoint,
+    pub(crate) justified_checkpoint: Checkpoint,
+    pub(crate) justified_balances: JustifiedBalances,
+    pub(crate) justified_state_root: Hash256,
+    pub(crate) unrealized_justified_checkpoint: Checkpoint,
+    pub(crate) unrealized_justified_state_root: Hash256,
+    pub(crate) unrealized_finalized_checkpoint: Checkpoint,
+    pub(crate) proposer_boost_root: Hash256,
+    pub(crate) equivocating_indices: BTreeSet<u64>,
+}
 
-    /// Returns the last value passed to `Self::set_current_slot`.
-    fn get_current_slot(&self) -> Slot;
+impl ForkChoiceStore {
+    pub(crate) fn get_current_slot(&self) -> Slot {
+        self.time
+    }
 
-    /// Set the value to be returned by `Self::get_current_slot`.
-    ///
-    /// ## Notes
-    ///
-    /// This should only ever be called from within `ForkChoice::on_tick`.
-    fn set_current_slot(&mut self, slot: Slot);
+    pub(crate) fn set_current_slot(&mut self, slot: Slot) {
+        self.time = slot
+    }
 
-    /// Called whenever `ForkChoice::on_block` has verified a block, but not yet added it to fork
-    /// choice. Allows the implementer to performing caching or other housekeeping duties.
-    fn on_verified_block<Payload: AbstractExecPayload<E>>(
+    pub(crate) fn justified_checkpoint(&self) -> &Checkpoint {
+        &self.justified_checkpoint
+    }
+
+    pub(crate) fn justified_balances(&self) -> &JustifiedBalances {
+        &self.justified_balances
+    }
+
+    pub(crate) fn finalized_checkpoint(&self) -> &Checkpoint {
+        &self.finalized_checkpoint
+    }
+
+    pub(crate) fn unrealized_justified_checkpoint(&self) -> &Checkpoint {
+        &self.unrealized_justified_checkpoint
+    }
+
+    pub(crate) fn unrealized_justified_state_root(&self) -> Hash256 {
+        self.unrealized_justified_state_root
+    }
+
+    pub(crate) fn unrealized_finalized_checkpoint(&self) -> &Checkpoint {
+        &self.unrealized_finalized_checkpoint
+    }
+
+    pub(crate) fn proposer_boost_root(&self) -> Hash256 {
+        self.proposer_boost_root
+    }
+
+    pub(crate) fn set_finalized_checkpoint(&mut self, checkpoint: Checkpoint) {
+        self.finalized_checkpoint = checkpoint
+    }
+
+    pub(crate) fn set_justified_checkpoint(
         &mut self,
-        block: BeaconBlockRef<E, Payload>,
-        block_root: Hash256,
-        state: &BeaconState<E>,
-    ) -> Result<(), Self::Error>;
+        checkpoint: Checkpoint,
+        justified_balances: JustifiedBalances,
+    ) {
+        self.justified_checkpoint = checkpoint;
+        self.justified_balances = justified_balances;
+    }
 
-    /// Returns the `justified_checkpoint`.
-    fn justified_checkpoint(&self) -> &Checkpoint;
-
-    /// Returns the state root of the justified checkpoint.
-    fn justified_state_root(&self) -> Hash256;
-
-    /// Returns balances from the `state` identified by `justified_checkpoint.root`.
-    fn justified_balances(&self) -> &JustifiedBalances;
-
-    /// Returns the `finalized_checkpoint`.
-    fn finalized_checkpoint(&self) -> &Checkpoint;
-
-    /// Returns the `unrealized_justified_checkpoint`.
-    fn unrealized_justified_checkpoint(&self) -> &Checkpoint;
-
-    /// Returns the state root of the unrealized justified checkpoint.
-    fn unrealized_justified_state_root(&self) -> Hash256;
-
-    /// Returns the `unrealized_finalized_checkpoint`.
-    fn unrealized_finalized_checkpoint(&self) -> &Checkpoint;
-
-    /// Returns the `proposer_boost_root`.
-    fn proposer_boost_root(&self) -> Hash256;
-
-    /// Sets `finalized_checkpoint`.
-    fn set_finalized_checkpoint(&mut self, checkpoint: Checkpoint);
-
-    /// Sets the `justified_checkpoint`.
-    fn set_justified_checkpoint(
+    pub(crate) fn set_unrealized_justified_checkpoint(
         &mut self,
         checkpoint: Checkpoint,
         state_root: Hash256,
-    ) -> Result<(), Self::Error>;
+    ) {
+        self.unrealized_justified_checkpoint = checkpoint;
+        self.unrealized_justified_state_root = state_root;
+    }
 
-    /// Sets the `unrealized_justified_checkpoint`.
-    fn set_unrealized_justified_checkpoint(&mut self, checkpoint: Checkpoint, state_root: Hash256);
+    pub(crate) fn set_unrealized_finalized_checkpoint(&mut self, checkpoint: Checkpoint) {
+        self.unrealized_finalized_checkpoint = checkpoint;
+    }
 
-    /// Sets the `unrealized_finalized_checkpoint`.
-    fn set_unrealized_finalized_checkpoint(&mut self, checkpoint: Checkpoint);
+    pub(crate) fn set_proposer_boost_root(&mut self, proposer_boost_root: Hash256) {
+        self.proposer_boost_root = proposer_boost_root;
+    }
 
-    /// Sets the proposer boost root.
-    fn set_proposer_boost_root(&mut self, proposer_boost_root: Hash256);
+    pub(crate) fn equivocating_indices(&self) -> &BTreeSet<u64> {
+        &self.equivocating_indices
+    }
 
-    /// Gets the equivocating indices.
-    fn equivocating_indices(&self) -> &BTreeSet<u64>;
-
-    /// Adds to the set of equivocating indices.
-    fn extend_equivocating_indices(&mut self, indices: impl IntoIterator<Item = u64>);
+    pub(crate) fn extend_equivocating_indices(&mut self, indices: impl IntoIterator<Item = u64>) {
+        self.equivocating_indices.extend(indices);
+    }
 }

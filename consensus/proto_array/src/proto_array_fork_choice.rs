@@ -484,15 +484,13 @@ impl ProtoArrayForkChoice {
         validator_index: usize,
         block_root: Hash256,
         target_epoch: Epoch,
-    ) -> Result<(), String> {
+    ) {
         let vote = self.votes.get_mut(validator_index);
 
         if target_epoch > vote.next_epoch || *vote == VoteTracker::default() {
             vote.next_root = block_root;
             vote.next_epoch = target_epoch;
         }
-
-        Ok(())
     }
 
     pub fn process_block<E: EthSpec>(

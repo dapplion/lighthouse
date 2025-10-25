@@ -215,7 +215,7 @@ pub enum BeaconChainError {
     BlsToExecutionPriorToCapella,
     BlsToExecutionConflictsWithPool,
     InconsistentFork(InconsistentFork),
-    ProposerHeadForkChoiceError(fork_choice::Error<proto_array::Error>),
+    ProposerHeadForkChoiceError(fork_choice::Error),
     UnableToPublish,
     UnableToBuildColumnSidecar(String),
     AvailabilityCheckError(AvailabilityCheckError),

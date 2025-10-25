@@ -1,4 +1,4 @@
-use crate::{BeaconForkChoiceStore, BeaconSnapshot};
+use crate::BalancesCache;
 use fork_choice::{ForkChoice, PayloadVerificationStatus};
 use itertools::process_results;
 use state_processing::state_advance::complete_state_advance;
@@ -95,9 +95,9 @@ pub fn reset_fork_choice_to_finalization<E: EthSpec, Hot: ItemStore<E>, Cold: It
     head_block_root: Hash256,
     head_state: &BeaconState<E>,
     store: Arc<HotColdDB<E, Hot, Cold>>,
-    current_slot: Option<Slot>,
+    current_slot: Slot,
     spec: &ChainSpec,
-) -> Result<ForkChoice<BeaconForkChoiceStore<E, Hot, Cold>, E>, String> {
+) -> Result<ForkChoice<BalancesCache<E, Hot, Cold>, E>, String> {
     // Fetch finalized block.
     let finalized_checkpoint = head_state.finalized_checkpoint();
     let finalized_block_root = finalized_checkpoint.root;
@@ -136,22 +136,13 @@ pub fn reset_fork_choice_to_finalization<E: EthSpec, Hot: ItemStore<E>, Cold: It
             e
         )
     })?;
-    let finalized_snapshot = BeaconSnapshot {
-        beacon_block_root: finalized_block_root,
-        beacon_block: Arc::new(finalized_block),
-        beacon_state: finalized_state,
-    };
-
-    let fc_store =
-        BeaconForkChoiceStore::get_forkchoice_store(store.clone(), finalized_snapshot.clone())
-            .map_err(|e| format!("Unable to reset fork choice store for revert: {e:?}"))?;
 
     let mut fork_choice = ForkChoice::from_anchor(
-        fc_store,
         finalized_block_root,
-        &finalized_snapshot.beacon_block,
-        &finalized_snapshot.beacon_state,
+        &finalized_block,
+        &mut finalized_state,
         current_slot,
+        BalancesCache::new(store.clone()),
         spec,
     )
     .map_err(|e| format!("Unable to reset fork choice for revert: {:?}", e))?;
@@ -163,7 +154,7 @@ pub fn reset_fork_choice_to_finalization<E: EthSpec, Hot: ItemStore<E>, Cold: It
         .load_blocks_to_replay(finalized_slot + 1, head_state.slot(), head_block_root)
         .map_err(|e| format!("Error loading blocks to replay for fork choice: {:?}", e))?;
 
-    let mut state = finalized_snapshot.beacon_state;
+    let mut state = finalized_state;
     for block in blocks {
         complete_state_advance(&mut state, None, block.slot(), spec)
             .map_err(|e| format!("State advance failed: {:?}", e))?;

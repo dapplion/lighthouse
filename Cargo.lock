@@ -3580,6 +3580,7 @@ dependencies = [
  "logging",
  "metrics",
  "proto_array",
+ "safe_arith",
  "state_processing",
  "store",
  "superstruct",

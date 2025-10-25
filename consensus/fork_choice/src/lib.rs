@@ -3,9 +3,10 @@ mod fork_choice_store;
 mod metrics;
 
 pub use crate::fork_choice::{
-    AttestationFromBlock, Error, ForkChoice, ForkChoiceView, ForkchoiceUpdateParameters,
-    InvalidAttestation, InvalidBlock, PayloadVerificationStatus, PersistedForkChoice,
-    PersistedForkChoiceV17, PersistedForkChoiceV28, QueuedAttestation, ResetPayloadStatuses,
+    AttestationFromBlock, BalancesGetter, Error, ForkChoice, ForkChoiceView,
+    ForkchoiceUpdateParameters, InvalidAttestation, InvalidBlock, PayloadVerificationStatus,
+    PersistedForkChoice, PersistedForkChoiceV17, PersistedForkChoiceV28, QueuedAttestation,
+    ResetPayloadStatuses,
 };
 pub use fork_choice_store::ForkChoiceStore;
 pub use proto_array::{

@@ -1,10 +1,11 @@
 use crate::{
-    BeaconChain, BeaconChainTypes, BeaconForkChoiceStore, PersistedForkChoiceStoreV17,
+    BalancesCache, BeaconChain, BeaconChainTypes, BeaconForkChoiceStore,
+    PersistedForkChoiceStoreV17,
     beacon_chain::FORK_CHOICE_DB_KEY,
     persisted_fork_choice::{PersistedForkChoiceV17, PersistedForkChoiceV28},
     summaries_dag::{DAGStateSummary, StateSummariesDAG},
 };
-use fork_choice::{ForkChoice, ForkChoiceStore, ResetPayloadStatuses};
+use fork_choice::{ForkChoice, ResetPayloadStatuses};
 use std::sync::Arc;
 use store::{Error, HotColdDB, KeyValueStoreOp, StoreItem};
 use tracing::{info, warn};
@@ -91,7 +92,7 @@ pub fn upgrade_to_v28<T: BeaconChainTypes>(
     let fork_choice = ForkChoice::from_persisted(
         persisted_fork_choice_v17.fork_choice_v17.try_into()?,
         reset_payload_statuses,
-        fc_store,
+        BalancesCache::new(db.clone()),
         db.get_chain_spec(),
     )
     .map_err(|e| Error::MigrationError(format!("Unable to build ForkChoice: {e:?}")))?;

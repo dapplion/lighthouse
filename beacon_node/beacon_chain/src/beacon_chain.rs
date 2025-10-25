@@ -71,8 +71,8 @@ use crate::validator_monitor::{
 };
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
 use crate::{
-    AvailabilityPendingExecutedBlock, BeaconChainError, BeaconForkChoiceStore, BeaconSnapshot,
-    CachedHead, metrics,
+    AvailabilityPendingExecutedBlock, BalancesCache, BeaconChainError, BeaconSnapshot, CachedHead,
+    metrics,
 };
 use eth2::types::{
     EventKind, SseBlobSidecar, SseBlock, SseDataColumnSidecar, SseExtendedPayloadAttributes,
@@ -134,7 +134,7 @@ use types::data_column_sidecar::ColumnIndex;
 use types::payload::BlockProductionVersion;
 use types::*;
 
-pub type ForkChoiceError = fork_choice::Error<crate::ForkChoiceStoreError>;
+pub type ForkChoiceError = fork_choice::Error;
 
 /// Alias to appease clippy.
 type HashBlockTuple<E> = (Hash256, RpcBlock<E>);
@@ -344,7 +344,7 @@ pub enum BlockProcessStatus<E: EthSpec> {
 pub type LightClientProducerEvent<T> = (Hash256, Slot, SyncAggregate<T>);
 
 pub type BeaconForkChoice<T> = ForkChoice<
-    BeaconForkChoiceStore<
+    BalancesCache<
         <T as BeaconChainTypes>::EthSpec,
         <T as BeaconChainTypes>::HotStore,
         <T as BeaconChainTypes>::ColdStore,
@@ -619,13 +619,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         let persisted_fork_choice =
             PersistedForkChoice::from_bytes(&persisted_fork_choice_bytes, store.get_config())?;
-        let fc_store =
-            BeaconForkChoiceStore::from_persisted(persisted_fork_choice.fork_choice_store, store)?;
 
         Ok(Some(ForkChoice::from_persisted(
             persisted_fork_choice.fork_choice,
             reset_payload_statuses,
-            fc_store,
+            BalancesCache::new(store.clone()),
             spec,
         )?))
     }

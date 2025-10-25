@@ -1,8 +1,9 @@
 use crate::ChainConfig;
 use crate::CustodyContext;
 use crate::beacon_chain::{
-    BEACON_CHAIN_DB_KEY, CanonicalHead, LightClientProducerEvent, OP_POOL_DB_KEY,
+    BEACON_CHAIN_DB_KEY, BeaconForkChoice, CanonicalHead, LightClientProducerEvent, OP_POOL_DB_KEY,
 };
+use crate::beacon_fork_choice_store::BalancesCache;
 use crate::beacon_proposer_cache::BeaconProposerCache;
 use crate::custody_context::NodeCustodyType;
 use crate::data_availability_checker::DataAvailabilityChecker;
@@ -18,9 +19,7 @@ use crate::persisted_custody::load_custody_context;
 use crate::shuffling_cache::{BlockShufflingIds, ShufflingCache};
 use crate::validator_monitor::{ValidatorMonitor, ValidatorMonitorConfig};
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
-use crate::{
-    BeaconChain, BeaconChainTypes, BeaconForkChoiceStore, BeaconSnapshot, ServerSentEventHandler,
-};
+use crate::{BeaconChain, BeaconChainTypes, BeaconSnapshot, ServerSentEventHandler};
 use execution_layer::ExecutionLayer;
 use fork_choice::{ForkChoice, ResetPayloadStatuses};
 use futures::channel::mpsc::Sender;
@@ -81,9 +80,7 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     genesis_block_root: Option<Hash256>,
     genesis_state_root: Option<Hash256>,
     #[allow(clippy::type_complexity)]
-    fork_choice: Option<
-        ForkChoice<BeaconForkChoiceStore<T::EthSpec, T::HotStore, T::ColdStore>, T::EthSpec>,
-    >,
+    fork_choice: Option<BeaconForkChoice<T>>,
     op_pool: Option<OperationPool<T::EthSpec>>,
     execution_layer: Option<ExecutionLayer<T::EthSpec>>,
     event_handler: Option<ServerSentEventHandler<T::EthSpec>>,
@@ -380,7 +377,7 @@ where
                 .map_err(|e| format!("Failed to initialize genesis anchor: {:?}", e))?,
         );
 
-        let (genesis, updated_builder) = self.set_genesis_state(beacon_state)?;
+        let (mut genesis, updated_builder) = self.set_genesis_state(beacon_state)?;
         self = updated_builder;
 
         // Stage the database's metadata fields for atomic storage when `build` is called.
@@ -395,16 +392,15 @@ where
                 .map_err(|e| format!("Failed to initialize genesis data column info: {:?}", e))?,
         );
 
-        let fc_store = BeaconForkChoiceStore::get_forkchoice_store(store, genesis.clone())
-            .map_err(|e| format!("Unable to initialize fork choice store: {e:?}"))?;
-        let current_slot = None;
+        let balances_getter = BalancesCache::new(store);
+        let current_slot = Slot::new(0);
 
         let fork_choice = ForkChoice::from_anchor(
-            fc_store,
             genesis.beacon_block_root,
             &genesis.beacon_block,
-            &genesis.beacon_state,
+            &mut genesis.beacon_state,
             current_slot,
+            balances_getter,
             &self.spec,
         )
         .map_err(|e| format!("Unable to initialize ForkChoice: {:?}", e))?;
@@ -611,21 +607,14 @@ where
                 .map_err(|e| format!("Failed to initialize data column info: {:?}", e))?,
         );
 
-        let snapshot = BeaconSnapshot {
-            beacon_block_root: weak_subj_block_root,
-            beacon_block: Arc::new(weak_subj_block),
-            beacon_state: weak_subj_state,
-        };
-
-        let fc_store = BeaconForkChoiceStore::get_forkchoice_store(store, snapshot.clone())
-            .map_err(|e| format!("Unable to initialize fork choice store: {e:?}"))?;
+        let balances_getter = BalancesCache::new(store);
 
         let fork_choice = ForkChoice::from_anchor(
-            fc_store,
-            snapshot.beacon_block_root,
-            &snapshot.beacon_block,
-            &snapshot.beacon_state,
-            Some(weak_subj_slot),
+            weak_subj_block_root,
+            &weak_subj_block,
+            &mut weak_subj_state,
+            weak_subj_slot,
+            balances_getter,
             &self.spec,
         )
         .map_err(|e| format!("Unable to initialize ForkChoice: {:?}", e))?;
@@ -797,7 +786,7 @@ where
                 head_block_root,
                 &head_state,
                 store.clone(),
-                Some(current_slot),
+                current_slot,
                 &self.spec,
             )?;
         }
