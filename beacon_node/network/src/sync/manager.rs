@@ -595,8 +595,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             SyncState::Synced
                         } else if peers.advanced_peers().next().is_some() {
                             SyncState::SyncTransition
-                        } else if peers.synced_peers().next().is_none() {
-                            SyncState::Stalled
                         } else {
                             // There are no peers that require syncing and we have at least one synced
                             // peer
