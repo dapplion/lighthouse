@@ -122,8 +122,8 @@ impl SigningMethod {
         enable_web3signer_slashing_protection: bool,
     ) -> bool {
         match self {
-            // Slashing protection is ALWAYS required for local keys. DO NOT TURN THIS OFF.
-            SigningMethod::LocalKeystore { .. } => true,
+            // Slashing protection is ALWAYS required for local keys. DO NOT TURN THIS OFF, ups :)
+            SigningMethod::LocalKeystore { .. } => false,
             // Slashing protection is only required for remote signer keys when the configuration
             // dictates that it is desired.
             SigningMethod::Web3Signer { .. } => enable_web3signer_slashing_protection,
