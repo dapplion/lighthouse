@@ -86,6 +86,11 @@ pub fn partial_state_advance<E: EthSpec>(
         // corrupting the `state.block_roots` array since the latest block header may not be updated
         // with the correct state root.
         let state_root = initial_state_root.take().unwrap_or_else(Hash256::zero);
+        tracing::debug!(
+            "Processing partial state advance {} / {}",
+            state.slot(),
+            target_slot
+        );
 
         per_slot_processing(state, Some(state_root), spec).map_err(Error::PerSlotProcessing)?;
     }
