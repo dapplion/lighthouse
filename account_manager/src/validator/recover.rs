@@ -6,14 +6,17 @@ use account_utils::{STDIN_INPUTS_FLAG, random_password, read_mnemonic_from_cli};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use clap_utils::FLAG_HEADER;
 use directory::{DEFAULT_SECRET_DIR, parse_path_or_default_with_flag};
+use eth2_keystore::json_keystore::{Kdf, Scrypt};
 use eth2_wallet::bip39::Seed;
 use eth2_wallet::{KeyType, ValidatorKeystores, recover_validator_secret_from_mnemonic};
+use rand::Rng;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
 use validator_dir::Builder as ValidatorDirBuilder;
 pub const CMD: &str = "recover";
 pub const FIRST_INDEX_FLAG: &str = "first-index";
 pub const MNEMONIC_FLAG: &str = "mnemonic-path";
+pub const UNSAFE_KEYSTORE_FLAG: &str = "unsafe-keystore";
 
 pub fn cli_app() -> Command {
     Command::new(CMD)
@@ -75,6 +78,14 @@ pub fn cli_app() -> Command {
                 .help_heading(FLAG_HEADER)
                 .display_order(0)
         )
+        .arg(
+            Arg::new(UNSAFE_KEYSTORE_FLAG)
+                .long(UNSAFE_KEYSTORE_FLAG)
+                .help("Use scrypt with n: 128")
+                .action(ArgAction::SetTrue)
+                .help_heading(FLAG_HEADER)
+                .display_order(0)
+        )
 }
 
 pub fn cli_run(matches: &ArgMatches, validator_dir: PathBuf) -> Result<(), String> {
@@ -88,6 +99,7 @@ pub fn cli_run(matches: &ArgMatches, validator_dir: PathBuf) -> Result<(), Strin
     let count: u32 = clap_utils::parse_required(matches, COUNT_FLAG)?;
     let mnemonic_path: Option<PathBuf> = clap_utils::parse_optional(matches, MNEMONIC_FLAG)?;
     let stdin_inputs = cfg!(windows) || matches.get_flag(STDIN_INPUTS_FLAG);
+    let unsafe_keystore = cfg!(windows) || matches.get_flag(UNSAFE_KEYSTORE_FLAG);
 
     eprintln!("secrets-dir path: {:?}", secrets_dir);
 
@@ -118,8 +130,22 @@ pub fn cli_run(matches: &ArgMatches, validator_dir: PathBuf) -> Result<(), Strin
             let keypair = keypair_from_secret(secret.as_bytes())
                 .map_err(|e| format!("Unable build keystore: {:?}", e))?;
 
-            KeystoreBuilder::new(&keypair, password, format!("{}", path))
-                .map_err(|e| format!("Unable build keystore: {:?}", e))?
+            let mut keystore_builder =
+                KeystoreBuilder::new(&keypair, password, format!("{}", path))
+                    .map_err(|e| format!("Unable build keystore: {:?}", e))?;
+
+            if unsafe_keystore {
+                let salt = rand::rng().random::<[u8; 32]>();
+                keystore_builder = keystore_builder.kdf(Kdf::Scrypt(Scrypt {
+                    dklen: 32,
+                    n: 128,
+                    p: 1,
+                    r: 8,
+                    salt: salt.to_vec().into(),
+                }));
+            }
+
+            keystore_builder
                 .build()
                 .map_err(|e| format!("Unable build keystore: {:?}", e))
         };

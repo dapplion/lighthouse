@@ -35,7 +35,7 @@ impl<E: EthSpec> BootNodeConfig<E> {
         // Try and obtain bootnodes
 
         let boot_nodes = {
-            if matches.get_flag("no-boot-nodes") {
+            if matches.get_flag("no-bootnodes") {
                 vec![]
             } else {
                 let mut boot_nodes = Vec::new();
