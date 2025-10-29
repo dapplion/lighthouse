@@ -35,22 +35,26 @@ impl<E: EthSpec> BootNodeConfig<E> {
         // Try and obtain bootnodes
 
         let boot_nodes = {
-            let mut boot_nodes = Vec::new();
+            if matches.get_flag("no-boot-nodes") {
+                vec![]
+            } else {
+                let mut boot_nodes = Vec::new();
 
-            if let Some(enr) = &eth2_network_config.boot_enr {
-                boot_nodes.extend_from_slice(enr);
+                if let Some(enr) = &eth2_network_config.boot_enr {
+                    boot_nodes.extend_from_slice(enr);
+                }
+
+                if let Some(nodes) = matches.get_one::<String>("boot-nodes") {
+                    boot_nodes.extend_from_slice(
+                        &nodes
+                            .split(',')
+                            .map(|enr| enr.parse().map_err(|_| format!("Invalid ENR: {}", enr)))
+                            .collect::<Result<Vec<Enr>, _>>()?,
+                    );
+                }
+
+                boot_nodes
             }
-
-            if let Some(nodes) = matches.get_one::<String>("boot-nodes") {
-                boot_nodes.extend_from_slice(
-                    &nodes
-                        .split(',')
-                        .map(|enr| enr.parse().map_err(|_| format!("Invalid ENR: {}", enr)))
-                        .collect::<Result<Vec<Enr>, _>>()?,
-                );
-            }
-
-            boot_nodes
         };
 
         let mut network_config = NetworkConfig::default();
