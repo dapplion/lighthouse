@@ -132,10 +132,6 @@ pub async fn publish_block<T: BeaconChainTypes, B: IntoGossipVerifiedBlock<T>>(
             "Signed block published to network via HTTP API"
         );
 
-        crate::publish_pubsub_message(&sender, PubsubMessage::BeaconBlock(block.clone())).map_err(
-            |_| BlockError::BeaconChainError(Box::new(BeaconChainError::UnableToPublish)),
-        )?;
-
         Ok(())
     };
 

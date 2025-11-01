@@ -135,7 +135,8 @@ impl<S: ValidatorStore + 'static, T: SlotClock + 'static> SyncCommitteeService<S
             }
         };
 
-        executor.spawn(interval_fut, "sync_committee_service");
+        // No sync duties this time
+        // executor.spawn(interval_fut, "sync_committee_service");
         Ok(())
     }
 

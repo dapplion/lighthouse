@@ -79,15 +79,6 @@ fn verify_and_publish_attestation<T: BeaconChainTypes>(
         .verify_unaggregated_attestation_for_gossip(attestation, None)
         .map_err(Error::Validation)?;
 
-    network_tx
-        .send(NetworkMessage::Publish {
-            messages: vec![PubsubMessage::Attestation(Box::new((
-                verified_attestation.subnet_id(),
-                attestation.clone(),
-            )))],
-        })
-        .map_err(|_| Error::Publication)?;
-
     // Notify the validator monitor.
     chain
         .validator_monitor

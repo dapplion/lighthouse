@@ -4992,10 +4992,6 @@ fn publish_network_message<E: EthSpec>(
     network_tx: &UnboundedSender<NetworkMessage<E>>,
     message: NetworkMessage<E>,
 ) -> Result<(), warp::Rejection> {
-    network_tx.send(message).map_err(|e| {
-        warp_utils::reject::custom_server_error(format!(
-            "unable to publish to network channel: {}",
-            e
-        ))
-    })
+    // Disable p2p, don't publish anything
+    Ok(())
 }
