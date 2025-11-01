@@ -280,10 +280,8 @@ pub async fn poll_sync_committee_duties<S: ValidatorStore + 'static, T: SlotCloc
     let current_epoch = current_slot.epoch(S::E::slots_per_epoch());
 
     // If the Altair fork is yet to be activated, do not attempt to poll for duties.
-    if spec
-        .altair_fork_epoch
-        .is_none_or(|altair_epoch| current_epoch < altair_epoch)
-    {
+    // Disable sync duties
+    if true {
         return Ok(());
     }
 
