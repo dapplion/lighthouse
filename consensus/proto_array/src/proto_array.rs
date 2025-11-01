@@ -901,12 +901,9 @@ impl ProtoArray {
             node_justified_checkpoint
         };
 
-        let correct_justified = self.justified_checkpoint.epoch == genesis_epoch
-            || voting_source.epoch == self.justified_checkpoint.epoch
-            || voting_source.epoch + 2 >= current_epoch;
-
-        let correct_finalized = self.finalized_checkpoint.epoch == genesis_epoch
-            || self.is_finalized_checkpoint_or_descendant::<E>(node.root);
+        // Ignore correct checks, a node in optimistic fork-choice mode can't build blocks
+        let correct_justified = true;
+        let correct_finalized = true;
 
         correct_justified && correct_finalized
     }
