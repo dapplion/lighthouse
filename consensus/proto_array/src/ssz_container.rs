@@ -8,7 +8,7 @@ use ssz::{Encode, four_byte_option_impl};
 use ssz_derive::{Decode, Encode};
 use std::collections::HashMap;
 use superstruct::superstruct;
-use types::{Checkpoint, Hash256};
+use types::{Checkpoint, EthSpec, Hash256};
 
 // Define a "legacy" implementation of `Option<usize>` which uses four bytes for encoding the union
 // selector.
@@ -49,10 +49,30 @@ impl From<&ProtoArrayForkChoice> for SszContainer {
     }
 }
 
-impl TryFrom<(SszContainer, JustifiedBalances)> for ProtoArrayForkChoice {
-    type Error = Error;
+impl ProtoArrayForkChoice {
+    pub fn from_ssz<E: EthSpec>(
+        from: SszContainer,
+        balances: JustifiedBalances,
+    ) -> Result<Self, Error> {
+        let anchor_block = if from
+            .nodes
+            .iter()
+            .any(|node| node.root == from.finalized_checkpoint.root)
+        {
+            // There's a node for the finalized checkpoint, use that as anchor block
+            (
+                from.finalized_checkpoint.root,
+                from.finalized_checkpoint
+                    .epoch
+                    .start_slot(E::slots_per_epoch()),
+            )
+        } else {
+            // Otherwise we initialized fork-choice from a block more recent than finalization and
+            // have not finalized yet. Use the first node as anchor block.
+            let anchor_node = from.nodes.first().ok_or(Error::EmptyNodes)?;
+            (anchor_node.root, anchor_node.slot)
+        };
 
-    fn try_from((from, balances): (SszContainer, JustifiedBalances)) -> Result<Self, Error> {
         let proto_array = ProtoArray {
             prune_threshold: from.prune_threshold,
             justified_checkpoint: from.justified_checkpoint,
@@ -60,6 +80,7 @@ impl TryFrom<(SszContainer, JustifiedBalances)> for ProtoArrayForkChoice {
             nodes: from.nodes,
             indices: from.indices.into_iter().collect::<HashMap<_, _>>(),
             previous_proposer_boost: from.previous_proposer_boost,
+            anchor_block,
         };
 
         Ok(Self {

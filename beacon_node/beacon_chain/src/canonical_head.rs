@@ -115,6 +115,7 @@ pub struct CachedHead<E: EthSpec> {
     justified_hash: Option<ExecutionBlockHash>,
     /// The `execution_payload.block_hash` of the finalized block. Set to `None` before Bellatrix.
     finalized_hash: Option<ExecutionBlockHash>,
+    pub anchor_block: (Hash256, Slot),
 }
 
 impl<E: EthSpec> CachedHead<E> {
@@ -221,6 +222,10 @@ impl<E: EthSpec> CachedHead<E> {
         self.justified_checkpoint
     }
 
+    pub fn finalized_checkpoint_from_state(&self) -> Checkpoint {
+        self.snapshot.beacon_state.finalized_checkpoint()
+    }
+
     /// Returns the cached values of `ForkChoice::forkchoice_update_parameters`.
     ///
     /// Useful for supplying to the execution layer.
@@ -272,6 +277,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             head_hash: forkchoice_update_params.head_hash,
             justified_hash: forkchoice_update_params.justified_hash,
             finalized_hash: forkchoice_update_params.finalized_hash,
+            anchor_block: fork_choice.get_anchor_block(),
         };
 
         Self {
@@ -323,6 +329,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             head_hash: forkchoice_update_params.head_hash,
             justified_hash: forkchoice_update_params.justified_hash,
             finalized_hash: forkchoice_update_params.finalized_hash,
+            anchor_block: fork_choice.get_anchor_block(),
         };
 
         *fork_choice_write_lock = fork_choice;
@@ -608,8 +615,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         // Check to ensure that the finalized block hasn't been marked as invalid. If it has,
         // shut down Lighthouse.
-        let finalized_proto_block = fork_choice_read_lock.get_finalized_block()?;
+        let finalized_proto_block = fork_choice_read_lock.get_finalized_or_anchor_block()?;
         check_finalized_payload_validity(self, &finalized_proto_block)?;
+        let anchor_block = fork_choice_read_lock.get_anchor_block();
 
         // Sanity check the finalized checkpoint.
         //
@@ -700,6 +708,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 head_hash: new_forkchoice_update_parameters.head_hash,
                 justified_hash: new_forkchoice_update_parameters.justified_hash,
                 finalized_hash: new_forkchoice_update_parameters.finalized_hash,
+                anchor_block,
             };
 
             let new_head = {
@@ -727,6 +736,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 head_hash: new_forkchoice_update_parameters.head_hash,
                 justified_hash: new_forkchoice_update_parameters.justified_hash,
                 finalized_hash: new_forkchoice_update_parameters.finalized_hash,
+                anchor_block,
             };
 
             let mut cached_head_write_lock = self.canonical_head.cached_head_write_lock();

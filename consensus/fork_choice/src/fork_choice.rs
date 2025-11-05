@@ -341,6 +341,12 @@ where
     E: EthSpec,
 {
     /// Instantiates `Self` from an anchor (genesis or another finalized checkpoint).
+    ///
+    /// # Parameters
+    /// - `anchor_block_root`: Hash of the `anchor_block`.
+    /// - `anchor_block`: The most recent block for `anchor_state` (the block that produced it).
+    /// - `anchor_state`: Beacon state **after** applying `anchor_block` and advanced to the closest
+    ///   epoch boundary.
     pub fn from_anchor(
         fc_store: T,
         anchor_block_root: Hash256,
@@ -357,16 +363,16 @@ where
             });
         }
 
-        let finalized_block_slot = anchor_block.slot();
-        let finalized_block_state_root = anchor_block.state_root();
-        let current_epoch_shuffling_id =
+        let anchor_block_slot = anchor_block.slot();
+        let anchor_block_state_root = anchor_block.state_root();
+        let anchor_block_current_epoch_shuffling_id =
             AttestationShufflingId::new(anchor_block_root, anchor_state, RelativeEpoch::Current)
                 .map_err(Error::BeaconStateError)?;
-        let next_epoch_shuffling_id =
+        let anchor_block_next_epoch_shuffling_id =
             AttestationShufflingId::new(anchor_block_root, anchor_state, RelativeEpoch::Next)
                 .map_err(Error::BeaconStateError)?;
 
-        let execution_status = anchor_block.message().execution_payload().map_or_else(
+        let anchor_block_execution_status = anchor_block.message().execution_payload().map_or_else(
             // If the block doesn't have an execution payload then it can't have
             // execution enabled.
             |_| ExecutionStatus::irrelevant(),
@@ -387,13 +393,14 @@ where
 
         let proto_array = ProtoArrayForkChoice::new::<E>(
             current_slot,
-            finalized_block_slot,
-            finalized_block_state_root,
+            anchor_block_slot,
+            anchor_block_root,
+            anchor_block_state_root,
             *fc_store.justified_checkpoint(),
             *fc_store.finalized_checkpoint(),
-            current_epoch_shuffling_id,
-            next_epoch_shuffling_id,
-            execution_status,
+            anchor_block_current_epoch_shuffling_id,
+            anchor_block_next_epoch_shuffling_id,
+            anchor_block_execution_status,
         )?;
 
         let mut fork_choice = Self {
@@ -501,13 +508,17 @@ where
         let head_hash = self
             .get_block(&head_root)
             .and_then(|b| b.execution_status.block_hash());
-        let justified_root = self.justified_checkpoint().root;
-        let finalized_root = self.finalized_checkpoint().root;
+        // After starting with checkpoint sync and before finalizing the finalized and justified
+        // ProtoNodes are not available.
+        // TODO(non-fin): Is it safe to tell the EL that the anchor block is finalized? Should we
+        // pass zero in that case?
         let justified_hash = self
-            .get_block(&justified_root)
+            .get_justified_or_anchor_block()
+            .ok()
             .and_then(|b| b.execution_status.block_hash());
         let finalized_hash = self
-            .get_block(&finalized_root)
+            .get_finalized_or_anchor_block()
+            .ok()
             .and_then(|b| b.execution_status.block_hash());
         self.forkchoice_update_parameters = ForkchoiceUpdateParameters {
             head_root,
@@ -716,12 +727,17 @@ where
         // (trivial), but more importantly, it means we don't need to have added `block` to
         // `self.proto_array` to do this search. See:
         //
+        // After starting with checkpoint sync and before finalizing there is no ProtoNode for the
+        // finalized root. Use the anchor block (initial block) are root to assert this new block is
+        // descendant of it.
+        //
         // https://github.com/ethereum/eth2.0-specs/pull/1884
-        let block_ancestor = self.get_ancestor(block.parent_root(), finalized_slot)?;
-        let finalized_root = self.fc_store.finalized_checkpoint().root;
-        if block_ancestor != Some(finalized_root) {
+        let finalized_or_anchor_block = self.get_finalized_or_anchor_block()?;
+        let block_ancestor =
+            self.get_ancestor(block.parent_root(), finalized_or_anchor_block.slot)?;
+        if block_ancestor != Some(finalized_or_anchor_block.root) {
             return Err(Error::InvalidBlock(InvalidBlock::NotFinalizedDescendant {
-                finalized_root,
+                finalized_root: finalized_or_anchor_block.root,
                 block_ancestor,
             }));
         }
@@ -1262,24 +1278,34 @@ where
         self.proto_array.get_weight(block_root)
     }
 
+    pub fn get_anchor_block(&self) -> (Hash256, Slot) {
+        self.proto_array.get_anchor_block()
+    }
+
     /// Returns the `ProtoBlock` for the justified checkpoint.
+    /// If the node started with checkpoint sync and has not justified yet, it returns the
+    /// `ProtoBlock` of the anchor block.
     ///
     /// ## Notes
     ///
     /// This does *not* return the "best justified checkpoint". It returns the justified checkpoint
     /// that is used for computing balances.
-    pub fn get_justified_block(&self) -> Result<ProtoBlock, Error<T::Error>> {
+    pub fn get_justified_or_anchor_block(&self) -> Result<ProtoBlock, Error<T::Error>> {
         let justified_checkpoint = self.justified_checkpoint();
         self.get_block(&justified_checkpoint.root)
+            .or_else(|| self.get_block(&self.proto_array.get_anchor_block_root()))
             .ok_or(Error::MissingJustifiedBlock {
                 justified_checkpoint,
             })
     }
 
     /// Returns the `ProtoBlock` for the finalized checkpoint.
-    pub fn get_finalized_block(&self) -> Result<ProtoBlock, Error<T::Error>> {
+    /// If the node started with checkpoint sync and has not finalized yet, it returns the
+    /// `ProtoBlock` of the anchor block.
+    pub fn get_finalized_or_anchor_block(&self) -> Result<ProtoBlock, Error<T::Error>> {
         let finalized_checkpoint = self.finalized_checkpoint();
         self.get_block(&finalized_checkpoint.root)
+            .or_else(|| self.get_block(&self.proto_array.get_anchor_block_root()))
             .ok_or(Error::MissingFinalizedBlock {
                 finalized_checkpoint,
             })
@@ -1313,7 +1339,7 @@ where
             Ok(status.is_optimistic_or_invalid())
         } else {
             Ok(self
-                .get_finalized_block()?
+                .get_finalized_or_anchor_block()?
                 .execution_status
                 .is_optimistic_or_invalid())
         }
@@ -1408,7 +1434,7 @@ where
         reset_payload_statuses: ResetPayloadStatuses,
         spec: &ChainSpec,
     ) -> Result<ProtoArrayForkChoice, Error<T::Error>> {
-        let mut proto_array = ProtoArrayForkChoice::from_container(
+        let mut proto_array = ProtoArrayForkChoice::from_container::<E>(
             persisted_proto_array.clone(),
             justified_balances.clone(),
         )
@@ -1440,7 +1466,7 @@ where
                 info = "please report this error",
                 "Failed to reset payload statuses"
             );
-            ProtoArrayForkChoice::from_container(persisted_proto_array, justified_balances)
+            ProtoArrayForkChoice::from_container::<E>(persisted_proto_array, justified_balances)
                 .map_err(Error::InvalidProtoArrayBytes)
         } else {
             debug!("Successfully reset all payload statuses");

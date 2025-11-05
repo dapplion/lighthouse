@@ -17,6 +17,8 @@ pub use ffg_updates::*;
 pub use no_votes::*;
 pub use votes::*;
 
+type E = MainnetEthSpec;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Operation {
     FindHead {
@@ -82,6 +84,7 @@ impl ForkChoiceTestDefinition {
         let mut fork_choice = ProtoArrayForkChoice::new::<MainnetEthSpec>(
             self.finalized_block_slot,
             self.finalized_block_slot,
+            self.finalized_checkpoint.root,
             Hash256::zero(),
             self.justified_checkpoint,
             self.finalized_checkpoint,
@@ -122,7 +125,7 @@ impl ForkChoiceTestDefinition {
                         "Operation at index {} failed head check. Operation: {:?}",
                         op_index, op
                     );
-                    check_bytes_round_trip(&fork_choice);
+                    check_bytes_round_trip::<E>(&fork_choice);
                 }
                 Operation::ProposerBoostFindHead {
                     justified_checkpoint,
@@ -153,7 +156,7 @@ impl ForkChoiceTestDefinition {
                         "Operation at index {} failed head check. Operation: {:?}",
                         op_index, op
                     );
-                    check_bytes_round_trip(&fork_choice);
+                    check_bytes_round_trip::<E>(&fork_choice);
                 }
                 Operation::InvalidFindHead {
                     justified_checkpoint,
@@ -179,7 +182,7 @@ impl ForkChoiceTestDefinition {
                         op_index,
                         op
                     );
-                    check_bytes_round_trip(&fork_choice);
+                    check_bytes_round_trip::<E>(&fork_choice);
                 }
                 Operation::ProcessBlock {
                     slot,
@@ -219,7 +222,7 @@ impl ForkChoiceTestDefinition {
                                 op_index, e
                             )
                         });
-                    check_bytes_round_trip(&fork_choice);
+                    check_bytes_round_trip::<E>(&fork_choice);
                 }
                 Operation::ProcessAttestation {
                     validator_index,
@@ -234,7 +237,7 @@ impl ForkChoiceTestDefinition {
                                 op_index
                             )
                         });
-                    check_bytes_round_trip(&fork_choice);
+                    check_bytes_round_trip::<E>(&fork_choice);
                 }
                 Operation::Prune {
                     finalized_root,
@@ -304,9 +307,9 @@ fn get_checkpoint(i: u64) -> Checkpoint {
     }
 }
 
-fn check_bytes_round_trip(original: &ProtoArrayForkChoice) {
+fn check_bytes_round_trip<E: EthSpec>(original: &ProtoArrayForkChoice) {
     let bytes = original.as_bytes();
-    let decoded = ProtoArrayForkChoice::from_bytes(&bytes, original.balances.clone())
+    let decoded = ProtoArrayForkChoice::from_bytes::<E>(&bytes, original.balances.clone())
         .expect("fork choice should decode from bytes");
     assert!(
         *original == decoded,

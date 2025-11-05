@@ -135,6 +135,12 @@ pub struct ProtoArray {
     pub nodes: Vec<ProtoNode>,
     pub indices: HashMap<Hash256, usize>,
     pub previous_proposer_boost: ProposerBoost,
+    /// The block hash of the block used to initialize the ProtoArray. Invariants:
+    /// - At initialization there is always a ProtoNode for `anchor_block_root`
+    /// - After pruning there may not be a ProtoNode for `anchor_block_root`
+    /// - At any point there is either or both ProtoNodes for `anchor_block_root` and
+    ///   `finalized_checkpoint.root`
+    pub anchor_block: (Hash256, Slot),
 }
 
 impl ProtoArray {
@@ -963,10 +969,16 @@ impl ProtoArray {
     /// *checkpoint* not the finalized *block*.
     pub fn is_finalized_checkpoint_or_descendant<E: EthSpec>(&self, root: Hash256) -> bool {
         let finalized_root = self.finalized_checkpoint.root;
-        let finalized_slot = self
-            .finalized_checkpoint
-            .epoch
-            .start_slot(E::slots_per_epoch());
+        let (finalized_root, finalized_slot) = if self.indices.contains_key(&finalized_root) {
+            (
+                finalized_root,
+                self.finalized_checkpoint
+                    .epoch
+                    .start_slot(E::slots_per_epoch()),
+            )
+        } else {
+            self.anchor_block
+        };
 
         let Some(mut node) = self
             .indices

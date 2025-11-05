@@ -414,13 +414,14 @@ impl ProtoArrayForkChoice {
     #[allow(clippy::too_many_arguments)]
     pub fn new<E: EthSpec>(
         current_slot: Slot,
-        finalized_block_slot: Slot,
-        finalized_block_state_root: Hash256,
+        anchor_block_slot: Slot,
+        anchor_block_root: Hash256,
+        anchor_block_state_root: Hash256,
         justified_checkpoint: Checkpoint,
         finalized_checkpoint: Checkpoint,
-        current_epoch_shuffling_id: AttestationShufflingId,
-        next_epoch_shuffling_id: AttestationShufflingId,
-        execution_status: ExecutionStatus,
+        anchor_block_current_epoch_shuffling_id: AttestationShufflingId,
+        anchor_block_next_epoch_shuffling_id: AttestationShufflingId,
+        anchor_block_execution_status: ExecutionStatus,
     ) -> Result<Self, String> {
         let mut proto_array = ProtoArray {
             prune_threshold: DEFAULT_PRUNE_THRESHOLD,
@@ -429,21 +430,22 @@ impl ProtoArrayForkChoice {
             nodes: Vec::with_capacity(1),
             indices: HashMap::with_capacity(1),
             previous_proposer_boost: ProposerBoost::default(),
+            anchor_block: (anchor_block_root, anchor_block_slot),
         };
 
         let block = Block {
-            slot: finalized_block_slot,
-            root: finalized_checkpoint.root,
+            slot: anchor_block_slot,
+            root: anchor_block_root,
             parent_root: None,
-            state_root: finalized_block_state_root,
+            state_root: anchor_block_state_root,
             // We are using the finalized_root as the target_root, since it always lies on an
             // epoch boundary.
             target_root: finalized_checkpoint.root,
-            current_epoch_shuffling_id,
-            next_epoch_shuffling_id,
+            current_epoch_shuffling_id: anchor_block_current_epoch_shuffling_id,
+            next_epoch_shuffling_id: anchor_block_next_epoch_shuffling_id,
             justified_checkpoint,
             finalized_checkpoint,
-            execution_status,
+            execution_status: anchor_block_execution_status,
             unrealized_justified_checkpoint: Some(justified_checkpoint),
             unrealized_finalized_checkpoint: Some(finalized_checkpoint),
         };
@@ -924,18 +926,20 @@ impl ProtoArrayForkChoice {
         SszContainer::from(self).as_ssz_bytes()
     }
 
-    pub fn from_bytes(bytes: &[u8], balances: JustifiedBalances) -> Result<Self, String> {
+    pub fn from_bytes<E: EthSpec>(
+        bytes: &[u8],
+        balances: JustifiedBalances,
+    ) -> Result<Self, String> {
         let container = SszContainer::from_ssz_bytes(bytes)
             .map_err(|e| format!("Failed to decode ProtoArrayForkChoice: {:?}", e))?;
-        Self::from_container(container, balances)
+        Self::from_container::<E>(container, balances)
     }
 
-    pub fn from_container(
+    pub fn from_container<E: EthSpec>(
         container: SszContainer,
         balances: JustifiedBalances,
     ) -> Result<Self, String> {
-        (container, balances)
-            .try_into()
+        Self::from_ssz::<E>(container, balances)
             .map_err(|e| format!("Failed to initialize ProtoArrayForkChoice: {e:?}"))
     }
 
@@ -956,6 +960,15 @@ impl ProtoArrayForkChoice {
     /// Returns all nodes that have zero children and are descended from the finalized checkpoint.
     pub fn heads_descended_from_finalization<E: EthSpec>(&self) -> Vec<&ProtoNode> {
         self.proto_array.heads_descended_from_finalization::<E>()
+    }
+
+    /// Returns the anchor_block_root
+    pub fn get_anchor_block_root(&self) -> Hash256 {
+        self.proto_array.anchor_block.0
+    }
+
+    pub fn get_anchor_block(&self) -> (Hash256, Slot) {
+        self.proto_array.anchor_block
     }
 }
 
@@ -1098,6 +1111,7 @@ mod test_compute_deltas {
         let mut fc = ProtoArrayForkChoice::new::<MainnetEthSpec>(
             genesis_slot,
             genesis_slot,
+            genesis_checkpoint.root,
             state_root,
             genesis_checkpoint,
             genesis_checkpoint,
@@ -1224,6 +1238,7 @@ mod test_compute_deltas {
         let mut fc = ProtoArrayForkChoice::new::<MainnetEthSpec>(
             genesis_slot,
             genesis_slot,
+            genesis_checkpoint.root,
             junk_state_root,
             genesis_checkpoint,
             genesis_checkpoint,
