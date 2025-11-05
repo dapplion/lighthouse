@@ -4,9 +4,9 @@
 //! Additionally, the `BalancesCache` struct is defined; a cache designed to avoid database
 //! reads when fork choice requires the validator balances of the justified state.
 
-use crate::{BeaconSnapshot, metrics};
+use crate::BeaconSnapshot;
 use derivative::Derivative;
-use fork_choice::ForkChoiceStore;
+use fork_choice::{BalancesGetter, Error as ForkChoiceError};
 use proto_array::JustifiedBalances;
 use safe_arith::ArithError;
 use ssz_derive::{Decode, Encode};
@@ -16,8 +16,7 @@ use std::sync::Arc;
 use store::{Error as StoreError, HotColdDB, ItemStore};
 use superstruct::superstruct;
 use types::{
-    AbstractExecPayload, BeaconBlockRef, BeaconState, BeaconStateError, Checkpoint, Epoch, EthSpec,
-    FixedBytesExtended, Hash256, Slot,
+    BeaconState, BeaconStateError, Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot,
 };
 
 #[derive(Debug)]
@@ -64,17 +63,22 @@ pub(crate) type CacheItem = CacheItemV8;
     variant_attributes(derive(PartialEq, Clone, Default, Debug, Encode, Decode)),
     no_enum
 )]
-pub struct BalancesCache {
+pub struct BalancesCacheInner {
     pub(crate) items: Vec<CacheItemV8>,
 }
 
-pub type BalancesCache = BalancesCacheV8;
+pub type BalancesCacheInner = BalancesCacheInnerV8;
 
-impl BalancesCache {
+pub struct BalancesCache<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
+    pub(crate) cache: BalancesCacheInner,
+    pub(crate) store: Arc<HotColdDB<E, Hot, Cold>>,
+}
+
+impl BalancesCacheInner {
     /// Inspect the given `state` and determine the root of the block at the first slot of
     /// `state.current_epoch`. If there is not already some entry for the given block root, then
     /// add the effective balances from the `state` to the cache.
-    pub fn process_state<E: EthSpec>(
+    fn process_state<E: EthSpec>(
         &mut self,
         block_root: Hash256,
         state: &BeaconState<E>,
@@ -119,9 +123,45 @@ impl BalancesCache {
     /// Get the balances for the given `block_root`, if any.
     ///
     /// If some balances are found, they are cloned from the cache.
-    pub fn get(&mut self, block_root: Hash256, epoch: Epoch) -> Option<Vec<u64>> {
+    fn get(&self, block_root: Hash256, epoch: Epoch) -> Option<Vec<u64>> {
         let i = self.position(block_root, epoch)?;
         Some(self.items[i].balances.clone())
+    }
+}
+
+impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BalancesCache<E, Hot, Cold> {
+    pub fn new(store: Arc<HotColdDB<E, Hot, Cold>>) -> Self {
+        Self {
+            store,
+            cache: <_>::default(),
+        }
+    }
+}
+
+impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BalancesGetter
+    for BalancesCache<E, Hot, Cold>
+{
+    fn get_balances(
+        &self,
+        state_root: Hash256,
+        checkpoint: Checkpoint,
+    ) -> Result<JustifiedBalances, ForkChoiceError> {
+        if let Some(balances) = self.cache.get(checkpoint.root, checkpoint.epoch) {
+            return Ok(JustifiedBalances::from_effective_balances(balances)
+                .map_err(|e| format!("Invalid cached balances {e:?}"))?);
+        }
+
+        let state_slot = checkpoint.epoch.start_slot(E::slots_per_epoch());
+        let state = self
+            .store
+            .get_state(&state_root, Some(state_slot), false)
+            .map_err(|e| format!("Error getting state {state_root:?} {e:?}"))?
+            .ok_or_else(|| {
+                ForkChoiceError::BalancesGetterError(format!("Missing state {state_root:?}"))
+            })?;
+        let balances = JustifiedBalances::from_justified_state(&state)
+            .map_err(|e| format!("Invalid state balances {e:?}"))?;
+        return Ok(balances);
     }
 }
 
@@ -132,7 +172,7 @@ impl BalancesCache {
 pub struct BeaconForkChoiceStore<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
     #[derivative(PartialEq = "ignore")]
     store: Arc<HotColdDB<E, Hot, Cold>>,
-    balances_cache: BalancesCache,
+    balances_cache: BalancesCacheInner,
     time: Slot,
     finalized_checkpoint: Checkpoint,
     justified_checkpoint: Checkpoint,
@@ -292,121 +332,6 @@ where
     }
 }
 
-impl<E, Hot, Cold> ForkChoiceStore<E> for BeaconForkChoiceStore<E, Hot, Cold>
-where
-    E: EthSpec,
-    Hot: ItemStore<E>,
-    Cold: ItemStore<E>,
-{
-    type Error = Error;
-
-    fn get_current_slot(&self) -> Slot {
-        self.time
-    }
-
-    fn set_current_slot(&mut self, slot: Slot) {
-        self.time = slot
-    }
-
-    fn on_verified_block<Payload: AbstractExecPayload<E>>(
-        &mut self,
-        _block: BeaconBlockRef<E, Payload>,
-        block_root: Hash256,
-        state: &BeaconState<E>,
-    ) -> Result<(), Self::Error> {
-        self.balances_cache.process_state(block_root, state)
-    }
-
-    fn justified_checkpoint(&self) -> &Checkpoint {
-        &self.justified_checkpoint
-    }
-
-    fn justified_state_root(&self) -> Hash256 {
-        self.justified_state_root
-    }
-
-    fn justified_balances(&self) -> &JustifiedBalances {
-        &self.justified_balances
-    }
-
-    fn finalized_checkpoint(&self) -> &Checkpoint {
-        &self.finalized_checkpoint
-    }
-
-    fn unrealized_justified_checkpoint(&self) -> &Checkpoint {
-        &self.unrealized_justified_checkpoint
-    }
-
-    fn unrealized_justified_state_root(&self) -> Hash256 {
-        self.unrealized_justified_state_root
-    }
-
-    fn unrealized_finalized_checkpoint(&self) -> &Checkpoint {
-        &self.unrealized_finalized_checkpoint
-    }
-
-    fn proposer_boost_root(&self) -> Hash256 {
-        self.proposer_boost_root
-    }
-
-    fn set_finalized_checkpoint(&mut self, checkpoint: Checkpoint) {
-        self.finalized_checkpoint = checkpoint
-    }
-
-    fn set_justified_checkpoint(
-        &mut self,
-        checkpoint: Checkpoint,
-        justified_state_root: Hash256,
-    ) -> Result<(), Error> {
-        self.justified_checkpoint = checkpoint;
-        self.justified_state_root = justified_state_root;
-
-        if let Some(balances) = self.balances_cache.get(
-            self.justified_checkpoint.root,
-            self.justified_checkpoint.epoch,
-        ) {
-            // NOTE: could avoid this re-calculation by introducing a `PersistedCacheItem`.
-            metrics::inc_counter(&metrics::BALANCES_CACHE_HITS);
-            self.justified_balances = JustifiedBalances::from_effective_balances(balances)?;
-        } else {
-            metrics::inc_counter(&metrics::BALANCES_CACHE_MISSES);
-
-            // Justified state is reasonably useful to cache, it might be finalized soon.
-            let update_cache = true;
-            let state = self
-                .store
-                .get_hot_state(&self.justified_state_root, update_cache)
-                .map_err(Error::FailedToReadState)?
-                .ok_or(Error::MissingState(self.justified_state_root))?;
-
-            self.justified_balances = JustifiedBalances::from_justified_state(&state)?;
-        }
-
-        Ok(())
-    }
-
-    fn set_unrealized_justified_checkpoint(&mut self, checkpoint: Checkpoint, state_root: Hash256) {
-        self.unrealized_justified_checkpoint = checkpoint;
-        self.unrealized_justified_state_root = state_root;
-    }
-
-    fn set_unrealized_finalized_checkpoint(&mut self, checkpoint: Checkpoint) {
-        self.unrealized_finalized_checkpoint = checkpoint;
-    }
-
-    fn set_proposer_boost_root(&mut self, proposer_boost_root: Hash256) {
-        self.proposer_boost_root = proposer_boost_root;
-    }
-
-    fn equivocating_indices(&self) -> &BTreeSet<u64> {
-        &self.equivocating_indices
-    }
-
-    fn extend_equivocating_indices(&mut self, indices: impl IntoIterator<Item = u64>) {
-        self.equivocating_indices.extend(indices);
-    }
-}
-
 pub type PersistedForkChoiceStore = PersistedForkChoiceStoreV28;
 
 /// A container which allows persisting the `BeaconForkChoiceStore` to the on-disk database.
@@ -418,7 +343,7 @@ pub type PersistedForkChoiceStore = PersistedForkChoiceStoreV28;
 pub struct PersistedForkChoiceStore {
     /// The balances cache was removed from disk storage in schema V28.
     #[superstruct(only(V17))]
-    pub balances_cache: BalancesCacheV8,
+    pub balances_cache: BalancesCacheInnerV8,
     pub time: Slot,
     pub finalized_checkpoint: Checkpoint,
     pub justified_checkpoint: Checkpoint,

@@ -1,5 +1,5 @@
-use crate::BeaconForkChoiceStore;
 use crate::beacon_chain::BeaconChainTypes;
+use crate::beacon_fork_choice_store::{BalancesCache, BeaconForkChoiceStore};
 use crate::persisted_fork_choice::PersistedForkChoiceV17;
 use crate::schema_change::StoreError;
 use crate::test_utils::{BEACON_CHAIN_DB_KEY, FORK_CHOICE_DB_KEY, PersistedBeaconChain};
@@ -113,7 +113,7 @@ pub fn downgrade_from_v23<T: BeaconChainTypes>(
     let fork_choice = ForkChoice::from_persisted(
         persisted_fork_choice.fork_choice_v17.try_into()?,
         reset_payload_statuses,
-        fc_store,
+        BalancesCache::new(db.clone()),
         &db.spec,
     )
     .map_err(|e| {

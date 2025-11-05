@@ -226,14 +226,7 @@ impl ForkChoiceTestDefinition {
                     block_root,
                     target_epoch,
                 } => {
-                    fork_choice
-                        .process_attestation(validator_index, block_root, target_epoch)
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "process_attestation op at index {} returned error",
-                                op_index
-                            )
-                        });
+                    fork_choice.process_attestation(validator_index, block_root, target_epoch);
                     check_bytes_round_trip(&fork_choice);
                 }
                 Operation::Prune {
