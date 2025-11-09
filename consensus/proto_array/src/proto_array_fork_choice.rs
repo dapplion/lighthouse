@@ -3,7 +3,7 @@ use crate::{
     error::Error,
     proto_array::{
         InvalidationOperation, Iter, ProposerBoost, ProtoArray, ProtoNode,
-        calculate_committee_fraction,
+        calculate_committee_fraction, iter_mut_all_backwards,
     },
     ssz_container::SszContainer,
 };
@@ -426,8 +426,7 @@ impl ProtoArrayForkChoice {
             prune_threshold: DEFAULT_PRUNE_THRESHOLD,
             justified_checkpoint,
             finalized_checkpoint,
-            nodes: Vec::with_capacity(1),
-            indices: HashMap::with_capacity(1),
+            nodes: <_>::default(),
             previous_proposer_boost: ProposerBoost::default(),
         };
 
@@ -524,7 +523,6 @@ impl ProtoArrayForkChoice {
         let new_balances = justified_state_balances;
 
         let deltas = compute_deltas(
-            &self.proto_array.indices,
             &mut self.votes,
             &old_balances.effective_balances,
             &new_balances.effective_balances,
@@ -705,7 +703,7 @@ impl ProtoArrayForkChoice {
     pub fn contains_invalid_payloads(&mut self) -> bool {
         self.proto_array
             .nodes
-            .iter()
+            .values()
             .any(|node| node.execution_status.is_invalid())
     }
 
@@ -724,12 +722,15 @@ impl ProtoArrayForkChoice {
         // This function will touch all blocks, even those that do not descend from the finalized
         // block. Since this function is expected to run at start-up during very rare
         // circumstances we prefer simplicity over efficiency.
-        for node_index in (0..self.proto_array.nodes.len()).rev() {
+        let block_roots_backwards = iter_mut_all_backwards(&mut self.proto_array.nodes)
+            .map(|node| node.root)
+            .collect::<Vec<_>>();
+        for block_root in block_roots_backwards {
             let node = self
                 .proto_array
                 .nodes
-                .get_mut(node_index)
-                .ok_or("unreachable index out of bounds in proto_array nodes")?;
+                .get_mut(&block_root)
+                .ok_or("unreachable key is part proto_array nodes")?;
 
             match node.execution_status {
                 ExecutionStatus::Invalid(block_hash) => {
@@ -782,12 +783,12 @@ impl ProtoArrayForkChoice {
                                 .checked_add(restored_weight)
                                 .ok_or("Overflow when adding weight to ancestor")?;
 
-                            if let Some(parent_index) = node_or_ancestor.parent {
+                            if let Some(parent_root) = node_or_ancestor.parent {
                                 node_or_ancestor = self
                                     .proto_array
                                     .nodes
-                                    .get_mut(parent_index)
-                                    .ok_or(format!("Missing parent index: {}", parent_index))?;
+                                    .get_mut(&parent_root)
+                                    .ok_or(format!("Missing parent node: {}", parent_root))?;
                             } else {
                                 // This is either the finalized block or a block that does not
                                 // descend from the finalized block.
@@ -828,25 +829,19 @@ impl ProtoArrayForkChoice {
     }
 
     pub fn contains_block(&self, block_root: &Hash256) -> bool {
-        self.proto_array.indices.contains_key(block_root)
+        self.proto_array.nodes.contains_key(block_root)
     }
 
     fn get_proto_node(&self, block_root: &Hash256) -> Option<&ProtoNode> {
-        let block_index = self.proto_array.indices.get(block_root)?;
-        self.proto_array.nodes.get(*block_index)
+        self.proto_array.nodes.get(block_root)
     }
 
     pub fn get_block(&self, block_root: &Hash256) -> Option<Block> {
         let block = self.get_proto_node(block_root)?;
-        let parent_root = block
-            .parent
-            .and_then(|i| self.proto_array.nodes.get(i))
-            .map(|parent| parent.root);
-
         Some(Block {
             slot: block.slot,
             root: block.root,
-            parent_root,
+            parent_root: block.parent,
             state_root: block.state_root,
             target_root: block.target_root,
             current_epoch_shuffling_id: block.current_epoch_shuffling_id.clone(),
@@ -867,10 +862,9 @@ impl ProtoArrayForkChoice {
 
     /// Returns the weight of a given block.
     pub fn get_weight(&self, block_root: &Hash256) -> Option<u64> {
-        let block_index = self.proto_array.indices.get(block_root)?;
         self.proto_array
             .nodes
-            .get(*block_index)
+            .get(block_root)
             .map(|node| node.weight)
     }
 
@@ -970,13 +964,12 @@ impl ProtoArrayForkChoice {
 /// - If some `Hash256` in `votes` is not a key in `indices` (except for `Hash256::zero()`, this is
 ///   always valid).
 fn compute_deltas(
-    indices: &HashMap<Hash256, usize>,
     votes: &mut ElasticList<VoteTracker>,
     old_balances: &[u64],
     new_balances: &[u64],
     equivocating_indices: &BTreeSet<u64>,
-) -> Result<Vec<i64>, Error> {
-    let mut deltas = vec![0_i64; indices.len()];
+) -> Result<HashMap<Hash256, i64>, Error> {
+    let mut deltas = HashMap::<Hash256, i64>::new();
 
     for (val_index, vote) in votes.iter_mut().enumerate() {
         // There is no need to create a score change if the validator has never voted or both their
@@ -999,17 +992,10 @@ fn compute_deltas(
             // 2. Set their `current_root` (permanently) to zero.
             if !vote.current_root.is_zero() {
                 let old_balance = old_balances.get(val_index).copied().unwrap_or(0);
-
-                if let Some(current_delta_index) = indices.get(&vote.current_root).copied() {
-                    let delta = deltas
-                        .get(current_delta_index)
-                        .ok_or(Error::InvalidNodeDelta(current_delta_index))?
-                        .checked_sub(old_balance as i64)
-                        .ok_or(Error::DeltaOverflow(current_delta_index))?;
-
-                    // Array access safe due to check on previous line.
-                    deltas[current_delta_index] = delta;
-                }
+                let delta = deltas.entry(vote.current_root).or_default();
+                *delta = delta
+                    .checked_sub(old_balance as i64)
+                    .ok_or(Error::DeltaOverflow(vote.current_root))?;
 
                 vote.current_root = Hash256::zero();
             }
@@ -1031,29 +1017,15 @@ fn compute_deltas(
         if vote.current_root != vote.next_root || old_balance != new_balance {
             // We ignore the vote if it is not known in `indices`. We assume that it is outside
             // of our tree (i.e., pre-finalization) and therefore not interesting.
-            if let Some(current_delta_index) = indices.get(&vote.current_root).copied() {
-                let delta = deltas
-                    .get(current_delta_index)
-                    .ok_or(Error::InvalidNodeDelta(current_delta_index))?
-                    .checked_sub(old_balance as i64)
-                    .ok_or(Error::DeltaOverflow(current_delta_index))?;
+            let delta = deltas.entry(vote.current_root).or_default();
+            *delta = delta
+                .checked_sub(old_balance as i64)
+                .ok_or(Error::DeltaOverflow(vote.current_root))?;
 
-                // Array access safe due to check on previous line.
-                deltas[current_delta_index] = delta;
-            }
-
-            // We ignore the vote if it is not known in `indices`. We assume that it is outside
-            // of our tree (i.e., pre-finalization) and therefore not interesting.
-            if let Some(next_delta_index) = indices.get(&vote.next_root).copied() {
-                let delta = deltas
-                    .get(next_delta_index)
-                    .ok_or(Error::InvalidNodeDelta(next_delta_index))?
-                    .checked_add(new_balance as i64)
-                    .ok_or(Error::DeltaOverflow(next_delta_index))?;
-
-                // Array access safe due to check on previous line.
-                deltas[next_delta_index] = delta;
-            }
+            let delta = deltas.entry(vote.next_root).or_default();
+            *delta = delta
+                .checked_sub(new_balance as i64)
+                .ok_or(Error::DeltaOverflow(vote.next_root))?;
 
             vote.current_root = vote.next_root;
         }

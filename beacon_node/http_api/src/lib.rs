@@ -3010,7 +3010,7 @@ pub fn serve<T: BeaconChainTypes>(
 
                     let fork_choice_nodes = proto_array
                         .nodes
-                        .iter()
+                        .values()
                         .map(|node| {
                             let execution_status = if node.execution_status.is_execution_enabled() {
                                 Some(node.execution_status.to_string())
@@ -3021,10 +3021,7 @@ pub fn serve<T: BeaconChainTypes>(
                             ForkChoiceNode {
                                 slot: node.slot,
                                 block_root: node.root,
-                                parent_root: node
-                                    .parent
-                                    .and_then(|index| proto_array.nodes.get(index))
-                                    .map(|parent| parent.root),
+                                parent_root: node.parent,
                                 justified_epoch: node.justified_checkpoint.epoch,
                                 finalized_epoch: node.finalized_checkpoint.epoch,
                                 weight: node.weight,

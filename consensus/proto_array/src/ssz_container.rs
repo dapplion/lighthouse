@@ -6,9 +6,8 @@ use crate::{
 };
 use ssz::{Encode, four_byte_option_impl};
 use ssz_derive::{Decode, Encode};
-use std::collections::HashMap;
 use superstruct::superstruct;
-use types::{Checkpoint, Hash256};
+use types::Checkpoint;
 
 // Define a "legacy" implementation of `Option<usize>` which uses four bytes for encoding the union
 // selector.
@@ -29,7 +28,6 @@ pub struct SszContainer {
     pub justified_checkpoint: Checkpoint,
     pub finalized_checkpoint: Checkpoint,
     pub nodes: Vec<ProtoNodeV17>,
-    pub indices: Vec<(Hash256, usize)>,
     pub previous_proposer_boost: ProposerBoost,
 }
 
@@ -42,8 +40,7 @@ impl From<&ProtoArrayForkChoice> for SszContainer {
             prune_threshold: proto_array.prune_threshold,
             justified_checkpoint: proto_array.justified_checkpoint,
             finalized_checkpoint: proto_array.finalized_checkpoint,
-            nodes: proto_array.nodes.clone(),
-            indices: proto_array.indices.iter().map(|(k, v)| (*k, *v)).collect(),
+            nodes: proto_array.nodes.values().cloned().collect(),
             previous_proposer_boost: proto_array.previous_proposer_boost,
         }
     }
@@ -57,8 +54,11 @@ impl TryFrom<(SszContainer, JustifiedBalances)> for ProtoArrayForkChoice {
             prune_threshold: from.prune_threshold,
             justified_checkpoint: from.justified_checkpoint,
             finalized_checkpoint: from.finalized_checkpoint,
-            nodes: from.nodes,
-            indices: from.indices.into_iter().collect::<HashMap<_, _>>(),
+            nodes: from
+                .nodes
+                .into_iter()
+                .map(|node| (node.root, node))
+                .collect(),
             previous_proposer_boost: from.previous_proposer_boost,
         };
 
@@ -79,7 +79,6 @@ impl From<SszContainerV17> for SszContainerV28 {
             justified_checkpoint: v17.justified_checkpoint,
             finalized_checkpoint: v17.finalized_checkpoint,
             nodes: v17.nodes,
-            indices: v17.indices,
             previous_proposer_boost: v17.previous_proposer_boost,
         }
     }
@@ -95,7 +94,6 @@ impl From<(SszContainerV28, JustifiedBalances)> for SszContainerV17 {
             justified_checkpoint: v28.justified_checkpoint,
             finalized_checkpoint: v28.finalized_checkpoint,
             nodes: v28.nodes,
-            indices: v28.indices,
             previous_proposer_boost: v28.previous_proposer_boost,
         }
     }

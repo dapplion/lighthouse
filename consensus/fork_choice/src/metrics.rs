@@ -13,12 +13,6 @@ pub static FORK_CHOICE_QUEUED_ATTESTATIONS: LazyLock<Result<IntGauge>> = LazyLoc
 pub static FORK_CHOICE_NODES: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
     try_create_int_gauge("fork_choice_nodes", "Current count of proto array nodes")
 });
-pub static FORK_CHOICE_INDICES: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
-    try_create_int_gauge(
-        "fork_choice_indices",
-        "Current count of proto array indices",
-    )
-});
 pub static FORK_CHOICE_DEQUEUED_ATTESTATIONS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
     try_create_int_counter(
         "fork_choice_dequeued_attestations_total",
@@ -54,9 +48,5 @@ pub fn scrape_for_metrics<T: ForkChoiceStore<E>, E: EthSpec>(fork_choice: &ForkC
     set_gauge(
         &FORK_CHOICE_NODES,
         fork_choice.proto_array().core_proto_array().nodes.len() as i64,
-    );
-    set_gauge(
-        &FORK_CHOICE_INDICES,
-        fork_choice.proto_array().core_proto_array().indices.len() as i64,
     );
 }
