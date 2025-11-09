@@ -1,10 +1,11 @@
+use crate::block::Block as ProtoBlock;
 use crate::metrics::{self, scrape_for_metrics};
 use crate::{ForkChoiceStore, InvalidationOperation};
 use logging::crit;
 use proto_array::{
-    Block as ProtoBlock, DisallowedReOrgOffsets, ExecutionStatus, JustifiedBalances,
-    ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice, ReOrgThreshold,
+    ExecutionStatus, JustifiedBalances, ProtoArray, ProtoNode, calculate_committee_fraction,
 };
+use serde::{Deserialize, Serialize};
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
 use state_processing::{
@@ -76,6 +77,7 @@ pub enum Error<T> {
     },
     UnrealizedVoteProcessing(state_processing::EpochProcessingError),
     ValidatorStatuses(BeaconStateError),
+    InvalidEpochOffset(u64),
 }
 
 impl<T> From<InvalidAttestation> for Error<T> {
@@ -180,6 +182,172 @@ impl<T> From<String> for Error<T> {
 impl<T> From<proto_array::Error> for Error<T> {
     fn from(e: proto_array::Error) -> Self {
         Error::ProtoArrayError(e)
+    }
+}
+
+/// Reasons why a re-org should not be attempted.
+///
+/// This type intentionally does not implement `Debug` so that the `Display` impl must be used.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DoNotReOrg {
+    MissingHeadOrParentNode,
+    MissingHeadFinalizedCheckpoint,
+    ParentDistance,
+    HeadDistance,
+    ShufflingUnstable,
+    DisallowedOffset {
+        offset: u64,
+    },
+    JustificationAndFinalizationNotCompetitive,
+    ChainNotFinalizing {
+        epochs_since_finalization: u64,
+    },
+    HeadNotWeak {
+        head_weight: u64,
+        re_org_head_weight_threshold: u64,
+    },
+    ParentNotStrong {
+        parent_weight: u64,
+        re_org_parent_weight_threshold: u64,
+    },
+    HeadNotLate,
+    NotProposing,
+    ReOrgsDisabled,
+}
+
+impl std::fmt::Display for DoNotReOrg {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::MissingHeadOrParentNode => write!(f, "unknown head or parent"),
+            Self::MissingHeadFinalizedCheckpoint => write!(f, "finalized checkpoint missing"),
+            Self::ParentDistance => write!(f, "parent too far from head"),
+            Self::HeadDistance => write!(f, "head too far from current slot"),
+            Self::ShufflingUnstable => write!(f, "shuffling unstable at epoch boundary"),
+            Self::DisallowedOffset { offset } => {
+                write!(f, "re-orgs disabled at offset {offset}")
+            }
+            Self::JustificationAndFinalizationNotCompetitive => {
+                write!(f, "justification or finalization not competitive")
+            }
+            Self::ChainNotFinalizing {
+                epochs_since_finalization,
+            } => write!(
+                f,
+                "chain not finalizing ({epochs_since_finalization} epochs since finalization)"
+            ),
+            Self::HeadNotWeak {
+                head_weight,
+                re_org_head_weight_threshold,
+            } => {
+                write!(
+                    f,
+                    "head not weak ({head_weight}/{re_org_head_weight_threshold})"
+                )
+            }
+            Self::ParentNotStrong {
+                parent_weight,
+                re_org_parent_weight_threshold,
+            } => {
+                write!(
+                    f,
+                    "parent not strong ({parent_weight}/{re_org_parent_weight_threshold})"
+                )
+            }
+            Self::HeadNotLate => {
+                write!(f, "head arrived on time")
+            }
+            Self::NotProposing => {
+                write!(f, "not proposing at next slot")
+            }
+            Self::ReOrgsDisabled => {
+                write!(f, "re-orgs disabled in config")
+            }
+        }
+    }
+}
+
+/// Information about the proposer head used for opportunistic re-orgs.
+#[derive(Debug, Clone)]
+pub struct ProposerHeadInfo {
+    /// Information about the *current* head block, which may be re-orged.
+    pub head_node: ProtoNode,
+    /// Information about the parent of the current head, which should be selected as the parent
+    /// for a new proposal *if* a re-org is decided on.
+    pub parent_node: ProtoNode,
+    /// The computed fraction of the active head committee balance below which we can re-org.
+    pub re_org_head_weight_threshold: u64,
+    /// The computed fraction of the active parent committee balance above which we can re-org.
+    pub re_org_parent_weight_threshold: u64,
+    /// The current slot from fork choice's point of view, may lead the wall-clock slot by upto
+    /// 500ms.
+    pub current_slot: Slot,
+}
+
+/// Error type to enable short-circuiting checks in `get_proposer_head`.
+///
+/// This type intentionally does not implement `Debug` so that callers are forced to handle the
+/// enum.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProposerHeadError<T> {
+    DoNotReOrg(DoNotReOrg),
+    Error(T),
+}
+
+impl<T> From<DoNotReOrg> for ProposerHeadError<T> {
+    fn from(e: DoNotReOrg) -> ProposerHeadError<T> {
+        Self::DoNotReOrg(e)
+    }
+}
+
+impl From<Error> for ProposerHeadError<Error> {
+    fn from(e: Error) -> Self {
+        Self::Error(e)
+    }
+}
+
+impl<T1> ProposerHeadError<T1> {
+    pub fn convert_inner_error<T2>(self) -> ProposerHeadError<T2>
+    where
+        T2: From<T1>,
+    {
+        self.map_inner_error(T2::from)
+    }
+
+    pub fn map_inner_error<T2>(self, f: impl FnOnce(T1) -> T2) -> ProposerHeadError<T2> {
+        match self {
+            ProposerHeadError::DoNotReOrg(reason) => ProposerHeadError::DoNotReOrg(reason),
+            ProposerHeadError::Error(error) => ProposerHeadError::Error(f(error)),
+        }
+    }
+}
+
+/// New-type for the re-org threshold percentage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReOrgThreshold(pub u64);
+
+/// New-type for disallowed re-org slots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DisallowedReOrgOffsets {
+    // Vecs are faster than hashmaps for small numbers of items.
+    offsets: Vec<u64>,
+}
+
+impl Default for DisallowedReOrgOffsets {
+    fn default() -> Self {
+        DisallowedReOrgOffsets { offsets: vec![0] }
+    }
+}
+
+impl DisallowedReOrgOffsets {
+    pub fn new<E: EthSpec>(offsets: Vec<u64>) -> Result<Self, Error> {
+        for &offset in &offsets {
+            if offset >= E::slots_per_epoch() {
+                return Err(Error::InvalidEpochOffset(offset));
+            }
+        }
+        Ok(Self { offsets })
     }
 }
 
@@ -315,7 +483,7 @@ pub struct ForkChoice<T, E> {
     /// Storage for `ForkChoice`, modelled off the spec `Store` object.
     fc_store: T,
     /// The underlying representation of the block DAG.
-    proto_array: ProtoArrayForkChoice,
+    proto_array: ProtoArray,
     /// Attestations that arrived at the current slot and must be queued for later processing.
     queued_attestations: Vec<QueuedAttestation>,
     /// Stores a cache of the values required to be sent to the execution layer.
@@ -556,17 +724,48 @@ where
             ));
         }
 
-        self.proto_array
-            .get_proposer_head::<E>(
-                current_slot,
-                canonical_head,
-                self.fc_store.justified_balances(),
-                re_org_head_threshold,
-                re_org_parent_threshold,
-                disallowed_offsets,
-                max_epochs_since_finalization,
-            )
-            .map_err(ProposerHeadError::convert_inner_error)
+        let info = self.get_proposer_head_info::<E>(
+            current_slot,
+            canonical_head,
+            self.fc_store.justified_balances(),
+            re_org_head_threshold,
+            re_org_parent_threshold,
+            disallowed_offsets,
+            max_epochs_since_finalization,
+        )?;
+
+        // Only re-org a single slot. This prevents cascading failures during asynchrony.
+        let head_slot_ok = info.head_node.slot + 1 == current_slot;
+        if !head_slot_ok {
+            return Err(DoNotReOrg::HeadDistance.into());
+        }
+
+        // Only re-org if the head's weight is less than the heads configured committee fraction.
+        let head_weight = info.head_node.weight;
+        let re_org_head_weight_threshold = info.re_org_head_weight_threshold;
+        let weak_head = head_weight < re_org_head_weight_threshold;
+        if !weak_head {
+            return Err(DoNotReOrg::HeadNotWeak {
+                head_weight,
+                re_org_head_weight_threshold,
+            }
+            .into());
+        }
+
+        // Only re-org if the parent's weight is greater than the parents configured committee fraction.
+        let parent_weight = info.parent_node.weight;
+        let re_org_parent_weight_threshold = info.re_org_parent_weight_threshold;
+        let parent_strong = parent_weight > re_org_parent_weight_threshold;
+        if !parent_strong {
+            return Err(DoNotReOrg::ParentNotStrong {
+                parent_weight,
+                re_org_parent_weight_threshold,
+            }
+            .into());
+        }
+
+        // All checks have passed, build upon the parent to re-org the head.
+        Ok(info)
     }
 
     pub fn get_preliminary_proposer_head(
@@ -578,17 +777,105 @@ where
         max_epochs_since_finalization: Epoch,
     ) -> Result<ProposerHeadInfo, ProposerHeadError<Error<proto_array::Error>>> {
         let current_slot = self.fc_store.get_current_slot();
-        self.proto_array
-            .get_proposer_head_info::<E>(
-                current_slot,
-                canonical_head,
-                self.fc_store.justified_balances(),
-                re_org_head_threshold,
-                re_org_parent_threshold,
-                disallowed_offsets,
-                max_epochs_since_finalization,
-            )
-            .map_err(ProposerHeadError::convert_inner_error)
+        self.get_proposer_head_info::<E>(
+            current_slot,
+            canonical_head,
+            self.fc_store.justified_balances(),
+            re_org_head_threshold,
+            re_org_parent_threshold,
+            disallowed_offsets,
+            max_epochs_since_finalization,
+        )
+        .map_err(ProposerHeadError::convert_inner_error)
+    }
+
+    /// Get information about the block to propose on during `current_slot`.
+    ///
+    /// This function returns a *partial* result which must be processed further.
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_proposer_head_info(
+        &self,
+        current_slot: Slot,
+        canonical_head: Hash256,
+        justified_balances: &JustifiedBalances,
+        re_org_head_threshold: ReOrgThreshold,
+        re_org_parent_threshold: ReOrgThreshold,
+        disallowed_offsets: &DisallowedReOrgOffsets,
+        max_epochs_since_finalization: Epoch,
+    ) -> Result<ProposerHeadInfo, ProposerHeadError<Error>> {
+        let mut nodes = self
+            .proto_array
+            .iter_nodes(&canonical_head)
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let parent_node = nodes.pop().ok_or(DoNotReOrg::MissingHeadOrParentNode)?;
+        let head_node = nodes.pop().ok_or(DoNotReOrg::MissingHeadOrParentNode)?;
+
+        let parent_slot = parent_node.slot;
+        let head_slot = head_node.slot;
+        let re_org_block_slot = head_slot + 1;
+
+        // Check finalization distance.
+        let proposal_epoch = re_org_block_slot.epoch(E::slots_per_epoch());
+        let finalized_epoch = head_node
+            .unrealized_finalized_checkpoint
+            .ok_or(DoNotReOrg::MissingHeadFinalizedCheckpoint)?
+            .epoch;
+        let epochs_since_finalization = proposal_epoch.saturating_sub(finalized_epoch).as_u64();
+        if epochs_since_finalization > max_epochs_since_finalization.as_u64() {
+            return Err(DoNotReOrg::ChainNotFinalizing {
+                epochs_since_finalization,
+            }
+            .into());
+        }
+
+        // Check parent distance from head.
+        // Do not check head distance from current slot, as that condition needs to be
+        // late-evaluated and is elided when `current_slot == head_slot`.
+        let parent_slot_ok = parent_slot + 1 == head_slot;
+        if !parent_slot_ok {
+            return Err(DoNotReOrg::ParentDistance.into());
+        }
+
+        // Check shuffling stability.
+        let shuffling_stable = re_org_block_slot % E::slots_per_epoch() != 0;
+        if !shuffling_stable {
+            return Err(DoNotReOrg::ShufflingUnstable.into());
+        }
+
+        // Check allowed slot offsets.
+        let offset = (re_org_block_slot % E::slots_per_epoch()).as_u64();
+        if disallowed_offsets.offsets.contains(&offset) {
+            return Err(DoNotReOrg::DisallowedOffset { offset }.into());
+        }
+
+        // Check FFG.
+        let ffg_competitive = parent_node.unrealized_justified_checkpoint
+            == head_node.unrealized_justified_checkpoint
+            && parent_node.unrealized_finalized_checkpoint
+                == head_node.unrealized_finalized_checkpoint;
+        if !ffg_competitive {
+            return Err(DoNotReOrg::JustificationAndFinalizationNotCompetitive.into());
+        }
+
+        // Compute re-org weight thresholds for head and parent.
+        let re_org_head_weight_threshold =
+            calculate_committee_fraction::<E>(justified_balances, re_org_head_threshold.0)
+                .ok_or(Error::ReOrgThresholdOverflow)?;
+
+        let re_org_parent_weight_threshold =
+            calculate_committee_fraction::<E>(justified_balances, re_org_parent_threshold.0)
+                .ok_or(Error::ReOrgThresholdOverflow)?;
+
+        Ok(ProposerHeadInfo {
+            head_node,
+            parent_node,
+            re_org_head_weight_threshold,
+            re_org_parent_weight_threshold,
+            current_slot,
+        })
     }
 
     /// Return information about:
@@ -882,8 +1169,8 @@ where
 
         // This does not apply a vote to the block, it just makes fork choice aware of the block so
         // it can still be identified as the head even if it doesn't have any votes.
-        self.proto_array.process_block::<E>(
-            ProtoBlock {
+        self.proto_array.on_block::<E>(
+            Block::to_proto_block(Block {
                 slot: block.slot(),
                 root: block_root,
                 parent_root: Some(block.parent_root()),
@@ -906,7 +1193,7 @@ where
                 execution_status,
                 unrealized_justified_checkpoint: Some(unrealized_justified_checkpoint),
                 unrealized_finalized_checkpoint: Some(unrealized_finalized_checkpoint),
-            },
+            }),
             current_slot,
         )?;
 
@@ -1248,10 +1535,33 @@ where
         }
     }
 
+    fn get_block_inner(&self) -> Option<ProtoBlock> {
+        let block = self.get_proto_node(block_root)?;
+        let parent_root = block
+            .parent
+            .and_then(|i| self.proto_array.nodes.get(i))
+            .map(|parent| parent.root);
+
+        Some(Block {
+            slot: block.slot,
+            root: block.root,
+            parent_root,
+            state_root: block.state_root,
+            target_root: block.target_root,
+            current_epoch_shuffling_id: block.current_epoch_shuffling_id.clone(),
+            next_epoch_shuffling_id: block.next_epoch_shuffling_id.clone(),
+            justified_checkpoint: block.justified_checkpoint,
+            finalized_checkpoint: block.finalized_checkpoint,
+            execution_status: block.execution_status,
+            unrealized_justified_checkpoint: block.unrealized_justified_checkpoint,
+            unrealized_finalized_checkpoint: block.unrealized_finalized_checkpoint,
+        })
+    }
+
     /// Returns an `ExecutionStatus` if the block is known **and** a descendant of the finalized root.
     pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
-            self.proto_array.get_block_execution_status(block_root)
+            Some(self.get_proto_node(block_root)?.execution_status)
         } else {
             None
         }
@@ -1363,6 +1673,17 @@ where
     /// since some attestations might be queued and awaiting processing.
     pub fn latest_message(&self, validator_index: usize) -> Option<(Hash256, Epoch)> {
         self.proto_array.latest_message(validator_index)
+    }
+
+    /// Returns `true` if there are any blocks in `self` with an `INVALID` execution payload status.
+    ///
+    /// This will operate on *all* blocks, even those that do not descend from the finalized
+    /// ancestor.
+    fn contains_invalid_payloads(&mut self) -> bool {
+        self.proto_array
+            .nodes
+            .iter()
+            .any(|node| node.execution_status.is_invalid())
     }
 
     /// Returns a reference to the underlying fork choice DAG.

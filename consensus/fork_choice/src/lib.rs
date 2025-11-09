@@ -1,3 +1,4 @@
+mod block;
 mod fork_choice;
 mod fork_choice_store;
 mod metrics;
@@ -8,6 +9,4 @@ pub use crate::fork_choice::{
     PersistedForkChoiceV17, PersistedForkChoiceV28, QueuedAttestation, ResetPayloadStatuses,
 };
 pub use fork_choice_store::ForkChoiceStore;
-pub use proto_array::{
-    Block as ProtoBlock, ExecutionStatus, InvalidationOperation, ProposerHeadError,
-};
+pub use proto_array::{ExecutionStatus, InvalidationOperation, ProtoNode as ProtoBlock};

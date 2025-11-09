@@ -1,8 +1,7 @@
 use crate::proto_array::ProposerBoost;
 use crate::{
     Error, JustifiedBalances,
-    proto_array::{ProtoArray, ProtoNodeV17},
-    proto_array_fork_choice::{ElasticList, ProtoArrayForkChoice, VoteTracker},
+    proto_array::{ElasticList, ProtoArray, ProtoNodeV17, VoteTracker},
 };
 use ssz::{Encode, four_byte_option_impl};
 use ssz_derive::{Decode, Encode};
@@ -33,37 +32,31 @@ pub struct SszContainer {
     pub previous_proposer_boost: ProposerBoost,
 }
 
-impl From<&ProtoArrayForkChoice> for SszContainer {
-    fn from(from: &ProtoArrayForkChoice) -> Self {
-        let proto_array = &from.proto_array;
-
+impl From<&ProtoArray> for SszContainer {
+    fn from(from: &ProtoArray) -> Self {
         Self {
             votes: from.votes.0.clone(),
-            prune_threshold: proto_array.prune_threshold,
-            justified_checkpoint: proto_array.justified_checkpoint,
-            finalized_checkpoint: proto_array.finalized_checkpoint,
-            nodes: proto_array.nodes.clone(),
-            indices: proto_array.indices.iter().map(|(k, v)| (*k, *v)).collect(),
-            previous_proposer_boost: proto_array.previous_proposer_boost,
+            prune_threshold: from.prune_threshold,
+            justified_checkpoint: from.justified_checkpoint,
+            finalized_checkpoint: from.finalized_checkpoint,
+            nodes: from.nodes.clone(),
+            indices: from.indices.iter().map(|(k, v)| (*k, *v)).collect(),
+            previous_proposer_boost: from.previous_proposer_boost,
         }
     }
 }
 
-impl TryFrom<(SszContainer, JustifiedBalances)> for ProtoArrayForkChoice {
+impl TryFrom<(SszContainer, JustifiedBalances)> for ProtoArray {
     type Error = Error;
 
     fn try_from((from, balances): (SszContainer, JustifiedBalances)) -> Result<Self, Error> {
-        let proto_array = ProtoArray {
+        Ok(ProtoArray {
             prune_threshold: from.prune_threshold,
             justified_checkpoint: from.justified_checkpoint,
             finalized_checkpoint: from.finalized_checkpoint,
             nodes: from.nodes,
             indices: from.indices.into_iter().collect::<HashMap<_, _>>(),
             previous_proposer_boost: from.previous_proposer_boost,
-        };
-
-        Ok(Self {
-            proto_array,
             votes: ElasticList(from.votes),
             balances,
         })
