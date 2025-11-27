@@ -296,14 +296,14 @@ impl<T: BeaconChainTypes> Router<T> {
                         .send_status_message(peer_id, status_message),
                 )
             }
-            Response::BlocksByRange(beacon_block) => {
-                self.on_blocks_by_range_response(peer_id, app_request_id, beacon_block);
+            Response::BlocksByRange(_) => {
+                crit!(id = ?app_request_id, "No BlocksByRange response expected");
             }
             Response::BlocksByRoot(beacon_block) => {
                 self.on_blocks_by_root_response(peer_id, app_request_id, beacon_block);
             }
-            Response::BlobsByRange(blob) => {
-                self.on_blobs_by_range_response(peer_id, app_request_id, blob);
+            Response::BlobsByRange(_) => {
+                crit!(id = ?app_request_id, "No BlobsByRange response expected");
             }
             Response::BlobsByRoot(blob) => {
                 self.on_blobs_by_root_response(peer_id, app_request_id, blob);
@@ -311,8 +311,8 @@ impl<T: BeaconChainTypes> Router<T> {
             Response::DataColumnsByRoot(data_column) => {
                 self.on_data_columns_by_root_response(peer_id, app_request_id, data_column);
             }
-            Response::DataColumnsByRange(data_column) => {
-                self.on_data_columns_by_range_response(peer_id, app_request_id, data_column);
+            Response::DataColumnsByRange(_) => {
+                crit!(id = ?app_request_id, "No DataColumnsByRange response expected");
             }
             // Light client responses should not be received
             Response::LightClientBootstrap(_)
@@ -559,66 +559,6 @@ impl<T: BeaconChainTypes> Router<T> {
         )
     }
 
-    /// Handle a `BlocksByRange` response from the peer.
-    /// A `beacon_block` behaves as a stream which is terminated on a `None` response.
-    pub fn on_blocks_by_range_response(
-        &mut self,
-        peer_id: PeerId,
-        app_request_id: AppRequestId,
-        beacon_block: Option<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) {
-        let sync_request_id = match app_request_id {
-            AppRequestId::Sync(sync_request_id) => match sync_request_id {
-                id @ SyncRequestId::BlocksByRange { .. } => id,
-                other => {
-                    crit!(request = ?other, "BlocksByRange response on incorrect request");
-                    return;
-                }
-            },
-            AppRequestId::Router => {
-                crit!(%peer_id, "All BBRange requests belong to sync");
-                return;
-            }
-            AppRequestId::Internal => unreachable!("Handled internally"),
-        };
-
-        trace!(
-            %peer_id,
-            "Received BlocksByRange Response"
-
-        );
-
-        self.send_to_sync(SyncMessage::RpcBlock {
-            peer_id,
-            sync_request_id,
-            beacon_block,
-            seen_timestamp: timestamp_now(),
-        });
-    }
-
-    pub fn on_blobs_by_range_response(
-        &mut self,
-        peer_id: PeerId,
-        app_request_id: AppRequestId,
-        blob_sidecar: Option<Arc<BlobSidecar<T::EthSpec>>>,
-    ) {
-        trace!(
-            %peer_id,
-            "Received BlobsByRange Response"
-        );
-
-        if let AppRequestId::Sync(sync_request_id) = app_request_id {
-            self.send_to_sync(SyncMessage::RpcBlob {
-                peer_id,
-                sync_request_id,
-                blob_sidecar,
-                seen_timestamp: timestamp_now(),
-            });
-        } else {
-            crit!("All blobs by range responses should belong to sync");
-        }
-    }
-
     /// Handle a `BlocksByRoot` response from the peer.
     pub fn on_blocks_by_root_response(
         &mut self,
@@ -628,7 +568,7 @@ impl<T: BeaconChainTypes> Router<T> {
     ) {
         let sync_request_id = match app_request_id {
             AppRequestId::Sync(sync_id) => match sync_id {
-                id @ SyncRequestId::SingleBlock { .. } => id,
+                id @ SyncRequestId::BlocksByRoot { .. } => id,
                 other => {
                     crit!(request = ?other, "BlocksByRoot response on incorrect request");
                     return;
@@ -662,7 +602,7 @@ impl<T: BeaconChainTypes> Router<T> {
     ) {
         let sync_request_id = match app_request_id {
             AppRequestId::Sync(sync_id) => match sync_id {
-                id @ SyncRequestId::SingleBlob { .. } => id,
+                id @ SyncRequestId::BlobsByRoot { .. } => id,
                 other => {
                     crit!(request = ?other, "BlobsByRoot response on incorrect request");
                     return;
@@ -719,29 +659,6 @@ impl<T: BeaconChainTypes> Router<T> {
             data_column,
             seen_timestamp: timestamp_now(),
         });
-    }
-
-    pub fn on_data_columns_by_range_response(
-        &mut self,
-        peer_id: PeerId,
-        app_request_id: AppRequestId,
-        data_column: Option<Arc<DataColumnSidecar<T::EthSpec>>>,
-    ) {
-        trace!(
-            %peer_id,
-            "Received DataColumnsByRange Response"
-        );
-
-        if let AppRequestId::Sync(sync_request_id) = app_request_id {
-            self.send_to_sync(SyncMessage::RpcDataColumn {
-                peer_id,
-                sync_request_id,
-                data_column,
-                seen_timestamp: timestamp_now(),
-            });
-        } else {
-            crit!("All data columns by range responses should belong to sync");
-        }
     }
 
     fn handle_beacon_processor_send_result(

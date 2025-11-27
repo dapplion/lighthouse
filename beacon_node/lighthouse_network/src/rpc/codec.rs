@@ -1088,7 +1088,12 @@ mod tests {
     }
 
     fn bbroot_request_v2(fork_name: ForkName) -> BlocksByRootRequest {
-        BlocksByRootRequest::new(vec![Hash256::zero()], &fork_context(fork_name))
+        let fork_context = fork_context(fork_name);
+        BlocksByRootRequest::new(
+            vec![Hash256::zero()],
+            &fork_context.spec,
+            fork_context.current_fork(),
+        )
     }
 
     fn blbroot_request(fork_name: ForkName) -> BlobsByRootRequest {

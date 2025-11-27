@@ -188,7 +188,7 @@ impl<E: EthSpec> RpcBlock<E> {
         block: Arc<SignedBeaconBlock<E>>,
         custody_columns: Vec<CustodyDataColumn<E>>,
         spec: &ChainSpec,
-    ) -> Result<Self, AvailabilityCheckError> {
+    ) -> Result<Self, String> {
         let block_root = block_root.unwrap_or_else(|| get_block_root(&block));
 
         let inner = RpcBlockInner::BlockAndCustodyColumns {
@@ -197,11 +197,7 @@ impl<E: EthSpec> RpcBlock<E> {
                 custody_columns,
                 spec.number_of_columns as usize,
             )
-            .map_err(|e| {
-                AvailabilityCheckError::Unexpected(format!(
-                    "custody_columns len exceeds number_of_columns: {e:?}"
-                ))
-            })?,
+            .map_err(|e| format!("custody_columns len exceeds number_of_columns: {e:?}"))?,
         };
         Ok(Self {
             block_root,

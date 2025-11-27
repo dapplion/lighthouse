@@ -2603,7 +2603,7 @@ async fn weak_subjectivity_sync_test(slots: Vec<Slot>, checkpoint_slot: Slot) {
                 .deconstruct();
             if wss_fork.fulu_enabled() {
                 info!(block_slot = %block.slot(), ?block_root, "Corrupting data column KZG proof");
-                let (mut data_columns, expected_column_indices) = cols.unwrap();
+                let mut data_columns = cols.unwrap();
                 assert!(
                     !data_columns.is_empty(),
                     "data column sidecars shouldn't be empty"
@@ -2618,7 +2618,6 @@ async fn weak_subjectivity_sync_test(slots: Vec<Slot>, checkpoint_slot: Slot) {
                     Some(block_root),
                     block,
                     data_columns.to_vec(),
-                    expected_column_indices,
                     &harness.spec,
                 )
                 .unwrap()
@@ -3819,7 +3818,6 @@ fn available_to_rpc_block<E: EthSpec>(block: AvailableBlock<E>, spec: &ChainSpec
                 .into_iter()
                 .map(|d| CustodyDataColumn::from_asserted_custody(d))
                 .collect(),
-            vec![],
             spec,
         )
         .unwrap(),

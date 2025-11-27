@@ -16,9 +16,9 @@ use types::blob_sidecar::BlobIdentifier;
 use types::light_client_update::MAX_REQUEST_LIGHT_CLIENT_UPDATES;
 use types::{
     blob_sidecar::BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar,
-    DataColumnsByRootIdentifier, Epoch, EthSpec, ForkContext, Hash256, LightClientBootstrap,
-    LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate, RuntimeVariableList,
-    SignedBeaconBlock, Slot,
+    DataColumnsByRootIdentifier, Epoch, EthSpec, ForkContext, ForkName, Hash256,
+    LightClientBootstrap, LightClientFinalityUpdate, LightClientOptimisticUpdate,
+    LightClientUpdate, RuntimeVariableList, SignedBeaconBlock, Slot,
 };
 
 /// Maximum length of error message.
@@ -440,10 +440,8 @@ pub struct BlocksByRootRequest {
 }
 
 impl BlocksByRootRequest {
-    pub fn new(block_roots: Vec<Hash256>, fork_context: &ForkContext) -> Self {
-        let max_request_blocks = fork_context
-            .spec
-            .max_request_blocks(fork_context.current_fork());
+    pub fn new(block_roots: Vec<Hash256>, spec: &ChainSpec, current_fork: ForkName) -> Self {
+        let max_request_blocks = spec.max_request_blocks(current_fork);
         let block_roots = RuntimeVariableList::from_vec(block_roots, max_request_blocks);
         Self::V2(BlocksByRootRequestV2 { block_roots })
     }

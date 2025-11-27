@@ -2,7 +2,7 @@ use crate::rpc::methods::{ResponseTermination, RpcResponse, RpcSuccessResponse, 
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use types::{
-    BlobSidecar, DataColumnSidecar, Epoch, EthSpec, Hash256, LightClientBootstrap,
+    BlobSidecar, DataColumnSidecar, EthSpec, Hash256, LightClientBootstrap,
     LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock,
 };
 
@@ -18,17 +18,43 @@ pub struct SingleLookupReqId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum SyncRequestId {
     /// Request searching for a block given a hash.
-    SingleBlock { id: SingleLookupReqId },
+    BlocksByRoot(BlocksByRootRequestId),
     /// Request searching for a set of blobs given a hash.
-    SingleBlob { id: SingleLookupReqId },
+    BlobsByRoot(BlobsByRootRequestId),
     /// Request searching for a set of data columns given a hash and list of column indices.
     DataColumnsByRoot(DataColumnsByRootRequestId),
-    /// Blocks by range request
-    BlocksByRange(BlocksByRangeRequestId),
-    /// Blobs by range request
-    BlobsByRange(BlobsByRangeRequestId),
-    /// Data columns by range request
-    DataColumnsByRange(DataColumnsByRangeRequestId),
+    /// Request for headers_by_root
+    HeadersByRoot(HeadersByRootRequestId),
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BlocksByRootRequestId {
+    pub id: Id,
+    pub parent_request_id: BlocksByRootRequester,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct HeadersByRootRequestId {
+    pub id: Id,
+    pub parent_request_id: HeaderLookupId,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct HeaderLookupId {
+    pub id: Id,
+    pub chain_id: HeaderChainId,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
+pub struct HeaderChainId(pub Id);
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BatchId(pub Id);
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct ForwardSyncLookupId {
+    pub id: Id,
+    pub block_root: Hash256,
 }
 
 /// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
@@ -36,37 +62,21 @@ pub enum SyncRequestId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct DataColumnsByRootRequestId {
     pub id: Id,
-    pub requester: DataColumnsByRootRequester,
+    pub parent_request_id: DataColumnsByRootRequester,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct BlocksByRangeRequestId {
-    /// Id to identify this attempt at a blocks_by_range request for `parent_request_id`
-    pub id: Id,
-    /// The Id of the overall By Range request for block components.
-    pub parent_request_id: ComponentsByRangeRequestId,
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct BlobsByRangeRequestId {
+pub struct BlobsByRootRequestId {
     /// Id to identify this attempt at a blobs_by_range request for `parent_request_id`
     pub id: Id,
     /// The Id of the overall By Range request for block components.
-    pub parent_request_id: ComponentsByRangeRequestId,
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct DataColumnsByRangeRequestId {
-    /// Id to identify this attempt at a data_columns_by_range request for `parent_request_id`
-    pub id: Id,
-    /// The Id of the overall By Range request for block components.
-    pub parent_request_id: ComponentsByRangeRequestId,
+    pub parent_request_id: ComponentsByRootRequestId,
 }
 
 /// Block components by range request for range sync. Includes an ID for downstream consumers to
 /// handle retries and tie all their sub requests together.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct ComponentsByRangeRequestId {
+pub struct ComponentsByRootRequestId {
     /// Each `RangeRequestId` may request the same data in a later retry. This Id identifies the
     /// current attempt.
     pub id: Id,
@@ -77,20 +87,20 @@ pub struct ComponentsByRangeRequestId {
 /// Range sync chain or backfill batch
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum RangeRequestId {
-    RangeSync { chain_id: Id, batch_id: Epoch },
-    BackfillSync { batch_id: Epoch },
+    ForwardSync(ForwardSyncLookupId),
+    BackfillSync(Id),
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum BlocksByRootRequester {
+    Header(HeaderLookupId),
+    ForwardSync(ComponentsByRootRequestId),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum DataColumnsByRootRequester {
     Sampling(SamplingId),
-    Custody(CustodyId),
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum RangeRequester {
-    RangeSync { chain_id: u64, batch_id: Epoch },
-    BackfillSync { batch_id: Epoch },
+    Custody(CustodyByRootRequestId),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -109,14 +119,9 @@ pub enum SamplingRequester {
 pub struct SamplingRequestId(pub usize);
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct CustodyId {
-    pub requester: CustodyRequester,
+pub struct CustodyByRootRequestId {
+    pub parent_request_id: ComponentsByRootRequestId,
 }
-
-/// Downstream components that perform custody by root requests.
-/// Currently, it's only single block lookups, so not using an enum
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct CustodyRequester(pub SingleLookupReqId);
 
 /// Application level requests sent to the network.
 #[derive(Debug, Clone, Copy)]
@@ -218,14 +223,18 @@ macro_rules! impl_display {
 // Since each request Id is deeply nested with various types, if rendered with Debug on logs they
 // take too much visual space. This custom Display implementations make the overall Id short while
 // not losing information
-impl_display!(BlocksByRangeRequestId, "{}/{}", id, parent_request_id);
-impl_display!(BlobsByRangeRequestId, "{}/{}", id, parent_request_id);
-impl_display!(DataColumnsByRangeRequestId, "{}/{}", id, parent_request_id);
-impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
-impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
+impl_display!(ComponentsByRootRequestId, "{}/{}", id, requester);
+impl_display!(BlocksByRootRequestId, "{}/{}", id, parent_request_id);
+impl_display!(BlobsByRootRequestId, "{}/{}", id, parent_request_id);
+impl_display!(DataColumnsByRootRequestId, "{}/{}", id, parent_request_id);
+impl_display!(HeadersByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
-impl_display!(CustodyId, "{}", requester);
+impl_display!(CustodyByRootRequestId, "{}", parent_request_id);
 impl_display!(SamplingId, "{}/{}", sampling_request_id, id);
+// Print only the ID to make logs succint. On lookup creation we log the ID and the block root to
+// link them.
+impl_display!(HeaderLookupId, "{}", id);
+impl_display!(ForwardSyncLookupId, "{}/{}", id, block_root);
 
 impl Display for DataColumnsByRootRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -236,7 +245,13 @@ impl Display for DataColumnsByRootRequester {
     }
 }
 
-impl Display for CustodyRequester {
+impl Display for HeaderChainId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Display for BatchId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -245,8 +260,17 @@ impl Display for CustodyRequester {
 impl Display for RangeRequestId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::RangeSync { chain_id, batch_id } => write!(f, "RangeSync/{batch_id}/{chain_id}"),
-            Self::BackfillSync { batch_id } => write!(f, "BackfillSync/{batch_id}"),
+            Self::ForwardSync(id) => write!(f, "ForwardSync/{id}"),
+            Self::BackfillSync(id) => write!(f, "BackfillSync/{id}"),
+        }
+    }
+}
+
+impl Display for BlocksByRootRequester {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Header(id) => write!(f, "Header/{id}"),
+            Self::ForwardSync(id) => write!(f, "ForwardSync/{id}"),
         }
     }
 }
@@ -273,11 +297,14 @@ mod tests {
     fn display_id_data_columns_by_root_custody() {
         let id = DataColumnsByRootRequestId {
             id: 123,
-            requester: DataColumnsByRootRequester::Custody(CustodyId {
-                requester: CustodyRequester(SingleLookupReqId {
-                    req_id: 121,
-                    lookup_id: 101,
-                }),
+            parent_request_id: DataColumnsByRootRequester::Custody(CustodyByRootRequestId {
+                parent_request_id: ComponentsByRootRequestId {
+                    id: 121,
+                    requester: RangeRequestId::ForwardSync(HeaderLookupId {
+                        id: 1,
+                        block_root: Hash256::ZERO,
+                    }),
+                },
             }),
         };
         assert_eq!(format!("{id}"), "123/Custody/121/Lookup/101");
@@ -287,26 +314,11 @@ mod tests {
     fn display_id_data_columns_by_root_sampling() {
         let id = DataColumnsByRootRequestId {
             id: 123,
-            requester: DataColumnsByRootRequester::Sampling(SamplingId {
+            parent_request_id: DataColumnsByRootRequester::Sampling(SamplingId {
                 id: SamplingRequester::ImportedBlock(Hash256::ZERO),
                 sampling_request_id: SamplingRequestId(101),
             }),
         };
         assert_eq!(format!("{id}"), "123/Sampling/101/ImportedBlock/0x0000000000000000000000000000000000000000000000000000000000000000");
-    }
-
-    #[test]
-    fn display_id_data_columns_by_range() {
-        let id = DataColumnsByRangeRequestId {
-            id: 123,
-            parent_request_id: ComponentsByRangeRequestId {
-                id: 122,
-                requester: RangeRequestId::RangeSync {
-                    chain_id: 54,
-                    batch_id: Epoch::new(0),
-                },
-            },
-        };
-        assert_eq!(format!("{id}"), "123/122/RangeSync/0/54");
     }
 }

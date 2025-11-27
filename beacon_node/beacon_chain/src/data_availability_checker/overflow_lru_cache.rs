@@ -1183,8 +1183,13 @@ mod pending_components_tests {
     pub fn pre_setup() -> Setup<E> {
         let mut rng = StdRng::seed_from_u64(0xDEADBEEF0BAD5EEDu64);
         let spec = test_spec::<E>();
-        let (block, blobs_vec) =
-            generate_rand_block_and_blobs::<E>(ForkName::Deneb, NumBlobs::Random, &mut rng, &spec);
+        let (block, blobs_vec) = generate_rand_block_and_blobs::<E>(
+            ForkName::Deneb,
+            NumBlobs::Random,
+            None,
+            &mut rng,
+            &spec,
+        );
         let max_len = spec.max_blobs_per_block(block.epoch()) as usize;
         let mut blobs: RuntimeFixedVector<Option<Arc<BlobSidecar<E>>>> =
             RuntimeFixedVector::default(max_len);

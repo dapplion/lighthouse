@@ -313,12 +313,21 @@ mod tests {
     use crate::rpc::rate_limiter::Quota;
     use crate::rpc::self_limiter::SelfRateLimiter;
     use crate::rpc::{Ping, Protocol, RPCSend, RequestType};
-    use crate::service::api_types::{AppRequestId, SingleLookupReqId, SyncRequestId};
+    use crate::service::api_types::{
+        AppRequestId, BlocksByRootRequestId, BlocksByRootRequester, HeaderLookupId, SyncRequestId,
+    };
     use libp2p::PeerId;
     use logging::create_test_tracing_subscriber;
     use std::num::NonZeroU64;
     use std::time::Duration;
     use types::{EthSpec, ForkContext, Hash256, MainnetEthSpec, Slot};
+
+    fn get_parent_request_id() -> BlocksByRootRequester {
+        BlocksByRootRequester::Header(HeaderLookupId {
+            id: 0,
+            block_root: Hash256::ZERO,
+        })
+    }
 
     /// Test that `next_peer_request_ready` correctly maintains the queue.
     #[tokio::test]
@@ -336,17 +345,15 @@ mod tests {
         let mut limiter: SelfRateLimiter<AppRequestId, MainnetEthSpec> =
             SelfRateLimiter::new(Some(config), fork_context).unwrap();
         let peer_id = PeerId::random();
-        let lookup_id = 0;
+        let parent_request_id = get_parent_request_id();
 
         for i in 1..=5u32 {
             let _ = limiter.allows(
                 peer_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                    id: SingleLookupReqId {
-                        lookup_id,
-                        req_id: i,
-                    },
-                }),
+                AppRequestId::Sync(SyncRequestId::BlocksByRoot(BlocksByRootRequestId {
+                    id: i,
+                    parent_request_id,
+                })),
                 RequestType::Ping(Ping { data: i as u64 }),
             );
         }
@@ -363,9 +370,7 @@ mod tests {
             for i in 2..=5u32 {
                 assert!(matches!(
                     iter.next().unwrap().request_id,
-                    AppRequestId::Sync(SyncRequestId::SingleBlock {
-                        id: SingleLookupReqId { req_id, .. },
-                    }) if req_id == i,
+                    AppRequestId::Sync(SyncRequestId::BlocksByRoot(BlocksByRootRequestId{id,..})) if id == i,
                 ));
             }
 
@@ -388,9 +393,7 @@ mod tests {
             for i in 3..=5 {
                 assert!(matches!(
                     iter.next().unwrap().request_id,
-                    AppRequestId::Sync(SyncRequestId::SingleBlock {
-                        id: SingleLookupReqId { req_id, .. },
-                    }) if req_id == i,
+                    AppRequestId::Sync(SyncRequestId::BlocksByRoot(BlocksByRootRequestId{id,..})) if id == i,
                 ));
             }
 
@@ -409,16 +412,15 @@ mod tests {
         let mut limiter: SelfRateLimiter<AppRequestId, MainnetEthSpec> =
             SelfRateLimiter::new(None, fork_context).unwrap();
         let peer_id = PeerId::random();
+        let parent_request_id = get_parent_request_id();
 
         for i in 1..=5u32 {
             let result = limiter.allows(
                 peer_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                    id: SingleLookupReqId {
-                        lookup_id: i,
-                        req_id: i,
-                    },
-                }),
+                AppRequestId::Sync(SyncRequestId::BlocksByRoot(BlocksByRootRequestId {
+                    id: i,
+                    parent_request_id,
+                })),
                 RequestType::Ping(Ping { data: i as u64 }),
             );
 
@@ -469,9 +471,7 @@ mod tests {
 
             assert!(matches!(
                 request_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                    id: SingleLookupReqId { req_id, .. },
-                }) if *req_id == i
+                AppRequestId::Sync(SyncRequestId::BlocksByRoot(BlocksByRootRequestId {id,..})) if *id == i
             ));
         }
     }
@@ -487,17 +487,16 @@ mod tests {
             SelfRateLimiter::new(None, fork_context).unwrap();
         let peer1 = PeerId::random();
         let peer2 = PeerId::random();
+        let parent_request_id = get_parent_request_id();
 
         for peer in [peer1, peer2] {
             for i in 1..=5u32 {
                 let result = limiter.allows(
                     peer,
-                    AppRequestId::Sync(SyncRequestId::SingleBlock {
-                        id: SingleLookupReqId {
-                            lookup_id: i,
-                            req_id: i,
-                        },
-                    }),
+                    AppRequestId::Sync(SyncRequestId::BlocksByRoot(BlocksByRootRequestId {
+                        id: i,
+                        parent_request_id,
+                    })),
                     RequestType::Ping(Ping { data: i as u64 }),
                 );
 
@@ -525,9 +524,7 @@ mod tests {
             let (request_id, _) = failed_requests.remove(0);
             assert!(matches!(
                 request_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                        id: SingleLookupReqId { req_id, .. },
-                }) if req_id == i
+                AppRequestId::Sync(SyncRequestId::BlocksByRoot(BlocksByRootRequestId{id,..})) if id == i
             ));
         }
 

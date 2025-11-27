@@ -1,14 +1,16 @@
 use crate::sync::manager::SyncManager;
-use crate::sync::range_sync::RangeSyncType;
 use crate::sync::SyncMessage;
 use crate::NetworkMessage;
 use beacon_chain::builder::Witness;
 use beacon_chain::eth1_chain::CachingEth1Backend;
 use beacon_chain::test_utils::{BeaconChainHarness, EphemeralHarnessType};
 use beacon_processor::WorkEvent;
+use lighthouse_network::service::api_types::ComponentsByRootRequestId;
 use lighthouse_network::NetworkGlobals;
+pub use lookups::PeersConfig;
 use rand_chacha::ChaCha20Rng;
 use slot_clock::ManualSlotClock;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::{Arc, Once};
@@ -17,7 +19,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use types::{ChainSpec, ForkName, MinimalEthSpec as E};
+use types::{ChainSpec, ForkName, Hash256, MinimalEthSpec as E, SignedBeaconBlock};
 
 mod lookups;
 mod range;
@@ -69,6 +71,9 @@ struct TestRig {
     rng: ChaCha20Rng,
     fork_name: ForkName,
     spec: Arc<ChainSpec>,
+
+    // Cache for produced blocks to serve
+    blocks_by_root: HashMap<Hash256, Arc<SignedBeaconBlock<E>>>,
 }
 
 // Environment variable to read if `fork_from_env` feature is enabled.

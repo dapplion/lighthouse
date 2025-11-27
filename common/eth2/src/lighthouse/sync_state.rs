@@ -4,17 +4,13 @@ use types::Slot;
 /// The current state of the node.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncState {
-    /// The node is performing a long-range (batch) sync over a finalized chain.
-    /// In this state, parent lookups are disabled.
-    SyncingFinalized { start_slot: Slot, target_slot: Slot },
-    /// The node is performing a long-range (batch) sync over one or many head chains.
-    /// In this state parent lookups are disabled.
-    SyncingHead { start_slot: Slot, target_slot: Slot },
+    /// The node is syncing one or many chains, either finalized or not
+    Syncing { start_slot: Slot, target_slot: Slot },
     /// The node is undertaking a backfill sync. This occurs when a user has specified a trusted
     /// state. The node first syncs "forward" by downloading blocks up to the current head as
     /// specified by its peers. Once completed, the node enters this sync state and attempts to
     /// download all required historical blocks.
-    BackFillSyncing { completed: usize, remaining: usize },
+    BackFillSyncing,
     /// The node has completed syncing a finalized chain and is in the process of re-evaluating
     /// which sync state to progress to.
     SyncTransition,
@@ -43,17 +39,11 @@ impl PartialEq for SyncState {
     fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (
-                SyncState::SyncingFinalized { .. },
-                SyncState::SyncingFinalized { .. }
-            ) | (SyncState::SyncingHead { .. }, SyncState::SyncingHead { .. })
+            (SyncState::Syncing { .. }, SyncState::Syncing { .. })
                 | (SyncState::Synced, SyncState::Synced)
                 | (SyncState::Stalled, SyncState::Stalled)
                 | (SyncState::SyncTransition, SyncState::SyncTransition)
-                | (
-                    SyncState::BackFillSyncing { .. },
-                    SyncState::BackFillSyncing { .. }
-                )
+                | (SyncState::BackFillSyncing, SyncState::BackFillSyncing)
         )
     }
 }
@@ -62,22 +52,10 @@ impl SyncState {
     /// Returns a boolean indicating the node is currently performing a long-range sync.
     pub fn is_syncing(&self) -> bool {
         match self {
-            SyncState::SyncingFinalized { .. } => true,
-            SyncState::SyncingHead { .. } => true,
+            SyncState::Syncing { .. } => true,
             SyncState::SyncTransition => true,
             // Backfill doesn't effect any logic, we consider this state, not syncing.
-            SyncState::BackFillSyncing { .. } => false,
-            SyncState::Synced => false,
-            SyncState::Stalled => false,
-        }
-    }
-
-    pub fn is_syncing_finalized(&self) -> bool {
-        match self {
-            SyncState::SyncingFinalized { .. } => true,
-            SyncState::SyncingHead { .. } => false,
-            SyncState::SyncTransition => false,
-            SyncState::BackFillSyncing { .. } => false,
+            SyncState::BackFillSyncing => false,
             SyncState::Synced => false,
             SyncState::Stalled => false,
         }
@@ -87,7 +65,7 @@ impl SyncState {
     ///
     /// NOTE: We consider the node synced if it is fetching old historical blocks.
     pub fn is_synced(&self) -> bool {
-        matches!(self, SyncState::Synced | SyncState::BackFillSyncing { .. })
+        matches!(self, SyncState::Synced | SyncState::BackFillSyncing)
     }
 
     /// Returns true if the node is *stalled*, i.e. has no synced peers.
@@ -102,12 +80,11 @@ impl SyncState {
 impl std::fmt::Display for SyncState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SyncState::SyncingFinalized { .. } => write!(f, "Syncing Finalized Chain"),
-            SyncState::SyncingHead { .. } => write!(f, "Syncing Head Chain"),
+            SyncState::Syncing { .. } => write!(f, "Syncing"),
             SyncState::Synced => write!(f, "Synced"),
             SyncState::Stalled => write!(f, "Stalled"),
             SyncState::SyncTransition => write!(f, "Evaluating known peers"),
-            SyncState::BackFillSyncing { .. } => write!(f, "Syncing Historical Blocks"),
+            SyncState::BackFillSyncing => write!(f, "Syncing Historical Blocks"),
         }
     }
 }

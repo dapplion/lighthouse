@@ -403,32 +403,23 @@ pub static SYNCING_CHAINS_COUNT: LazyLock<Result<IntGaugeVec>> = LazyLock::new(|
         &["range_type"],
     )
 });
-pub static SYNCING_CHAINS_REMOVED: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+pub static SYNC_CHAINS_REMOVED: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
     try_create_int_counter_vec(
-        "sync_range_removed_chains_total",
-        "Total count of range syncing chains removed per range type",
-        &["range_type"],
+        "sync_removed_chains_total",
+        "Total count of forward sync chains removed",
+        &["reason"],
     )
 });
-pub static SYNCING_CHAINS_ADDED: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
-    try_create_int_counter_vec(
-        "sync_range_added_chains_total",
-        "Total count of range syncing chains added per range type",
-        &["range_type"],
+pub static SYNC_CHAINS_ADDED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_added_chains_total",
+        "Total count of forward sync chains added",
     )
 });
-pub static SYNCING_CHAINS_DROPPED_BLOCKS: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
-    try_create_int_counter_vec(
-        "sync_range_chains_dropped_blocks_total",
-        "Total count of dropped blocks when removing a syncing chain per range type",
-        &["range_type"],
-    )
-});
-pub static SYNCING_CHAINS_IGNORED_BLOCKS: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
-    try_create_int_counter_vec(
+pub static SYNCING_CHAINS_IGNORED_BLOCKS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
         "sync_range_chains_ignored_blocks_total",
         "Total count of ignored blocks when processing a syncing chain batch per chain type",
-        &["chain_type"],
     )
 });
 pub static SYNCING_CHAINS_PROCESSED_BATCHES: LazyLock<Result<IntCounterVec>> =
@@ -461,23 +452,10 @@ pub static SYNC_LOOKUP_CREATED: LazyLock<Result<IntCounter>> = LazyLock::new(|| 
         "Total count of sync lookups created",
     )
 });
-pub static SYNC_LOOKUP_DROPPED: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
-    try_create_int_counter_vec(
-        "sync_lookups_dropped_total",
-        "Total count of sync lookups dropped by reason",
-        &["reason"],
-    )
-});
-pub static SYNC_LOOKUP_COMPLETED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+pub static SYNC_FORWARD_BLOCKS_DROPPED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
     try_create_int_counter(
-        "sync_lookups_completed_total",
-        "Total count of sync lookups completed",
-    )
-});
-pub static SYNC_LOOKUPS_STUCK: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
-    try_create_int_counter(
-        "sync_lookups_stuck_total",
-        "Total count of sync lookups that are stuck and dropped",
+        "sync_forward_lookups_dropped_total",
+        "Total count of forward sync blocks dropped by reason",
     )
 });
 pub static SYNC_ACTIVE_NETWORK_REQUESTS: LazyLock<Result<IntGaugeVec>> = LazyLock::new(|| {
@@ -492,6 +470,115 @@ pub static SYNC_UNKNOWN_NETWORK_REQUESTS: LazyLock<Result<IntCounterVec>> = Lazy
         "sync_unknwon_network_request",
         "Total count of network messages received for unknown active requests",
         &["type"],
+    )
+});
+pub static SYNC_RPC_REQUEST_SUCCESSES: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+    try_create_int_counter_vec(
+        "sync_rpc_requests_success_total",
+        "Total count of sync RPC requests successes",
+        &["protocol"],
+    )
+});
+pub static SYNC_RPC_REQUEST_ERRORS: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+    try_create_int_counter_vec(
+        "sync_rpc_requests_error_total",
+        "Total count of sync RPC requests errors",
+        &["protocol"],
+    )
+});
+pub static SYNC_RPC_REQUEST_TIME: LazyLock<Result<HistogramVec>> = LazyLock::new(|| {
+    try_create_histogram_vec_with_buckets(
+        "sync_rpc_request_duration_sec",
+        "Time to complete a successful sync RPC requesst",
+        Ok(vec![
+            0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 1.0, 2.0,
+        ]),
+        &["protocol"],
+    )
+});
+pub static SYNC_HEADERS_DOWNLOADED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_headers_downloaded_total",
+        "Total count of forward sync headers downloaded",
+    )
+});
+pub static SYNC_BLOCKS_PROCESSED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_blocks_processed_total",
+        "Total count of forward sync blocks processed",
+    )
+});
+pub static SYNC_LOOKUPS_CREATED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_lookups_created_total",
+        "Total count of forward sync lookups created",
+    )
+});
+pub static SYNC_LOOKUPS_DROPPED: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_lookups_dropped_total",
+        "Total count of forward sync lookups dropped",
+    )
+});
+pub static SYNC_HEADER_MIN_SLOT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "sync_header_min_slot",
+        "Current min slot of foward sync headers",
+    )
+});
+pub static SYNC_HEADER_MAX_SLOT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "sync_header_max_slot",
+        "Current max slot of foward sync headers",
+    )
+});
+pub static SYNC_HEADERS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge("sync_headers_count", "Current count of headers in memory")
+});
+pub static SYNC_HEADER_CHAINS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "sync_header_chains_count",
+        "Current count of header chains in memory",
+    )
+});
+pub static SYNC_FORWARD_SYNC_BLOCKS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "sync_forward_sync_blocks_count",
+        "Current count of forward sync blocks in memory",
+    )
+});
+pub static SYNC_CHAIN_MERGES_COUNT: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "sync_forward_chain_merges_total",
+        "Total count of forward sync chain merges",
+    )
+});
+pub static SYNC_CHAIN_ERROR_COUNT: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+    try_create_int_counter_vec(
+        "sync_forward_chain_error_total",
+        "Total count of forward sync chain errors",
+        &["error"],
+    )
+});
+pub static SYNC_BLOCK_DOWNLOADING_TIME: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram_with_buckets(
+        "sync_block_downloading_time_seconds",
+        "Time to complete SyncBlock Downloading state",
+        decimal_buckets(-3, -1),
+    )
+});
+pub static SYNC_BLOCK_AWAITING_PROCESSING_TIME: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram_with_buckets(
+        "sync_block_awaiting_processing_time_seconds",
+        "Time to complete SyncBlock AwaitingProcessing state",
+        decimal_buckets(-3, -1),
+    )
+});
+pub static SYNC_BLOCK_PROCESSING_TIME: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram_with_buckets(
+        "sync_block_processing_time_seconds",
+        "Time to complete SyncBlock Processing state",
+        decimal_buckets(-3, -1),
     )
 });
 

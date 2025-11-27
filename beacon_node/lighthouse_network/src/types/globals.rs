@@ -248,6 +248,10 @@ impl<E: EthSpec> NetworkGlobals<E> {
         }
     }
 
+    pub fn sampling_columns_count(&self) -> usize {
+        self.sampling_columns.read().len()
+    }
+
     pub fn sampling_columns(&self) -> HashSet<ColumnIndex> {
         self.sampling_columns.read().clone()
     }
@@ -267,6 +271,25 @@ impl<E: EthSpec> NetworkGlobals<E> {
             attnets: Default::default(),
             syncnets: Default::default(),
             custody_group_count: spec.custody_requirement,
+        });
+        Self::new_test_globals_with_metadata(trusted_peers, metadata, config, spec)
+    }
+
+    pub fn new_test_globals_as_supernode(
+        trusted_peers: Vec<PeerId>,
+        config: Arc<NetworkConfig>,
+        spec: Arc<ChainSpec>,
+        is_supernode: bool,
+    ) -> NetworkGlobals<E> {
+        let metadata = MetaData::V3(MetaDataV3 {
+            seq_number: 0,
+            attnets: Default::default(),
+            syncnets: Default::default(),
+            custody_group_count: if is_supernode {
+                spec.number_of_custody_groups
+            } else {
+                spec.custody_requirement
+            },
         });
         Self::new_test_globals_with_metadata(trusted_peers, metadata, config, spec)
     }
