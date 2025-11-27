@@ -8,7 +8,7 @@ use beacon_chain::data_column_verification::verify_kzg_for_data_column_list;
 use beacon_chain::{
     BeaconChainTypes, BlockError, ChainSegmentResult, HistoricalBlockError, NotifyExecutionLayer,
 };
-use lighthouse_network::service::api_types::{HeaderLookupId, Id};
+use lighthouse_network::service::api_types::{ForwardSyncLookupId, Id};
 use lighthouse_network::PeerAction;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
@@ -21,7 +21,7 @@ use types::{ColumnIndex, DataColumnSidecar, Hash256};
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChainSegmentProcessId {
     /// Processing Id of a range syncing batch.
-    ForwardSync(HeaderLookupId),
+    ForwardSync(ForwardSyncLookupId),
     /// Processing ID for a backfill syncing batch.
     BackfillSync(Id),
 }

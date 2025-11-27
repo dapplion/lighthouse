@@ -42,11 +42,20 @@ pub struct HeadersByRootRequestId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct HeaderLookupId {
     pub id: Id,
-    pub block_root: Hash256,
+    pub chain_id: HeaderChainId,
 }
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
+pub struct HeaderChainId(pub Id);
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct BatchId(pub Id);
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct ForwardSyncLookupId {
+    pub id: Id,
+    pub block_root: Hash256,
+}
 
 /// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
 /// Wrapping this particular req_id, ensures not mixing this request with a custody req_id.
@@ -78,7 +87,7 @@ pub struct ComponentsByRootRequestId {
 /// Range sync chain or backfill batch
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum RangeRequestId {
-    ForwardSync(HeaderLookupId),
+    ForwardSync(ForwardSyncLookupId),
     BackfillSync(Id),
 }
 
@@ -225,6 +234,7 @@ impl_display!(SamplingId, "{}/{}", sampling_request_id, id);
 // Print only the ID to make logs succint. On lookup creation we log the ID and the block root to
 // link them.
 impl_display!(HeaderLookupId, "{}", id);
+impl_display!(ForwardSyncLookupId, "{}/{}", id, block_root);
 
 impl Display for DataColumnsByRootRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -232,6 +242,12 @@ impl Display for DataColumnsByRootRequester {
             Self::Custody(id) => write!(f, "Custody/{id}"),
             Self::Sampling(id) => write!(f, "Sampling/{id}"),
         }
+    }
+}
+
+impl Display for HeaderChainId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

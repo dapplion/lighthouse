@@ -535,10 +535,16 @@ pub static SYNC_HEADER_MAX_SLOT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
 pub static SYNC_HEADERS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
     try_create_int_gauge("sync_headers_count", "Current count of headers in memory")
 });
-pub static SYNC_CHAINS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+pub static SYNC_HEADER_CHAINS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
     try_create_int_gauge(
-        "sync_chains_count",
-        "Current count of forward sync chains in memory",
+        "sync_header_chains_count",
+        "Current count of header chains in memory",
+    )
+});
+pub static SYNC_FORWARD_SYNC_BLOCKS_COUNT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "sync_forward_sync_blocks_count",
+        "Current count of forward sync blocks in memory",
     )
 });
 pub static SYNC_CHAIN_MERGES_COUNT: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
