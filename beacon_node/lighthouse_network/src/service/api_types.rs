@@ -19,9 +19,9 @@ pub struct SingleLookupReqId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum SyncRequestId {
     /// Request searching for a block given a hash.
-    SingleBlock { id: SingleLookupReqId },
+    SingleBlock(BlocksByRootRequestId),
     /// Request searching for a set of blobs given a hash.
-    SingleBlob { id: SingleLookupReqId },
+    SingleBlob(BlobsByRootRequestId),
     /// Request searching for a set of data columns given a hash and list of column indices.
     DataColumnsByRoot(DataColumnsByRootRequestId),
     /// Blocks by range request
@@ -30,6 +30,22 @@ pub enum SyncRequestId {
     BlobsByRange(BlobsByRangeRequestId),
     /// Data columns by range request
     DataColumnsByRange(DataColumnsByRangeRequestId),
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BlocksByRootRequestId {
+    /// Id to identify this attempt at a blocks_by_root request for `parent_request_id`
+    pub id: Id,
+    /// The Id of the overall By Root request for block components.
+    pub parent_request_id: ComponentsByRootRequestId,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BlobsByRootRequestId {
+    /// Id to identify this attempt at a blocks_by_root request for `parent_request_id`
+    pub id: Id,
+    /// The Id of the overall By Root request for block components.
+    pub parent_request_id: ComponentsByRootRequestId,
 }
 
 /// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
@@ -80,6 +96,17 @@ pub enum DataColumnsByRangeRequester {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct ComponentsByRangeRequestId {
     /// Each `RangeRequestId` may request the same data in a later retry. This Id identifies the
+    /// current attempt.
+    pub id: Id,
+    /// What sync component is issuing a components by range request and expecting data back
+    pub requester: RangeRequestId,
+}
+
+/// Block components by root request for lookup sync. Includes an ID for downstream consumers to
+/// handle retries and tie all their sub requests together.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct ComponentsByRootRequestId {
+    /// Each `Id` may request the same data in a later retry. This Id identifies the
     /// current attempt.
     pub id: Id,
     /// What sync component is issuing a components by range request and expecting data back
@@ -234,10 +261,13 @@ macro_rules! impl_display {
 // Since each request Id is deeply nested with various types, if rendered with Debug on logs they
 // take too much visual space. This custom Display implementations make the overall Id short while
 // not losing information
+impl_display!(BlocksByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(BlocksByRangeRequestId, "{}/{}", id, parent_request_id);
+impl_display!(BlobsByRootRequestId, "{}/{}", id, parent_request_id);
 impl_display!(BlobsByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(DataColumnsByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
+impl_display!(ComponentsByRootRequestId, "{}/{}", id, requester);
 impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
 impl_display!(CustodyId, "{}", requester);

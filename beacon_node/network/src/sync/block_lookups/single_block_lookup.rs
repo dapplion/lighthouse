@@ -1,5 +1,4 @@
 use super::{BlockComponent, PeerId, SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS};
-use crate::sync::block_lookups::common::RequestState;
 use crate::sync::network_context::{
     LookupRequestResult, PeerGroup, ReqId, RpcRequestSendError, SendErrorProcessor,
     SyncNetworkContext,
@@ -61,7 +60,7 @@ pub enum LookupRequestError {
 #[educe(Debug(bound(T: BeaconChainTypes)))]
 pub struct SingleBlockLookup<T: BeaconChainTypes> {
     pub id: Id,
-    pub block_request_state: BlockRequestState<T::EthSpec>,
+    pub request_state: BlockRequestState<T::EthSpec>,
     pub component_requests: ComponentRequests<T::EthSpec>,
     /// Peers that claim to have imported this set of block components. This state is shared with
     /// the custody request to have an updated view of the peers that claim to have imported the
@@ -142,23 +141,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     /// Returns the time elapsed since this lookup was created
     pub fn elapsed_since_created(&self) -> Duration {
         self.created.elapsed()
-    }
-
-    /// Maybe insert a verified response into this lookup. Returns true if imported
-    pub fn add_child_components(&mut self, block_component: BlockComponent<T::EthSpec>) -> bool {
-        match block_component {
-            BlockComponent::Block(block) => self
-                .block_request_state
-                .state
-                .insert_verified_response(block),
-            BlockComponent::Blob(_) | BlockComponent::DataColumn(_) => {
-                // For now ignore single blobs and columns, as the blob request state assumes all blobs are
-                // attributed to the same peer = the peer serving the remaining blobs. Ignoring this
-                // block component has a minor effect, causing the node to re-request this blob
-                // once the parent chain is successfully resolved
-                false
-            }
-        }
     }
 
     /// Check the block root matches the requested block root.
@@ -276,7 +258,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     }
 
     /// Potentially makes progress on this request if it's in a progress-able state
-    fn continue_request<R: RequestState<T>>(
+    fn continue_request(
         &mut self,
         cx: &mut SyncNetworkContext<T>,
         expected_blobs: usize,

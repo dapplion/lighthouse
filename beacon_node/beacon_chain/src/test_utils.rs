@@ -2460,7 +2460,8 @@ where
                     .filter(|d| sampling_columns.contains(&d.index))
                     .map(CustodyDataColumn::from_asserted_custody)
                     .collect::<Vec<_>>();
-                RpcBlock::new_with_custody_columns(Some(block_root), block, columns)?
+                RpcBlock::new_with_custody_columns(Some(block_root), block, columns)
+                    .expect("cannot build RpcBlock with columns")
             } else {
                 RpcBlock::new_without_blobs(Some(block_root), block)
             }

@@ -152,16 +152,20 @@ impl<E: EthSpec> RpcBlock<E> {
         block_root: Option<Hash256>,
         block: Arc<SignedBeaconBlock<E>>,
         custody_columns: Vec<CustodyDataColumn<E>>,
-    ) -> Result<Self, AvailabilityCheckError> {
+    ) -> Result<Self, String> {
         let block_root = block_root.unwrap_or_else(|| get_block_root(&block));
 
         if block.num_expected_blobs() > 0 && custody_columns.is_empty() {
             // The number of required custody columns is out of scope here.
-            return Err(AvailabilityCheckError::MissingCustodyColumns);
+            return Err("missing expected columns".to_string());
         }
         // Treat empty data column lists as if they are missing.
         let inner = if !custody_columns.is_empty() {
-            RpcBlockInner::BlockAndCustodyColumns(block, VariableList::new(custody_columns)?)
+            RpcBlockInner::BlockAndCustodyColumns(
+                block,
+                VariableList::new(custody_columns)
+                    .map_err(|e| format!("Too many columns {e:?}"))?,
+            )
         } else {
             RpcBlockInner::Block(block)
         };
