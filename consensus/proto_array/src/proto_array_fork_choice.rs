@@ -1,3 +1,4 @@
+use crate::proto_array::ForkChoiceNode;
 use crate::{
     JustifiedBalances,
     error::Error,
@@ -531,7 +532,7 @@ impl ProtoArrayForkChoice {
         equivocating_indices: &BTreeSet<u64>,
         current_slot: Slot,
         spec: &ChainSpec,
-    ) -> Result<Hash256, String> {
+    ) -> Result<ForkChoiceNode, String> {
         let old_balances = &mut self.balances;
         let new_balances = justified_state_balances;
 
