@@ -415,6 +415,15 @@ pub fn cli_app() -> Command {
                 .display_order(0)
         )
         .arg(
+            Arg::new("era-files-dir")
+                .long("era-files-dir")
+                .value_name("DIR")
+                .help("Directory containing `.era` files to use for backfill.")
+                .action(ArgAction::Set)
+                .help_heading(FLAG_HEADER)
+                .display_order(0)
+        )
+        .arg(
             Arg::new("complete-blob-backfill")
                 .long("complete-blob-backfill")
                 .help("Download all blobs back to the Deneb fork epoch. This will likely result in \
