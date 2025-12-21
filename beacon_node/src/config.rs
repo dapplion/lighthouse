@@ -811,6 +811,9 @@ pub fn get_config<E: EthSpec>(
         client_config.chain.genesis_backfill = true;
     }
 
+    client_config.network.era_files_dir =
+        clap_utils::parse_optional(cli_args, "era-files-dir")?;
+
     client_config.chain.complete_blob_backfill = cli_args.get_flag("complete-blob-backfill");
 
     // Ensure `prune_blobs` is false whenever complete-blob-backfill is set. This overrides any
