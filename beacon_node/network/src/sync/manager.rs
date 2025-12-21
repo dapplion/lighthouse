@@ -34,6 +34,7 @@
 //! search for the block and subsequently search for parents if needed.
 
 use super::backfill_sync::{BackFillSync, ProcessResult, SyncStart};
+use super::backfill_sync_era::BackFillSyncEra;
 use super::block_lookups::BlockLookups;
 use super::network_context::{
     CustodyByRootResult, RangeBlockComponent, RangeRequestId, RpcEvent, SyncNetworkContext,
@@ -251,6 +252,9 @@ pub struct SyncManager<T: BeaconChainTypes> {
     /// Backfill syncing.
     backfill_sync: BackFillSync<T>,
 
+    /// Backfill syncing with ERA files
+    backfill_sync_era: Option<BackFillSyncEra<T>>,
+
     /// Custody syncing.
     custody_backfill_sync: CustodyBackFillSync<T>,
 
@@ -314,6 +318,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             ),
             range_sync: RangeSync::new(beacon_chain.clone()),
             backfill_sync: BackFillSync::new(beacon_chain.clone(), network_globals.clone()),
+            backfill_sync_era: network_globals.config.era_files_dir.clone().map(|dir| {
+                BackFillSyncEra::new(beacon_chain.clone(), network_globals.clone(), dir)
+            }),
             custody_backfill_sync: CustodyBackFillSync::new(beacon_chain.clone(), network_globals),
             block_lookups: BlockLookups::new(),
             notified_unknown_roots: LRUTimeCache::new(Duration::from_secs(
@@ -636,52 +643,76 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     // complete a backfill sync.
                     #[cfg(not(feature = "disable-backfill"))]
                     if matches!(sync_state, SyncState::Synced) {
-                        // Determine if we need to start/resume/restart a backfill sync.
-                        match self.backfill_sync.start(&mut self.network) {
-                            Ok(SyncStart::Syncing {
-                                completed,
-                                remaining,
-                            }) => {
-                                sync_state = SyncState::BackFillSyncing {
-                                    completed,
-                                    remaining,
-                                };
-                            }
-                            Ok(SyncStart::NotSyncing) => {} // Ignore updating the state if the backfill sync state didn't start.
-                            Err(e) => {
-                                error!(error = ?e, "Backfill sync failed to start");
-                            }
-                        }
-
-                        // If backfill is complete, check if we have a pending custody backfill to complete
-                        let anchor_info = self.chain.store.get_anchor_info();
-                        if anchor_info.block_backfill_complete(self.chain.genesis_backfill_slot) {
-                            match self.custody_backfill_sync.start(&mut self.network) {
+                        let mut era_backfill_active = false;
+                        if let Some(era_backfill_sync) = self.backfill_sync_era.as_mut() {
+                            match era_backfill_sync.start(&mut self.network) {
                                 Ok(SyncStart::Syncing {
                                     completed,
                                     remaining,
                                 }) => {
-                                    sync_state = SyncState::CustodyBackFillSyncing {
+                                    sync_state = SyncState::BackFillSyncing {
+                                        completed,
+                                        remaining,
+                                    };
+                                    era_backfill_active = true;
+                                }
+                                Ok(SyncStart::NotSyncing) => {}
+                                Err(e) => {
+                                    error!(error = ?e, "Era backfill sync failed to start");
+                                }
+                            }
+                        }
+
+                        if !era_backfill_active {
+                            self.backfill_sync.reset_from_store();
+                            // Determine if we need to start/resume/restart a backfill sync.
+                            match self.backfill_sync.start(&mut self.network) {
+                                Ok(SyncStart::Syncing {
+                                    completed,
+                                    remaining,
+                                }) => {
+                                    sync_state = SyncState::BackFillSyncing {
                                         completed,
                                         remaining,
                                     };
                                 }
-                                Ok(SyncStart::NotSyncing) => {} // Ignore updating the state if custody sync state didn't start.
+                                Ok(SyncStart::NotSyncing) => {} // Ignore updating the state if the backfill sync state didn't start.
                                 Err(e) => {
-                                    use crate::sync::custody_backfill_sync::CustodyBackfillError;
+                                    error!(error = ?e, "Backfill sync failed to start");
+                                }
+                            }
 
-                                    match &e {
-                                        CustodyBackfillError::BatchDownloadFailed(_)
-                                        | CustodyBackfillError::BatchProcessingFailed(_) => {
-                                            debug!(error=?e, "Custody backfill batch processing or downloading failed");
+                            // If backfill is complete, check if we have a pending custody backfill to complete
+                            let anchor_info = self.chain.store.get_anchor_info();
+                            if anchor_info.block_backfill_complete(self.chain.genesis_backfill_slot)
+                            {
+                                match self.custody_backfill_sync.start(&mut self.network) {
+                                    Ok(SyncStart::Syncing {
+                                        completed,
+                                        remaining,
+                                    }) => {
+                                        sync_state = SyncState::CustodyBackFillSyncing {
+                                            completed,
+                                            remaining,
+                                        };
+                                    }
+                                    Ok(SyncStart::NotSyncing) => {} // Ignore updating the state if custody sync state didn't start.
+                                    Err(e) => {
+                                        use crate::sync::custody_backfill_sync::CustodyBackfillError;
+
+                                        match &e {
+                                            CustodyBackfillError::BatchDownloadFailed(_)
+                                            | CustodyBackfillError::BatchProcessingFailed(_) => {
+                                                debug!(error=?e, "Custody backfill batch processing or downloading failed");
+                                            }
+                                            CustodyBackfillError::BatchInvalidState(_, reason) => {
+                                                error!(error=?e, reason, "Custody backfill sync failed due to invalid batch state")
+                                            }
+                                            CustodyBackfillError::InvalidSyncState(reason) => {
+                                                error!(error=?e, reason, "Custody backfill sync failed due to invalid sync state")
+                                            }
+                                            CustodyBackfillError::Paused => {}
                                         }
-                                        CustodyBackfillError::BatchInvalidState(_, reason) => {
-                                            error!(error=?e, reason, "Custody backfill sync failed due to invalid batch state")
-                                        }
-                                        CustodyBackfillError::InvalidSyncState(reason) => {
-                                            error!(error=?e, reason, "Custody backfill sync failed due to invalid sync state")
-                                        }
-                                        CustodyBackfillError::Paused => {}
                                     }
                                 }
                             }
@@ -695,6 +726,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     // Range sync is in progress. If there is a backfill or custody sync in progress pause it.
                     #[cfg(not(feature = "disable-backfill"))]
                     self.backfill_sync.pause();
+                    if let Some(era_backfill_sync) = self.backfill_sync_era.as_mut() {
+                        era_backfill_sync.pause();
+                    }
                     self.custody_backfill_sync
                         .pause("Range sync in progress".to_string());
 
@@ -708,6 +742,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     // in progress pause it.
                     #[cfg(not(feature = "disable-backfill"))]
                     self.backfill_sync.pause();
+                    if let Some(era_backfill_sync) = self.backfill_sync_era.as_mut() {
+                        era_backfill_sync.pause();
+                    }
                     self.custody_backfill_sync
                         .pause("Range sync in progress".to_string());
 
@@ -947,6 +984,27 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             // Update the global status
                             self.update_sync_state();
                         }
+                    }
+                }
+                ChainSegmentProcessId::BackSyncEraBatchId(era_number) => {
+                    if let Some(era_backfill_sync) = self.backfill_sync_era.as_mut() {
+                        match era_backfill_sync.on_batch_process_result(
+                            &mut self.network,
+                            era_number,
+                            &result,
+                        ) {
+                            Ok(ProcessResult::Successful) => {}
+                            Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
+                            Err(error) => {
+                                error!(error = ?error, "Era backfill sync failed");
+                                self.update_sync_state();
+                            }
+                        }
+                    } else {
+                        debug!(
+                            era_number = %era_number,
+                            "Ignoring era backfill batch result without era backfill enabled"
+                        );
                     }
                 }
             },

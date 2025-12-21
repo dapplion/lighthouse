@@ -118,6 +118,8 @@ pub struct Config {
 
     /// Whether we are running a block proposer only node.
     pub proposer_only: bool,
+    /// Optional directory containing `.era` files for backfill.
+    pub era_files_dir: Option<PathBuf>,
 
     /// Whether metrics are enabled.
     pub metrics_enabled: bool,
@@ -357,6 +359,7 @@ impl Default for Config {
             shutdown_after_sync: false,
             topics: Vec::new(),
             proposer_only: false,
+            era_files_dir: None,
             metrics_enabled: false,
             enable_light_client_server: true,
             outbound_rate_limiter_config: None,

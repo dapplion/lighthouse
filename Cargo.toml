@@ -99,7 +99,7 @@ alloy-consensus = { version = "1", default-features = false }
 alloy-dyn-abi = { version = "1", default-features = false }
 alloy-json-abi = { version = "1", default-features = false }
 alloy-network = { version = "1", default-features = false }
-alloy-primitives = { version = "1", default-features = false, features = ["rlp", "getrandom"] }
+alloy-primitives = { version = "1.5", default-features = false, features = ["rlp", "getrandom"] }
 alloy-provider = { version = "1", default-features = false, features = ["reqwest"] }
 alloy-rlp = { version = "0.3", default-features = false }
 alloy-rpc-types-eth = { version = "1", default-features = false, features = ["serde"] }
@@ -138,6 +138,7 @@ eip_3076 = { path = "common/eip_3076" }
 either = "1.9"
 environment = { path = "lighthouse/environment" }
 eth2 = { path = "common/eth2" }
+reth-era = { git = "https://github.com/paradigmxyz/reth", package = "reth-era", rev = "62abfdaeb54e8a205a8ee085ddebd56047d93374" }
 eth2_config = { path = "common/eth2_config" }
 eth2_key_derivation = { path = "crypto/eth2_key_derivation" }
 eth2_keystore = { path = "crypto/eth2_keystore" }

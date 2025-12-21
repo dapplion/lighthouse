@@ -36,6 +36,8 @@ pub enum ChainSegmentProcessId {
     RangeBatchId(ChainId, Epoch),
     /// Processing ID for a backfill syncing batch.
     BackSyncBatchId(Epoch),
+    /// Processing ID for an era backfill syncing batch.
+    BackSyncEraBatchId(u64),
 }
 
 /// Returned when a chain segment import fails.
@@ -613,14 +615,20 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         process_id: ChainSegmentProcessId,
         downloaded_blocks: Vec<RpcBlock<T::EthSpec>>,
     ) {
-        let ChainSegmentProcessId::BackSyncBatchId(epoch) = process_id else {
-            // this a request from RangeSync, this should _never_ happen
-            crit!(
-                error =
-                    "process_chain_segment_backfill called on a variant other than BackSyncBatchId",
-                "Please notify the devs"
-            );
-            return;
+        let epoch = match process_id {
+            ChainSegmentProcessId::BackSyncBatchId(epoch) => epoch,
+            ChainSegmentProcessId::BackSyncEraBatchId(_) => {
+                // Era backfill doesn't encode epochs; use 0 for logging.
+                Epoch::new(0)
+            }
+            _ => {
+                crit!(
+                    error =
+                        "process_chain_segment_backfill called on a variant other than BackSyncBatchId or BackSyncEraBatchId",
+                    "Please notify the devs"
+                );
+                return;
+            }
         };
 
         let start_slot = downloaded_blocks.first().map(|b| b.slot().as_u64());
