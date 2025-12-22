@@ -43,6 +43,14 @@ pub fn cli_app() -> Command {
                 .action(ArgAction::Set)
                 .display_order(0)
         )
+        .arg(
+            Arg::new("era-files-dir")
+                .long("era-files-dir")
+                .value_name("DIR")
+                .help("Directory containing .era files for backfill and where new .era files will be written.")
+                .action(ArgAction::Set)
+                .display_order(0)
+        )
         /*
          * Network parameters.
          */

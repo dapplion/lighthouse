@@ -25,6 +25,7 @@ mod errors;
 pub mod events;
 pub mod execution_payload;
 pub mod fetch_blobs;
+mod era_file_producer;
 pub mod fork_choice_signal;
 pub mod fork_revert;
 pub mod graffiti_calculator;

@@ -65,7 +65,7 @@ pub struct StoreConfig {
     /// The margin for blob pruning in epochs. The oldest blobs are pruned up until
     /// data_availability_boundary - blob_prune_margin_epochs. Default: 0.
     pub blob_prune_margin_epochs: u64,
-    /// Optional path for era file import/production.
+    /// Directory for era file import and production.
     pub era_files_dir: Option<PathBuf>,
 }
 

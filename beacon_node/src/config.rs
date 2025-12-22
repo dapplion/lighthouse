@@ -350,6 +350,10 @@ pub fn get_config<E: EthSpec>(
         client_config.freezer_db_path = Some(PathBuf::from(freezer_dir));
     }
 
+    if let Some(era_files_dir) = cli_args.get_one::<String>("era-files-dir") {
+        client_config.store.era_files_dir = Some(PathBuf::from(era_files_dir));
+    }
+
     if let Some(blobs_db_dir) = cli_args.get_one::<String>("blobs-dir") {
         client_config.blobs_db_path = Some(PathBuf::from(blobs_db_dir));
     }
