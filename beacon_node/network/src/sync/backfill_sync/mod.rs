@@ -204,32 +204,6 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         }
     }
 
-    /// Refreshes backfill start state from the beacon chain.
-    ///
-    /// Intended for external backfill sources that may have advanced the anchor.
-    pub fn reset_from_store(&mut self) {
-        let anchor_info = self.beacon_chain.store.get_anchor_info();
-        if anchor_info.block_backfill_complete(self.beacon_chain.genesis_backfill_slot) {
-            self.set_state(BackFillState::Completed);
-            return;
-        }
-
-        let start_epoch = anchor_info
-            .oldest_block_slot
-            .epoch(T::EthSpec::slots_per_epoch());
-
-        self.current_start = start_epoch;
-        self.processing_target = start_epoch;
-        self.to_be_downloaded = start_epoch;
-        self.last_batch_downloaded = false;
-        self.current_processing_batch = None;
-        self.batches.clear();
-        self.participating_peers.clear();
-        self.restart_failed_sync = false;
-        self.validated_batches = 0;
-        self.set_state(BackFillState::Paused);
-    }
-
     /// Starts or resumes syncing.
     ///
     /// If resuming is successful, reports back the current syncing metrics.
