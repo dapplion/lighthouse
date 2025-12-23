@@ -618,22 +618,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         process_id: ChainSegmentProcessId,
         downloaded_blocks: Vec<RpcBlock<T::EthSpec>>,
     ) {
-        let epoch = match process_id {
-            ChainSegmentProcessId::BackSyncBatchId(epoch) => epoch,
-            ChainSegmentProcessId::BackSyncEraBatchId(_) => {
-                // Era backfill doesn't encode epochs; use 0 for logging.
-                Epoch::new(0)
-            }
-            _ => {
-                crit!(
-                    error =
-                        "process_chain_segment_backfill called on a variant other than BackSyncBatchId or BackSyncEraBatchId",
-                    "Please notify the devs"
-                );
-                return;
-            }
-        };
-
+        let block_count = downloaded_blocks.len();
         let start_slot = downloaded_blocks.first().map(|b| b.slot().as_u64());
         let end_slot = downloaded_blocks.last().map(|b| b.slot().as_u64());
         let sent_blocks = downloaded_blocks.len();
@@ -649,15 +634,16 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         let result = match self.process_backfill_blocks(downloaded_blocks) {
             (imported_blocks, Ok(_)) => {
                 debug!(
-                            batch_epoch = %epoch,
-                            first_block_slot = start_slot,
-                            keep_execution_payload = !self.chain.store.get_config().prune_payloads,
-                            last_block_slot = end_slot,
-                            processed_blocks = sent_blocks,
-                            processed_blobs = n_blobs,
-                            processed_data_columns = n_data_columns,
-                            service= "sync",
-                            "Backfill batch processed");
+                    block_count,
+                    first_block_slot = start_slot,
+                    keep_execution_payload = !self.chain.store.get_config().prune_payloads,
+                    last_block_slot = end_slot,
+                    processed_blocks = sent_blocks,
+                    processed_blobs = n_blobs,
+                    processed_data_columns = n_data_columns,
+                    service = "sync",
+                    "Backfill batch processed"
+                );
                 BatchProcessResult::Success {
                     sent_blocks,
                     imported_blocks,
@@ -665,7 +651,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             }
             (_, Err(e)) => {
                 debug!(
-                    batch_epoch = %epoch,
+                    block_count,
                     first_block_slot = start_slot,
                     last_block_slot = end_slot,
                     processed_blobs = n_blobs,

@@ -664,7 +664,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         }
 
                         if !era_backfill_active {
-                            self.backfill_sync.reset_from_store();
                             // Determine if we need to start/resume/restart a backfill sync.
                             match self.backfill_sync.start(&mut self.network) {
                                 Ok(SyncStart::Syncing {
