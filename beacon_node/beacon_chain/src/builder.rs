@@ -18,6 +18,7 @@ use crate::persisted_custody::load_custody_context;
 use crate::shuffling_cache::{BlockShufflingIds, ShufflingCache};
 use crate::validator_monitor::{ValidatorMonitor, ValidatorMonitorConfig};
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
+use crate::era_file_consumer::import_era_files;
 use crate::{
     BeaconChain, BeaconChainTypes, BeaconForkChoiceStore, BeaconSnapshot, ServerSentEventHandler,
 };
@@ -37,6 +38,7 @@ use slasher::Slasher;
 use slot_clock::{SlotClock, TestingSlotClock};
 use state_processing::{AllCaches, per_slot_processing};
 use std::marker::PhantomData;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use store::{Error as StoreError, HotColdDB, ItemStore, KeyValueStoreOp};
@@ -204,6 +206,21 @@ where
     pub fn store(mut self, store: Arc<HotColdDB<E, THotStore, TColdStore>>) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// Import trusted era files into the store before building the chain.
+    pub fn era_files(
+        self,
+        era_files_dir: &Path,
+        genesis_state: BeaconState<E>,
+    ) -> Result<Self, String> {
+        let builder = self.genesis_state(genesis_state)?;
+        let store = builder
+            .store
+            .clone()
+            .ok_or("era_files requires a store.")?;
+        import_era_files(&store, era_files_dir, &builder.spec)?;
+        Ok(builder)
     }
 
     /// Sets the store migrator config (optional).

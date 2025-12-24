@@ -1264,6 +1264,7 @@ dependencies = [
  "proto_array",
  "rand 0.9.2",
  "rayon",
+ "reth-era",
  "safe_arith",
  "sensitive_url",
  "serde",
