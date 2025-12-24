@@ -248,7 +248,12 @@ where
 
             ClientGenesis::DepositContract
         } else if chain_exists {
-            if matches!(client_genesis, ClientGenesis::WeakSubjSszBytes { .. })
+            if matches!(client_genesis, ClientGenesis::EraFiles { .. }) {
+                info!(
+                    msg = "database already exists, use --purge-db to force era import",
+                    "Refusing to import era files"
+                );
+            } else if matches!(client_genesis, ClientGenesis::WeakSubjSszBytes { .. })
                 || matches!(client_genesis, ClientGenesis::CheckpointSyncUrl { .. })
             {
                 info!(
@@ -460,6 +465,12 @@ where
                 return Err("Loading genesis from deposit contract no longer supported".to_string());
             }
             ClientGenesis::FromStore => builder.resume_from_db()?,
+            ClientGenesis::EraFiles { era_files_dir } => {
+                info!(?era_files_dir, "Importing era files");
+                let genesis_state = genesis_state(&runtime_context, &config).await?;
+                let builder = builder.era_files(&era_files_dir, genesis_state)?;
+                builder.reconstruct_historic_states_from_era_states()?
+            }
         };
 
         self.beacon_chain_builder = Some(beacon_chain_builder);

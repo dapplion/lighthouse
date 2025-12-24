@@ -811,8 +811,13 @@ pub fn get_config<E: EthSpec>(
         client_config.chain.genesis_backfill = true;
     }
 
-    client_config.network.era_files_dir =
-        clap_utils::parse_optional(cli_args, "era-files-dir")?;
+    if let Some(dir) = clap_utils::parse_optional::<String>(cli_args, "era-files-dir")? {
+        let path = PathBuf::from(dir);
+        client_config.store.era_files_dir = Some(path.clone());
+        client_config.genesis = ClientGenesis::EraFiles {
+            era_files_dir: path,
+        };
+    }
 
     client_config.chain.complete_blob_backfill = cli_args.get_flag("complete-blob-backfill");
 
