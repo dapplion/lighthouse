@@ -45,6 +45,9 @@ pub enum ClientGenesis {
     CheckpointSyncUrl {
         url: SensitiveUrl,
     },
+    EraFiles {
+        era_files_dir: PathBuf,
+    },
 }
 
 /// The core configuration of a Lighthouse beacon node.
