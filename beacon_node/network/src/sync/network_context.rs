@@ -13,7 +13,6 @@ use crate::network_beacon_processor::TestBeaconChainType;
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::batch::ByRangeRequestType;
-use crate::sync::block_lookups::SingleLookupId;
 use crate::sync::block_sidecar_coupling::CouplingError;
 use crate::sync::network_context::requests::BlobsByRootSingleBlockRequest;
 use crate::sync::range_data_column_batch_request::RangeDataColumnBatchRequest;
@@ -21,14 +20,16 @@ use beacon_chain::block_verification_types::RpcBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
+use itertools::Itertools;
 use lighthouse_network::rpc::methods::{BlobsByRangeRequest, DataColumnsByRangeRequest};
 use lighthouse_network::rpc::{BlocksByRangeRequest, GoodbyeReason, RPCError, RequestType};
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, SingleLookupReqId, SyncRequestId,
+    AppRequestId, BlobsByRangeRequestId, BlobsByRootRequestId, BlocksByRangeRequestId,
+    BlocksByRootRequestId, ComponentsByRangeRequestId, ComponentsByRootRequestId,
+    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyByRootRequestId, CustodyId,
+    CustodyRequester, DataColumnsByRangeRequestId, DataColumnsByRangeRequester,
+    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use lighthouse_tracing::{SPAN_OUTGOING_BLOCK_BY_ROOT_REQUEST, SPAN_OUTGOING_RANGE_REQUEST};
@@ -51,11 +52,13 @@ use tokio::sync::mpsc;
 use tracing::{Span, debug, debug_span, error, warn};
 use types::blob_sidecar::FixedBlobSidecarList;
 use types::{
-    BlobSidecar, BlockImportSource, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, EthSpec,
-    ForkContext, Hash256, SignedBeaconBlock, Slot,
+    BlobSidecar, BlockImportSource, ChainSpec, ColumnIndex, DataColumnSidecar,
+    DataColumnSidecarList, EthSpec, ForkContext, Hash256, SignedBeaconBlock, Slot,
 };
 
+mod block_components_by_root;
 pub mod custody;
+mod download_request;
 mod requests;
 
 macro_rules! new_range_request_span {
@@ -101,6 +104,7 @@ pub enum RpcResponseError {
     VerifyError(LookupVerifyError),
     CustodyRequestError(#[allow(dead_code)] CustodyRequestError),
     BlockComponentCouplingError(CouplingError),
+    InternalError(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -171,6 +175,57 @@ impl PeerGroup {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct BatchPeers {
+    block_peer: PeerId,
+    column_peers: PeerGroup,
+}
+
+impl BatchPeers {
+    pub(crate) fn new_from_block_peer(block_peer: PeerId) -> Self {
+        Self {
+            block_peer,
+            column_peers: PeerGroup {
+                peers: <_>::default(),
+            },
+        }
+    }
+    pub(crate) fn new(block_peer: PeerId, column_peers: PeerGroup) -> Self {
+        Self {
+            block_peer,
+            column_peers,
+        }
+    }
+
+    pub(crate) fn blame(&self, peer_action: PeerGroupAction) -> Vec<(PeerId, PeerAction)> {
+        // Penalize each peer only once. Currently a peer_action does not mix different
+        // PeerAction levels.
+        let mut peer_penalties = peer_action
+            .column_peer
+            .iter()
+            .flat_map(|(column_index, penalty)| {
+                self.column_peers
+                    .of_index(*column_index as usize)
+                    .map(|peer| (*peer, *penalty))
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(penalty) = peer_action.block_peer {
+            // Penalize the peer appropiately.
+            peer_penalties.push((self.block_peer, penalty));
+        }
+
+        peer_penalties
+    }
+}
+
+/// Tracks which block(s) component caused the block to be invalid. Used to attribute fault in sync.
+#[derive(Debug)]
+pub struct PeerGroupAction {
+    pub block_peer: Option<PeerAction>,
+    pub column_peer: HashMap<ColumnIndex, PeerAction>,
+}
+
 /// Sequential ID that uniquely identifies ReqResp outgoing requests
 pub type ReqId = u32;
 
@@ -198,9 +253,10 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
 
     /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
     blocks_by_root_requests:
-        ActiveRequests<SingleLookupReqId, BlocksByRootRequestItems<T::EthSpec>>,
+        ActiveRequests<BlocksByRootRequestId, BlocksByRootRequestItems<T::EthSpec>>,
     /// A mapping of active BlobsByRoot requests, including both current slot and parent lookups.
-    blobs_by_root_requests: ActiveRequests<SingleLookupReqId, BlobsByRootRequestItems<T::EthSpec>>,
+    blobs_by_root_requests:
+        ActiveRequests<BlobsByRootRequestId, BlobsByRootRequestItems<T::EthSpec>>,
     /// A mapping of active DataColumnsByRoot requests
     data_columns_by_root_requests:
         ActiveRequests<DataColumnsByRootRequestId, DataColumnsByRootRequestItems<T::EthSpec>>,
@@ -214,7 +270,7 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     data_columns_by_range_requests:
         ActiveRequests<DataColumnsByRangeRequestId, DataColumnsByRangeRequestItems<T::EthSpec>>,
     /// Mapping of active custody column requests for a block root
-    custody_by_root_requests: FnvHashMap<CustodyRequester, ActiveCustodyRequest<T>>,
+    custody_by_root_requests: FnvHashMap<CustodyByRootRequestId, ActiveCustodyRequest<T>>,
 
     /// BlocksByRange requests paired with other ByRange requests for data components
     components_by_range_requests:
@@ -340,11 +396,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let blocks_by_root_ids = blocks_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
-            .map(|id| SyncRequestId::SingleBlock { id: *id });
+            .map(|id| SyncRequestId::SingleBlock(*id));
         let blobs_by_root_ids = blobs_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
-            .map(|id| SyncRequestId::SingleBlob { id: *id });
+            .map(|id| SyncRequestId::SingleBlob(*id));
         let data_column_by_root_ids = data_columns_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
@@ -377,6 +433,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub fn network_globals(&self) -> &NetworkGlobals<T::EthSpec> {
         &self.network_beacon_processor.network_globals
+    }
+
+    pub fn spec(&self) -> &ChainSpec {
+        &self.chain.spec
     }
 
     /// Returns the Client type of the peer if known
@@ -809,12 +869,12 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     /// - If the da_checker has a pending block from gossip or a previous request
     ///
     /// Returns false if no request was made, because the block is already imported
-    pub fn block_lookup_request(
+    pub fn send_blocks_by_root_request(
         &mut self,
-        lookup_id: SingleLookupId,
+        lookup_id: ComponentsByRootRequestId,
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
         block_root: Hash256,
-    ) -> Result<LookupRequestResult, RpcRequestSendError> {
+    ) -> Result<LookupRequestResult<BlocksByRootRequestId>, RpcRequestSendError> {
         let active_request_count_by_peer = self.active_request_count_by_peer();
         let Some(peer_id) = lookup_peers
             .read()
@@ -872,9 +932,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             }
         }
 
-        let id = SingleLookupReqId {
-            lookup_id,
-            req_id: self.next_id(),
+        let id = BlocksByRootRequestId {
+            id: self.next_id(),
+            parent_request_id: lookup_id,
         };
 
         let request = BlocksByRootSingleRequest(block_root);
@@ -894,7 +954,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .send(NetworkMessage::SendRequest {
                 peer_id,
                 request: network_request,
-                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlock { id }),
+                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlock(id)),
             })
             .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
 
@@ -921,7 +981,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_span,
         );
 
-        Ok(LookupRequestResult::RequestSent(id.req_id))
+        Ok(LookupRequestResult::RequestSent(id))
     }
 
     /// Request necessary blobs for `block_root`. Requests only the necessary blobs by checking:
@@ -930,13 +990,13 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     /// - If the da_checker has pending blobs from gossip
     ///
     /// Returns false if no request was made, because we don't need to import (more) blobs.
-    pub fn blob_lookup_request(
+    pub fn send_blobs_by_root_request(
         &mut self,
-        lookup_id: SingleLookupId,
+        lookup_id: ComponentsByRootRequestId,
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
         block_root: Hash256,
         expected_blobs: usize,
-    ) -> Result<LookupRequestResult, RpcRequestSendError> {
+    ) -> Result<LookupRequestResult<BlobsByRootRequestId>, RpcRequestSendError> {
         let active_request_count_by_peer = self.active_request_count_by_peer();
         let Some(peer_id) = lookup_peers
             .read()
@@ -977,9 +1037,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             return Ok(LookupRequestResult::NoRequestNeeded("no indices to fetch"));
         }
 
-        let id = SingleLookupReqId {
-            lookup_id,
-            req_id: self.next_id(),
+        let id = BlobsByRootRequestId {
+            id: self.next_id(),
+            parent_request_id: lookup_id,
         };
 
         let request = BlobsByRootSingleBlockRequest {
@@ -998,7 +1058,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .send(NetworkMessage::SendRequest {
                 peer_id,
                 request: network_request,
-                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlob { id }),
+                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlob(id)),
             })
             .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
 
@@ -1023,7 +1083,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             Span::none(),
         );
 
-        Ok(LookupRequestResult::RequestSent(id.req_id))
+        Ok(LookupRequestResult::RequestSent(id))
     }
 
     /// Request to send a single `data_columns_by_root` request to the network.
@@ -1076,10 +1136,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     /// any request to the network if no columns have to be fetched based on the import state of the
     /// node. A custody request is a "super request" that may trigger 0 or more `data_columns_by_root`
     /// requests.
-    pub fn custody_lookup_request(
+    pub fn send_custody_by_root_request(
         &mut self,
-        lookup_id: SingleLookupId,
+        lookup_id: ComponentsByRootRequestId,
         block_root: Hash256,
+        block_slot: Slot,
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Result<LookupRequestResult, RpcRequestSendError> {
         let custody_indexes_imported = self
@@ -1088,14 +1149,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .cached_data_column_indexes(&block_root)
             .unwrap_or_default();
 
-        let current_epoch = self.chain.epoch().map_err(|e| {
-            RpcRequestSendError::InternalError(format!("Unable to read slot clock {:?}", e))
-        })?;
-
         // Include only the blob indexes not yet imported (received through gossip)
         let custody_indexes_to_fetch = self
             .chain
-            .sampling_columns_for_epoch(current_epoch)
+            .sampling_columns_for_epoch(block_slot.epoch(T::EthSpec::slots_per_epoch()))
             .iter()
             .copied()
             .filter(|index| !custody_indexes_imported.contains(index))
@@ -1106,9 +1163,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             return Ok(LookupRequestResult::NoRequestNeeded("no indices to fetch"));
         }
 
-        let id = SingleLookupReqId {
-            lookup_id,
-            req_id: self.next_id(),
+        let id = CustodyByRootRequestId {
+            id: self.next_id(),
+            parent_request_id: lookup_id,
         };
 
         debug!(
@@ -1411,7 +1468,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub(crate) fn on_single_block_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: BlocksByRootRequestId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<Arc<SignedBeaconBlock<T::EthSpec>>>> {
@@ -1433,7 +1490,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub(crate) fn on_single_blob_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: BlobsByRootRequestId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<FixedBlobSidecarList<T::EthSpec>>> {

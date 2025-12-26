@@ -23,20 +23,18 @@
 use self::parent_chain::{NodeChain, compute_parent_chains};
 pub use self::single_block_lookup::DownloadResult;
 use self::single_block_lookup::{LookupRequestError, LookupResult, SingleBlockLookup};
-use super::manager::{BlockProcessType, BlockProcessingResult, SLOT_IMPORT_TOLERANCE};
+use super::manager::{BlockProcessingResult, SLOT_IMPORT_TOLERANCE};
 use super::network_context::{PeerGroup, RpcResponseError, SyncNetworkContext};
 use crate::metrics;
 use crate::sync::SyncMessage;
-use crate::sync::block_lookups::common::ResponseType;
 use crate::sync::block_lookups::parent_chain::find_oldest_fork_ancestor;
-use beacon_chain::block_verification_types::AsBlock;
+use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
 use beacon_chain::data_availability_checker::{
     AvailabilityCheckError, AvailabilityCheckErrorCategory,
 };
 use beacon_chain::{AvailabilityProcessingStatus, BeaconChainTypes, BlockError};
-pub use common::RequestState;
 use fnv::FnvHashMap;
-use lighthouse_network::service::api_types::SingleLookupReqId;
+use lighthouse_network::service::api_types::{Id, SingleLookupReqId};
 use lighthouse_network::{PeerAction, PeerId};
 use lru_cache::LRUTimeCache;
 pub use single_block_lookup::{BlobRequestState, BlockRequestState, CustodyRequestState};
@@ -423,26 +421,25 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     /* Lookup responses */
 
     /// Process a block or blob response received from a single lookup request.
-    pub fn on_download_response<R: RequestState<T>>(
+    pub fn on_download_response(
         &mut self,
         id: SingleLookupReqId,
-        response: Result<(R::VerifiedResponseType, PeerGroup, Duration), RpcResponseError>,
+        response: Result<(RpcBlock<T::EthSpec>, PeerGroup, Duration), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = self.on_download_response_inner::<R>(id, response, cx);
+        let result = self.on_download_response_inner(id, response, cx);
         self.on_lookup_result(id.lookup_id, result, "download_response", cx);
     }
 
     /// Process a block or blob response received from a single lookup request.
-    pub fn on_download_response_inner<R: RequestState<T>>(
+    pub fn on_download_response_inner(
         &mut self,
         id: SingleLookupReqId,
-        response: Result<(R::VerifiedResponseType, PeerGroup, Duration), RpcResponseError>,
+        response: Result<(RpcBlock<T::EthSpec>, PeerGroup, Duration), RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupResult, LookupRequestError> {
         // Note: no need to downscore peers here, already downscored on network context
 
-        let response_type = R::response_type();
         let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
             // We don't have the ability to cancel in-flight RPC requests. So this can happen
             // if we started this RPC request, and later saw the block/blobs via gossip.
@@ -451,9 +448,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         };
 
         let block_root = lookup.block_root();
-        let request_state = R::request_state_mut(lookup)
-            .map_err(|e| LookupRequestError::BadState(e.to_owned()))?
-            .get_state_mut();
 
         match response {
             Ok((response, peer_group, seen_timestamp)) => {
@@ -461,7 +455,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                     ?block_root,
                     ?id,
                     ?peer_group,
-                    ?response_type,
                     "Received lookup download success"
                 );
 
@@ -476,7 +469,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 // Register the download peer here. Once we have received some data over the wire we
                 // attribute it to this peer for scoring latter regardless of how the request was
                 // done.
-                request_state.on_download_success(
+                self.request_state.on_download_success(
                     id.req_id,
                     DownloadResult {
                         value: response,
@@ -493,12 +486,11 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 debug!(
                     ?block_root,
                     ?id,
-                    ?response_type,
                     error = ?e,
                     "Received lookup download failure"
                 );
 
-                request_state.on_download_failure(id.req_id)?;
+                self.request_state.on_download_failure(id.req_id)?;
                 // continue_request will retry a download as the request state is AwaitingDownload
             }
         }
@@ -518,25 +510,16 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
 
     pub fn on_processing_result(
         &mut self,
-        process_type: BlockProcessType,
+        id: Id,
         result: BlockProcessingResult,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let lookup_result = match process_type {
-            BlockProcessType::SingleBlock { id } => {
-                self.on_processing_result_inner::<BlockRequestState<T::EthSpec>>(id, result, cx)
-            }
-            BlockProcessType::SingleBlob { id } => {
-                self.on_processing_result_inner::<BlobRequestState<T::EthSpec>>(id, result, cx)
-            }
-            BlockProcessType::SingleCustodyColumn(id) => {
-                self.on_processing_result_inner::<CustodyRequestState<T::EthSpec>>(id, result, cx)
-            }
-        };
-        self.on_lookup_result(process_type.id(), lookup_result, "processing_result", cx);
+        let lookup_result =
+            self.on_processing_result_inner::<BlockRequestState<T::EthSpec>>(id, result, cx);
+        self.on_lookup_result(id, lookup_result, "processing_result", cx);
     }
 
-    pub fn on_processing_result_inner<R: RequestState<T>>(
+    pub fn on_processing_result_inner(
         &mut self,
         lookup_id: SingleLookupId,
         result: BlockProcessingResult,
@@ -548,12 +531,8 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         };
 
         let block_root = lookup.block_root();
-        let request_state = R::request_state_mut(lookup)
-            .map_err(|e| LookupRequestError::BadState(e.to_owned()))?
-            .get_state_mut();
 
         debug!(
-            component = ?R::response_type(),
             ?block_root,
             id = lookup_id,
             ?result,
@@ -564,7 +543,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(_))
             | BlockProcessingResult::Err(BlockError::DuplicateFullyImported(..)) => {
                 // Successfully imported
-                request_state.on_processing_success()?;
+                self.request_state.on_processing_success()?;
                 Action::Continue
             }
 
@@ -573,7 +552,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             }) => {
                 // `on_processing_success` is called here to ensure the request state is updated prior to checking
                 // if both components have been processed.
-                request_state.on_processing_success()?;
+                self.request_state.on_processing_success()?;
 
                 if lookup.all_components_processed() {
                     // We don't request for other block components until being sure that the block has
@@ -595,10 +574,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             BlockProcessingResult::Ignored => {
                 // Beacon processor signalled to ignore the block processing result.
                 // This implies that the cpu is overloaded. Drop the request.
-                warn!(
-                    component = ?R::response_type(),
-                    "Lookup component processing ignored, cpu might be overloaded"
-                );
+                warn!("Lookup component processing ignored, cpu might be overloaded");
                 Action::Drop("Block processing ignored".to_owned())
             }
             BlockProcessingResult::Err(e) => {
@@ -614,7 +590,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                         // once there are no pending parent requests.
                         // Note: `BlockError::ParentUnknown` is only returned when processing
                         // blocks, not blobs.
-                        request_state.revert_to_awaiting_processing()?;
+                        self.request_state.revert_to_awaiting_processing()?;
                         Action::ParentUnknown { parent_root }
                     }
                     ref e @ BlockError::ExecutionPayloadError(ref epe) if !epe.penalize_peer() => {
@@ -642,11 +618,10 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                     other => {
                         debug!(
                             ?block_root,
-                            component = ?R::response_type(),
                             error = ?other,
                             "Invalid lookup component"
                         );
-                        let peer_group = request_state.on_processing_failure()?;
+                        let peer_group = self.request_state.on_processing_failure()?;
                         let peers_to_penalize: Vec<_> = match other {
                             // Note: currenlty only InvalidColumn errors have index granularity,
                             // but future errors may follow the same pattern. Generalize this
@@ -667,13 +642,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                             cx.report_peer(
                                 *peer,
                                 PeerAction::MidToleranceError,
-                                match R::response_type() {
-                                    ResponseType::Block => "lookup_block_processing_failure",
-                                    ResponseType::Blob => "lookup_blobs_processing_failure",
-                                    ResponseType::CustodyColumn => {
-                                        "lookup_custody_column_processing_failure"
-                                    }
-                                },
+                                "lookup_processing_failure",
                             );
                         }
 
