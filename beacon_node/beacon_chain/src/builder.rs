@@ -6,6 +6,7 @@ use crate::beacon_chain::{
 use crate::beacon_proposer_cache::BeaconProposerCache;
 use crate::custody_context::NodeCustodyType;
 use crate::data_availability_checker::DataAvailabilityChecker;
+use crate::era_file_consumer::import_era_files;
 use crate::fork_choice_signal::ForkChoiceSignalTx;
 use crate::fork_revert::{reset_fork_choice_to_finalization, revert_to_fork_boundary};
 use crate::graffiti_calculator::{GraffitiCalculator, GraffitiOrigin};
@@ -18,7 +19,6 @@ use crate::persisted_custody::load_custody_context;
 use crate::shuffling_cache::{BlockShufflingIds, ShufflingCache};
 use crate::validator_monitor::{ValidatorMonitor, ValidatorMonitorConfig};
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
-use crate::era_file_consumer::import_era_files;
 use crate::{
     BeaconChain, BeaconChainTypes, BeaconForkChoiceStore, BeaconSnapshot, ServerSentEventHandler,
 };
@@ -212,14 +212,44 @@ where
     pub fn era_files(
         self,
         era_files_dir: &Path,
-        genesis_state: BeaconState<E>,
+        mut genesis_state: BeaconState<E>,
     ) -> Result<Self, String> {
-        let builder = self.genesis_state(genesis_state)?;
-        let store = builder
-            .store
-            .clone()
-            .ok_or("era_files requires a store.")?;
-        import_era_files(&store, era_files_dir, &builder.spec)?;
+        let genesis_state_root = genesis_state
+            .canonical_root()
+            .map_err(|e| format!("Error computing genesis state root: {e:?}"))?;
+
+        let builder = self.genesis_state(genesis_state.clone())?;
+        let store = builder.store.clone().ok_or("era_files requires a store.")?;
+
+        {
+            let mut ops = vec![];
+            store
+                .store_cold_state(&genesis_state_root, &genesis_state, &mut ops)
+                .map_err(|e| format!("Error building genesis state write ops: {e:?}"))?;
+            store
+                .cold_db
+                .do_atomically(ops)
+                .map_err(|e| format!("Error writing genesis state: {e:?}"))?;
+        }
+
+        let max_era = import_era_files(&store, era_files_dir, &builder.spec)?;
+        let slots_per_historical_root = E::slots_per_historical_root() as u64;
+        (1..=max_era).into_par_iter().try_for_each(|era_number| {
+            let start_slot = Slot::new((era_number - 1) * slots_per_historical_root);
+            let end_slot = Slot::new(era_number * slots_per_historical_root);
+            store
+                .reconstruct_historic_states_on_range(
+                    // Start reconstruction with state at the era file start, but the state has the
+                    // block already applied. So start with the block at the next slot.
+                    start_slot,
+                    start_slot + Slot::new(1),
+                    end_slot,
+                )
+                .map_err(|error| {
+                    format!("Era reconstruction failed for era {era_number}: {error:?}")
+                })
+        })?;
+
         Ok(builder)
     }
 

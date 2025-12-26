@@ -468,8 +468,7 @@ where
             ClientGenesis::EraFiles { era_files_dir } => {
                 info!(?era_files_dir, "Importing era files");
                 let genesis_state = genesis_state(&runtime_context, &config).await?;
-                let builder = builder.era_files(&era_files_dir, genesis_state)?;
-                builder.reconstruct_historic_states_from_era_states()?
+                builder.era_files(&era_files_dir, genesis_state)?
             }
         };
 
