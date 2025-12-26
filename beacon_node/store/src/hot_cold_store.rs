@@ -196,7 +196,7 @@ pub enum HotColdDBError {
     RestorePointDecodeError(ssz::DecodeError),
     BlockReplayBeaconError(BeaconStateError),
     BlockReplaySlotError(SlotProcessingError),
-    BlockReplayBlockError(BlockProcessingError),
+    BlockReplayBlockError(Slot, BlockProcessingError),
     InvalidSlotsPerRestorePoint {
         slots_per_restore_point: u64,
         slots_per_historical_root: u64,
@@ -1090,6 +1090,17 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             self.store_hot_state(state_root, state, &mut ops)?;
             self.hot_db.do_atomically(ops)
         }
+    }
+
+    /// Store and commit a state into the cold db store.
+    pub fn put_cold_state(
+        &self,
+        state_root: &Hash256,
+        state: &BeaconState<E>,
+    ) -> Result<(), Error> {
+        let mut ops: Vec<KeyValueStoreOp> = Vec::new();
+        self.store_cold_state(state_root, state, &mut ops)?;
+        self.cold_db.do_atomically(ops)
     }
 
     /// Fetch a state from the store.

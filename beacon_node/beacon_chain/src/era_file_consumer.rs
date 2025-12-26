@@ -3,15 +3,15 @@ use reth_era::era::file::EraReader;
 use reth_era::era::types::consensus::{CompressedBeaconState, CompressedSignedBeaconBlock};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use store::{HotColdDB, ItemStore};
+use store::{DBColumn, HotColdDB, ItemStore, KeyValueStoreOp};
 use tracing::{info, warn};
-use types::{BeaconState, ChainSpec, EthSpec, SignedBeaconBlock};
+use types::{BeaconState, ChainSpec, EthSpec, SignedBeaconBlock, Slot};
 
 pub(crate) fn import_era_files<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     store: &HotColdDB<E, Hot, Cold>,
     era_files_dir: &Path,
     spec: &ChainSpec,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let mut era_files = list_era_files(era_files_dir)?;
     era_files.sort_by_key(|(era_number, _)| *era_number);
 
@@ -20,18 +20,21 @@ pub(crate) fn import_era_files<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
 
+    let mut max_era = None;
     for (era_number, path) in era_files {
         info!(era_number, ?path, "Importing era file");
-        import_era_file(store, &path, &network_name, spec)
-            .map_err(|error| format!("era file import failed: {error}"))?;
+        import_era_file(store, &path, era_number, &network_name, spec)
+            .map_err(|error| format!("era file {era_number} {path:?} import failed: {error}"))?;
+        max_era = Some(era_number);
     }
 
-    Ok(())
+    max_era.ok_or_else(|| "era files directory is empty".to_string())
 }
 
 fn import_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     store: &HotColdDB<E, Hot, Cold>,
     path: &Path,
+    era_number: u64,
     network_name: &str,
     spec: &ChainSpec,
 ) -> Result<(), String> {
@@ -52,9 +55,11 @@ fn import_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     let state_root = state
         .canonical_root()
         .map_err(|error| format!("failed to hash state: {error:?}"))?;
+    // Use put_cold_state as the split is not updated and we need the state into the cold store.
     store
-        .put_state(&state_root, &state)
+        .put_cold_state(&state_root, &state)
         .map_err(|error| format!("failed to store state: {error:?}"))?;
+    write_block_root_index_for_era(store, &state, era_number)?;
 
     Ok(())
 }
@@ -79,6 +84,44 @@ fn decode_state<E: EthSpec>(
         .map_err(|error| format!("failed to decompress state: {error:?}"))?;
     BeaconState::from_ssz_bytes(&bytes, spec)
         .map_err(|error| format!("failed to decode state: {error:?}"))
+}
+
+fn write_block_root_index_for_era<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    store: &HotColdDB<E, Hot, Cold>,
+    state: &BeaconState<E>,
+    era_number: u64,
+) -> Result<(), String> {
+    let end_slot = state.slot();
+    let slots_per_historical_root = E::slots_per_historical_root() as u64;
+    let expected_end_slot = Slot::new(era_number * slots_per_historical_root);
+    if end_slot != expected_end_slot {
+        return Err(format!(
+            "era state slot mismatch: expected {expected_end_slot}, got {end_slot}"
+        ));
+    }
+
+    let start_slot = end_slot.saturating_sub(slots_per_historical_root);
+
+    let ops = (start_slot.as_u64()..end_slot.as_u64())
+        .map(|slot_u64| {
+            let slot = Slot::new(slot_u64);
+            let block_root = state
+                .get_block_root(slot)
+                .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
+            Ok(KeyValueStoreOp::PutKeyValue(
+                DBColumn::BeaconBlockRoots,
+                slot_u64.to_be_bytes().to_vec(),
+                block_root.as_slice().to_vec(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    store
+        .cold_db
+        .do_atomically(ops)
+        .map_err(|error| format!("failed to store block root index: {error:?}"))?;
+
+    Ok(())
 }
 
 fn list_era_files(dir: &Path) -> Result<Vec<(u64, PathBuf)>, String> {
