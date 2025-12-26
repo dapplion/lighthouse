@@ -212,7 +212,10 @@ pub fn process_block_header<E: EthSpec>(
     // Verify that the slots match
     verify!(
         block_header.slot == state.slot(),
-        HeaderInvalid::StateSlotMismatch
+        HeaderInvalid::StateSlotMismatch {
+            state: state.slot(),
+            header: block_header.slot,
+        }
     );
 
     // Verify that the block is newer than the latest block header
