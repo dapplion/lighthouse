@@ -2095,31 +2095,16 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         self.store_cold_state_summary(state_root, state.slot(), ops)?;
 
         let slot = state.slot();
-        match self.cold_storage_strategy(slot)? {
-            StorageStrategy::ReplayFrom(from) => {
-                debug!(
-                    strategy = "replay",
-                    from_slot = %from,
-                    %slot,
-                    "Storing cold state",
-                );
+        let strategy = self.cold_storage_strategy(slot)?;
+        debug!(?strategy, %slot, "Storing cold state");
+        match strategy {
+            StorageStrategy::ReplayFrom(_) => {
                 // Already have persisted the state summary, don't persist anything else
             }
             StorageStrategy::Snapshot => {
-                debug!(
-                    strategy = "snapshot",
-                    %slot,
-                    "Storing cold state"
-                );
                 self.store_cold_state_as_snapshot(state, ops)?;
             }
             StorageStrategy::DiffFrom(from) => {
-                debug!(
-                    strategy = "diff",
-                    from_slot = %from,
-                    %slot,
-                    "Storing cold state"
-                );
                 self.store_cold_state_as_diff(state, from, ops)?;
             }
         }
