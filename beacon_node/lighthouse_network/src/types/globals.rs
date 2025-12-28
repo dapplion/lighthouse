@@ -165,11 +165,6 @@ impl<E: EthSpec> NetworkGlobals<E> {
         self.backfill_state.read().clone()
     }
 
-    /// Set the current backfill state.
-    pub fn set_backfill_state(&self, state: BackFillState) {
-        *self.backfill_state.write() = state;
-    }
-
     /// Returns a `Client` type if one is known for the `PeerId`.
     pub fn client(&self, peer_id: &PeerId) -> Client {
         self.peers
