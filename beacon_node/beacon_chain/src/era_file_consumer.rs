@@ -1,68 +1,13 @@
+use bls::FixedBytesExtended;
 use reth_era::common::file_ops::StreamReader;
 use reth_era::era::file::EraReader;
 use reth_era::era::types::consensus::{CompressedBeaconState, CompressedSignedBeaconBlock};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use store::{DBColumn, HotColdDB, ItemStore, KeyValueStoreOp};
-use tracing::{info, warn};
-use types::{BeaconState, ChainSpec, EthSpec, SignedBeaconBlock, Slot};
-
-pub(crate) fn import_era_files<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
-    store: &HotColdDB<E, Hot, Cold>,
-    era_files_dir: &Path,
-    spec: &ChainSpec,
-) -> Result<u64, String> {
-    let mut era_files = list_era_files(era_files_dir)?;
-    era_files.sort_by_key(|(era_number, _)| *era_number);
-
-    let network_name = spec
-        .config_name
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let mut max_era = None;
-    for (era_number, path) in era_files {
-        info!(era_number, ?path, "Importing era file");
-        import_era_file(store, &path, era_number, &network_name, spec)
-            .map_err(|error| format!("era file {era_number} {path:?} import failed: {error}"))?;
-        max_era = Some(era_number);
-    }
-
-    max_era.ok_or_else(|| "era files directory is empty".to_string())
-}
-
-fn import_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
-    store: &HotColdDB<E, Hot, Cold>,
-    path: &Path,
-    era_number: u64,
-    network_name: &str,
-    spec: &ChainSpec,
-) -> Result<(), String> {
-    let file = File::open(path).map_err(|error| format!("failed to open era file: {error}"))?;
-    let era_file = EraReader::new(file)
-        .read_and_assemble(network_name.to_string())
-        .map_err(|error| format!("failed to parse era file: {error:?}"))?;
-
-    for compressed_block in era_file.group.blocks {
-        let block = decode_block::<E>(compressed_block, spec)?;
-        let block_root = block.canonical_root();
-        store
-            .put_block(&block_root, block)
-            .map_err(|error| format!("failed to store block: {error:?}"))?;
-    }
-
-    let mut state = decode_state::<E>(era_file.group.era_state, spec)?;
-    let state_root = state
-        .canonical_root()
-        .map_err(|error| format!("failed to hash state: {error:?}"))?;
-    // Use put_cold_state as the split is not updated and we need the state into the cold store.
-    store
-        .put_cold_state(&state_root, &state)
-        .map_err(|error| format!("failed to store state: {error:?}"))?;
-    write_block_root_index_for_era(store, &state, era_number)?;
-
-    Ok(())
-}
+use tracing::warn;
+use tree_hash::TreeHash;
+use types::{BeaconState, ChainSpec, EthSpec, Hash256, HistoricalSummary, SignedBeaconBlock, Slot};
 
 fn decode_block<E: EthSpec>(
     compressed: CompressedSignedBeaconBlock,
@@ -84,6 +29,226 @@ fn decode_state<E: EthSpec>(
         .map_err(|error| format!("failed to decompress state: {error:?}"))?;
     BeaconState::from_ssz_bytes(&bytes, spec)
         .map_err(|error| format!("failed to decode state: {error:?}"))
+}
+
+pub(crate) struct EraFileDir {
+    dir: PathBuf,
+    network_name: String,
+    genesis_validators_root: Hash256,
+    historical_roots: Vec<Hash256>,
+    historical_summaries: Vec<HistoricalSummary>,
+    max_era: u64,
+}
+
+impl EraFileDir {
+    pub(crate) fn new<E: EthSpec>(era_files_dir: &Path, spec: &ChainSpec) -> Result<Self, String> {
+        let mut era_files = list_era_files(era_files_dir)?;
+        era_files.sort_by_key(|(era_number, _)| *era_number);
+
+        let network_name = spec
+            .config_name
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let Some((max_era, reference_path)) = era_files.last().cloned() else {
+            return Err("era files directory is empty".to_string());
+        };
+
+        let reference_state = read_era_state::<E>(&reference_path, &network_name, spec)?;
+
+        // historical_roots was frozen in capella, and continued as historical_summaries
+        let historical_roots = reference_state.historical_roots().to_vec();
+        // Pre-Capella states don't have historical_summaries property
+        let historical_summaries = match reference_state.historical_summaries() {
+            Ok(list) => list.to_vec(),
+            Err(_) => vec![],
+        };
+
+        let dir = era_files_dir.to_path_buf();
+        let era_dir = Self {
+            dir,
+            network_name,
+            genesis_validators_root: reference_state.genesis_validators_root(),
+            historical_roots,
+            historical_summaries,
+            max_era,
+        };
+
+        // Verify that every expected era file name exists in the directory.
+        for era_number in 0..=era_dir.max_era {
+            let expected = era_dir.expected_path(era_number);
+            if !expected.exists() {
+                return Err(format!("missing era file: {expected:?}"));
+            }
+        }
+
+        Ok(era_dir)
+    }
+
+    pub(crate) fn max_era(&self) -> u64 {
+        self.max_era
+    }
+
+    pub(crate) fn import_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+        &self,
+        store: &HotColdDB<E, Hot, Cold>,
+        era_number: u64,
+        spec: &ChainSpec,
+    ) -> Result<(), String> {
+        let path = self.expected_path(era_number);
+        let file = File::open(path).map_err(|error| format!("failed to open era file: {error}"))?;
+        let era_file = EraReader::new(file)
+            .read_and_assemble(self.network_name.clone())
+            .map_err(|error| format!("failed to parse era file: {error:?}"))?;
+
+        // Consistency checks: ensure the era state matches the expected historical root and that
+        // each block root matches the state block_roots for its slot.
+        let mut state = decode_state::<E>(era_file.group.era_state, spec)?;
+        let expected_root = self
+            .era_file_name_root(era_number)
+            .ok_or_else(|| format!("missing historical root for era {era_number}"))?;
+        let actual_root = era_root_from_state(&state, era_number)?;
+        if expected_root != actual_root {
+            return Err(format!(
+                "era root mismatch for era {era_number}: expected {expected_root:?}, got {actual_root:?}"
+            ));
+        }
+
+        let slots_per_historical_root = E::slots_per_historical_root() as u64;
+        let _start_slot = Slot::new(era_number.saturating_sub(1) * slots_per_historical_root);
+        let end_slot = Slot::new(era_number * slots_per_historical_root);
+        if state.slot() != end_slot {
+            return Err(format!(
+                "era state slot mismatch: expected {end_slot}, got {}",
+                state.slot()
+            ));
+        }
+
+        // Check that the block roots in this state match the ones in the last state,
+        // only if the state is post-capella (historical_summaries exist).
+        if let Ok(summaries) = state.historical_summaries()
+            && era_number > 0
+        {
+            let index = era_number.saturating_sub(1) as usize;
+            // historical_summaries started to be appended after capella, so we need to offset
+            let summary_index = index
+                .checked_sub(self.historical_roots.len())
+                .ok_or_else(|| format!("missing historical summary index for era {era_number}"))?;
+            let summary = summaries
+                .get(summary_index)
+                .ok_or_else(|| format!("missing historical summary for era {era_number}"))?;
+            let expected_root = state.block_roots().tree_hash_root();
+            let actual_root = summary.block_summary_root();
+            if actual_root != expected_root {
+                return Err(format!(
+                    "block summary root mismatch for era {era_number}: {expected_root:?} != {actual_root:?}",
+                ));
+            }
+        }
+
+        // TODO(era): Block signatures are not verified here and are trusted.
+        for compressed_block in era_file.group.blocks {
+            let block = decode_block::<E>(compressed_block, spec)?;
+            let slot = block.slot();
+            let block_root = block.canonical_root();
+
+            // Check consistency that this block is expected w.r.t. the state in the era file.
+            let expected_block_root = state
+                .get_block_root(slot)
+                .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
+            if *expected_block_root != block_root {
+                return Err(format!(
+                    "block root mismatch at slot {slot}: expected {expected_block_root:?}, got {block_root:?}"
+                ));
+            }
+            store
+                .put_block(&block_root, block)
+                .map_err(|error| format!("failed to store block: {error:?}"))?;
+        }
+
+        // Populate the cold DB slot -> block root index from the state.block_roots()
+        write_block_root_index_for_era(store, &state, era_number)?;
+
+        let state_root = state
+            .canonical_root()
+            .map_err(|error| format!("failed to hash state: {error:?}"))?;
+        // Use put_cold_state as the split is not updated and we need the state into the cold store.
+        store
+            .put_cold_state(&state_root, &state)
+            .map_err(|error| format!("failed to store state: {error:?}"))?;
+        Ok(())
+    }
+
+    fn expected_path(&self, era_number: u64) -> PathBuf {
+        let root = self
+            .era_file_name_root(era_number)
+            .unwrap_or_else(Hash256::zero);
+        let short = root
+            .as_slice()
+            .iter()
+            .take(4)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let filename = format!("{}-{era_number:05}-{short}.era", self.network_name);
+        self.dir.join(filename)
+    }
+
+    // era_file_name_root for file naming:
+    // short-era-root is the first 4 bytes of the last historical root in the last state in the
+    // era file, lower-case hex-encoded (8 characters), except the genesis era which instead
+    // uses the genesis_validators_root field from the genesis state.
+    // - The root is available as state.historical_roots[era - 1] except for genesis, which is
+    //   state.genesis_validators_root
+    // - Post-Capella, the root must be computed from
+    //   `state.historical_summaries[era - state.historical_roots.len - 1]`
+    fn era_file_name_root(&self, era_number: u64) -> Option<Hash256> {
+        if era_number == 0 {
+            return Some(self.genesis_validators_root);
+        }
+        let index = era_number.saturating_sub(1) as usize;
+        if let Some(root) = self.historical_roots.get(index) {
+            return Some(*root);
+        }
+        let summary_index = index.saturating_sub(self.historical_roots.len());
+        self.historical_summaries
+            .get(summary_index)
+            .map(|summary| summary.tree_hash_root())
+    }
+}
+
+fn read_era_state<E: EthSpec>(
+    path: &Path,
+    network_name: &str,
+    spec: &ChainSpec,
+) -> Result<BeaconState<E>, String> {
+    let file = File::open(path).map_err(|error| format!("failed to open era file: {error}"))?;
+    let era_file = EraReader::new(file)
+        .read_and_assemble(network_name.to_string())
+        .map_err(|error| format!("failed to parse era file: {error:?}"))?;
+    decode_state::<E>(era_file.group.era_state, spec)
+}
+
+fn era_root_from_state<E: EthSpec>(
+    state: &BeaconState<E>,
+    era_number: u64,
+) -> Result<Hash256, String> {
+    if era_number == 0 {
+        return Ok(state.genesis_validators_root());
+    }
+    let index = era_number
+        .checked_sub(1)
+        .ok_or_else(|| "invalid era number".to_string())? as usize;
+    if let Some(root) = state.historical_roots().get(index) {
+        return Ok(*root);
+    }
+    if let Ok(summaries) = state.historical_summaries() {
+        let summary_index = index.saturating_sub(state.historical_roots().len());
+        let summary = summaries
+            .get(summary_index)
+            .ok_or_else(|| "missing historical summary".to_string())?;
+        return Ok(summary.tree_hash_root());
+    }
+    Err(format!("missing historical root for era {era_number}"))
 }
 
 fn write_block_root_index_for_era<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
