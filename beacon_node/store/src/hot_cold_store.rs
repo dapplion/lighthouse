@@ -88,6 +88,16 @@ pub struct HotColdDB<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
     _phantom: PhantomData<E>,
 }
 
+fn era_import_pointer_key() -> &'static [u8] {
+    b"era_import_ptr"
+}
+
+fn era_reconstruction_key(era_number: u64) -> Vec<u8> {
+    let mut key = b"era_recon:".to_vec();
+    key.extend_from_slice(&era_number.to_be_bytes());
+    key
+}
+
 #[derive(Debug)]
 struct BlockCache<E: EthSpec> {
     block_cache: LruCache<Hash256, SignedBeaconBlock<E>>,
@@ -3131,6 +3141,36 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     /// Return `true` if compaction on finalization/pruning is enabled.
     pub fn compact_on_prune(&self) -> bool {
         self.config.compact_on_prune
+    }
+
+    pub fn get_era_import_pointer(&self) -> Result<Option<u64>, Error> {
+        let Some(bytes) = self.hot_db.get_bytes(DBColumn::BeaconMeta, era_import_pointer_key())?
+        else {
+            return Ok(None);
+        };
+        let bytes: [u8; 8] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::InvalidBytes)?;
+        Ok(Some(u64::from_be_bytes(bytes)))
+    }
+
+    pub fn set_era_import_pointer(&self, era_number: u64) -> Result<(), Error> {
+        self.hot_db
+            .put_bytes(DBColumn::BeaconMeta, era_import_pointer_key(), &era_number.to_be_bytes())
+    }
+
+    pub fn era_reconstruction_done(&self, era_number: u64) -> Result<bool, Error> {
+        self.hot_db
+            .key_exists(DBColumn::BeaconMeta, &era_reconstruction_key(era_number))
+    }
+
+    pub fn set_era_reconstruction_done(&self, era_number: u64) -> Result<(), Error> {
+        self.hot_db.put_bytes(
+            DBColumn::BeaconMeta,
+            &era_reconstruction_key(era_number),
+            &[1u8],
+        )
     }
 
     /// Load the timestamp of the last compaction as a `Duration` since the UNIX epoch.

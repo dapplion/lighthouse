@@ -6,7 +6,7 @@ use crate::beacon_chain::{
 use crate::beacon_proposer_cache::BeaconProposerCache;
 use crate::custody_context::NodeCustodyType;
 use crate::data_availability_checker::DataAvailabilityChecker;
-use crate::era_file_consumer::import_era_files;
+use crate::era_file_consumer::EraFileDir;
 use crate::fork_choice_signal::ForkChoiceSignalTx;
 use crate::fork_revert::{reset_fork_choice_to_finalization, revert_to_fork_boundary};
 use crate::graffiti_calculator::{GraffitiCalculator, GraffitiOrigin};
@@ -42,7 +42,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use store::{DBColumn, Error as StoreError, HotColdDB, ItemStore, KeyValueStoreOp};
+use store::{Error as StoreError, HotColdDB, ItemStore, KeyValueStoreOp};
 use task_executor::{ShutdownReason, TaskExecutor};
 use tracing::{debug, error, info};
 use tree_hash::TreeHash;
@@ -236,20 +236,56 @@ where
         }
 
         // Import all blocks and states from the ERA files.
-        info!(?era_files_dir, "Importing blocks and states from ERA files");
-        let max_era = import_era_files(&store, era_files_dir, &builder.spec)?;
-
-        info!(max_era, "Reconstructing states from ERA files");
+        let era_dir = EraFileDir::new::<E>(era_files_dir, &builder.spec)?;
+        let max_era = era_dir.max_era();
         let slots_per_historical_root = E::slots_per_historical_root() as u64;
+
+        let imported_era_files_pointer = store
+            .get_era_import_pointer()
+            .map_err(|error| format!("Era import pointer read failed: {error:?}"))?
+            .unwrap_or(0);
+        info!(
+            ?era_files_dir,
+            max_slot = max_era * slots_per_historical_root,
+            current_slot = imported_era_files_pointer * slots_per_historical_root,
+            "Importing blocks and states from ERA files"
+        );
+        let mut import_progress = Speedo::default();
+        let mut import_last_log = Instant::now();
+        for era_number in imported_era_files_pointer + 1..=max_era {
+            era_dir.import_era_file(&store, era_number, &builder.spec)?;
+            store
+                .set_era_import_pointer(era_number)
+                .map_err(|error| format!("Era import pointer write failed: {error:?}"))?;
+
+            let now = Instant::now();
+            let done_slots = era_number * slots_per_historical_root;
+            import_progress.observe(Slot::new(done_slots), now);
+            if now.duration_since(import_last_log) >= Duration::from_secs(5) {
+                import_last_log = now;
+                info!(
+                    completed_era_files = era_number,
+                    total_era_files = max_era,
+                    completed_slots = done_slots,
+                    total_slots = max_era * slots_per_historical_root,
+                    slots_per_second = import_progress.slots_per_second().unwrap_or(0.0),
+                    "Importing era files"
+                );
+            }
+        }
+
+        info!(
+            ?era_files_dir,
+            max_slot = max_era * slots_per_historical_root,
+            "Reconstructing states from ERA files"
+        );
         let total_era_files = max_era;
         let completed_era_files = Arc::new(AtomicU64::new(0));
         let progress = Arc::new(Mutex::new((Speedo::default(), Instant::now())));
 
         (1..=max_era).into_par_iter().try_for_each(|era_number| {
-            let already_reconstructed_db_key = era_reconstruction_key(era_number);
             let already_reconstructed = store
-                .hot_db
-                .key_exists(DBColumn::BeaconMeta, &already_reconstructed_db_key)
+                .era_reconstruction_done(era_number)
                 .map_err(|error| format!("Era reconstruction marker read failed: {error:?}"))?;
 
             if !already_reconstructed {
@@ -268,8 +304,7 @@ where
                     })?;
 
                 store
-                    .hot_db
-                    .put_bytes(DBColumn::BeaconMeta, &already_reconstructed_db_key, &[1u8])
+                    .set_era_reconstruction_done(era_number)
                     .map_err(|error| {
                         format!("Era reconstruction marker write failed: {error:?}")
                     })?;
@@ -1331,12 +1366,6 @@ fn build_data_columns_from_blobs<E: EthSpec>(
         }
     };
     Ok(data_columns)
-}
-
-fn era_reconstruction_key(era_number: u64) -> Vec<u8> {
-    let mut key = b"era_recon:".to_vec();
-    key.extend_from_slice(&era_number.to_be_bytes());
-    key
 }
 
 /// Track recent slot completion rates for era reconstruction.
