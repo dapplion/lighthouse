@@ -615,7 +615,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 };
                 Work::ChainSegment(Box::pin(process_fn))
             }
-            ChainSegmentProcessId::BackSyncBatchId(_) | ChainSegmentProcessId::BackSyncEraBatchId(_) => {
+            ChainSegmentProcessId::BackSyncBatchId(_) => {
                 let process_fn =
                     move || processor.process_chain_segment_backfill(process_id, blocks);
                 Work::ChainSegmentBackfill(Box::new(process_fn))

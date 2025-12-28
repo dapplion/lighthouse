@@ -36,8 +36,6 @@ pub enum ChainSegmentProcessId {
     RangeBatchId(ChainId, Epoch),
     /// Processing ID for a backfill syncing batch.
     BackSyncBatchId(Epoch),
-    /// Processing ID for an era backfill syncing batch.
-    BackSyncEraBatchId(u64),
 }
 
 /// Returned when a chain segment import fails.
