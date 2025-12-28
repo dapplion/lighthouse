@@ -40,8 +40,9 @@ use state_processing::{AllCaches, per_slot_processing};
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
-use store::{Error as StoreError, HotColdDB, ItemStore, KeyValueStoreOp};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use store::{DBColumn, Error as StoreError, HotColdDB, ItemStore, KeyValueStoreOp};
 use task_executor::{ShutdownReason, TaskExecutor};
 use tracing::{debug, error, info};
 use tree_hash::TreeHash;
@@ -221,6 +222,8 @@ where
         let builder = self.genesis_state(genesis_state.clone())?;
         let store = builder.store.clone().ok_or("era_files requires a store.")?;
 
+        // Explicitly store the genesis state in the cold DB. In testing this seems necessary.
+        // TODO(era): Review why ^
         {
             let mut ops = vec![];
             store
@@ -232,22 +235,65 @@ where
                 .map_err(|e| format!("Error writing genesis state: {e:?}"))?;
         }
 
+        // Import all blocks and states from the ERA files.
+        info!(?era_files_dir, "Importing blocks and states from ERA files");
         let max_era = import_era_files(&store, era_files_dir, &builder.spec)?;
+
+        info!(max_era, "Reconstructing states from ERA files");
         let slots_per_historical_root = E::slots_per_historical_root() as u64;
+        let total_era_files = max_era;
+        let completed_era_files = Arc::new(AtomicU64::new(0));
+        let progress = Arc::new(Mutex::new((Speedo::default(), Instant::now())));
+
         (1..=max_era).into_par_iter().try_for_each(|era_number| {
-            let start_slot = Slot::new((era_number - 1) * slots_per_historical_root);
-            let end_slot = Slot::new(era_number * slots_per_historical_root);
-            store
-                .reconstruct_historic_states_on_range(
-                    // Start reconstruction with state at the era file start, but the state has the
-                    // block already applied. So start with the block at the next slot.
-                    start_slot,
-                    start_slot + Slot::new(1),
-                    end_slot,
-                )
-                .map_err(|error| {
-                    format!("Era reconstruction failed for era {era_number}: {error:?}")
-                })
+            let already_reconstructed_db_key = era_reconstruction_key(era_number);
+            let already_reconstructed = store
+                .hot_db
+                .key_exists(DBColumn::BeaconMeta, &already_reconstructed_db_key)
+                .map_err(|error| format!("Era reconstruction marker read failed: {error:?}"))?;
+
+            if !already_reconstructed {
+                let start_slot = Slot::new((era_number - 1) * slots_per_historical_root);
+                let end_slot = Slot::new(era_number * slots_per_historical_root);
+                store
+                    .reconstruct_historic_states_on_range(
+                        // Start reconstruction with state at the era file start, but the state has the
+                        // block already applied. So start with the block at the next slot.
+                        start_slot,
+                        start_slot + Slot::new(1),
+                        end_slot,
+                    )
+                    .map_err(|error| {
+                        format!("Era reconstruction failed for era {era_number}: {error:?}")
+                    })?;
+
+                store
+                    .hot_db
+                    .put_bytes(DBColumn::BeaconMeta, &already_reconstructed_db_key, &[1u8])
+                    .map_err(|error| {
+                        format!("Era reconstruction marker write failed: {error:?}")
+                    })?;
+            }
+
+            let now = Instant::now();
+            let done_era_files = completed_era_files.fetch_add(1, Ordering::Relaxed) + 1;
+            let done_slots = done_era_files.saturating_mul(slots_per_historical_root);
+            let mut progress = progress.lock();
+            let (speedo, last_log) = &mut *progress;
+            speedo.observe(Slot::new(done_slots), now);
+            if now.duration_since(*last_log) >= Duration::from_secs(5) {
+                *last_log = now;
+                info!(
+                    completed_era_files = done_era_files,
+                    total_era_files,
+                    completed_slots = done_slots,
+                    total_slots = total_era_files.saturating_mul(slots_per_historical_root),
+                    slots_per_second = speedo.slots_per_second().unwrap_or(0.0),
+                    "Reconstructing from era files"
+                );
+            }
+
+            Ok::<(), String>(())
         })?;
 
         Ok(builder)
@@ -1285,6 +1331,52 @@ fn build_data_columns_from_blobs<E: EthSpec>(
         }
     };
     Ok(data_columns)
+}
+
+fn era_reconstruction_key(era_number: u64) -> Vec<u8> {
+    let mut key = b"era_recon:".to_vec();
+    key.extend_from_slice(&era_number.to_be_bytes());
+    key
+}
+
+/// Track recent slot completion rates for era reconstruction.
+#[derive(Default)]
+struct Speedo(Vec<(Slot, Instant)>);
+
+impl Speedo {
+    fn observe(&mut self, slot: Slot, instant: Instant) {
+        const SPEEDO_OBSERVATIONS: usize = 4;
+        if self.0.len() > SPEEDO_OBSERVATIONS {
+            self.0.remove(0);
+        }
+        self.0.push((slot, instant));
+    }
+
+    fn slots_per_second(&self) -> Option<f64> {
+        let speeds = self
+            .0
+            .windows(2)
+            .filter_map(|windows| {
+                let (slot_a, instant_a) = windows[0];
+                let (slot_b, instant_b) = windows[1];
+                let distance = f64::from((slot_b - slot_a).as_u64() as u32);
+                let seconds = f64::from((instant_b - instant_a).as_millis() as u32) / 1_000.0;
+                if seconds > 0.0 {
+                    Some(distance / seconds)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<f64>>();
+
+        let count = speeds.len();
+        let sum: f64 = speeds.iter().sum();
+        if count > 0 {
+            Some(sum / f64::from(count as u32))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(not(debug_assertions))]
