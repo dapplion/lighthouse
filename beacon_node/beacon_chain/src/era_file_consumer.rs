@@ -1,11 +1,12 @@
 use bls::FixedBytesExtended;
+use rayon::prelude::*;
 use reth_era::common::file_ops::StreamReader;
 use reth_era::era::file::EraReader;
 use reth_era::era::types::consensus::{CompressedBeaconState, CompressedSignedBeaconBlock};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use store::{DBColumn, HotColdDB, ItemStore, KeyValueStoreOp};
-use tracing::warn;
+use tracing::{debug_span, instrument, warn};
 use tree_hash::TreeHash;
 use types::{
     BeaconState, ChainSpec, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
@@ -92,6 +93,7 @@ impl EraFileDir {
         self.max_era
     }
 
+    #[instrument(level = "debug", skip_all, fields(era_number = %era_number))]
     pub(crate) fn import_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         &self,
         store: &HotColdDB<E, Hot, Cold>,
@@ -100,13 +102,19 @@ impl EraFileDir {
     ) -> Result<(), String> {
         let path = self.expected_path(era_number);
         let file = File::open(path).map_err(|error| format!("failed to open era file: {error}"))?;
-        let era_file = EraReader::new(file)
-            .read_and_assemble(self.network_name.clone())
-            .map_err(|error| format!("failed to parse era file: {error:?}"))?;
+        let era_file = {
+            let _span = debug_span!("era_import_read").entered();
+            EraReader::new(file)
+                .read_and_assemble(self.network_name.clone())
+                .map_err(|error| format!("failed to parse era file: {error:?}"))?
+        };
 
         // Consistency checks: ensure the era state matches the expected historical root and that
         // each block root matches the state block_roots for its slot.
-        let mut state = decode_state::<E>(era_file.group.era_state, spec)?;
+        let mut state = {
+            let _span = debug_span!("era_import_decode_state").entered();
+            decode_state::<E>(era_file.group.era_state, spec)?
+        };
         let expected_root = self
             .era_file_name_root(era_number)
             .ok_or_else(|| format!("missing historical root for era {era_number}"))?;
@@ -182,37 +190,70 @@ impl EraFileDir {
         }
 
         // TODO(era): Block signatures are not verified here and are trusted.
-        for compressed_block in era_file.group.blocks {
-            let block = decode_block::<E>(compressed_block, spec)?;
-            let slot = block.slot();
-            let block_root = block.canonical_root();
+        // decode and hash is split in two loops to track timings better. If we add spans for each
+        // block it's too short and the data is not really useful.
+        let decoded_blocks = {
+            let _span = debug_span!("era_import_decode_blocks").entered();
+            era_file
+                .group
+                .blocks
+                .into_par_iter()
+                .map(|compressed_block| decode_block::<E>(compressed_block, spec))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let blocks_with_roots = {
+            let _span = debug_span!("era_import_hash_blocks").entered();
+            decoded_blocks
+                .into_par_iter()
+                .map(|block| (block.canonical_root(), block))
+                .collect::<Vec<_>>()
+        };
 
-            // Check consistency that this block is expected w.r.t. the state in the era file.
-            // Since we check that the state block roots match the historical summary, we know that
-            // this block root is the expected one.
-            let expected_block_root = state
-                .get_block_root(slot)
-                .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
-            if *expected_block_root != block_root {
-                return Err(format!(
-                    "block root mismatch at slot {slot}: expected {expected_block_root:?}, got {block_root:?}"
-                ));
+        let mut block_ops = vec![];
+        {
+            let _ = debug_span!("era_import_db_ops_blocks").entered();
+            for (block_root, block) in blocks_with_roots {
+                let slot = block.slot();
+                // Check consistency that this block is expected w.r.t. the state in the era file.
+                // Since we check that the state block roots match the historical summary, we know that
+                // this block root is the expected one.
+                let expected_block_root = state
+                    .get_block_root(slot)
+                    .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
+                if *expected_block_root != block_root {
+                    return Err(format!(
+                        "block root mismatch at slot {slot}: expected {expected_block_root:?}, got {block_root:?}"
+                    ));
+                }
+                store
+                    .block_as_kv_store_ops(&block_root, block, &mut block_ops)
+                    .map_err(|error| format!("failed to store block: {error:?}"))?;
             }
+        }
+        {
+            let _ = debug_span!("era_import_write_blocks").entered();
             store
-                .put_block(&block_root, block)
-                .map_err(|error| format!("failed to store block: {error:?}"))?;
+                .hot_db
+                .do_atomically(block_ops)
+                .map_err(|error| format!("failed to store blocks: {error:?}"))?;
         }
 
         // Populate the cold DB slot -> block root index from the state.block_roots()
-        write_block_root_index_for_era(store, &state, era_number)?;
+        {
+            let _span = debug_span!("era_import_write_block_index").entered();
+            write_block_root_index_for_era(store, &state, era_number)?;
+        }
 
-        let state_root = state
-            .canonical_root()
-            .map_err(|error| format!("failed to hash state: {error:?}"))?;
-        // Use put_cold_state as the split is not updated and we need the state into the cold store.
-        store
-            .put_cold_state(&state_root, &state)
-            .map_err(|error| format!("failed to store state: {error:?}"))?;
+        {
+            let _span = debug_span!("era_import_write_state").entered();
+            let state_root = state
+                .canonical_root()
+                .map_err(|error| format!("failed to hash state: {error:?}"))?;
+            // Use put_cold_state as the split is not updated and we need the state into the cold store.
+            store
+                .put_cold_state(&state_root, &state)
+                .map_err(|error| format!("failed to store state: {error:?}"))?;
+        }
         Ok(())
     }
 
