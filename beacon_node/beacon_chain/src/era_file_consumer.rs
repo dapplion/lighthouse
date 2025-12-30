@@ -6,7 +6,7 @@ use reth_era::era::types::consensus::{CompressedBeaconState, CompressedSignedBea
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use store::{DBColumn, HotColdDB, ItemStore, KeyValueStoreOp};
-use tracing::{debug_span, instrument, warn};
+use tracing::{debug, debug_span, instrument, warn};
 use tree_hash::TreeHash;
 use types::{
     BeaconState, ChainSpec, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
@@ -101,6 +101,7 @@ impl EraFileDir {
         spec: &ChainSpec,
     ) -> Result<(), String> {
         let path = self.expected_path(era_number);
+        debug!(?path, era_number, "Importing era file");
         let file = File::open(path).map_err(|error| format!("failed to open era file: {error}"))?;
         let era_file = {
             let _span = debug_span!("era_import_read").entered();
@@ -189,6 +190,7 @@ impl EraFileDir {
             }
         }
 
+        debug!(era_number, "Importing blocks from era file");
         // TODO(era): Block signatures are not verified here and are trusted.
         // decode and hash is split in two loops to track timings better. If we add spans for each
         // block it's too short and the data is not really useful.
@@ -244,6 +246,7 @@ impl EraFileDir {
             write_block_root_index_for_era(store, &state, era_number)?;
         }
 
+        debug!(era_number, "Importing state from era file");
         {
             let _span = debug_span!("era_import_write_state").entered();
             let state_root = state
