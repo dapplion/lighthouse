@@ -3144,7 +3144,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     }
 
     pub fn get_era_import_pointer(&self) -> Result<Option<u64>, Error> {
-        let Some(bytes) = self.hot_db.get_bytes(DBColumn::BeaconMeta, era_import_pointer_key())?
+        let Some(bytes) = self
+            .hot_db
+            .get_bytes(DBColumn::BeaconMeta, era_import_pointer_key())?
         else {
             return Ok(None);
         };
@@ -3156,8 +3158,11 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     }
 
     pub fn set_era_import_pointer(&self, era_number: u64) -> Result<(), Error> {
-        self.hot_db
-            .put_bytes(DBColumn::BeaconMeta, era_import_pointer_key(), &era_number.to_be_bytes())
+        self.hot_db.put_bytes(
+            DBColumn::BeaconMeta,
+            era_import_pointer_key(),
+            &era_number.to_be_bytes(),
+        )
     }
 
     pub fn era_reconstruction_done(&self, era_number: u64) -> Result<bool, Error> {
