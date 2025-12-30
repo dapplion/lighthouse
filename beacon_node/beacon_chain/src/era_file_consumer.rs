@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use store::{DBColumn, HotColdDB, ItemStore, KeyValueStoreOp};
 use tracing::warn;
 use tree_hash::TreeHash;
-use types::{BeaconState, ChainSpec, EthSpec, Hash256, HistoricalSummary, SignedBeaconBlock, Slot};
+use types::{
+    BeaconState, ChainSpec, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
+    SignedBeaconBlock, Slot,
+};
 
 fn decode_block<E: EthSpec>(
     compressed: CompressedSignedBeaconBlock,
@@ -124,24 +127,56 @@ impl EraFileDir {
             ));
         }
 
-        // Check that the block roots in this state match the ones in the last state,
-        // only if the state is post-capella (historical_summaries exist).
-        if let Ok(summaries) = state.historical_summaries()
-            && era_number > 0
-        {
+        // Check that the block roots vector in this state match the historical summary in the last
+        // state. Asserts that the blocks are exactly the expected ones given a trusted final state
+        if era_number == 0 {
+            // Skip checking genesis state era file for now
+        } else if state.fork_name_unchecked().capella_enabled() {
+            // Post-capella state, check against historical summaries
+            // ```py
+            // historical_summary = HistoricalSummary(
+            //     block_summary_root=hash_tree_root(state.block_roots),
+            //     state_summary_root=hash_tree_root(state.state_roots),
+            // )
+            // state.historical_summaries.append(historical_summary)
+            // ```
             let index = era_number.saturating_sub(1) as usize;
             // historical_summaries started to be appended after capella, so we need to offset
             let summary_index = index
                 .checked_sub(self.historical_roots.len())
                 .ok_or_else(|| format!("missing historical summary index for era {era_number}"))?;
-            let summary = summaries
+            let expected_root = self
+                .historical_summaries
                 .get(summary_index)
-                .ok_or_else(|| format!("missing historical summary for era {era_number}"))?;
-            let expected_root = state.block_roots().tree_hash_root();
-            let actual_root = summary.block_summary_root();
+                .ok_or_else(|| format!("missing historical summary for era {era_number}"))?
+                .block_summary_root();
+            let actual_root = state.block_roots().tree_hash_root();
             if actual_root != expected_root {
                 return Err(format!(
-                    "block summary root mismatch for era {era_number}: {expected_root:?} != {actual_root:?}",
+                    "block summary root post-capella mismatch for era {}: {:?} != {:?}",
+                    era_number, expected_root, actual_root
+                ));
+            }
+        } else {
+            // Pre-capella state, check against historical roots
+            // ```py
+            // historical_batch = HistoricalBatch(block_roots=state.block_roots, state_roots=state.state_roots)
+            // state.historical_roots.append(hash_tree_root(historical_batch))
+            // ```
+            let index = era_number.saturating_sub(1) as usize;
+            let expected_root = *self
+                .historical_roots
+                .get(index)
+                .ok_or_else(|| format!("missing historical root for era {era_number}"))?;
+            let historical_batch = HistoricalBatch::<E> {
+                block_roots: state.block_roots().clone(),
+                state_roots: state.state_roots().clone(),
+            };
+            let actual_root = historical_batch.tree_hash_root();
+            if actual_root != expected_root {
+                return Err(format!(
+                    "block summary root pre-capella mismatch for era {}: {:?} != {:?}",
+                    era_number, expected_root, actual_root
                 ));
             }
         }
@@ -153,6 +188,8 @@ impl EraFileDir {
             let block_root = block.canonical_root();
 
             // Check consistency that this block is expected w.r.t. the state in the era file.
+            // Since we check that the state block roots match the historical summary, we know that
+            // this block root is the expected one.
             let expected_block_root = state
                 .get_block_root(slot)
                 .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
