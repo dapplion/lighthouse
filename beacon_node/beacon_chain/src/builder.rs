@@ -253,12 +253,13 @@ where
         let mut import_progress = Speedo::default();
         let mut import_last_log = Instant::now();
         for era_number in imported_era_files_pointer + 1..=max_era {
-            debug!(?era_files_dir, ?era_number, "Importing ERA file");
+            debug!(?era_files_dir, era_number, "Importing ERA file");
             era_dir.import_era_file(&store, era_number, &builder.spec)?;
-            debug!(?era_files_dir, ?era_number, "Imported ERA file");
+            debug!(?era_files_dir, era_number, "Imported ERA file");
             store
                 .set_era_import_pointer(era_number)
                 .map_err(|error| format!("Era import pointer write failed: {error:?}"))?;
+            debug!(?era_files_dir, era_number, "Persisted era pointer");
 
             let now = Instant::now();
             let done_slots = era_number * slots_per_historical_root;
