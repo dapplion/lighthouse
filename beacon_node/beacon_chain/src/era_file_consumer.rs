@@ -9,7 +9,7 @@ use store::{DBColumn, HotColdDB, ItemStore, KeyValueStoreOp};
 use tracing::{debug, debug_span, instrument, warn};
 use tree_hash::TreeHash;
 use types::{
-    BeaconState, ChainSpec, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
+    BeaconState, ChainSpec, Epoch, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
     SignedBeaconBlock, Slot,
 };
 
@@ -136,11 +136,25 @@ impl EraFileDir {
             ));
         }
 
+        let historical_summaries_active_at_slot = match store.spec.capella_fork_epoch {
+            // For mainnet case, Capella activates at 194048 epoch = 6209536 slot = 758 era number.
+            // The last epoch processing before capella transition adds a last entry to historical
+            // roots. So historical_roots.len() == 758 at the capella fork boundary. An ERA file
+            // includes the state AFTER advanced (or applying) the block at the final slot, so the
+            // state for ERA file 758 is of the Capella variant. However, historical summaries are
+            // still empty.
+            Some(epoch) => {
+                epoch.start_slot(E::slots_per_epoch())
+                    + Slot::new(E::slots_per_historical_root() as u64)
+            }
+            None => Slot::max_value(),
+        };
+
         // Check that the block roots vector in this state match the historical summary in the last
         // state. Asserts that the blocks are exactly the expected ones given a trusted final state
         if era_number == 0 {
             // Skip checking genesis state era file for now
-        } else if state.fork_name_unchecked().capella_enabled() {
+        } else if state.slot() >= historical_summaries_active_at_slot {
             // Post-capella state, check against historical summaries
             // ```py
             // historical_summary = HistoricalSummary(
@@ -357,6 +371,7 @@ fn write_block_root_index_for_era<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore
             let block_root = state
                 .get_block_root(slot)
                 .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
+            // TODO(era): Should we write BeaconBlockRoots for missed slots?
             Ok(KeyValueStoreOp::PutKeyValue(
                 DBColumn::BeaconBlockRoots,
                 slot_u64.to_be_bytes().to_vec(),
