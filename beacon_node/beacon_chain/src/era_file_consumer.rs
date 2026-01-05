@@ -153,7 +153,10 @@ impl EraFileDir {
             // historical_summaries started to be appended after capella, so we need to offset
             let summary_index = index
                 .checked_sub(self.historical_roots.len())
-                .ok_or_else(|| format!("missing historical summary index for era {era_number}"))?;
+                .ok_or_else(|| format!(
+                    "Not enough historical roots era number {era_number} index {index} historical_roots len {}",
+                    self.historical_roots.len()
+                ))?;
             let expected_root = self
                 .historical_summaries
                 .get(summary_index)
