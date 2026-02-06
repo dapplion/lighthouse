@@ -74,7 +74,18 @@ pub fn verify_attestation_for_state<'ctxt, E: EthSpec>(
             );
         }
         AttestationRef::Electra(_) => {
-            verify!(data.index == 0, Invalid::BadCommitteeIndex);
+            // In Gloas, data.index represents payload availability (0 or 1), not committee index
+            if state.fork_name_unchecked().gloas_enabled() {
+                verify!(data.index <= 1, Invalid::BadCommitteeIndex);
+
+                // Same-slot attestations MUST have data.index == 0 (cannot commit to payload)
+                let is_same_slot = state.is_attestation_same_slot(data)?;
+                if is_same_slot {
+                    verify!(data.index == 0, Invalid::BadCommitteeIndex);
+                }
+            } else {
+                verify!(data.index == 0, Invalid::BadCommitteeIndex);
+            }
         }
     }
 

@@ -167,11 +167,38 @@ pub mod altair_deneb {
 
         // Update epoch participation flags.
         let mut proposer_reward_numerator = 0;
+
+        // For Gloas: determine payment index based on target epoch
+        // The builder_pending_payments array has 2*SLOTS_PER_EPOCH slots:
+        // - Indices 0..SLOTS_PER_EPOCH-1: Previous epoch payments
+        // - Indices SLOTS_PER_EPOCH..2*SLOTS_PER_EPOCH-1: Current epoch payments
+        let (is_gloas_same_slot, gloas_payment_index) = if state.fork_name_unchecked().gloas_enabled() {
+            let is_current_epoch = data.target.epoch == current_epoch;
+            let slots_per_epoch = E::slots_per_epoch() as usize;
+            let slot_mod = data.slot.as_u64() as usize % slots_per_epoch;
+
+            let payment_index = if is_current_epoch {
+                // Current epoch: SLOTS_PER_EPOCH + slot % SLOTS_PER_EPOCH
+                slots_per_epoch + slot_mod
+            } else {
+                // Previous epoch: slot % SLOTS_PER_EPOCH
+                slot_mod
+            };
+
+            let is_same_slot = data.index == 0 && state.is_attestation_same_slot(data).unwrap_or(false);
+            (is_same_slot, Some(payment_index))
+        } else {
+            (false, None)
+        };
+
         for index in indexed_att.attesting_indices_iter() {
             let index = *index as usize;
 
             let validator_effective_balance = state.epoch_cache().get_effective_balance(index)?;
             let validator_slashed = state.slashings_cache().is_slashed(index);
+
+            // Track if this validator will set any new participation flag
+            let mut will_set_new_flag = false;
 
             for (flag_index, &weight) in PARTICIPATION_FLAG_WEIGHTS.iter().enumerate() {
                 let epoch_participation = state.get_epoch_participation_mut(
@@ -197,6 +224,26 @@ pub mod altair_deneb {
                             validator_effective_balance,
                             validator_slashed,
                         )?;
+
+                        will_set_new_flag = true;
+                    }
+                }
+            }
+
+            // For Gloas: update builder payment weight for same-slot attestations
+            // Only accumulate if validator set a NEW flag (not on duplicate attestations)
+            if will_set_new_flag && is_gloas_same_slot {
+                if let Some(payment_index) = gloas_payment_index {
+                    if let BeaconState::Gloas(state_gloas) = state {
+                        // Check if there's an active payment at this index
+                        if let Some(payment) = state_gloas.builder_pending_payments.get(payment_index) {
+                            if payment.withdrawal.amount > 0 {
+                                // Accumulate validator's effective balance to payment weight
+                                let payment = state_gloas.builder_pending_payments.get_mut(payment_index)
+                                    .ok_or(BeaconStateError::UnknownBuilder(payment_index as u64))?;
+                                payment.weight = payment.weight.safe_add(validator_effective_balance)?;
+                            }
+                        }
                     }
                 }
             }
