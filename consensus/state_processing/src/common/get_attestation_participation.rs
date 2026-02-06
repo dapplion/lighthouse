@@ -54,7 +54,25 @@ pub fn get_attestation_participation_flag_indices<E: EthSpec>(
     }
 
     if is_matching_head && inclusion_delay == spec.min_attestation_inclusion_delay {
-        participation_flag_indices.push(TIMELY_HEAD_FLAG_INDEX);
+        // In Gloas, for previous-slot attestations (data.index == 1), only set the head flag
+        // if the execution payload is also available/matching
+        let should_set_head_flag = if state.fork_name_unchecked().gloas_enabled() && data.index == 1 {
+            // Check if execution payload is available for the attested slot
+            // The execution_payload_availability bitvector is indexed by slot % SLOTS_PER_HISTORICAL_ROOT
+            use types::BeaconState;
+            if let BeaconState::Gloas(state_gloas) = state {
+                let index = data.slot.as_u64() as usize % E::slots_per_historical_root();
+                state_gloas.execution_payload_availability.get(index).unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            true
+        };
+
+        if should_set_head_flag {
+            participation_flag_indices.push(TIMELY_HEAD_FLAG_INDEX);
+        }
     }
     Ok(participation_flag_indices)
 }
