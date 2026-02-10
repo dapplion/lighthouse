@@ -496,6 +496,8 @@ Flags:
       --enable-private-discovery
           Lighthouse by default does not discover private IP addresses. Set this
           flag to enable connection attempts to local addresses.
+      --era-files-dir <DIR>
+          Directory containing `.era` files to use for backfill.
       --genesis-backfill
           Attempts to download blocks all the way back to genesis when
           checkpoint syncing.
