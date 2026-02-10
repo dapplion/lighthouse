@@ -132,6 +132,7 @@ impl ApiTester {
             },
             sse_logging_components: None,
             slot_clock: slot_clock.clone(),
+            version: "test".to_string(),
         });
         let ctx = context.clone();
         let (listening_socket, server) =
@@ -237,7 +238,7 @@ impl ApiTester {
         let result = self.client.get_lighthouse_version().await.unwrap().data;
 
         let expected = VersionData {
-            version: lighthouse_version::version_with_platform(),
+            version: "test".to_string(),
         };
 
         assert_eq!(result, expected);

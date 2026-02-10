@@ -6,7 +6,9 @@ use crate::config::{ClientGenesis, Config as ClientConfig};
 use crate::notifier::spawn_notifier;
 use beacon_chain::attestation_simulator::start_attestation_simulator_service;
 use beacon_chain::data_availability_checker::start_availability_cache_maintenance_service;
-use beacon_chain::graffiti_calculator::start_engine_version_cache_refresh_service;
+use beacon_chain::graffiti_calculator::{
+    GraffitiOrigin, start_engine_version_cache_refresh_service,
+};
 use beacon_chain::proposer_prep_service::start_proposer_prep_service;
 use beacon_chain::schema_change::migrate_schema;
 use beacon_chain::{
@@ -90,6 +92,7 @@ pub struct ClientBuilder<T: BeaconChainTypes> {
     beacon_processor_channels: Option<BeaconProcessorChannels<T::EthSpec>>,
     light_client_server_rv: Option<Receiver<LightClientProducerEvent<T::EthSpec>>>,
     eth_spec_instance: T::EthSpec,
+    version_with_platform: String,
 }
 
 impl<TSlotClock, E, THotStore, TColdStore>
@@ -123,6 +126,7 @@ where
             beacon_processor_config: None,
             beacon_processor_channels: None,
             light_client_server_rv: None,
+            version_with_platform: String::new(),
         }
     }
 
@@ -158,12 +162,20 @@ where
         config: ClientConfig,
         node_id: [u8; 32],
     ) -> Result<Self, String> {
+        self.version_with_platform = config.version_with_platform.clone();
+
         let store = self.store.clone();
         let chain_spec = self.chain_spec.clone();
         let runtime_context = self.runtime_context.clone();
         let eth_spec_instance = self.eth_spec_instance.clone();
         let chain_config = config.chain.clone();
-        let beacon_graffiti = config.beacon_graffiti;
+        let beacon_graffiti = if matches!(config.beacon_graffiti, GraffitiOrigin::Calculated(_))
+            && !config.version.is_empty()
+        {
+            GraffitiOrigin::from_version(&config.version)
+        } else {
+            config.beacon_graffiti
+        };
 
         let store = store.ok_or("beacon_chain_start_method requires a store")?;
         let runtime_context =
@@ -208,6 +220,7 @@ where
             )
             .chain_config(chain_config)
             .beacon_graffiti(beacon_graffiti)
+            .commit_prefix(config.commit_prefix.clone())
             .event_handler(event_handler)
             .execution_layer(execution_layer)
             .node_custody_type(config.chain.node_custody_type)
@@ -639,6 +652,7 @@ where
                 network_globals: self.network_globals.clone(),
                 beacon_processor_send: Some(beacon_processor_channels.beacon_processor_tx.clone()),
                 sse_logging_components: runtime_context.sse_logging_components.clone(),
+                version: self.version_with_platform.clone(),
             });
 
             let exit = runtime_context.executor.exit();
@@ -669,6 +683,7 @@ where
                 db_path: self.db_path.clone(),
                 freezer_db_path: self.freezer_db_path.clone(),
                 gossipsub_registry: self.libp2p_registry.take().map(std::sync::Mutex::new),
+                version: self.version_with_platform.clone(),
             });
 
             let exit = runtime_context.executor.exit();

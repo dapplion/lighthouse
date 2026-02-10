@@ -76,7 +76,7 @@ impl From<ProcessHealth> for ProcessMetrics {
             cpu_process_seconds_total: health.pid_process_seconds_total,
             memory_process_bytes: health.pid_mem_resident_set_size,
             client_name: CLIENT_NAME.to_string(),
-            client_version: client_version().unwrap_or_default(),
+            client_version: client_version(),
             client_build: client_build(),
         }
     }
@@ -164,10 +164,8 @@ pub struct ValidatorProcessMetrics {
 }
 
 /// Returns the client version
-fn client_version() -> Option<String> {
-    let re = regex::Regex::new(r"\d+\.\d+\.\d+").expect("Regex is valid");
-    re.find(lighthouse_version::VERSION)
-        .map(|m| m.as_str().to_string())
+fn client_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// Returns the client build

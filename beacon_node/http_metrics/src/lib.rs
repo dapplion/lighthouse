@@ -5,7 +5,6 @@ mod metrics;
 
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::prometheus_client::registry::Registry;
-use lighthouse_version::version_with_platform;
 use logging::crit;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -42,6 +41,7 @@ pub struct Context<T: BeaconChainTypes> {
     pub db_path: Option<PathBuf>,
     pub freezer_db_path: Option<PathBuf>,
     pub gossipsub_registry: Option<std::sync::Mutex<Registry>>,
+    pub version: String,
 }
 
 /// Configuration for the HTTP server.
@@ -86,6 +86,7 @@ pub fn serve<T: BeaconChainTypes>(
     shutdown: impl Future<Output = ()> + Send + Sync + 'static,
 ) -> Result<(SocketAddr, impl Future<Output = ()>), Error> {
     let config = &ctx.config;
+    let version = ctx.version.clone();
 
     // Configure CORS.
     let cors_builder = {
@@ -132,7 +133,7 @@ pub fn serve<T: BeaconChainTypes>(
             )
         })
         // Add a `Server` header.
-        .map(|reply| warp::reply::with_header(reply, "Server", &version_with_platform()))
+        .map(move |reply| warp::reply::with_header(reply, "Server", &version))
         .with(cors_builder.build());
 
     let (listening_socket, server) = warp::serve(routes).try_bind_with_graceful_shutdown(

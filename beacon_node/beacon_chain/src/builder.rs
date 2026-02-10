@@ -97,6 +97,7 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     spec: Arc<ChainSpec>,
     chain_config: ChainConfig,
     beacon_graffiti: GraffitiOrigin,
+    commit_prefix: String,
     slasher: Option<Arc<Slasher<T::EthSpec>>>,
     // Pending I/O batch that is constructed during building and should be executed atomically
     // alongside `PersistedBeaconChain` storage when `BeaconChainBuilder::build` is called.
@@ -139,6 +140,7 @@ where
             spec: Arc::new(E::default_spec()),
             chain_config: ChainConfig::default(),
             beacon_graffiti: GraffitiOrigin::default(),
+            commit_prefix: String::new(),
             slasher: None,
             pending_io_batch: vec![],
             kzg,
@@ -709,6 +711,12 @@ where
         self
     }
 
+    /// Sets the `commit_prefix` field used by the graffiti calculator.
+    pub fn commit_prefix(mut self, commit_prefix: String) -> Self {
+        self.commit_prefix = commit_prefix;
+        self
+    }
+
     /// Sets the `ChainConfig` that determines `BeaconChain` runtime behaviour.
     pub fn chain_config(mut self, config: ChainConfig) -> Self {
         self.chain_config = config;
@@ -1040,6 +1048,7 @@ where
                 self.beacon_graffiti,
                 self.execution_layer,
                 slot_clock.slot_duration() * E::slots_per_epoch() as u32,
+                self.commit_prefix,
             ),
             slasher: self.slasher.clone(),
             validator_monitor: RwLock::new(validator_monitor),

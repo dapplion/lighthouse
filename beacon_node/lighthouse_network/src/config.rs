@@ -82,8 +82,14 @@ pub struct Config {
     /// Disables peer scoring altogether.
     pub disable_peer_scoring: bool,
 
-    /// Client version
+    /// Client version (e.g. "Lighthouse/v8.0.0-67da032/x86_64-linux")
     pub client_version: String,
+
+    /// Client name for ENR (e.g. "Lighthouse")
+    pub enr_client_name: String,
+
+    /// Semantic version for ENR (e.g. "8.0.0")
+    pub enr_version: String,
 
     /// Disables the discovery protocol from starting.
     pub disable_discovery: bool,
@@ -346,7 +352,9 @@ impl Default for Config {
             libp2p_nodes: vec![],
             trusted_peers: vec![],
             disable_peer_scoring: false,
-            client_version: lighthouse_version::version_with_platform(),
+            client_version: String::new(),
+            enr_client_name: String::new(),
+            enr_version: String::new(),
             disable_discovery: false,
             disable_quic_support: false,
             upnp_enabled: true,

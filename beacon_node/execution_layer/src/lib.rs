@@ -4,7 +4,7 @@
 //! This crate only provides useful functionality for "The Merge", it does not provide any of the
 //! deposit-contract functionality that the `beacon_node/eth1` crate already provides.
 
-use crate::json_structures::{BlobAndProofV1, BlobAndProofV2};
+use crate::json_structures::{BlobAndProofV1, BlobAndProofV2, JsonClientVersionV1};
 use crate::payload_cache::PayloadCache;
 use arc_swap::ArcSwapOption;
 use auth::{Auth, JwtKey, strip_prefix};
@@ -467,6 +467,10 @@ pub struct Config {
     /// Default directory for the jwt secret if not provided through cli.
     pub default_datadir: PathBuf,
     pub execution_timeout_multiplier: Option<u32>,
+    /// Version string for identifying this CL client to the EL (e.g. "Lighthouse/v8.0.0-67da032").
+    pub version: String,
+    /// First 8 chars of the git commit hash.
+    pub commit_prefix: String,
 }
 
 /// Provides access to one execution engine and provides a neat interface for consumption by the
@@ -491,7 +495,16 @@ impl<E: EthSpec> ExecutionLayer<E> {
             jwt_version,
             default_datadir,
             execution_timeout_multiplier,
+            version,
+            commit_prefix,
         } = config;
+
+        let client_version = JsonClientVersionV1 {
+            code: ClientCode::Lighthouse.to_string(),
+            name: "Lighthouse".to_string(),
+            version: version.replace("Lighthouse/", ""),
+            commit: commit_prefix,
+        };
 
         let execution_url = url.ok_or(Error::NoEngine)?;
 
@@ -530,8 +543,13 @@ impl<E: EthSpec> ExecutionLayer<E> {
         let engine: Engine = {
             let auth = Auth::new(jwt_key, jwt_id, jwt_version);
             debug!(endpoint = %execution_url, jwt_path = ?secret_file.as_path(),"Loaded execution endpoint");
-            let api = HttpJsonRpc::new_with_auth(execution_url, auth, execution_timeout_multiplier)
-                .map_err(Error::ApiError)?;
+            let api = HttpJsonRpc::new_with_auth(
+                execution_url,
+                auth,
+                execution_timeout_multiplier,
+                client_version,
+            )
+            .map_err(Error::ApiError)?;
             Engine::new(api, executor.clone())
         };
 

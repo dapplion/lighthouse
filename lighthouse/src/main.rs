@@ -16,7 +16,7 @@ use environment::{EnvironmentBuilder, LoggerConfig};
 use eth2_network_config::{DEFAULT_HARDCODED_NETWORK, Eth2NetworkConfig, HARDCODED_NET_NAMES};
 use ethereum_hashing::have_sha_extensions;
 use futures::TryFutureExt;
-use lighthouse_version::VERSION;
+use lighthouse_version::{COMMIT_PREFIX, VERSION, client_name, version, version_with_platform};
 use logging::{MetricsLayer, build_workspace_filter, crit};
 use malloc_utils::configure_memory_allocator;
 use opentelemetry::trace::TracerProvider;
@@ -783,8 +783,9 @@ fn run<E: EthSpec>(
         Ok(LighthouseSubcommands::ValidatorClient(validator_client_config)) => {
             let context = environment.core_context();
             let executor = context.executor.clone();
-            let config = validator_client::Config::from_cli(matches, &validator_client_config)
+            let mut config = validator_client::Config::from_cli(matches, &validator_client_config)
                 .map_err(|e| format!("Unable to initialize validator config: {}", e))?;
+            config.version_with_platform = version_with_platform();
             // Dump configs if `dump-config` or `dump-chain-config` flags are set
             clap_utils::check_dump_configs::<_, E>(matches, &config, &context.eth2_config.spec)?;
 
@@ -823,6 +824,18 @@ fn run<E: EthSpec>(
             let executor = context.executor.clone();
             let mut config = beacon_node::get_config::<E>(matches, &context)?;
             config.logger_config = logger_config;
+
+            // Set version fields from the binary's lighthouse_version crate.
+            config.version = VERSION.to_string();
+            config.version_with_platform = version_with_platform();
+            config.commit_prefix = COMMIT_PREFIX.to_string();
+            config.network.client_version = version_with_platform();
+            config.network.enr_client_name = client_name().to_string();
+            config.network.enr_version = version().to_string();
+            if let Some(ref mut el_config) = config.execution_layer {
+                el_config.version = VERSION.to_string();
+                el_config.commit_prefix = COMMIT_PREFIX.to_string();
+            }
             // Dump configs if `dump-config` or `dump-chain-config` flags are set
             clap_utils::check_dump_configs::<_, E>(matches, &config, &context.eth2_config.spec)?;
 

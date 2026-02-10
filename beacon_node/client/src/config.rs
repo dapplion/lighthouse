@@ -51,6 +51,15 @@ pub enum ClientGenesis {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     data_dir: PathBuf,
+    /// Version string (e.g. "Lighthouse/v5.0.0-abc12345/x86_64-linux"). Set by the binary.
+    #[serde(skip)]
+    pub version: String,
+    /// Version with platform info for identifying this node in HTTP headers.
+    #[serde(skip)]
+    pub version_with_platform: String,
+    /// First 8 chars of the git commit hash.
+    #[serde(skip)]
+    pub commit_prefix: String,
     /// Name of the directory inside the data directory where the main "hot" DB is located.
     pub db_name: String,
     /// Path where the freezer database will be located.
@@ -85,6 +94,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from(DEFAULT_ROOT_DIR),
+            version: String::new(),
+            version_with_platform: String::new(),
+            commit_prefix: String::new(),
             db_name: "chain_db".to_string(),
             freezer_db_path: None,
             blobs_db_path: None,

@@ -35,7 +35,13 @@ impl GraffitiOrigin {
 
 impl Default for GraffitiOrigin {
     fn default() -> Self {
-        let version_bytes = lighthouse_version::VERSION.as_bytes();
+        Self::from_version(concat!("Lighthouse/v", env!("CARGO_PKG_VERSION")))
+    }
+}
+
+impl GraffitiOrigin {
+    pub fn from_version(version: &str) -> Self {
+        let version_bytes = version.as_bytes();
         let trimmed_len = std::cmp::min(version_bytes.len(), GRAFFITI_BYTES_LEN);
         let mut bytes = [0u8; GRAFFITI_BYTES_LEN];
         bytes[..trimmed_len].copy_from_slice(&version_bytes[..trimmed_len]);
@@ -72,6 +78,7 @@ pub struct GraffitiCalculator<T: BeaconChainTypes> {
     pub beacon_graffiti: GraffitiOrigin,
     execution_layer: Option<ExecutionLayer<T::EthSpec>>,
     pub epoch_duration: Duration,
+    commit_prefix: String,
 }
 
 impl<T: BeaconChainTypes> GraffitiCalculator<T> {
@@ -79,11 +86,13 @@ impl<T: BeaconChainTypes> GraffitiCalculator<T> {
         beacon_graffiti: GraffitiOrigin,
         execution_layer: Option<ExecutionLayer<T::EthSpec>>,
         epoch_duration: Duration,
+        commit_prefix: String,
     ) -> Self {
         Self {
             beacon_graffiti,
             execution_layer,
             epoch_duration,
+            commit_prefix,
         }
     }
 
@@ -150,16 +159,15 @@ impl<T: BeaconChainTypes> GraffitiCalculator<T> {
                     return default_graffiti;
                 }
 
-                let lighthouse_commit_prefix =
-                    CommitPrefix::try_from(lighthouse_version::COMMIT_PREFIX.to_string())
-                        .unwrap_or_else(|error_message| {
-                            // This really shouldn't happen but we want to definitly log if it does
-                            crit!(
-                                error = error_message,
-                                "Failed to parse lighthouse commit prefix"
-                            );
-                            CommitPrefix("00000000".to_string())
-                        });
+                let lighthouse_commit_prefix = CommitPrefix::try_from(self.commit_prefix.clone())
+                    .unwrap_or_else(|error_message| {
+                        // This really shouldn't happen but we want to definitly log if it does
+                        crit!(
+                            error = error_message,
+                            "Failed to parse lighthouse commit prefix"
+                        );
+                        CommitPrefix("00000000".to_string())
+                    });
 
                 engine_version.calculate_graffiti(lighthouse_commit_prefix, validator_graffiti)
             }

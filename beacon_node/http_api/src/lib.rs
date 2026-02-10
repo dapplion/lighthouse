@@ -61,7 +61,6 @@ use health_metrics::observe::Observe;
 use lighthouse_network::Enr;
 use lighthouse_network::NetworkGlobals;
 use lighthouse_network::PeerId;
-use lighthouse_version::version_with_platform;
 use logging::{SSELoggingComponents, crit};
 use network::{NetworkMessage, NetworkSenders};
 use network_utils::enr_ext::EnrExt;
@@ -128,6 +127,7 @@ pub struct Context<T: BeaconChainTypes> {
     pub network_globals: Option<Arc<NetworkGlobals<T::EthSpec>>>,
     pub beacon_processor_send: Option<BeaconProcessorSend<T::EthSpec>>,
     pub sse_logging_components: Option<SSELoggingComponents>,
+    pub version: String,
 }
 
 /// Configuration for the HTTP server.
@@ -330,6 +330,7 @@ pub fn serve<T: BeaconChainTypes>(
     shutdown: impl Future<Output = ()> + Send + Sync + 'static,
 ) -> Result<HttpServer, Error> {
     let config = ctx.config.clone();
+    let version = ctx.version.clone();
 
     // Configure CORS.
     let cors_builder = {
@@ -2141,11 +2142,17 @@ pub fn serve<T: BeaconChainTypes>(
         .and(warp::path("version"))
         .and(warp::path::end())
         // Bypass the `task_spawner` since this method returns a static string.
-        .then(|| async {
-            warp::reply::json(&api_types::GenericResponse::from(api_types::VersionData {
-                version: version_with_platform(),
-            }))
-            .into_response()
+        .then({
+            let version = version.clone();
+            move || {
+                let version = version.clone();
+                async move {
+                    warp::reply::json(&api_types::GenericResponse::from(api_types::VersionData {
+                        version,
+                    }))
+                    .into_response()
+                }
+            }
         });
 
     // GET node/syncing
@@ -3387,7 +3394,7 @@ pub fn serve<T: BeaconChainTypes>(
         .with(tracing_logging())
         .with(prometheus_metrics())
         // Add a `Server` header.
-        .map(|reply| warp::reply::with_header(reply, "Server", &version_with_platform()))
+        .map(move |reply| warp::reply::with_header(reply, "Server", &version))
         .with(cors_builder.build())
         .boxed();
 

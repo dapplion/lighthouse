@@ -7,7 +7,6 @@ use crate::NetworkConfig;
 use crate::types::{Enr, EnrAttestationBitfield, EnrSyncCommitteeBitfield};
 use alloy_rlp::bytes::Bytes;
 use libp2p::identity::Keypair;
-use lighthouse_version::{client_name, version};
 use network_utils::enr_ext::CombinedKeyExt;
 use network_utils::enr_ext::{EnrExt, QUIC_ENR_KEY, QUIC6_ENR_KEY};
 use ssz::{Decode, Encode};
@@ -210,7 +209,11 @@ pub fn build_enr<E: EthSpec>(
 
     // Add EIP 7636 client information
     if !config.private {
-        builder.client_info(client_name().to_string(), version().to_string(), None);
+        builder.client_info(
+            config.enr_client_name.clone(),
+            config.enr_version.clone(),
+            None,
+        );
     }
 
     // Add QUIC fields to the ENR.

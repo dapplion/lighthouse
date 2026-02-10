@@ -3,7 +3,6 @@
 //! For other endpoints, see the `http_api` crate.
 
 use lighthouse_validator_store::LighthouseValidatorStore;
-use lighthouse_version::version_with_platform;
 use logging::crit;
 use malloc_utils::scrape_allocator_metrics;
 use parking_lot::RwLock;
@@ -51,6 +50,7 @@ pub struct Shared<E> {
 pub struct Context<E> {
     pub config: Config,
     pub shared: RwLock<Shared<E>>,
+    pub version: String,
 }
 
 /// Configuration for the HTTP server.
@@ -95,6 +95,7 @@ pub fn serve<E: EthSpec>(
     shutdown: impl Future<Output = ()> + Send + Sync + 'static,
 ) -> Result<(SocketAddr, impl Future<Output = ()>), Error> {
     let config = &ctx.config;
+    let version = ctx.version.clone();
 
     // Configure CORS.
     let cors_builder = {
@@ -141,7 +142,7 @@ pub fn serve<E: EthSpec>(
             )
         })
         // Add a `Server` header.
-        .map(|reply| warp::reply::with_header(reply, "Server", &version_with_platform()))
+        .map(move |reply| warp::reply::with_header(reply, "Server", &version))
         .with(cors_builder.build());
 
     let (listening_socket, server) = warp::serve(routes).try_bind_with_graceful_shutdown(
