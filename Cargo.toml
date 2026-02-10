@@ -138,7 +138,6 @@ eip_3076 = { path = "common/eip_3076" }
 either = "1.9"
 environment = { path = "lighthouse/environment" }
 eth2 = { path = "common/eth2" }
-reth-era = { git = "https://github.com/paradigmxyz/reth", package = "reth-era", rev = "62abfdaeb54e8a205a8ee085ddebd56047d93374" }
 eth2_config = { path = "common/eth2_config" }
 eth2_key_derivation = { path = "crypto/eth2_key_derivation" }
 eth2_keystore = { path = "crypto/eth2_keystore" }
@@ -226,6 +225,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "rustls-tls",
 ] }
+reth-era = { git = "https://github.com/paradigmxyz/reth", package = "reth-era", rev = "62abfdaeb54e8a205a8ee085ddebd56047d93374" }
 ring = "0.17"
 rpds = "0.11"
 rusqlite = { version = "0.28", features = ["bundled"] }

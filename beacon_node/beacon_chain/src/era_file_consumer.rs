@@ -9,7 +9,7 @@ use store::{DBColumn, HotColdDB, ItemStore, KeyValueStoreOp};
 use tracing::{debug, debug_span, instrument, warn};
 use tree_hash::TreeHash;
 use types::{
-    BeaconState, ChainSpec, Epoch, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
+    BeaconState, ChainSpec, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
     SignedBeaconBlock, Slot,
 };
 
