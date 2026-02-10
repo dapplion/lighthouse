@@ -122,6 +122,8 @@ Options:
           The number of epochs to wait between running the migration of data
           from the hot DB to the cold DB. Less frequent runs can be useful for
           minimizing disk writes [default: 1]
+      --era-files-dir <DIR>
+          Directory containing `.era` files to use for backfill.
       --execution-endpoint <EXECUTION-ENDPOINT>
           Server endpoint for an execution layer JWT-authenticated HTTP JSON-RPC
           connection. Uses the same endpoint to populate the deposit cache.
