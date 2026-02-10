@@ -2,7 +2,7 @@
 
 use crate::per_block_processing::errors::{
     AttestationInvalid, AttesterSlashingInvalid, BlockOperationError, BlockProcessingError,
-    DepositInvalid, IndexedAttestationInvalid, IntoWithIndex, ProposerSlashingInvalid,
+    DepositInvalid, HeaderInvalid, IndexedAttestationInvalid, IntoWithIndex, ProposerSlashingInvalid,
 };
 use crate::{BlockReplayError, BlockReplayer, per_block_processing};
 use crate::{
@@ -14,7 +14,7 @@ use bls::{AggregateSignature, Keypair, PublicKeyBytes, Signature, SignatureBytes
 use fixed_bytes::FixedBytesExtended;
 use ssz_types::Bitfield;
 use ssz_types::VariableList;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use test_utils::generate_deterministic_keypairs;
 use types::*;
 
@@ -38,8 +38,10 @@ async fn get_harness<E: EthSpec>(
     // Set the state and block to be in the last slot of the `epoch_offset`th epoch.
     let last_slot_of_epoch =
         (MainnetEthSpec::genesis_epoch() + epoch_offset).end_slot(E::slots_per_epoch());
+    // Use Electra at genesis so blocks produced by mock_execution_layer match the state fork.
+    let spec = Arc::new(ForkName::Electra.make_genesis_spec(E::default_spec()));
     let harness = BeaconChainHarness::<EphemeralHarnessType<E>>::builder(E::default())
-        .default_spec()
+        .spec(spec)
         .keypairs(KEYPAIRS[0..num_validators].to_vec())
         .fresh_ephemeral_store()
         .mock_execution_layer()
@@ -107,10 +109,12 @@ async fn invalid_block_header_state_slot() {
         &spec,
     );
 
-    assert!(matches!(
+    assert_eq!(
         result,
-        Err(BlockProcessingError::InconsistentBlockFork(_))
-    ));
+        Err(BlockProcessingError::HeaderInvalid {
+            reason: HeaderInvalid::StateSlotMismatch
+        })
+    );
 }
 
 #[tokio::test]
@@ -127,6 +131,7 @@ async fn invalid_parent_block_root() {
     let (mut block, signature) = (*signed_block).clone().deconstruct();
     *block.parent_root_mut() = Hash256::from([0xAA; 32]);
 
+    let expected_state_root = state.latest_block_header().canonical_root();
     let mut ctxt = ConsensusContext::new(block.slot());
     let result = per_block_processing(
         &mut state,
@@ -137,10 +142,15 @@ async fn invalid_parent_block_root() {
         &spec,
     );
 
-    assert!(matches!(
+    assert_eq!(
         result,
-        Err(BlockProcessingError::InconsistentBlockFork(_))
-    ));
+        Err(BlockProcessingError::HeaderInvalid {
+            reason: HeaderInvalid::ParentBlockRootMismatch {
+                state: expected_state_root,
+                block: Hash256::from([0xAA; 32])
+            }
+        })
+    );
 }
 
 #[tokio::test]
@@ -165,11 +175,13 @@ async fn invalid_block_signature() {
         &spec,
     );
 
-    // Expecting InconsistentBlockFork because of fork mismatch
-    assert!(matches!(
+    // should get a BadSignature error
+    assert_eq!(
         result,
-        Err(BlockProcessingError::InconsistentBlockFork(_))
-    ));
+        Err(BlockProcessingError::HeaderInvalid {
+            reason: HeaderInvalid::ProposalSignatureInvalid
+        })
+    );
 }
 
 #[tokio::test]
