@@ -35,7 +35,6 @@ int_to_bytes = { workspace = true }
 itertools = { workspace = true }
 kzg = { workspace = true }
 lighthouse_tracing = { workspace = true }
-lighthouse_version = { workspace = true }
 logging = { workspace = true }
 lru = { workspace = true }
 merkle_proof = { workspace = true }
@@ -73,6 +72,7 @@ zstd = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+lighthouse_version = { workspace = true }
 maplit = { workspace = true }
 mockall = { workspace = true }
 mockall_double = { workspace = true }

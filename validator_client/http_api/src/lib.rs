@@ -36,7 +36,6 @@ use eth2::lighthouse_vc::{
     },
 };
 use health_metrics::observe::Observe;
-use lighthouse_version::version_with_platform;
 use logging::SSELoggingComponents;
 use logging::crit;
 use parking_lot::RwLock;
@@ -94,6 +93,7 @@ pub struct Context<T: SlotClock, E> {
     pub config: Config,
     pub sse_logging_components: Option<SSELoggingComponents>,
     pub slot_clock: T,
+    pub version: String,
 }
 
 /// Configuration for the HTTP server.
@@ -151,6 +151,7 @@ pub fn serve<T: 'static + SlotClock + Clone, E: EthSpec>(
     shutdown: impl Future<Output = ()> + Send + Sync + 'static,
 ) -> Result<(SocketAddr, impl Future<Output = ()>), Error> {
     let config = &ctx.config;
+    let version = ctx.version.clone();
     let allow_keystore_export = config.allow_keystore_export;
     let store_passwords_in_secrets_dir = config.store_passwords_in_secrets_dir;
     let use_long_timeouts = config.bn_long_timeouts;
@@ -289,12 +290,16 @@ pub fn serve<T: 'static + SlotClock + Clone, E: EthSpec>(
     let get_node_version = warp::path("lighthouse")
         .and(warp::path("version"))
         .and(warp::path::end())
-        .then(|| {
-            blocking_json_task(move || {
-                Ok(api_types::GenericResponse::from(api_types::VersionData {
-                    version: version_with_platform(),
-                }))
-            })
+        .then({
+            let version = version.clone();
+            move || {
+                let version = version.clone();
+                blocking_json_task(move || {
+                    Ok(api_types::GenericResponse::from(api_types::VersionData {
+                        version,
+                    }))
+                })
+            }
         });
 
     // GET lighthouse/health
@@ -1396,7 +1401,7 @@ pub fn serve<T: 'static + SlotClock + Clone, E: EthSpec>(
         // Maps errors into HTTP responses.
         .recover(warp_utils::reject::handle_rejection)
         // Add a `Server` header.
-        .map(|reply| warp::reply::with_header(reply, "Server", &version_with_platform()))
+        .map(move |reply| warp::reply::with_header(reply, "Server", &version))
         .with(cors_builder.build());
 
     let (listening_socket, server) = warp::serve(routes).try_bind_with_graceful_shutdown(

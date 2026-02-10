@@ -24,7 +24,6 @@ hex = { workspace = true }
 jsonwebtoken = "9"
 keccak-hash = "0.10.0"
 kzg = { workspace = true }
-lighthouse_version = { workspace = true }
 logging = { workspace = true }
 lru = { workspace = true }
 metrics = { workspace = true }

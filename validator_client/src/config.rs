@@ -90,6 +90,9 @@ pub struct Config {
     #[serde(flatten)]
     pub initialized_validators: InitializedValidatorsConfig,
     pub disable_attesting: bool,
+    /// Version with platform info for HTTP Server headers. Set by the binary.
+    #[serde(skip)]
+    pub version_with_platform: String,
 }
 
 impl Default for Config {
@@ -136,6 +139,7 @@ impl Default for Config {
             distributed: false,
             initialized_validators: <_>::default(),
             disable_attesting: false,
+            version_with_platform: String::new(),
         }
     }
 }

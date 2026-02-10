@@ -26,6 +26,7 @@ async fn returns_200_ok() {
             db_path: None,
             freezer_db_path: None,
             gossipsub_registry: None,
+            version: "test".to_string(),
         });
 
         let ctx = context.clone();

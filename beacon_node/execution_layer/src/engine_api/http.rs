@@ -3,13 +3,11 @@
 use super::*;
 use crate::auth::Auth;
 use crate::json_structures::*;
-use lighthouse_version::{COMMIT_PREFIX, VERSION};
 use reqwest::header::CONTENT_TYPE;
 use sensitive_url::SensitiveUrl;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::collections::HashSet;
-use std::sync::LazyLock;
 use tokio::sync::Mutex;
 
 use std::time::{Duration, Instant};
@@ -88,18 +86,6 @@ pub static LIGHTHOUSE_CAPABILITIES: &[&str] = &[
     ENGINE_GET_BLOBS_V1,
     ENGINE_GET_BLOBS_V2,
 ];
-
-/// We opt to initialize the JsonClientVersionV1 rather than the ClientVersionV1
-/// for two reasons:
-/// 1. This saves the overhead of converting into Json for every engine call
-/// 2. The Json version lacks error checking so we can avoid calling `unwrap()`
-pub static LIGHTHOUSE_JSON_CLIENT_VERSION: LazyLock<JsonClientVersionV1> =
-    LazyLock::new(|| JsonClientVersionV1 {
-        code: ClientCode::Lighthouse.to_string(),
-        name: "Lighthouse".to_string(),
-        version: VERSION.replace("Lighthouse/", ""),
-        commit: COMMIT_PREFIX.to_string(),
-    });
 
 /// Contains methods to convert arbitrary bytes to an ETH2 deposit contract object.
 pub mod deposit_log {
@@ -605,6 +591,7 @@ pub struct HttpJsonRpc {
     pub execution_timeout_multiplier: u32,
     pub engine_capabilities_cache: Mutex<Option<CachedResponse<EngineCapabilities>>>,
     pub engine_version_cache: Mutex<Option<CachedResponse<Vec<ClientVersionV1>>>>,
+    pub client_version: JsonClientVersionV1,
     auth: Option<Auth>,
 }
 
@@ -612,6 +599,7 @@ impl HttpJsonRpc {
     pub fn new(
         url: SensitiveUrl,
         execution_timeout_multiplier: Option<u32>,
+        client_version: JsonClientVersionV1,
     ) -> Result<Self, Error> {
         Ok(Self {
             client: Client::builder().build()?,
@@ -619,6 +607,7 @@ impl HttpJsonRpc {
             execution_timeout_multiplier: execution_timeout_multiplier.unwrap_or(1),
             engine_capabilities_cache: Mutex::new(None),
             engine_version_cache: Mutex::new(None),
+            client_version,
             auth: None,
         })
     }
@@ -627,6 +616,7 @@ impl HttpJsonRpc {
         url: SensitiveUrl,
         auth: Auth,
         execution_timeout_multiplier: Option<u32>,
+        client_version: JsonClientVersionV1,
     ) -> Result<Self, Error> {
         Ok(Self {
             client: Client::builder().build()?,
@@ -634,6 +624,7 @@ impl HttpJsonRpc {
             execution_timeout_multiplier: execution_timeout_multiplier.unwrap_or(1),
             engine_capabilities_cache: Mutex::new(None),
             engine_version_cache: Mutex::new(None),
+            client_version,
             auth: Some(auth),
         })
     }
@@ -1252,7 +1243,7 @@ impl HttpJsonRpc {
     /// `get_engine_version(Some(Duration::ZERO))` if you want to force
     /// fetching from the EE as this will cache the result.
     pub async fn get_client_version_v1(&self) -> Result<Vec<ClientVersionV1>, Error> {
-        let params = json!([*LIGHTHOUSE_JSON_CLIENT_VERSION]);
+        let params = json!([self.client_version]);
 
         let response: Vec<JsonClientVersionV1> = self
             .rpc_request(
@@ -1488,19 +1479,36 @@ mod test {
             let rpc_url = SensitiveUrl::parse(&server.url()).unwrap();
             let echo_url = SensitiveUrl::parse(&format!("{}/echo", server.url())).unwrap();
             // Create rpc clients that include JWT auth headers if `with_auth` is true.
+            let test_client_version = JsonClientVersionV1 {
+                code: ClientCode::Lighthouse.to_string(),
+                name: "Lighthouse".to_string(),
+                version: "test".to_string(),
+                commit: "00000000".to_string(),
+            };
             let (rpc_client, echo_client) = if with_auth {
                 let rpc_auth =
                     Auth::new(JwtKey::from_slice(&DEFAULT_JWT_SECRET).unwrap(), None, None);
                 let echo_auth =
                     Auth::new(JwtKey::from_slice(&DEFAULT_JWT_SECRET).unwrap(), None, None);
                 (
-                    Arc::new(HttpJsonRpc::new_with_auth(rpc_url, rpc_auth, None).unwrap()),
-                    Arc::new(HttpJsonRpc::new_with_auth(echo_url, echo_auth, None).unwrap()),
+                    Arc::new(
+                        HttpJsonRpc::new_with_auth(
+                            rpc_url,
+                            rpc_auth,
+                            None,
+                            test_client_version.clone(),
+                        )
+                        .unwrap(),
+                    ),
+                    Arc::new(
+                        HttpJsonRpc::new_with_auth(echo_url, echo_auth, None, test_client_version)
+                            .unwrap(),
+                    ),
                 )
             } else {
                 (
-                    Arc::new(HttpJsonRpc::new(rpc_url, None).unwrap()),
-                    Arc::new(HttpJsonRpc::new(echo_url, None).unwrap()),
+                    Arc::new(HttpJsonRpc::new(rpc_url, None, test_client_version.clone()).unwrap()),
+                    Arc::new(HttpJsonRpc::new(echo_url, None, test_client_version).unwrap()),
                 )
             };
 

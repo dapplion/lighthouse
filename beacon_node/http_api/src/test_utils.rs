@@ -293,6 +293,7 @@ pub async fn create_api_server_with_config<T: BeaconChainTypes>(
         network_globals: Some(network_globals),
         beacon_processor_send: Some(beacon_processor_send),
         sse_logging_components: None,
+        version: "test".to_string(),
     });
 
     let (listening_socket, server) =
