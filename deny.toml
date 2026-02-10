@@ -17,7 +17,8 @@ deny = [
     { crate = "sha2", deny-multiple-versions = true, reason = "takes a long time to compile" },
     { crate = "pbkdf2", deny-multiple-versions = true, reason = "takes a long time to compile" },
     { crate = "scrypt", deny-multiple-versions = true, reason = "takes a long time to compile" },
-    { crate = "syn", deny-multiple-versions = true, reason = "takes a long time to compile" },
+    # Temporarily disabled for reth-era integration - reth deps pull in syn 1.x
+    # { crate = "syn", deny-multiple-versions = true, reason = "takes a long time to compile" },
 ]
 
 [sources]
