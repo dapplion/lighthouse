@@ -167,6 +167,13 @@ fn build_era_group<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
                 .map_err(|error| format!("failed to load block: {error:?}"))?
                 .ok_or_else(|| format!("missing block for root {block_root:?}"))?;
 
+            // Skip blocks from previous era. At era boundaries, block_roots[slot] may
+            // contain a root from the previous era if there was no block at exactly
+            // `start_slot` (the root is the most recent block AT OR BEFORE that slot).
+            if block.slot() < start_slot {
+                continue;
+            }
+
             let compressed = CompressedSignedBeaconBlock::from_ssz(&block.as_ssz_bytes())
                 .map_err(|error| format!("failed to compress block: {error:?}"))?;
 
