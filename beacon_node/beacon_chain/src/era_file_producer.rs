@@ -80,7 +80,7 @@ pub(crate) fn maybe_produce_finalization_era<E: EthSpec, Hot: ItemStore<E>, Cold
     }
 }
 
-fn create_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+pub fn create_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     db: &HotColdDB<E, Hot, Cold>,
     era_number: u64,
     output_dir: &Path,
