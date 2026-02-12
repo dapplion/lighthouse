@@ -9,7 +9,7 @@ use store::{DBColumn, HotColdDB, ItemStore, KeyValueStoreOp};
 use tracing::{debug, debug_span, instrument, warn};
 use tree_hash::TreeHash;
 use types::{
-    BeaconState, ChainSpec, Epoch, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
+    BeaconState, ChainSpec, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
     SignedBeaconBlock, Slot,
 };
 
@@ -35,7 +35,7 @@ fn decode_state<E: EthSpec>(
         .map_err(|error| format!("failed to decode state: {error:?}"))
 }
 
-pub(crate) struct EraFileDir {
+pub struct EraFileDir {
     dir: PathBuf,
     network_name: String,
     genesis_validators_root: Hash256,
@@ -45,7 +45,7 @@ pub(crate) struct EraFileDir {
 }
 
 impl EraFileDir {
-    pub(crate) fn new<E: EthSpec>(era_files_dir: &Path, spec: &ChainSpec) -> Result<Self, String> {
+    pub fn new<E: EthSpec>(era_files_dir: &Path, spec: &ChainSpec) -> Result<Self, String> {
         let mut era_files = list_era_files(era_files_dir)?;
         era_files.sort_by_key(|(era_number, _)| *era_number);
 
@@ -89,12 +89,12 @@ impl EraFileDir {
         Ok(era_dir)
     }
 
-    pub(crate) fn max_era(&self) -> u64 {
+    pub fn max_era(&self) -> u64 {
         self.max_era
     }
 
     #[instrument(level = "debug", skip_all, fields(era_number = %era_number))]
-    pub(crate) fn import_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    pub fn import_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         &self,
         store: &HotColdDB<E, Hot, Cold>,
         era_number: u64,

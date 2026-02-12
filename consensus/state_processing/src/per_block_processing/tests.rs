@@ -107,12 +107,12 @@ async fn invalid_block_header_state_slot() {
         &spec,
     );
 
-    assert_eq!(
+    assert!(matches!(
         result,
         Err(BlockProcessingError::HeaderInvalid {
-            reason: HeaderInvalid::StateSlotMismatch
+            reason: HeaderInvalid::StateSlotMismatch { .. }
         })
-    );
+    ));
 }
 
 #[tokio::test]

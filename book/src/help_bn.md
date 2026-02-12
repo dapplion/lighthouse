@@ -225,7 +225,8 @@ Options:
           be careful to avoid filling up their disks.
       --libp2p-addresses <MULTIADDR>
           One or more comma-delimited multiaddrs to manually connect to a libp2p
-          peer without an ENR.
+          peer without an ENR. DEPRECATED. The --libp2p-addresses flag is
+          deprecated and replaced by --boot-nodes
       --listen-address [<ADDRESS>...]
           The address lighthouse will listen for UDP and TCP connections. To
           listen over IPv4 and IPv6 set this flag twice with the different
@@ -495,6 +496,8 @@ Flags:
       --enable-private-discovery
           Lighthouse by default does not discover private IP addresses. Set this
           flag to enable connection attempts to local addresses.
+      --era-files-dir <DIR>
+          Directory containing `.era` files to use for backfill.
       --genesis-backfill
           Attempts to download blocks all the way back to genesis when
           checkpoint syncing.

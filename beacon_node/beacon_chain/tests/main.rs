@@ -1,4 +1,5 @@
 mod attestation_production;
+mod era_file_tests;
 mod attestation_verification;
 mod bellatrix;
 mod blob_verification;
