@@ -751,3 +751,63 @@ fn era_consumer_rejects_wrong_era_content() {
         "expected slot mismatch error: {err}"
     );
 }
+
+#[test]
+fn era_consumer_rejects_wrong_era_root() {
+    // ERA 0 with corrupted genesis_validators_root
+    let temp_dir = setup_era_dir_with_corrupt_file("era0-wrong-root.era", "-00000-");
+    let spec = load_test_spec();
+    let era_dir = EraFileDir::new::<MinimalEthSpec>(&temp_dir.path().join("era"), &spec)
+        .expect("init should succeed");
+    let store = setup_store_for_corruption_test(&spec);
+
+    let err = era_dir.import_era_file(&store, 0, &spec).unwrap_err();
+    assert!(
+        err.contains("era root mismatch") || err.contains("decompress"),
+        "expected era root mismatch or decompression error: {err}"
+    );
+}
+
+#[test]
+fn era_consumer_rejects_corrupt_block_summary() {
+    // ERA 8 with corrupted block_roots vector (post-Capella)
+    let temp_dir = setup_era_dir_with_corrupt_file("era8-corrupt-block-summary.era", "-00008-");
+    let spec = load_test_spec();
+    let era_dir = EraFileDir::new::<MinimalEthSpec>(&temp_dir.path().join("era"), &spec)
+        .expect("init should succeed");
+    let store = setup_store_for_corruption_test(&spec);
+
+    for era in 0..8 {
+        era_dir
+            .import_era_file(&store, era, &spec)
+            .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
+    }
+
+    let err = era_dir.import_era_file(&store, 8, &spec).unwrap_err();
+    assert!(
+        err.contains("block summary root") || err.contains("decompress"),
+        "expected block summary root mismatch or decompression error: {err}"
+    );
+}
+
+#[test]
+fn era_consumer_rejects_wrong_block_root() {
+    // ERA 2 with corrupted block (signature modified)
+    let temp_dir = setup_era_dir_with_corrupt_file("era2-wrong-block-root.era", "-00002-");
+    let spec = load_test_spec();
+    let era_dir = EraFileDir::new::<MinimalEthSpec>(&temp_dir.path().join("era"), &spec)
+        .expect("init should succeed");
+    let store = setup_store_for_corruption_test(&spec);
+
+    for era in 0..2 {
+        era_dir
+            .import_era_file(&store, era, &spec)
+            .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
+    }
+
+    let err = era_dir.import_era_file(&store, 2, &spec).unwrap_err();
+    assert!(
+        err.contains("block root mismatch") || err.contains("decompress") || err.contains("decode"),
+        "expected block root mismatch, decompress, or decode error: {err}"
+    );
+}
