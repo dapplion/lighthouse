@@ -88,6 +88,16 @@ pub struct HotColdDB<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
     _phantom: PhantomData<E>,
 }
 
+fn era_import_pointer_key() -> &'static [u8] {
+    b"era_import_ptr"
+}
+
+fn era_reconstruction_key(era_number: u64) -> Vec<u8> {
+    let mut key = b"era_recon:".to_vec();
+    key.extend_from_slice(&era_number.to_be_bytes());
+    key
+}
+
 #[derive(Debug)]
 struct BlockCache<E: EthSpec> {
     block_cache: LruCache<Hash256, SignedBeaconBlock<E>>,
@@ -196,7 +206,7 @@ pub enum HotColdDBError {
     RestorePointDecodeError(ssz::DecodeError),
     BlockReplayBeaconError(BeaconStateError),
     BlockReplaySlotError(SlotProcessingError),
-    BlockReplayBlockError(BlockProcessingError),
+    BlockReplayBlockError(Slot, BlockProcessingError),
     InvalidSlotsPerRestorePoint {
         slots_per_restore_point: u64,
         slots_per_historical_root: u64,
@@ -1090,6 +1100,17 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             self.store_hot_state(state_root, state, &mut ops)?;
             self.hot_db.do_atomically(ops)
         }
+    }
+
+    /// Store and commit a state into the cold db store.
+    pub fn put_cold_state(
+        &self,
+        state_root: &Hash256,
+        state: &BeaconState<E>,
+    ) -> Result<(), Error> {
+        let mut ops: Vec<KeyValueStoreOp> = Vec::new();
+        self.store_cold_state(state_root, state, &mut ops)?;
+        self.cold_db.do_atomically(ops)
     }
 
     /// Fetch a state from the store.
@@ -2084,31 +2105,16 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         self.store_cold_state_summary(state_root, state.slot(), ops)?;
 
         let slot = state.slot();
-        match self.cold_storage_strategy(slot)? {
-            StorageStrategy::ReplayFrom(from) => {
-                debug!(
-                    strategy = "replay",
-                    from_slot = %from,
-                    %slot,
-                    "Storing cold state",
-                );
+        let strategy = self.cold_storage_strategy(slot)?;
+        debug!(?strategy, %slot, "Storing cold state");
+        match strategy {
+            StorageStrategy::ReplayFrom(_) => {
                 // Already have persisted the state summary, don't persist anything else
             }
             StorageStrategy::Snapshot => {
-                debug!(
-                    strategy = "snapshot",
-                    %slot,
-                    "Storing cold state"
-                );
                 self.store_cold_state_as_snapshot(state, ops)?;
             }
             StorageStrategy::DiffFrom(from) => {
-                debug!(
-                    strategy = "diff",
-                    from_slot = %from,
-                    %slot,
-                    "Storing cold state"
-                );
                 self.store_cold_state_as_diff(state, from, ops)?;
             }
         }
@@ -3135,6 +3141,41 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     /// Return `true` if compaction on finalization/pruning is enabled.
     pub fn compact_on_prune(&self) -> bool {
         self.config.compact_on_prune
+    }
+
+    pub fn get_era_import_pointer(&self) -> Result<Option<u64>, Error> {
+        let Some(bytes) = self
+            .hot_db
+            .get_bytes(DBColumn::BeaconMeta, era_import_pointer_key())?
+        else {
+            return Ok(None);
+        };
+        let bytes: [u8; 8] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::InvalidBytes)?;
+        Ok(Some(u64::from_be_bytes(bytes)))
+    }
+
+    pub fn set_era_import_pointer(&self, era_number: u64) -> Result<(), Error> {
+        self.hot_db.put_bytes(
+            DBColumn::BeaconMeta,
+            era_import_pointer_key(),
+            &era_number.to_be_bytes(),
+        )
+    }
+
+    pub fn era_reconstruction_done(&self, era_number: u64) -> Result<bool, Error> {
+        self.hot_db
+            .key_exists(DBColumn::BeaconMeta, &era_reconstruction_key(era_number))
+    }
+
+    pub fn set_era_reconstruction_done(&self, era_number: u64) -> Result<(), Error> {
+        self.hot_db.put_bytes(
+            DBColumn::BeaconMeta,
+            &era_reconstruction_key(era_number),
+            &[1u8],
+        )
     }
 
     /// Load the timestamp of the last compaction as a `Duration` since the UNIX epoch.

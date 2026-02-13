@@ -99,7 +99,7 @@ alloy-consensus = { version = "1", default-features = false }
 alloy-dyn-abi = { version = "1", default-features = false }
 alloy-json-abi = { version = "1", default-features = false }
 alloy-network = { version = "1", default-features = false }
-alloy-primitives = { version = "1", default-features = false, features = ["rlp", "getrandom"] }
+alloy-primitives = { version = "1.5", default-features = false, features = ["rlp", "getrandom"] }
 alloy-provider = { version = "1", default-features = false, features = ["reqwest"] }
 alloy-rlp = { version = "0.3", default-features = false }
 alloy-rpc-types-eth = { version = "1", default-features = false, features = ["serde"] }
@@ -225,6 +225,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "stream",
     "rustls-tls",
 ] }
+reth-era = { git = "https://github.com/paradigmxyz/reth", package = "reth-era", rev = "62abfdaeb54e8a205a8ee085ddebd56047d93374" }
 ring = "0.17"
 rpds = "0.11"
 rusqlite = { version = "0.28", features = ["bundled"] }
