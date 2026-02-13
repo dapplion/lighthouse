@@ -7,6 +7,7 @@ mod capella;
 mod column_verification;
 mod era_file_tests;
 mod events;
+mod gen_corrupt_era_files;
 mod op_verification;
 mod payload_invalidation;
 mod rewards;
