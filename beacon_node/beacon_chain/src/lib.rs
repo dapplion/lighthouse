@@ -20,6 +20,7 @@ pub mod custody_context;
 pub mod data_availability_checker;
 pub mod data_column_verification;
 mod early_attester_cache;
+mod era_file_producer;
 mod errors;
 pub mod events;
 pub mod execution_payload;
