@@ -88,13 +88,25 @@ fn operations_execution_payload_blinded() {
 }
 
 #[test]
+fn operations_execution_payload_envelope() {
+    OperationsHandler::<MinimalEthSpec, SignedExecutionPayloadEnvelope<_>>::default().run();
+    OperationsHandler::<MainnetEthSpec, SignedExecutionPayloadEnvelope<_>>::default().run();
+}
+
+#[test]
+fn operations_execution_payload_bid() {
+    OperationsHandler::<MinimalEthSpec, ExecutionPayloadBidBlock<_>>::default().run();
+    OperationsHandler::<MainnetEthSpec, ExecutionPayloadBidBlock<_>>::default().run();
+}
+
+#[test]
 fn operations_withdrawals() {
     OperationsHandler::<MinimalEthSpec, WithdrawalsPayload<_>>::default().run();
     OperationsHandler::<MainnetEthSpec, WithdrawalsPayload<_>>::default().run();
 }
 
 #[test]
-fn operations_withdrawal_reqeusts() {
+fn operations_withdrawal_requests() {
     OperationsHandler::<MinimalEthSpec, WithdrawalRequest>::default().run();
     OperationsHandler::<MainnetEthSpec, WithdrawalRequest>::default().run();
 }
@@ -940,6 +952,12 @@ fn epoch_processing_participation_flag_updates() {
 fn epoch_processing_proposer_lookahead() {
     EpochProcessingHandler::<MinimalEthSpec, ProposerLookahead>::default().run();
     EpochProcessingHandler::<MainnetEthSpec, ProposerLookahead>::default().run();
+}
+
+#[test]
+fn epoch_processing_builder_pending_payments() {
+    EpochProcessingHandler::<MinimalEthSpec, BuilderPendingPayments>::default().run();
+    EpochProcessingHandler::<MainnetEthSpec, BuilderPendingPayments>::default().run();
 }
 
 #[test]
