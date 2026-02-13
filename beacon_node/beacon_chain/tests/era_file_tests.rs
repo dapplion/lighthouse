@@ -221,7 +221,7 @@ fn era_blocks_have_correct_roots() {
             .unwrap_or_else(|e| panic!("Failed to parse {:?}: {:?}", path, e));
 
         // Calculate expected slot range for this ERA
-        let start_slot = if *era_num == 0 {
+        let _start_slot = if *era_num == 0 {
             0
         } else {
             (era_num - 1) * slots_per_era
@@ -305,7 +305,7 @@ fn era_boundary_states_available() {
 /// Test 4: Import ERA files and verify blocks are retrievable from store
 #[test]
 fn era_consumer_imports_all_files() {
-    let (store, spec, max_era) = setup_store_with_era_files();
+    let (store, _spec, max_era) = setup_store_with_era_files();
     let slots_per_historical_root = MinimalEthSpec::slots_per_historical_root() as u64;
     let max_slot = max_era * slots_per_historical_root;
 
@@ -342,7 +342,7 @@ fn era_consumer_imports_all_files() {
 /// Test 5: Verify all blocks can be fetched from store and have correct roots
 #[test]
 fn era_consumer_blocks_have_correct_roots() {
-    let (store, spec, max_era) = setup_store_with_era_files();
+    let (store, _spec, max_era) = setup_store_with_era_files();
     let slots_per_historical_root = MinimalEthSpec::slots_per_historical_root() as u64;
 
     let mut seen_roots = std::collections::HashSet::new();
@@ -390,7 +390,7 @@ fn era_consumer_blocks_have_correct_roots() {
 #[test]
 fn era_consumer_final_head_matches_expected() {
     let metadata = load_metadata();
-    let (store, spec, max_era) = setup_store_with_era_files();
+    let (store, _spec, max_era) = setup_store_with_era_files();
     let slots_per_historical_root = MinimalEthSpec::slots_per_historical_root() as u64;
 
     // Find the head block (last block in the chain)
@@ -512,7 +512,7 @@ fn era_producer_output_is_byte_identical() {
                 .read_and_assemble("minimal".to_string())
                 .expect("Failed to parse produced ERA file");
 
-            let mut state = decode_state(era_file.group.era_state.clone(), &spec);
+            let state = decode_state(era_file.group.era_state.clone(), &spec);
             let state_slot = state.slot().as_u64();
             let slots_per_era = MinimalEthSpec::slots_per_historical_root() as u64;
             let actual_era_num = state_slot / slots_per_era;
@@ -534,7 +534,7 @@ fn era_producer_output_is_byte_identical() {
                 .read_and_assemble("minimal".to_string())
                 .expect("Failed to parse original ERA file");
 
-            let mut state = decode_state(era_file.group.era_state.clone(), &spec);
+            let state = decode_state(era_file.group.era_state.clone(), &spec);
             let state_slot = state.slot().as_u64();
             let slots_per_era = MinimalEthSpec::slots_per_historical_root() as u64;
             let actual_era_num = state_slot / slots_per_era;
