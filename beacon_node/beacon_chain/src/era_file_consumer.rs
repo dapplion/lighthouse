@@ -99,6 +99,8 @@ impl EraFileDir {
         store: &HotColdDB<E, Hot, Cold>,
         era_number: u64,
         spec: &ChainSpec,
+        trusted_state_root: Option<Hash256>,
+        trusted_slot: Option<Slot>,
     ) -> Result<(), String> {
         let path = self.expected_path(era_number);
         debug!(?path, era_number, "Importing era file");
@@ -116,6 +118,21 @@ impl EraFileDir {
             let _span = debug_span!("era_import_decode_state").entered();
             decode_state::<E>(era_file.group.era_state, spec)?
         };
+
+        // Verify trusted state root if provided
+        if let (Some(expected_root), Some(expected_slot)) = (trusted_state_root, trusted_slot) {
+            if state.slot() == expected_slot {
+                let actual_root = state
+                    .canonical_root()
+                    .map_err(|e| format!("Failed to compute state root: {e:?}"))?;
+                if actual_root != expected_root {
+                    return Err(format!(
+                        "trusted state root mismatch at slot {expected_slot}: expected {expected_root:?}, got {actual_root:?}"
+                    ));
+                }
+            }
+        }
+
         let expected_root = self
             .era_file_name_root(era_number)
             .ok_or_else(|| format!("missing historical root for era {era_number}"))?;

@@ -51,6 +51,24 @@ pub fn cli_app() -> Command {
                 .action(ArgAction::Set)
                 .display_order(0)
         )
+        .arg(
+            Arg::new("era-trusted-state-root")
+                .long("era-trusted-state-root")
+                .value_name("ROOT")
+                .help("Trusted state root to verify when importing ERA files. Must be used with --era-trusted-slot.")
+                .requires("era-trusted-slot")
+                .action(ArgAction::Set)
+                .display_order(0)
+        )
+        .arg(
+            Arg::new("era-trusted-slot")
+                .long("era-trusted-slot")
+                .value_name("SLOT")
+                .help("Slot number of the trusted state root. Must be used with --era-trusted-state-root.")
+                .requires("era-trusted-state-root")
+                .action(ArgAction::Set)
+                .display_order(0)
+        )
         /*
          * Network parameters.
          */

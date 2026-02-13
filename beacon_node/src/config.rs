@@ -354,6 +354,18 @@ pub fn get_config<E: EthSpec>(
         client_config.store.era_files_dir = Some(PathBuf::from(era_files_dir));
     }
 
+    if let Some(root_str) = cli_args.get_one::<String>("era-trusted-state-root") {
+        let root = root_str.parse::<Hash256>()
+            .map_err(|e| format!("Invalid era-trusted-state-root: {}", e))?;
+        client_config.store.era_trusted_state_root = Some(root);
+    }
+
+    if let Some(slot_str) = cli_args.get_one::<String>("era-trusted-slot") {
+        let slot = slot_str.parse::<u64>()
+            .map_err(|e| format!("Invalid era-trusted-slot: {}", e))?;
+        client_config.store.era_trusted_slot = Some(Slot::new(slot));
+    }
+
     if let Some(blobs_db_dir) = cli_args.get_one::<String>("blobs-dir") {
         client_config.blobs_db_path = Some(PathBuf::from(blobs_db_dir));
     }

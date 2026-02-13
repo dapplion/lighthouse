@@ -8,6 +8,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use strum::{Display, EnumString, VariantNames};
 use superstruct::superstruct;
+use types::{Hash256, Slot};
 use types::EthSpec;
 use types::new_non_zero_usize;
 use zstd::{Decoder, Encoder};
@@ -67,6 +68,10 @@ pub struct StoreConfig {
     pub blob_prune_margin_epochs: u64,
     /// Directory for era file import and production.
     pub era_files_dir: Option<PathBuf>,
+    /// Trusted state root for ERA file verification.
+    pub era_trusted_state_root: Option<Hash256>,
+    /// Slot number of the trusted state root.
+    pub era_trusted_slot: Option<Slot>,
 }
 
 /// Variant of `StoreConfig` that gets written to disk. Contains immutable configuration params.
@@ -124,6 +129,8 @@ impl Default for StoreConfig {
             epochs_per_blob_prune: DEFAULT_EPOCHS_PER_BLOB_PRUNE,
             blob_prune_margin_epochs: DEFAULT_BLOB_PUNE_MARGIN_EPOCHS,
             era_files_dir: None,
+            era_trusted_state_root: None,
+            era_trusted_slot: None,
         }
     }
 }
