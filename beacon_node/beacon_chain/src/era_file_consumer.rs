@@ -120,16 +120,15 @@ impl EraFileDir {
         };
 
         // Verify trusted state root if provided
-        if let (Some(expected_root), Some(expected_slot)) = (trusted_state_root, trusted_slot) {
-            if state.slot() == expected_slot {
-                let actual_root = state
-                    .canonical_root()
-                    .map_err(|e| format!("Failed to compute state root: {e:?}"))?;
-                if actual_root != expected_root {
-                    return Err(format!(
-                        "trusted state root mismatch at slot {expected_slot}: expected {expected_root:?}, got {actual_root:?}"
-                    ));
-                }
+        if let (Some(expected_root), Some(expected_slot)) = (trusted_state_root, trusted_slot) &&
+            state.slot() == expected_slot {
+            let actual_root = state
+                .canonical_root()
+                .map_err(|e| format!("Failed to compute state root: {e:?}"))?;
+            if actual_root != expected_root {
+                return Err(format!(
+                    "trusted state root mismatch at slot {expected_slot}: expected {expected_root:?}, got {actual_root:?}"
+                ));
             }
         }
 
