@@ -156,10 +156,13 @@ fn build_era_group<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
                 .get_block_root(slot)
                 .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
 
-            if let Ok(prev_root) = state.get_block_root(Slot::new(slot_u64.saturating_sub(1)))
-                && prev_root == block_root
-            {
-                continue;
+            // Skip duplicate blocks (same root as previous slot), but only within this ERA
+            if slot_u64 > start_slot.as_u64() {
+                if let Ok(prev_root) = state.get_block_root(Slot::new(slot_u64 - 1)) {
+                    if prev_root == block_root {
+                        continue;
+                    }
+                }
             }
 
             let block = db
@@ -192,7 +195,8 @@ fn build_era_group<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     }
 
     let state_index_start = offset;
-    let state_offset = state_data_start - state_index_start;
+    // Offset is relative to the start of the slot index data (after the 8-byte header)
+    let state_offset = state_data_start - (state_index_start + 8);
     let state_slot_index = SlotIndex::new(end_slot.as_u64(), vec![state_offset]);
 
     let group = if era_number > 0 {
@@ -300,12 +304,16 @@ fn era_file_id<E: EthSpec>(
     era_number: u64,
     state: &mut BeaconState<E>,
 ) -> Result<EraId, String> {
-    let end_slot = Slot::new(era_number * E::slots_per_historical_root() as u64);
+    // reth_era uses hardcoded SLOTS_PER_HISTORICAL_ROOT=8192 to compute era number from start_slot.
+    // To get the correct filename era number, we pass era_number * 8192 as the start_slot.
+    const RETH_SLOTS_PER_HISTORICAL_ROOT: u64 = 8192;
+    let reth_start_slot = era_number * RETH_SLOTS_PER_HISTORICAL_ROOT;
+    
     let slot_count = if era_number == 0 {
         0
     } else {
         E::slots_per_historical_root() as u32
     };
     let short_hash = short_historical_root(state, era_number)?;
-    Ok(EraId::new(network_name, end_slot.as_u64(), slot_count).with_hash(short_hash))
+    Ok(EraId::new(network_name, reth_start_slot, slot_count).with_hash(short_hash))
 }

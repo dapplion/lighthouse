@@ -424,24 +424,24 @@ fn era_consumer_genesis_state_intact() {
     );
 }
 
-/// Test 8: ERA producer test - verify produced ERA files match originals
+/// Test 8: ERA producer test - verify produced ERA files are byte-identical to originals
 ///
 /// This test:
 /// 1. Imports test vector ERA files into a store (consumer)
 /// 2. Uses the producer to generate new ERA files
-/// 3. Compares generated files byte-for-byte with originals
+/// 3. Compares generated files byte-for-byte with originals (must be identical)
 #[test]
-fn era_producer_output_matches_originals() {
+fn era_producer_output_is_byte_identical() {
     use beacon_chain::era_file_producer;
     use std::fs;
-    use tempfile::TempDir;
     
     // Set up store with imported ERA files
     let (store, spec, max_era) = setup_store_with_era_files();
     
-    // Create temp directory for produced ERA files
-    let output_dir = TempDir::new().expect("Failed to create temp dir");
-    let output_path = output_dir.path();
+    // Create output directory for produced ERA files
+    let output_path = std::path::Path::new("/tmp/era_producer_test_output_verify");
+    let _ = fs::remove_dir_all(output_path);
+    fs::create_dir_all(output_path).expect("Failed to create output dir");
     
     // Run producer for all eras
     for era_number in 0..=max_era {
@@ -451,14 +451,12 @@ fn era_producer_output_matches_originals() {
         }
     }
     
-    // Collect produced ERA files and parse them to determine actual ERA number from state slot
-    // (filename ERA numbers are unreliable in current implementation)
+    // Collect produced ERA files by parsing to determine actual ERA number from state slot
     let mut produced_eras: HashMap<u64, PathBuf> = HashMap::new();
     for entry in fs::read_dir(output_path).expect("Failed to read output dir") {
-        let entry = entry.ok().unwrap();
+        let entry = entry.unwrap();
         let name = entry.file_name().to_str().unwrap().to_string();
         if name.ends_with(".era") {
-            // Parse the file to get the actual ERA number from state slot
             let file = fs::File::open(entry.path())
                 .expect("Failed to open produced ERA file");
             let era_file = reth_era::era::file::EraReader::new(file)
@@ -474,13 +472,14 @@ fn era_producer_output_matches_originals() {
         }
     }
     
-    // Collect original ERA files by parsing to determine ERA number
+    // Collect original ERA files
     let original_era_dir = test_vectors_dir().join("era");
     let mut original_eras: HashMap<u64, PathBuf> = HashMap::new();
     for entry in fs::read_dir(&original_era_dir).expect("Failed to read original era dir") {
-        let entry = entry.ok().unwrap();
+        let entry = entry.unwrap();
         let name = entry.file_name().to_str().unwrap().to_string();
         if name.ends_with(".era") {
+            // We trust the test vectors now, but let's parse to be safe and consistent
             let file = fs::File::open(entry.path())
                 .expect("Failed to open original ERA file");
             let era_file = reth_era::era::file::EraReader::new(file)
@@ -499,12 +498,12 @@ fn era_producer_output_matches_originals() {
     assert_eq!(
         original_eras.len(),
         produced_eras.len(),
-        "Number of produced ERA files should match originals: expected {}, got {}",
-        original_eras.len(),
-        produced_eras.len()
+        "Number of produced ERA files ({}) should match originals ({})",
+        produced_eras.len(),
+        original_eras.len()
     );
     
-    // Verify each ERA file by comparing the parsed contents
+    // Verify each ERA file is byte-identical
     let mut verified_eras = 0;
     for era_num in 0..=max_era {
         let orig_path = original_eras.get(&era_num)
@@ -512,76 +511,42 @@ fn era_producer_output_matches_originals() {
         let prod_path = produced_eras.get(&era_num)
             .unwrap_or_else(|| panic!("Missing produced ERA file for era {}", era_num));
         
-        // Parse both ERA files
-        let orig_file = fs::File::open(orig_path)
-            .unwrap_or_else(|e| panic!("Failed to open original ERA {}: {}", era_num, e));
-        let orig_era = reth_era::era::file::EraReader::new(orig_file)
-            .read_and_assemble("minimal".to_string())
-            .unwrap_or_else(|e| panic!("Failed to parse original ERA {}: {:?}", era_num, e));
+        // Read raw bytes from both files
+        let orig_bytes = fs::read(orig_path)
+            .unwrap_or_else(|e| panic!("Failed to read original ERA {}: {}", era_num, e));
+        let prod_bytes = fs::read(prod_path)
+            .unwrap_or_else(|e| panic!("Failed to read produced ERA {}: {}", era_num, e));
         
-        let prod_file = fs::File::open(prod_path)
-            .unwrap_or_else(|e| panic!("Failed to open produced ERA {}: {}", era_num, e));
-        let prod_era = reth_era::era::file::EraReader::new(prod_file)
-            .read_and_assemble("minimal".to_string())
-            .unwrap_or_else(|e| panic!("Failed to parse produced ERA {}: {:?}", era_num, e));
-        
-        // Collect all unique block roots from both ERA files
-        let mut orig_roots: Vec<Hash256> = Vec::new();
-        for compressed_block in &orig_era.group.blocks {
-            let block = decode_block(compressed_block.clone(), &spec);
-            let root = block.canonical_root();
-            if !orig_roots.contains(&root) {
-                orig_roots.push(root);
-            }
-        }
-        
-        let mut prod_roots: Vec<Hash256> = Vec::new();
-        for compressed_block in &prod_era.group.blocks {
-            let block = decode_block(compressed_block.clone(), &spec);
-            let root = block.canonical_root();
-            if !prod_roots.contains(&root) {
-                prod_roots.push(root);
-            }
-        }
-        
-        // Compare block counts - may differ due to known producer bugs
-        if orig_roots.len() != prod_roots.len() {
-            println!(
-                "⚠ ERA {} block count differs: original {}, produced {} (investigating...)",
-                era_num, orig_roots.len(), prod_roots.len()
-            );
-            
-            // For now, just verify all produced blocks exist in originals
-            // Don't fail on count mismatch - the important thing is data correctness
-        }
-        
-        // Verify produced blocks are present in original blocks
-        for (i, prod_root) in prod_roots.iter().enumerate() {
-            assert!(
-                orig_roots.contains(prod_root),
-                "ERA {} produced block {} with root {:?} not found in originals",
-                era_num, i, prod_root
+        // Check file sizes match
+        if orig_bytes.len() != prod_bytes.len() {
+            panic!(
+                "ERA {} size mismatch: original {} bytes, produced {} bytes",
+                era_num, orig_bytes.len(), prod_bytes.len()
             );
         }
         
-        // Compare state root
-        let mut orig_state = decode_state(orig_era.group.era_state.clone(), &spec);
-        let mut prod_state = decode_state(prod_era.group.era_state.clone(), &spec);
+        // Find first byte that differs
+        let first_diff = orig_bytes.iter()
+            .zip(prod_bytes.iter())
+            .enumerate()
+            .find(|(_, (a, b))| a != b);
         
-        let orig_state_root = orig_state.canonical_root().expect("Failed to compute orig state root");
-        let prod_state_root = prod_state.canonical_root().expect("Failed to compute prod state root");
+        if let Some((offset, (orig_byte, prod_byte))) = first_diff {
+            panic!(
+                "ERA {} byte mismatch at offset {}: original 0x{:02x}, produced 0x{:02x}",
+                era_num, offset, orig_byte, prod_byte
+            );
+        }
         
-        assert_eq!(
-            orig_state_root, prod_state_root,
-            "ERA {} state root mismatch: {:?} vs {:?}",
-            era_num, orig_state_root, prod_state_root
+        println!(
+            "✓ ERA {} byte-identical ({} bytes)",
+            era_num, orig_bytes.len()
         );
-        
         verified_eras += 1;
     }
     
     println!(
-        "✓ All {} produced ERA files verified (blocks and states match originals)",
+        "✓ All {} ERA files are byte-identical to originals",
         verified_eras
     );
 }
