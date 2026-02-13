@@ -8,9 +8,9 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use strum::{Display, EnumString, VariantNames};
 use superstruct::superstruct;
-use types::{Hash256, Slot};
 use types::EthSpec;
 use types::new_non_zero_usize;
+use types::{Hash256, Slot};
 use zstd::{Decoder, Encoder};
 
 #[cfg(all(feature = "redb", not(feature = "leveldb")))]

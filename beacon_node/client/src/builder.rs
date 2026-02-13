@@ -470,7 +470,12 @@ where
                 let genesis_state = genesis_state(&runtime_context, &config).await?;
                 let trusted_state_root = config.store.era_trusted_state_root;
                 let trusted_slot = config.store.era_trusted_slot;
-                builder.era_files(&era_files_dir, genesis_state, trusted_state_root, trusted_slot)?
+                builder.era_files(
+                    &era_files_dir,
+                    genesis_state,
+                    trusted_state_root,
+                    trusted_slot,
+                )?
             }
         };
 

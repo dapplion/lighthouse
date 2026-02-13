@@ -49,6 +49,7 @@ fn load_genesis_state(spec: &ChainSpec) -> BeaconState<MinimalEthSpec> {
 }
 
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct TestMetadata {
     head_slot: u64,
     head_root: String,
@@ -315,7 +316,7 @@ fn era_consumer_imports_all_files() {
         let key = slot.to_be_bytes().to_vec();
         if let Some(root_bytes) = store
             .cold_db
-            .get_bytes(DBColumn::BeaconBlockRoots.into(), &key)
+            .get_bytes(DBColumn::BeaconBlockRoots, &key)
             .expect("Failed to read block root index")
         {
             let root = Hash256::from_slice(&root_bytes);
@@ -352,7 +353,7 @@ fn era_consumer_blocks_have_correct_roots() {
         let key = slot.to_be_bytes().to_vec();
         if let Some(root_bytes) = store
             .cold_db
-            .get_bytes(DBColumn::BeaconBlockRoots.into(), &key)
+            .get_bytes(DBColumn::BeaconBlockRoots, &key)
             .expect("Failed to read block root index")
         {
             let expected_root = Hash256::from_slice(&root_bytes);
@@ -402,7 +403,7 @@ fn era_consumer_final_head_matches_expected() {
         let key = slot.to_be_bytes().to_vec();
         if let Some(root_bytes) = store
             .cold_db
-            .get_bytes(DBColumn::BeaconBlockRoots.into(), &key)
+            .get_bytes(DBColumn::BeaconBlockRoots, &key)
             .expect("Failed to read block root index")
         {
             let root = Hash256::from_slice(&root_bytes);
@@ -672,9 +673,13 @@ fn era_consumer_rejects_corrupted_block() {
         .expect("init should succeed");
     let store = setup_store_for_corruption_test(&spec);
 
-    era_dir.import_era_file(&store, 0, &spec, None, None).expect("ERA 0 ok");
+    era_dir
+        .import_era_file(&store, 0, &spec, None, None)
+        .expect("ERA 0 ok");
 
-    let err = era_dir.import_era_file(&store, 1, &spec, None, None).unwrap_err();
+    let err = era_dir
+        .import_era_file(&store, 1, &spec, None, None)
+        .unwrap_err();
     assert!(
         err.contains("decompress"),
         "expected decompression error: {err}"
@@ -689,7 +694,9 @@ fn era_consumer_rejects_corrupted_genesis_state() {
         .expect("init should succeed (reference is ERA 12)");
     let store = setup_store_for_corruption_test(&spec);
 
-    let err = era_dir.import_era_file(&store, 0, &spec, None, None).unwrap_err();
+    let err = era_dir
+        .import_era_file(&store, 0, &spec, None, None)
+        .unwrap_err();
     assert!(
         err.contains("decompress"),
         "expected decompression error: {err}"
@@ -710,7 +717,9 @@ fn era_consumer_rejects_corrupted_middle_state() {
             .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
     }
 
-    let err = era_dir.import_era_file(&store, 5, &spec, None, None).unwrap_err();
+    let err = era_dir
+        .import_era_file(&store, 5, &spec, None, None)
+        .unwrap_err();
     assert!(
         err.contains("decompress"),
         "expected decompression error: {err}"
@@ -746,7 +755,9 @@ fn era_consumer_rejects_wrong_era_content() {
             .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
     }
 
-    let err = era_dir.import_era_file(&store, 3, &spec, None, None).unwrap_err();
+    let err = era_dir
+        .import_era_file(&store, 3, &spec, None, None)
+        .unwrap_err();
     assert!(
         err.contains("slot mismatch"),
         "expected slot mismatch error: {err}"
@@ -762,7 +773,9 @@ fn era_consumer_rejects_wrong_era_root() {
         .expect("init should succeed");
     let store = setup_store_for_corruption_test(&spec);
 
-    let err = era_dir.import_era_file(&store, 0, &spec, None, None).unwrap_err();
+    let err = era_dir
+        .import_era_file(&store, 0, &spec, None, None)
+        .unwrap_err();
     assert!(
         err.contains("era root mismatch") || err.contains("decompress"),
         "expected era root mismatch or decompression error: {err}"
@@ -784,7 +797,9 @@ fn era_consumer_rejects_corrupt_block_summary() {
             .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
     }
 
-    let err = era_dir.import_era_file(&store, 8, &spec, None, None).unwrap_err();
+    let err = era_dir
+        .import_era_file(&store, 8, &spec, None, None)
+        .unwrap_err();
     assert!(
         err.contains("block summary root") || err.contains("decompress"),
         "expected block summary root mismatch or decompression error: {err}"
@@ -806,7 +821,9 @@ fn era_consumer_rejects_wrong_block_root() {
             .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
     }
 
-    let err = era_dir.import_era_file(&store, 2, &spec, None, None).unwrap_err();
+    let err = era_dir
+        .import_era_file(&store, 2, &spec, None, None)
+        .unwrap_err();
     assert!(
         err.contains("block root mismatch") || err.contains("decompress") || err.contains("decode"),
         "expected block root mismatch, decompress, or decode error: {err}"
@@ -817,68 +834,74 @@ fn era_consumer_rejects_wrong_block_root() {
 fn era_consumer_verifies_trusted_state_root() {
     let spec = load_test_spec();
     let spec_arc = Arc::new(spec.clone());
-    let store: HotColdDB<MinimalEthSpec, store::MemoryStore<MinimalEthSpec>, store::MemoryStore<MinimalEthSpec>> = 
-        HotColdDB::open_ephemeral(StoreConfig::default(), spec_arc)
-            .expect("Failed to create ephemeral store");
-    
+    let store: HotColdDB<
+        MinimalEthSpec,
+        store::MemoryStore<MinimalEthSpec>,
+        store::MemoryStore<MinimalEthSpec>,
+    > = HotColdDB::open_ephemeral(StoreConfig::default(), spec_arc)
+        .expect("Failed to create ephemeral store");
+
     // First, import a good ERA file and extract its state root
     let era_dir_path = Path::new("tests/era_test_vectors/era");
-    let era_dir = EraFileDir::new::<MinimalEthSpec>(&era_dir_path, &spec)
+    let era_dir = EraFileDir::new::<MinimalEthSpec>(era_dir_path, &spec)
         .expect("ERA directory should be valid");
-    
+
     // Import ERA 0-2 normally
     for era in 0..=2 {
         era_dir
             .import_era_file(&store, era, &spec, None, None)
             .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
     }
-    
+
     // Get the state root from ERA 3 by importing it first
     let era_path = era_dir_path.join("minimal-00003-62feb608.era");
     let file = File::open(&era_path).expect("ERA 3 file should exist");
     let era_file = reth_era::era::file::EraReader::new(file)
         .read_and_assemble("minimal".to_string())
         .expect("Should read ERA file");
-    
+
     let compressed_state = era_file.group.era_state;
     let state_bytes = compressed_state.decompress().expect("Should decompress");
-    let mut state: BeaconState<MinimalEthSpec> = BeaconState::from_ssz_bytes(&state_bytes, &spec)
-        .expect("Should decode state");
-    
+    let mut state: BeaconState<MinimalEthSpec> =
+        BeaconState::from_ssz_bytes(&state_bytes, &spec).expect("Should decode state");
+
     let correct_root = state.canonical_root().expect("Should compute state root");
     let slot = state.slot();
-    
+
     // Test 1: Import with correct trusted state root should succeed
     era_dir
         .import_era_file(&store, 3, &spec, Some(correct_root), Some(slot))
         .expect("Should succeed with correct trusted root");
-    
+
     // Test 2: Import with WRONG trusted state root should fail
     // Use a different root (just flip one bit)
     let wrong_root = {
         let mut bytes: [u8; 32] = correct_root.into();
-        bytes[0] ^= 0x01;  // Flip one bit
+        bytes[0] ^= 0x01; // Flip one bit
         Hash256::from(bytes)
     };
-    
+
     // Create a fresh store for second test
     let spec_arc2 = Arc::new(spec.clone());
-    let store2: HotColdDB<MinimalEthSpec, store::MemoryStore<MinimalEthSpec>, store::MemoryStore<MinimalEthSpec>> = 
-        HotColdDB::open_ephemeral(StoreConfig::default(), spec_arc2)
-            .expect("Failed to create second ephemeral store");
-    
+    let store2: HotColdDB<
+        MinimalEthSpec,
+        store::MemoryStore<MinimalEthSpec>,
+        store::MemoryStore<MinimalEthSpec>,
+    > = HotColdDB::open_ephemeral(StoreConfig::default(), spec_arc2)
+        .expect("Failed to create second ephemeral store");
+
     // Import ERA 0-2 first
     for era in 0..=2 {
         era_dir
             .import_era_file(&store2, era, &spec, None, None)
             .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
     }
-    
+
     // Import ERA 3 with wrong trusted root should fail
     let err = era_dir
         .import_era_file(&store2, 3, &spec, Some(wrong_root), Some(slot))
         .unwrap_err();
-    
+
     assert!(
         err.contains("trusted state root mismatch"),
         "Expected trusted state root mismatch error, got: {err}"

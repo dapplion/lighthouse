@@ -355,13 +355,15 @@ pub fn get_config<E: EthSpec>(
     }
 
     if let Some(root_str) = cli_args.get_one::<String>("era-trusted-state-root") {
-        let root = root_str.parse::<Hash256>()
+        let root = root_str
+            .parse::<Hash256>()
             .map_err(|e| format!("Invalid era-trusted-state-root: {}", e))?;
         client_config.store.era_trusted_state_root = Some(root);
     }
 
     if let Some(slot_str) = cli_args.get_one::<String>("era-trusted-slot") {
-        let slot = slot_str.parse::<u64>()
+        let slot = slot_str
+            .parse::<u64>()
             .map_err(|e| format!("Invalid era-trusted-slot: {}", e))?;
         client_config.store.era_trusted_slot = Some(Slot::new(slot));
     }

@@ -157,9 +157,10 @@ fn build_era_group<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
                 .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
 
             // Skip duplicate blocks (same root as previous slot), but only within this ERA
-            if slot_u64 > start_slot.as_u64() &&
-                let Ok(prev_root) = state.get_block_root(Slot::new(slot_u64 - 1)) &&
-                prev_root == block_root {
+            if slot_u64 > start_slot.as_u64()
+                && let Ok(prev_root) = state.get_block_root(Slot::new(slot_u64 - 1))
+                && prev_root == block_root
+            {
                 continue;
             }
 
