@@ -1,11 +1,11 @@
 mod attestation_production;
-mod era_file_tests;
 mod attestation_verification;
 mod bellatrix;
 mod blob_verification;
 mod block_verification;
 mod capella;
 mod column_verification;
+mod era_file_tests;
 mod events;
 mod op_verification;
 mod payload_invalidation;

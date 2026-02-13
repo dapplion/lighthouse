@@ -308,7 +308,7 @@ fn era_file_id<E: EthSpec>(
     // To get the correct filename era number, we pass era_number * 8192 as the start_slot.
     const RETH_SLOTS_PER_HISTORICAL_ROOT: u64 = 8192;
     let reth_start_slot = era_number * RETH_SLOTS_PER_HISTORICAL_ROOT;
-    
+
     let slot_count = if era_number == 0 {
         0
     } else {
