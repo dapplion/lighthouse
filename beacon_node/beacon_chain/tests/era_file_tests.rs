@@ -608,467 +608,146 @@ fn era_producer_output_is_byte_identical() {
 // CORRUPTION TESTS
 // =============================================================================
 //
-// These tests verify that the ERA consumer correctly rejects corrupted ERA files.
-// They create temporary directories with corrupted copies of the test vectors.
+// These tests verify the ERA consumer rejects corrupted ERA files.
+// Pre-corrupted files are in era_test_vectors/corrupt/
 
-/// Helper to create a temporary directory with ERA files, allowing corruption of specific files.
-fn setup_corrupt_era_dir<F>(corrupt_fn: F) -> tempfile::TempDir
-where
-    F: FnOnce(&std::path::Path),
-{
+/// Create temp dir with valid ERA files, optionally replacing one with a corrupt version.
+fn setup_era_dir_with_corrupt_file(
+    corrupt_file: &str,
+    target_era_pattern: &str,
+) -> tempfile::TempDir {
     use std::fs;
 
     let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
-    let source_dir = test_vectors_dir();
+    let source = test_vectors_dir();
 
-    // Copy config.yaml and genesis.ssz
-    fs::copy(
-        source_dir.join("config.yaml"),
-        temp_dir.path().join("config.yaml"),
-    )
-    .expect("Failed to copy config.yaml");
-    fs::copy(
-        source_dir.join("genesis.ssz"),
-        temp_dir.path().join("genesis.ssz"),
-    )
-    .expect("Failed to copy genesis.ssz");
-
-    // Copy ERA files to temp_dir/era/
+    // Copy ERA files, replacing one with corrupt version
     let era_dest = temp_dir.path().join("era");
-    fs::create_dir_all(&era_dest).expect("Failed to create era dir");
+    fs::create_dir_all(&era_dest).expect("create era dir");
 
-    let era_source = source_dir.join("era");
-    for entry in fs::read_dir(&era_source).expect("Failed to read era source dir") {
-        let entry = entry.expect("Failed to read entry");
-        let dest_path = era_dest.join(entry.file_name());
-        fs::copy(entry.path(), &dest_path).expect("Failed to copy ERA file");
+    for entry in fs::read_dir(source.join("era")).expect("read era dir") {
+        let entry = entry.expect("entry");
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if name.contains(target_era_pattern) {
+            // Replace with corrupt version
+            fs::copy(
+                source.join("corrupt").join(corrupt_file),
+                era_dest.join(&name),
+            )
+            .expect("copy corrupt file");
+        } else {
+            fs::copy(entry.path(), era_dest.join(&name)).expect("copy era file");
+        }
     }
-
-    // Apply corruption
-    corrupt_fn(temp_dir.path());
 
     temp_dir
 }
 
-/// Corrupt a block in an ERA file by flipping bits in the compressed block data.
-fn corrupt_block_in_era_file(era_file_path: &std::path::Path) {
-    use std::fs;
+/// Setup store with genesis state for corruption tests
+fn setup_store_for_corruption_test(
+    spec: &ChainSpec,
+) -> HotColdDB<MinimalEthSpec, store::MemoryStore<MinimalEthSpec>, store::MemoryStore<MinimalEthSpec>>
+{
+    let spec_arc = Arc::new(spec.clone());
+    let store = HotColdDB::open_ephemeral(StoreConfig::default(), spec_arc).expect("create store");
 
-    let mut data = fs::read(era_file_path).expect("Failed to read ERA file");
+    let mut genesis_state = load_genesis_state(spec);
+    let genesis_state_root = genesis_state.canonical_root().expect("hash genesis");
+    let mut ops = vec![];
+    store
+        .store_cold_state(&genesis_state_root, &genesis_state, &mut ops)
+        .expect("build ops");
+    store.cold_db.do_atomically(ops).expect("store genesis");
 
-    // ERA file structure: version header (8 bytes), then entries
-    // Each entry: type (2 bytes) + length (4 bytes) + reserved (2 bytes) + data
-    // Block entries have type 0x0001
-
-    // Find first block entry and corrupt it
-    let mut offset = 8; // Skip version header
-    while offset + 8 <= data.len() {
-        let entry_type = u16::from_le_bytes([data[offset], data[offset + 1]]);
-        let length = u32::from_le_bytes([
-            data[offset + 2],
-            data[offset + 3],
-            data[offset + 4],
-            data[offset + 5],
-        ]) as usize;
-
-        // 0x0001 = compressed signed beacon block
-        if entry_type == 0x0001 && length > 100 {
-            // Corrupt some bytes in the middle of the block data
-            let data_start = offset + 8;
-            let corrupt_offset = data_start + length / 2;
-            if corrupt_offset + 10 < data.len() {
-                // Flip bits to ensure corruption
-                for i in 0..10 {
-                    data[corrupt_offset + i] ^= 0xFF;
-                }
-                break;
-            }
-        }
-        offset += 8 + length;
-    }
-
-    fs::write(era_file_path, data).expect("Failed to write corrupted ERA file");
+    store
 }
 
-/// Corrupt the state in an ERA file by flipping bits in the compressed state data.
-fn corrupt_state_in_era_file(era_file_path: &std::path::Path) {
-    use std::fs;
-
-    let mut data = fs::read(era_file_path).expect("Failed to read ERA file");
-
-    // Find state entry (type 0x0002 = compressed beacon state) and corrupt it
-    let mut offset = 8; // Skip version header
-    while offset + 8 <= data.len() {
-        let entry_type = u16::from_le_bytes([data[offset], data[offset + 1]]);
-        let length = u32::from_le_bytes([
-            data[offset + 2],
-            data[offset + 3],
-            data[offset + 4],
-            data[offset + 5],
-        ]) as usize;
-
-        // 0x0002 = compressed beacon state
-        if entry_type == 0x0002 && length > 100 {
-            let data_start = offset + 8;
-            let corrupt_offset = data_start + length / 2;
-            if corrupt_offset + 10 < data.len() {
-                for i in 0..10 {
-                    data[corrupt_offset + i] ^= 0xFF;
-                }
-                break;
-            }
-        }
-        offset += 8 + length;
-    }
-
-    fs::write(era_file_path, data).expect("Failed to write corrupted ERA file");
-}
-
-/// Test 9: Corrupted block in ERA file should fail import with block root mismatch
 #[test]
 fn era_consumer_rejects_corrupted_block() {
-    use std::fs;
-
-    let temp_dir = setup_corrupt_era_dir(|dir| {
-        // Corrupt a block in ERA 1 (has actual blocks, unlike ERA 0 which only has genesis state)
-        let era_dir = dir.join("era");
-        for entry in fs::read_dir(&era_dir).expect("Failed to read era dir") {
-            let entry = entry.expect("Failed to read entry");
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains("-00001-") {
-                corrupt_block_in_era_file(&entry.path());
-                println!("Corrupted block in: {}", name);
-                break;
-            }
-        }
-    });
-
+    let temp_dir = setup_era_dir_with_corrupt_file("era1-corrupt-block.era", "-00001-");
     let spec = load_test_spec();
-    let era_dir_path = temp_dir.path().join("era");
+    let era_dir = EraFileDir::new::<MinimalEthSpec>(&temp_dir.path().join("era"), &spec)
+        .expect("init should succeed");
+    let store = setup_store_for_corruption_test(&spec);
 
-    // EraFileDir::new should succeed (it only parses the reference state)
-    let era_dir = EraFileDir::new::<MinimalEthSpec>(&era_dir_path, &spec)
-        .expect("EraFileDir::new should succeed even with corrupted block");
+    era_dir.import_era_file(&store, 0, &spec).expect("ERA 0 ok");
 
-    let spec_arc = Arc::new(spec.clone());
-    let store = HotColdDB::open_ephemeral(StoreConfig::default(), spec_arc)
-        .expect("Failed to create ephemeral store");
-
-    // Store genesis state first
-    let mut genesis_state = load_genesis_state(&spec);
-    let genesis_state_root = genesis_state
-        .canonical_root()
-        .expect("Failed to hash genesis state");
-    {
-        let mut ops = vec![];
-        store
-            .store_cold_state(&genesis_state_root, &genesis_state, &mut ops)
-            .expect("Failed to build genesis state ops");
-        store
-            .cold_db
-            .do_atomically(ops)
-            .expect("Failed to store genesis state");
-    }
-
-    // ERA 0 should import successfully
-    let result_era0 = era_dir.import_era_file(&store, 0, &spec);
+    let err = era_dir.import_era_file(&store, 1, &spec).unwrap_err();
     assert!(
-        result_era0.is_ok(),
-        "ERA 0 import should succeed: {:?}",
-        result_era0
-    );
-
-    // ERA 1 should fail due to corrupted block
-    let result_era1 = era_dir.import_era_file(&store, 1, &spec);
-    assert!(
-        result_era1.is_err(),
-        "ERA 1 import should fail due to corrupted block"
-    );
-
-    let error = result_era1.unwrap_err();
-    println!("Expected error for corrupted block: {}", error);
-
-    // Error should indicate decompression failure or block decode failure
-    assert!(
-        error.contains("decompress") || error.contains("decode") || error.contains("block"),
-        "Error should mention decompression/decode failure: {}",
-        error
+        err.contains("decompress"),
+        "expected decompression error: {err}"
     );
 }
 
-/// Test 10: Corrupted state in ERA 0 (genesis era) should fail import
 #[test]
 fn era_consumer_rejects_corrupted_genesis_state() {
-    use std::fs;
-
-    let temp_dir = setup_corrupt_era_dir(|dir| {
-        // Corrupt the state in ERA 0
-        let era_dir = dir.join("era");
-        for entry in fs::read_dir(&era_dir).expect("Failed to read era dir") {
-            let entry = entry.expect("Failed to read entry");
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains("-00000-") {
-                corrupt_state_in_era_file(&entry.path());
-                println!("Corrupted state in: {}", name);
-                break;
-            }
-        }
-    });
-
+    let temp_dir = setup_era_dir_with_corrupt_file("era0-corrupt-state.era", "-00000-");
     let spec = load_test_spec();
-    let era_dir_path = temp_dir.path().join("era");
+    let era_dir = EraFileDir::new::<MinimalEthSpec>(&temp_dir.path().join("era"), &spec)
+        .expect("init should succeed (reference is ERA 12)");
+    let store = setup_store_for_corruption_test(&spec);
 
-    // EraFileDir::new parses the highest ERA file's state as reference, not ERA 0
-    // So it should still succeed (ERA 0 is not the reference)
-    let era_dir = EraFileDir::new::<MinimalEthSpec>(&era_dir_path, &spec)
-        .expect("EraFileDir::new should succeed (reference is highest ERA, not ERA 0)");
-
-    let spec_arc = Arc::new(spec.clone());
-    let store = HotColdDB::open_ephemeral(StoreConfig::default(), spec_arc)
-        .expect("Failed to create ephemeral store");
-
-    // Store genesis state
-    let mut genesis_state = load_genesis_state(&spec);
-    let genesis_state_root = genesis_state
-        .canonical_root()
-        .expect("Failed to hash genesis state");
-    {
-        let mut ops = vec![];
-        store
-            .store_cold_state(&genesis_state_root, &genesis_state, &mut ops)
-            .expect("Failed to build genesis state ops");
-        store
-            .cold_db
-            .do_atomically(ops)
-            .expect("Failed to store genesis state");
-    }
-
-    // ERA 0 import should fail due to corrupted state
-    let result = era_dir.import_era_file(&store, 0, &spec);
+    let err = era_dir.import_era_file(&store, 0, &spec).unwrap_err();
     assert!(
-        result.is_err(),
-        "ERA 0 import should fail due to corrupted state"
-    );
-
-    let error = result.unwrap_err();
-    println!("Expected error for corrupted genesis state: {}", error);
-
-    // Error should indicate decompression or decode failure
-    assert!(
-        error.contains("decompress") || error.contains("decode") || error.contains("state"),
-        "Error should mention decompression/decode failure: {}",
-        error
+        err.contains("decompress"),
+        "expected decompression error: {err}"
     );
 }
 
-/// Test 11: Corrupted state in middle ERA should fail import with root mismatch
 #[test]
 fn era_consumer_rejects_corrupted_middle_state() {
-    use std::fs;
-
-    let temp_dir = setup_corrupt_era_dir(|dir| {
-        // Corrupt the state in ERA 5 (middle of the range)
-        let era_dir = dir.join("era");
-        for entry in fs::read_dir(&era_dir).expect("Failed to read era dir") {
-            let entry = entry.expect("Failed to read entry");
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains("-00005-") {
-                corrupt_state_in_era_file(&entry.path());
-                println!("Corrupted state in: {}", name);
-                break;
-            }
-        }
-    });
-
+    let temp_dir = setup_era_dir_with_corrupt_file("era5-corrupt-state.era", "-00005-");
     let spec = load_test_spec();
-    let era_dir_path = temp_dir.path().join("era");
+    let era_dir = EraFileDir::new::<MinimalEthSpec>(&temp_dir.path().join("era"), &spec)
+        .expect("init should succeed");
+    let store = setup_store_for_corruption_test(&spec);
 
-    let era_dir = EraFileDir::new::<MinimalEthSpec>(&era_dir_path, &spec)
-        .expect("EraFileDir::new should succeed");
-
-    let spec_arc = Arc::new(spec.clone());
-    let store = HotColdDB::open_ephemeral(StoreConfig::default(), spec_arc)
-        .expect("Failed to create ephemeral store");
-
-    // Store genesis state
-    let mut genesis_state = load_genesis_state(&spec);
-    let genesis_state_root = genesis_state
-        .canonical_root()
-        .expect("Failed to hash genesis state");
-    {
-        let mut ops = vec![];
-        store
-            .store_cold_state(&genesis_state_root, &genesis_state, &mut ops)
-            .expect("Failed to build genesis state ops");
-        store
-            .cold_db
-            .do_atomically(ops)
-            .expect("Failed to store genesis state");
-    }
-
-    // Import ERA 0-4 should succeed
     for era in 0..5 {
-        let result = era_dir.import_era_file(&store, era, &spec);
-        assert!(
-            result.is_ok(),
-            "ERA {} import should succeed: {:?}",
-            era,
-            result
-        );
+        era_dir
+            .import_era_file(&store, era, &spec)
+            .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
     }
 
-    // ERA 5 import should fail due to corrupted state
-    let result = era_dir.import_era_file(&store, 5, &spec);
+    let err = era_dir.import_era_file(&store, 5, &spec).unwrap_err();
     assert!(
-        result.is_err(),
-        "ERA 5 import should fail due to corrupted state"
-    );
-
-    let error = result.unwrap_err();
-    println!("Expected error for corrupted middle state: {}", error);
-
-    // Error should indicate decompression, decode, or root mismatch
-    assert!(
-        error.contains("decompress")
-            || error.contains("decode")
-            || error.contains("mismatch")
-            || error.contains("state"),
-        "Error should mention failure reason: {}",
-        error
+        err.contains("decompress"),
+        "expected decompression error: {err}"
     );
 }
 
-/// Test 12: Corrupted reference state (highest ERA) should fail EraFileDir::new
 #[test]
 fn era_consumer_rejects_corrupted_reference_state() {
-    use std::fs;
-
-    let temp_dir = setup_corrupt_era_dir(|dir| {
-        // Corrupt the state in the highest ERA file (ERA 12)
-        let era_dir = dir.join("era");
-        for entry in fs::read_dir(&era_dir).expect("Failed to read era dir") {
-            let entry = entry.expect("Failed to read entry");
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains("-00012-") {
-                corrupt_state_in_era_file(&entry.path());
-                println!("Corrupted reference state in: {}", name);
-                break;
-            }
-        }
-    });
-
+    let temp_dir = setup_era_dir_with_corrupt_file("era12-corrupt-state.era", "-00012-");
     let spec = load_test_spec();
-    let era_dir_path = temp_dir.path().join("era");
 
-    // EraFileDir::new should fail because it can't parse the reference state
-    let result = EraFileDir::new::<MinimalEthSpec>(&era_dir_path, &spec);
-
-    match result {
-        Ok(_) => panic!("EraFileDir::new should fail with corrupted reference state"),
-        Err(error) => {
-            println!("Expected error for corrupted reference state: {}", error);
-            assert!(
-                error.contains("decompress") || error.contains("decode") || error.contains("parse"),
-                "Error should mention parse/decode failure: {}",
-                error
-            );
-        }
+    match EraFileDir::new::<MinimalEthSpec>(&temp_dir.path().join("era"), &spec) {
+        Ok(_) => panic!("should fail with corrupted reference state"),
+        Err(err) => assert!(
+            err.contains("decompress"),
+            "expected decompression error: {err}"
+        ),
     }
 }
 
-// =============================================================================
-// SEMANTIC CORRUPTION TESTS
-// =============================================================================
-//
-// These tests use the ERA producer to create ERA files with modified content,
-// then verify the consumer rejects them due to root mismatches.
-
-/// Test 13: Swapped ERA files should fail due to historical root mismatch
-///
-/// This tests the semantic integrity check: if we swap ERA 5 content into ERA 3's filename,
-/// the historical root check should catch it.
 #[test]
-fn era_consumer_rejects_swapped_era_files() {
-    use std::fs;
-
-    let temp_dir = setup_corrupt_era_dir(|dir| {
-        let era_dir = dir.join("era");
-
-        // Find ERA 3 and ERA 5 files
-        let mut era3_path = None;
-        let mut era5_path = None;
-
-        for entry in fs::read_dir(&era_dir).expect("Failed to read era dir") {
-            let entry = entry.expect("Failed to read entry");
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.contains("-00003-") {
-                era3_path = Some(entry.path());
-            } else if name.contains("-00005-") {
-                era5_path = Some(entry.path());
-            }
-        }
-
-        let era3 = era3_path.expect("ERA 3 not found");
-        let era5 = era5_path.expect("ERA 5 not found");
-
-        // Copy ERA 5 content to ERA 3 filename (keeping the ERA 3 filename)
-        let era5_content = fs::read(&era5).expect("Failed to read ERA 5");
-        fs::write(&era3, era5_content).expect("Failed to write swapped ERA 3");
-
-        println!("Swapped ERA 5 content into ERA 3 file");
-    });
-
+fn era_consumer_rejects_wrong_era_content() {
+    // ERA 3 file contains ERA 5's content - tests semantic slot check
+    let temp_dir = setup_era_dir_with_corrupt_file("era3-wrong-content.era", "-00003-");
     let spec = load_test_spec();
-    let era_dir_path = temp_dir.path().join("era");
+    let era_dir = EraFileDir::new::<MinimalEthSpec>(&temp_dir.path().join("era"), &spec)
+        .expect("init should succeed");
+    let store = setup_store_for_corruption_test(&spec);
 
-    let era_dir = EraFileDir::new::<MinimalEthSpec>(&era_dir_path, &spec)
-        .expect("EraFileDir::new should succeed");
-
-    let spec_arc = Arc::new(spec.clone());
-    let store = HotColdDB::open_ephemeral(StoreConfig::default(), spec_arc)
-        .expect("Failed to create ephemeral store");
-
-    // Store genesis state
-    let mut genesis_state = load_genesis_state(&spec);
-    let genesis_state_root = genesis_state
-        .canonical_root()
-        .expect("Failed to hash genesis state");
-    {
-        let mut ops = vec![];
-        store
-            .store_cold_state(&genesis_state_root, &genesis_state, &mut ops)
-            .expect("Failed to build genesis state ops");
-        store
-            .cold_db
-            .do_atomically(ops)
-            .expect("Failed to store genesis state");
-    }
-
-    // ERA 0, 1, 2 should import successfully
     for era in 0..3 {
-        let result = era_dir.import_era_file(&store, era, &spec);
-        assert!(
-            result.is_ok(),
-            "ERA {} import should succeed: {:?}",
-            era,
-            result
-        );
+        era_dir
+            .import_era_file(&store, era, &spec)
+            .unwrap_or_else(|e| panic!("ERA {era} should succeed: {e}"));
     }
 
-    // ERA 3 should fail because it contains ERA 5's content
-    let result_era3 = era_dir.import_era_file(&store, 3, &spec);
+    let err = era_dir.import_era_file(&store, 3, &spec).unwrap_err();
     assert!(
-        result_era3.is_err(),
-        "ERA 3 import should fail (contains ERA 5 content)"
-    );
-
-    let error = result_era3.unwrap_err();
-    println!("Expected error for swapped ERA: {}", error);
-
-    // Could be state slot mismatch or root mismatch
-    assert!(
-        error.contains("mismatch") || error.contains("slot"),
-        "Error should mention mismatch: {}",
-        error
+        err.contains("slot mismatch"),
+        "expected slot mismatch error: {err}"
     );
 }
