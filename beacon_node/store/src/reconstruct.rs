@@ -1,15 +1,16 @@
 //! Implementation of historic state reconstruction (given complete block history).
+use crate::forwards_iter::FrozenForwardsIterator;
 use crate::hot_cold_store::{HotColdDB, HotColdDBError};
-use crate::metrics;
+use crate::{DBColumn, KeyValueStoreOp, metrics};
 use crate::{Error, ItemStore};
-use itertools::{Itertools, process_results};
+use itertools::process_results;
 use state_processing::{
     BlockSignatureStrategy, ConsensusContext, VerifyBlockRoot, per_block_processing,
     per_slot_processing,
 };
 use std::sync::Arc;
 use tracing::{debug, info};
-use types::EthSpec;
+use types::{EthSpec, Slot};
 
 impl<E, Hot, Cold> HotColdDB<E, Hot, Cold>
 where
@@ -53,40 +54,103 @@ where
             return Ok(());
         }
 
-        // If `num_blocks` is not specified iterate all blocks. Add 1 so that we end on an epoch
-        // boundary when `num_blocks` is a multiple of an epoch boundary. We want to be *inclusive*
-        // of the state at slot `lower_limit_slot + num_blocks`.
-        let block_root_iter = self
-            .forwards_block_roots_iterator_until(lower_limit_slot, upper_limit_slot - 1, || {
-                Err(Error::StateShouldNotBeRequired(upper_limit_slot - 1))
-            })?
-            .take(num_blocks.map_or(usize::MAX, |n| n + 1));
+        let from_slot = lower_limit_slot;
+        let to_slot = if let Some(num_blocks) = num_blocks {
+            std::cmp::min(upper_limit_slot, from_slot + Slot::new(num_blocks as u64))
+        } else {
+            upper_limit_slot
+        };
+
+        self.reconstruct_historic_states_on_range(from_slot, from_slot, to_slot)?;
+
+        let remaining = upper_limit_slot
+            .as_u64()
+            .saturating_sub(1)
+            .saturating_sub(to_slot.as_u64());
+        info!(
+            slot = %to_slot,
+            remaining = %remaining,
+            "State reconstruction in progress"
+        );
+
+        // Update anchor.
+        let old_anchor = anchor.clone();
+
+        let reconstruction_complete = to_slot == upper_limit_slot;
+        if reconstruction_complete {
+            let new_anchor = old_anchor.as_archive_anchor();
+            self.compare_and_set_anchor_info_with_write(old_anchor, new_anchor)?;
+
+            return Ok(());
+        } else {
+            // The lower limit has been raised, store it.
+            anchor.state_lower_limit = to_slot;
+
+            self.compare_and_set_anchor_info_with_write(old_anchor, anchor.clone())?;
+        }
+
+        // Check that the split point wasn't mutated during the state reconstruction process.
+        // It shouldn't have been, due to the serialization of requests through the store migrator,
+        // so this is just a paranoid check.
+        let latest_split = self.get_split_info();
+        if split != latest_split {
+            return Err(Error::SplitPointModified(latest_split.slot, split.slot));
+        }
+
+        Ok(())
+    }
+
+    pub fn reconstruct_historic_states_on_range(
+        self: &Arc<Self>,
+        with_state_at_slot: Slot,
+        from_slot: Slot,
+        to_slot: Slot,
+    ) -> Result<(), Error> {
+        debug!(
+            %from_slot,
+            %to_slot,
+            "Starting state reconstruction batch"
+        );
+
+        let _t = metrics::start_timer(&metrics::STORE_BEACON_RECONSTRUCTION_TIME);
+
+        let block_root_iter =
+            FrozenForwardsIterator::new(self, DBColumn::BeaconBlockRoots, from_slot, to_slot)?;
 
         // The state to be advanced.
-        let mut state = self.load_cold_state_by_slot(lower_limit_slot)?;
+        let mut state = self.load_cold_state_by_slot(with_state_at_slot)?;
 
         state.build_caches(&self.spec)?;
 
         process_results(block_root_iter, |iter| -> Result<(), Error> {
             let mut io_batch = vec![];
-
             let mut prev_state_root = None;
 
-            for ((prev_block_root, _), (block_root, slot)) in iter.tuple_windows() {
-                let is_skipped_slot = prev_block_root == block_root;
+            for (block_root, slot) in iter {
+                io_batch.push(KeyValueStoreOp::PutKeyValue(
+                    DBColumn::BeaconBlockRoots,
+                    slot.as_u64().to_be_bytes().to_vec(),
+                    block_root.as_slice().to_vec(),
+                ));
 
-                let block = if is_skipped_slot {
-                    None
-                } else {
-                    Some(
-                        self.get_blinded_block(&block_root)?
-                            .ok_or(Error::BlockNotFound(block_root))?,
-                    )
+                let block = {
+                    let block = self
+                        .get_blinded_block(&block_root)?
+                        .ok_or(Error::BlockNotFound(block_root))?;
+                    if block.slot() == slot && block.slot() > self.spec.genesis_slot {
+                        // If block.slot != slot means it's a skipped slot.
+                        // Also skip applying the genesis slot.
+                        Some(block)
+                    } else {
+                        None
+                    }
                 };
 
                 // Advance state to slot.
-                per_slot_processing(&mut state, prev_state_root.take(), &self.spec)
-                    .map_err(HotColdDBError::BlockReplaySlotError)?;
+                while state.slot() < slot {
+                    per_slot_processing(&mut state, prev_state_root.take(), &self.spec)
+                        .map_err(HotColdDBError::BlockReplaySlotError)?;
+                }
 
                 // Apply block.
                 if let Some(block) = block {
@@ -102,7 +166,7 @@ where
                         &mut ctxt,
                         &self.spec,
                     )
-                    .map_err(HotColdDBError::BlockReplayBlockError)?;
+                    .map_err(|e| HotColdDBError::BlockReplayBlockError(block.slot(), e))?;
 
                     prev_state_root = Some(block.state_root());
                 }
@@ -114,58 +178,21 @@ where
                 // Stage state for storage in freezer DB.
                 self.store_cold_state(&state_root, &state, &mut io_batch)?;
 
-                let batch_complete =
-                    num_blocks.is_some_and(|n_blocks| slot == lower_limit_slot + n_blocks as u64);
-                let reconstruction_complete = slot + 1 == upper_limit_slot;
+                let batch_complete = slot + 1 == to_slot;
 
                 // Commit the I/O batch if:
                 //
                 // - The diff/snapshot for this slot is required for future slots, or
                 // - The reconstruction batch is complete (we are about to return), or
                 // - Reconstruction is complete.
-                if self.hierarchy.should_commit_immediately(slot)?
-                    || batch_complete
-                    || reconstruction_complete
-                {
-                    info!(
-                        %slot,
-                        remaining = %(upper_limit_slot - 1 - slot),
-                        "State reconstruction in progress"
-                    );
-
+                if self.hierarchy.should_commit_immediately(slot)? || batch_complete {
                     self.cold_db.do_atomically(std::mem::take(&mut io_batch))?;
-
-                    // Update anchor.
-                    let old_anchor = anchor.clone();
-
-                    if reconstruction_complete {
-                        // The two limits have met in the middle! We're done!
-                        // Perform one last integrity check on the state reached.
-                        let computed_state_root = state.update_tree_hash_cache()?;
-                        if computed_state_root != state_root {
-                            return Err(Error::StateReconstructionRootMismatch {
-                                slot,
-                                expected: state_root,
-                                computed: computed_state_root,
-                            });
-                        }
-
-                        let new_anchor = old_anchor.as_archive_anchor();
-                        self.compare_and_set_anchor_info_with_write(old_anchor, new_anchor)?;
-
-                        return Ok(());
-                    } else {
-                        // The lower limit has been raised, store it.
-                        anchor.state_lower_limit = slot;
-
-                        self.compare_and_set_anchor_info_with_write(old_anchor, anchor.clone())?;
-                    }
 
                     // If this is the end of the batch, return Ok. The caller will run another
                     // batch when there is idle capacity.
                     if batch_complete {
                         debug!(
-                            start_slot = %lower_limit_slot,
+                            start_slot = %from_slot,
                             end_slot = %slot,
                             "Finished state reconstruction batch"
                         );
@@ -178,14 +205,6 @@ where
             // above.
             Err(Error::StateReconstructionLogicError)
         })??;
-
-        // Check that the split point wasn't mutated during the state reconstruction process.
-        // It shouldn't have been, due to the serialization of requests through the store migrator,
-        // so this is just a paranoid check.
-        let latest_split = self.get_split_info();
-        if split != latest_split {
-            return Err(Error::SplitPointModified(latest_split.slot, split.slot));
-        }
 
         Ok(())
     }

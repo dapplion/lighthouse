@@ -286,7 +286,10 @@ impl<T> From<ContextError> for BlockOperationError<T> {
 #[derive(Debug, PartialEq, Clone)]
 pub enum HeaderInvalid {
     ProposalSignatureInvalid,
-    StateSlotMismatch,
+    StateSlotMismatch {
+        state: Slot,
+        header: Slot,
+    },
     OlderThanLatestBlockHeader {
         latest_block_header_slot: Slot,
         block_slot: Slot,

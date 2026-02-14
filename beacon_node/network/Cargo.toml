@@ -36,6 +36,7 @@ metrics = { workspace = true }
 operation_pool = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
+reth-era = { workspace = true }
 slot_clock = { workspace = true }
 smallvec = { workspace = true }
 ssz_types = { workspace = true }

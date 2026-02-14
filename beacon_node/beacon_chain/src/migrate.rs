@@ -1,3 +1,4 @@
+use crate::era_file_producer::{maybe_produce_finalization_era, maybe_produce_reconstruction_eras};
 use crate::errors::BeaconChainError;
 use crate::summaries_dag::{DAGStateSummary, Error as SummariesDagError, StateSummariesDAG};
 use parking_lot::Mutex;
@@ -215,12 +216,15 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
         }
     }
 
-    pub fn run_reconstruction(
+    fn run_reconstruction(
         db: Arc<HotColdDB<E, Hot, Cold>>,
         opt_tx: Option<mpsc::Sender<Notification>>,
     ) {
         match db.reconstruct_historic_states(Some(BLOCKS_PER_RECONSTRUCTION)) {
             Ok(()) => {
+                if let Some(era_files_dir) = &db.get_config().era_files_dir {
+                    maybe_produce_reconstruction_eras(&db, era_files_dir);
+                }
                 // Schedule another reconstruction batch if required and we have access to the
                 // channel for requeueing.
                 if let Some(tx) = opt_tx
@@ -403,6 +407,10 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> BackgroundMigrator<E, Ho
                 return;
             }
         };
+
+        if let Some(era_files_dir) = &db.get_config().era_files_dir {
+            maybe_produce_finalization_era(&db, era_files_dir, finalized_state.slot());
+        }
 
         // Finally, compact the database so that new free space is properly reclaimed.
         if let Err(e) = Self::run_compaction(
