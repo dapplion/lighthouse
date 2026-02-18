@@ -16,6 +16,7 @@ use logging::crit;
 use std::collections::{BTreeMap, HashSet, btree_map::Entry};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::time::Duration;
 use strum::IntoStaticStr;
 use tracing::{Span, debug, error, instrument, warn};
 use types::{ColumnIndex, Epoch, EthSpec, Hash256, Slot};
@@ -49,6 +50,10 @@ const MAX_BATCH_DOWNLOAD_ATTEMPTS: u8 = 5;
 /// Invalid batches are attempted to be re-downloaded from other peers. If a batch cannot be processed
 /// after `MAX_BATCH_PROCESSING_ATTEMPTS` times, it is considered faulty.
 const MAX_BATCH_PROCESSING_ATTEMPTS: u8 = 3;
+
+/// Maximum duration a chain can go without making meaningful progress before it is considered
+/// stalled and removed. The chain will be recreated when peers re-announce themselves via STATUS.
+const CHAIN_MAX_STALL_DURATION: Duration = Duration::from_secs(600);
 
 pub struct RangeSyncBatchConfig<E: EthSpec> {
     marker: PhantomData<E>,
@@ -685,6 +690,10 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         let removed_batches = std::mem::replace(&mut self.batches, remaining_batches);
 
         for (id, batch) in removed_batches.into_iter() {
+            metrics::observe_duration(
+                &metrics::SYNCING_CHAIN_BATCH_LIFETIME,
+                batch.elapsed_since_created(),
+            );
             // only for batches awaiting validation can we be sure the last attempt is
             // right, and thus, that any different attempt is wrong
             match batch.state() {
@@ -1083,6 +1092,19 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 }
                 Err(e) => match e {
                     RpcRequestSendError::NoPeer(err) => {
+                        if batch.elapsed_since_created() > CHAIN_MAX_STALL_DURATION {
+                            debug!(
+                                %batch_id,
+                                elapsed = ?batch.elapsed_since_created(),
+                                error = ?err,
+                                "Range sync batch stalled with no peers, failing chain"
+                            );
+                            metrics::inc_counter(&metrics::SYNCING_CHAIN_FAILED_NO_PEERS);
+                            return Err(RemoveChain::ChainFailed {
+                                blacklist: false,
+                                failing_batch: batch_id,
+                            });
+                        }
                         debug!(error = ?err, "Did not send batch request due to insufficient peers");
                     }
                     RpcRequestSendError::InternalError(err) => {
