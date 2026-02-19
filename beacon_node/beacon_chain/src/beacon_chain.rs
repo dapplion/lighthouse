@@ -1664,7 +1664,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         let validator_index = *validator_index as usize;
                         committee_cache.get_attestation_duties(validator_index)
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>()?;
 
                 Ok((duties, dependent_root))
             },
