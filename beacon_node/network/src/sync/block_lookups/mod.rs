@@ -22,7 +22,9 @@
 
 use self::parent_chain::{NodeChain, compute_parent_chains};
 pub use self::single_block_lookup::DownloadResult;
-use self::single_block_lookup::{LookupRequestError, LookupResult, SingleBlockLookup};
+use self::single_block_lookup::{
+    LookupRequestError, LookupResult, SingleBlockLookup, SingleLookupRequestState,
+};
 use super::manager::{BlockProcessType, BlockProcessingResult, SLOT_IMPORT_TOLERANCE};
 use super::network_context::{PeerGroup, RpcResponseError, SyncNetworkContext};
 use crate::metrics;
@@ -34,17 +36,16 @@ use beacon_chain::data_availability_checker::{
     AvailabilityCheckError, AvailabilityCheckErrorCategory,
 };
 use beacon_chain::{AvailabilityProcessingStatus, BeaconChainTypes, BlockError};
-pub use common::RequestState;
 use fnv::FnvHashMap;
 use lighthouse_network::service::api_types::SingleLookupReqId;
 use lighthouse_network::{PeerAction, PeerId};
 use lru_cache::LRUTimeCache;
-pub use single_block_lookup::{BlobRequestState, BlockRequestState, CustodyRequestState};
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::time::Duration;
 use store::Hash256;
 use tracing::{debug, error, warn};
+use types::data::FixedBlobSidecarList;
 use types::{BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock};
 
 pub mod common;
@@ -446,27 +447,97 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
 
     /* Lookup responses */
 
-    /// Process a block or blob response received from a single lookup request.
-    pub fn on_download_response<R: RequestState<T>>(
+    /// Process a block response received from a single lookup request.
+    pub fn on_block_download_response(
         &mut self,
         id: SingleLookupReqId,
-        response: Result<(R::VerifiedResponseType, PeerGroup, Duration), RpcResponseError>,
+        response: Result<
+            (Arc<SignedBeaconBlock<T::EthSpec>>, PeerGroup, Duration),
+            RpcResponseError,
+        >,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = self.on_download_response_inner::<R>(id, response, cx);
-        self.on_lookup_result(id.lookup_id, result, "download_response", cx);
+        let result = self.on_download_response_inner(
+            id,
+            response,
+            ResponseType::Block,
+            |lookup| Ok(&mut lookup.block_request_state.state),
+            cx,
+        );
+        self.on_lookup_result(id.lookup_id, result, "block_download_response", cx);
     }
 
-    /// Process a block or blob response received from a single lookup request.
-    pub fn on_download_response_inner<R: RequestState<T>>(
+    /// Process a blob response received from a single lookup request.
+    pub fn on_blob_download_response(
         &mut self,
         id: SingleLookupReqId,
-        response: Result<(R::VerifiedResponseType, PeerGroup, Duration), RpcResponseError>,
+        response: Result<(FixedBlobSidecarList<T::EthSpec>, PeerGroup, Duration), RpcResponseError>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        let result = self.on_download_response_inner(
+            id,
+            response,
+            ResponseType::Blob,
+            |lookup| match &mut lookup.component_requests {
+                single_block_lookup::ComponentRequests::ActiveBlobRequest(request, _) => {
+                    Ok(&mut request.state)
+                }
+                single_block_lookup::ComponentRequests::WaitingForBlock => Err("waiting for block"),
+                single_block_lookup::ComponentRequests::ActiveCustodyRequest(_) => {
+                    Err("expecting custody request")
+                }
+                single_block_lookup::ComponentRequests::NotNeeded(_) => Err("not needed"),
+            },
+            cx,
+        );
+        self.on_lookup_result(id.lookup_id, result, "blob_download_response", cx);
+    }
+
+    /// Process a custody columns response received from a single lookup request.
+    pub fn on_custody_download_response(
+        &mut self,
+        id: SingleLookupReqId,
+        response: Result<
+            (
+                types::DataColumnSidecarList<T::EthSpec>,
+                PeerGroup,
+                Duration,
+            ),
+            RpcResponseError,
+        >,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        let result = self.on_download_response_inner(
+            id,
+            response,
+            ResponseType::CustodyColumn,
+            |lookup| match &mut lookup.component_requests {
+                single_block_lookup::ComponentRequests::ActiveCustodyRequest(request) => {
+                    Ok(&mut request.state)
+                }
+                single_block_lookup::ComponentRequests::WaitingForBlock => Err("waiting for block"),
+                single_block_lookup::ComponentRequests::ActiveBlobRequest(_, _) => {
+                    Err("expecting blob request")
+                }
+                single_block_lookup::ComponentRequests::NotNeeded(_) => Err("not needed"),
+            },
+            cx,
+        );
+        self.on_lookup_result(id.lookup_id, result, "custody_download_response", cx);
+    }
+
+    fn on_download_response_inner<V: Clone>(
+        &mut self,
+        id: SingleLookupReqId,
+        response: Result<(V, PeerGroup, Duration), RpcResponseError>,
+        response_type: ResponseType,
+        request_state_getter: impl FnOnce(
+            &mut SingleBlockLookup<T>,
+        )
+            -> Result<&mut SingleLookupRequestState<V>, &'static str>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupResult, LookupRequestError> {
         // Note: no need to downscore peers here, already downscored on network context
-
-        let response_type = R::response_type();
         let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
             // We don't have the ability to cancel in-flight RPC requests. So this can happen
             // if we started this RPC request, and later saw the block/blobs via gossip.
@@ -475,9 +546,8 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         };
 
         let block_root = lookup.block_root();
-        let request_state = R::request_state_mut(lookup)
-            .map_err(|e| LookupRequestError::BadState(e.to_owned()))?
-            .get_state_mut();
+        let request_state =
+            request_state_getter(lookup).map_err(|e| LookupRequestError::BadState(e.to_owned()))?;
 
         match response {
             Ok((response, peer_group, seen_timestamp)) => {
@@ -551,22 +621,90 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     ) {
         let lookup_result = match process_type {
             BlockProcessType::SingleBlock { id } => {
-                self.on_processing_result_inner::<BlockRequestState<T::EthSpec>>(id, result, cx)
+                self.on_block_processing_result_inner(id, result, cx)
             }
             BlockProcessType::SingleBlob { id } => {
-                self.on_processing_result_inner::<BlobRequestState<T::EthSpec>>(id, result, cx)
+                self.on_blob_processing_result_inner(id, result, cx)
             }
             BlockProcessType::SingleCustodyColumn(id) => {
-                self.on_processing_result_inner::<CustodyRequestState<T::EthSpec>>(id, result, cx)
+                self.on_custody_processing_result_inner(id, result, cx)
             }
         };
         self.on_lookup_result(process_type.id(), lookup_result, "processing_result", cx);
     }
 
-    pub fn on_processing_result_inner<R: RequestState<T>>(
+    fn on_block_processing_result_inner(
         &mut self,
         lookup_id: SingleLookupId,
         result: BlockProcessingResult,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        self.on_processing_result_inner(
+            lookup_id,
+            result,
+            ResponseType::Block,
+            |lookup| Ok(&mut lookup.block_request_state.state),
+            cx,
+        )
+    }
+
+    fn on_blob_processing_result_inner(
+        &mut self,
+        lookup_id: SingleLookupId,
+        result: BlockProcessingResult,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        self.on_processing_result_inner(
+            lookup_id,
+            result,
+            ResponseType::Blob,
+            |lookup| match &mut lookup.component_requests {
+                single_block_lookup::ComponentRequests::ActiveBlobRequest(request, _) => {
+                    Ok(&mut request.state)
+                }
+                single_block_lookup::ComponentRequests::WaitingForBlock => Err("waiting for block"),
+                single_block_lookup::ComponentRequests::ActiveCustodyRequest(_) => {
+                    Err("expecting custody request")
+                }
+                single_block_lookup::ComponentRequests::NotNeeded(_) => Err("not needed"),
+            },
+            cx,
+        )
+    }
+
+    fn on_custody_processing_result_inner(
+        &mut self,
+        lookup_id: SingleLookupId,
+        result: BlockProcessingResult,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        self.on_processing_result_inner(
+            lookup_id,
+            result,
+            ResponseType::CustodyColumn,
+            |lookup| match &mut lookup.component_requests {
+                single_block_lookup::ComponentRequests::ActiveCustodyRequest(request) => {
+                    Ok(&mut request.state)
+                }
+                single_block_lookup::ComponentRequests::WaitingForBlock => Err("waiting for block"),
+                single_block_lookup::ComponentRequests::ActiveBlobRequest(_, _) => {
+                    Err("expecting blob request")
+                }
+                single_block_lookup::ComponentRequests::NotNeeded(_) => Err("not needed"),
+            },
+            cx,
+        )
+    }
+
+    fn on_processing_result_inner<V: Clone>(
+        &mut self,
+        lookup_id: SingleLookupId,
+        result: BlockProcessingResult,
+        response_type: ResponseType,
+        request_state_getter: impl FnOnce(
+            &mut SingleBlockLookup<T>,
+        )
+            -> Result<&mut SingleLookupRequestState<V>, &'static str>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupResult, LookupRequestError> {
         let Some(lookup) = self.single_block_lookups.get_mut(&lookup_id) else {
@@ -575,12 +713,11 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         };
 
         let block_root = lookup.block_root();
-        let request_state = R::request_state_mut(lookup)
-            .map_err(|e| LookupRequestError::BadState(e.to_owned()))?
-            .get_state_mut();
+        let request_state =
+            request_state_getter(lookup).map_err(|e| LookupRequestError::BadState(e.to_owned()))?;
 
         debug!(
-            component = ?R::response_type(),
+            component = ?response_type,
             ?block_root,
             id = lookup_id,
             ?result,
@@ -624,7 +761,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 // Beacon processor signalled to ignore the block processing result.
                 // This implies that the cpu is overloaded. Drop the request.
                 warn!(
-                    component = ?R::response_type(),
+                    component = ?response_type,
                     "Lookup component processing ignored, cpu might be overloaded"
                 );
                 Action::Drop("Block processing ignored".to_owned())
@@ -670,7 +807,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                     other => {
                         debug!(
                             ?block_root,
-                            component = ?R::response_type(),
+                            component = ?response_type,
                             error = ?other,
                             "Invalid lookup component"
                         );
@@ -695,7 +832,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                             cx.report_peer(
                                 *peer,
                                 PeerAction::MidToleranceError,
-                                match R::response_type() {
+                                match response_type {
                                     ResponseType::Block => "lookup_block_processing_failure",
                                     ResponseType::Blob => "lookup_blobs_processing_failure",
                                     ResponseType::CustodyColumn => {

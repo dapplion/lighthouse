@@ -1,5 +1,5 @@
 use super::{BlockComponent, PeerId, SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS};
-use crate::sync::block_lookups::common::RequestState;
+use crate::sync::manager::BlockProcessType;
 use crate::sync::network_context::{
     LookupRequestResult, PeerGroup, ReqId, RpcRequestSendError, SendErrorProcessor,
     SyncNetworkContext,
@@ -209,7 +209,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     ) -> Result<LookupResult, LookupRequestError> {
         let _guard = self.span.clone().entered();
         // TODO: Check what's necessary to download, specially for blobs
-        self.continue_request::<BlockRequestState<T::EthSpec>>(cx, 0)?;
+        self.continue_block_request(cx)?;
 
         if let ComponentRequests::WaitingForBlock = self.component_requests {
             let downloaded_block = self
@@ -261,11 +261,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         match &self.component_requests {
             ComponentRequests::WaitingForBlock => {} // do nothing
             ComponentRequests::ActiveBlobRequest(_, expected_blobs) => {
-                self.continue_request::<BlobRequestState<T::EthSpec>>(cx, *expected_blobs)?
+                self.continue_blob_request(cx, *expected_blobs)?
             }
-            ComponentRequests::ActiveCustodyRequest(_) => {
-                self.continue_request::<CustodyRequestState<T::EthSpec>>(cx, 0)?
-            }
+            ComponentRequests::ActiveCustodyRequest(_) => self.continue_custody_request(cx)?,
             ComponentRequests::NotNeeded { .. } => {} // do nothing
         }
 
@@ -280,50 +278,46 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         }
     }
 
-    /// Potentially makes progress on this request if it's in a progress-able state
-    fn continue_request<R: RequestState<T>>(
+    /// Potentially makes progress on the block request if it's in a progress-able state.
+    fn continue_block_request(
         &mut self,
         cx: &mut SyncNetworkContext<T>,
-        expected_blobs: usize,
     ) -> Result<(), LookupRequestError> {
         let id = self.id;
         let awaiting_parent = self.awaiting_parent.is_some();
-        let request =
-            R::request_state_mut(self).map_err(|e| LookupRequestError::BadState(e.to_owned()))?;
+        let request = &mut self.block_request_state;
 
         // Attempt to progress awaiting downloads
-        if request.get_state().is_awaiting_download() {
+        if request.state.is_awaiting_download() {
             // Verify the current request has not exceeded the maximum number of attempts.
-            let request_state = request.get_state();
+            let request_state = &request.state;
             if request_state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
                 let cannot_process = request_state.more_failed_processing_attempts();
                 return Err(LookupRequestError::TooManyAttempts { cannot_process });
             }
 
             let peers = self.peers.clone();
-            let request = R::request_state_mut(self)
-                .map_err(|e| LookupRequestError::BadState(e.to_owned()))?;
-
-            match request.make_request(id, peers, expected_blobs, cx)? {
+            match cx
+                .block_lookup_request(id, peers, request.requested_block_root)
+                .map_err(LookupRequestError::SendFailedNetwork)?
+            {
                 LookupRequestResult::RequestSent(req_id) => {
                     // Lookup sync event safety: If make_request returns `RequestSent`, we are
                     // guaranteed that `BlockLookups::on_download_response` will be called exactly
                     // with this `req_id`.
-                    request.get_state_mut().on_download_start(req_id)?
+                    request.state.on_download_start(req_id)?
                 }
                 LookupRequestResult::NoRequestNeeded(reason) => {
                     // Lookup sync event safety: Advances this request to the terminal `Processed`
                     // state. If all requests reach this state, the request is marked as completed
                     // in `Self::continue_requests`.
-                    request.get_state_mut().on_completed_request(reason)?
+                    request.state.on_completed_request(reason)?
                 }
                 // Sync will receive a future event to make progress on the request, do nothing now
                 LookupRequestResult::Pending(reason) => {
                     // Lookup sync event safety: Refer to the code paths constructing
                     // `LookupRequestResult::Pending`
-                    request
-                        .get_state_mut()
-                        .update_awaiting_download_status(reason);
+                    request.state.update_awaiting_download_status(reason);
                     return Ok(());
                 }
             }
@@ -334,11 +328,19 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         } else if !awaiting_parent {
             // maybe_start_processing returns Some if state == AwaitingProcess. This pattern is
             // useful to conditionally access the result data.
-            if let Some(result) = request.get_state_mut().maybe_start_processing() {
+            if let Some(result) = request.state.maybe_start_processing() {
                 // Lookup sync event safety: If `send_for_processing` returns Ok() we are guaranteed
                 // that `BlockLookups::on_processing_result` will be called exactly once with this
                 // lookup_id
-                return R::send_for_processing(id, result, cx);
+                let DownloadResult {
+                    value,
+                    block_root,
+                    seen_timestamp,
+                    ..
+                } = result;
+                return cx
+                    .send_block_for_processing(id, block_root, value, seen_timestamp)
+                    .map_err(LookupRequestError::SendFailedProcessor);
             }
             // Lookup sync event safety: If the request is not in `AwaitingDownload` or
             // `AwaitingProcessing` state it is guaranteed to receive some event to make progress.
@@ -347,6 +349,137 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         // Lookup sync event safety: If a lookup is awaiting a parent we are guaranteed to either:
         // (1) attempt to make progress with `BlockLookups::continue_child_lookups` if the parent
         // lookup completes, or (2) get dropped if the parent fails and is dropped.
+
+        Ok(())
+    }
+
+    /// Potentially makes progress on the blob request if it's in a progress-able state.
+    fn continue_blob_request(
+        &mut self,
+        cx: &mut SyncNetworkContext<T>,
+        expected_blobs: usize,
+    ) -> Result<(), LookupRequestError> {
+        let id = self.id;
+        let awaiting_parent = self.awaiting_parent.is_some();
+        let peers = self.peers.clone();
+        let request = match &mut self.component_requests {
+            ComponentRequests::ActiveBlobRequest(request, _) => request,
+            ComponentRequests::WaitingForBlock => {
+                return Err(LookupRequestError::BadState("waiting for block".to_owned()));
+            }
+            ComponentRequests::ActiveCustodyRequest(_) => {
+                return Err(LookupRequestError::BadState(
+                    "expecting custody request".to_owned(),
+                ));
+            }
+            ComponentRequests::NotNeeded(_) => {
+                return Err(LookupRequestError::BadState("not needed".to_owned()));
+            }
+        };
+
+        if request.state.is_awaiting_download() {
+            let request_state = &request.state;
+            if request_state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
+                let cannot_process = request_state.more_failed_processing_attempts();
+                return Err(LookupRequestError::TooManyAttempts { cannot_process });
+            }
+
+            match cx
+                .blob_lookup_request(id, peers, request.block_root, expected_blobs)
+                .map_err(LookupRequestError::SendFailedNetwork)?
+            {
+                LookupRequestResult::RequestSent(req_id) => {
+                    request.state.on_download_start(req_id)?
+                }
+                LookupRequestResult::NoRequestNeeded(reason) => {
+                    request.state.on_completed_request(reason)?
+                }
+                LookupRequestResult::Pending(reason) => {
+                    request.state.update_awaiting_download_status(reason);
+                    return Ok(());
+                }
+            }
+        } else if !awaiting_parent {
+            if let Some(result) = request.state.maybe_start_processing() {
+                let DownloadResult {
+                    value,
+                    block_root,
+                    seen_timestamp,
+                    ..
+                } = result;
+                return cx
+                    .send_blobs_for_processing(id, block_root, value, seen_timestamp)
+                    .map_err(LookupRequestError::SendFailedProcessor);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Potentially makes progress on the custody request if it's in a progress-able state.
+    fn continue_custody_request(
+        &mut self,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<(), LookupRequestError> {
+        let id = self.id;
+        let awaiting_parent = self.awaiting_parent.is_some();
+        let peers = self.peers.clone();
+        let request = match &mut self.component_requests {
+            ComponentRequests::ActiveCustodyRequest(request) => request,
+            ComponentRequests::WaitingForBlock => {
+                return Err(LookupRequestError::BadState("waiting for block".to_owned()));
+            }
+            ComponentRequests::ActiveBlobRequest(_, _) => {
+                return Err(LookupRequestError::BadState(
+                    "expecting blob request".to_owned(),
+                ));
+            }
+            ComponentRequests::NotNeeded(_) => {
+                return Err(LookupRequestError::BadState("not needed".to_owned()));
+            }
+        };
+
+        if request.state.is_awaiting_download() {
+            let request_state = &request.state;
+            if request_state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
+                let cannot_process = request_state.more_failed_processing_attempts();
+                return Err(LookupRequestError::TooManyAttempts { cannot_process });
+            }
+
+            match cx
+                .custody_lookup_request(id, request.block_root, peers)
+                .map_err(LookupRequestError::SendFailedNetwork)?
+            {
+                LookupRequestResult::RequestSent(req_id) => {
+                    request.state.on_download_start(req_id)?
+                }
+                LookupRequestResult::NoRequestNeeded(reason) => {
+                    request.state.on_completed_request(reason)?
+                }
+                LookupRequestResult::Pending(reason) => {
+                    request.state.update_awaiting_download_status(reason);
+                    return Ok(());
+                }
+            }
+        } else if !awaiting_parent {
+            if let Some(result) = request.state.maybe_start_processing() {
+                let DownloadResult {
+                    value,
+                    block_root,
+                    seen_timestamp,
+                    ..
+                } = result;
+                return cx
+                    .send_custody_columns_for_processing(
+                        id,
+                        block_root,
+                        value,
+                        seen_timestamp,
+                        BlockProcessType::SingleCustodyColumn(id),
+                    )
+                    .map_err(LookupRequestError::SendFailedProcessor);
+            }
+        }
 
         Ok(())
     }
