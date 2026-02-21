@@ -18,6 +18,7 @@ use crate::sync::block_sidecar_coupling::CouplingError;
 use crate::sync::network_context::requests::BlobsByRootSingleBlockRequest;
 use crate::sync::range_data_column_batch_request::RangeDataColumnBatchRequest;
 use beacon_chain::block_verification_types::{AsBlock, RpcBlock};
+use beacon_chain::data_availability_checker::AvailableBlockData;
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
@@ -1596,6 +1597,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         id: Id,
         block_root: Hash256,
         block: Arc<SignedBeaconBlock<T::EthSpec>>,
+        block_data: Option<AvailableBlockData<T::EthSpec>>,
         seen_timestamp: Duration,
     ) -> Result<(), SendErrorProcessor> {
         let beacon_processor = self
@@ -1604,7 +1606,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         let block = RpcBlock::new(
             block,
-            None,
+            block_data,
             &self.chain.data_availability_checker,
             self.chain.spec.clone(),
         )

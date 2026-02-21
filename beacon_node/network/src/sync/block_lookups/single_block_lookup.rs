@@ -5,6 +5,7 @@ use crate::sync::network_context::{
 };
 use beacon_chain::BeaconChainTypes;
 use beacon_chain::block_verification_types::AsBlock;
+use beacon_chain::data_availability_checker::AvailableBlockData;
 use educe::Educe;
 use lighthouse_network::service::api_types::Id;
 use parking_lot::RwLock;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 use store::Hash256;
 use strum::IntoStaticStr;
 use tracing::{Span, debug_span};
-use types::data::FixedBlobSidecarList;
+use types::data::{BlobSidecarList, FixedBlobSidecarList};
 use types::{
     DataColumnSidecarList, EthSpec, ForkName, SignedBeaconBlock, SignedExecutionPayloadEnvelope,
     Slot,
@@ -252,7 +253,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                         break;
                     }
                 }
-                LookupState::Processing { block, .. } => {
+                LookupState::Processing { block, extras, .. } => {
                     // If awaiting parent, don't send for processing yet
                     if self.awaiting_parent.is_some() {
                         break;
@@ -264,12 +265,13 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     }
 
                     let block_root = self.block_root;
+                    let block_data = extras.into_available_block_data()?;
 
-                    // TODO: Also send extras (blobs/columns) for processing
                     cx.send_block_for_processing(
                         id,
                         block_root,
                         block.clone(),
+                        block_data,
                         Duration::ZERO, // TODO: track seen_timestamp properly
                     )
                     .map_err(LookupRequestError::SendFailedProcessor)?;
@@ -380,6 +382,43 @@ pub(crate) enum BlockExtras<E: EthSpec> {
     Fulu(CustodyColumnsResult<E>),
     Gloas(PayloadResult<E>, CustodyColumnsResult<E>),
     None,
+}
+
+impl<E: EthSpec> BlockExtras<E> {
+    /// Convert downloaded extras into `AvailableBlockData` for block processing.
+    fn into_available_block_data(
+        &self,
+    ) -> Result<Option<AvailableBlockData<E>>, LookupRequestError> {
+        match self {
+            BlockExtras::None => Ok(None),
+            BlockExtras::Electra(fixed_blobs) => {
+                let blobs: Vec<_> = fixed_blobs.iter().flatten().cloned().collect();
+                if blobs.is_empty() {
+                    Ok(Some(AvailableBlockData::NoData))
+                } else {
+                    // Use the fixed vector length as max_len since it matches max_blobs_per_block
+                    let blob_list = BlobSidecarList::new(blobs, fixed_blobs.len())
+                        .map_err(|e| LookupRequestError::Failed(format!("invalid blobs: {e:?}")))?;
+                    Ok(Some(AvailableBlockData::Blobs(blob_list)))
+                }
+            }
+            BlockExtras::Fulu(columns) => match columns {
+                CustodyColumnsResult::NoData => Ok(Some(AvailableBlockData::NoData)),
+                CustodyColumnsResult::Columns(cols) => {
+                    Ok(Some(AvailableBlockData::DataColumns(cols.clone())))
+                }
+            },
+            BlockExtras::Gloas(_payload, columns) => {
+                // TODO(gloas): Handle payload envelope when supported
+                match columns {
+                    CustodyColumnsResult::NoData => Ok(Some(AvailableBlockData::NoData)),
+                    CustodyColumnsResult::Columns(cols) => {
+                        Ok(Some(AvailableBlockData::DataColumns(cols.clone())))
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
