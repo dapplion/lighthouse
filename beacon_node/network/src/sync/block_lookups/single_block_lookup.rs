@@ -4,6 +4,7 @@ use crate::sync::network_context::{
     LookupRequestResult, PeerGroup, ReqId, RpcRequestSendError, SendErrorProcessor,
     SyncNetworkContext,
 };
+use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::data_column_verification::CustodyDataColumnList;
 use beacon_chain::{BeaconChainTypes, BlockProcessStatus};
 use educe::Educe;
@@ -77,7 +78,6 @@ pub struct SingleBlockLookup<T: BeaconChainTypes> {
     pub(crate) span: Span,
 }
 
-#[derive(Debug)]
 enum LookupState<E: EthSpec> {
     BlockDownload {
         block_req: BlockRequestState<E>,
@@ -97,15 +97,30 @@ enum BlockExtraRequests<E: EthSpec> {
     ElectraBlobs(Option<BlobRequestState<E>>),
     FuluColumns(Option<CustodyRequestState<E>>),
     Gloas {
-        payload_req: PayloadRequestState<E>,
+        payload_req: Option<PayloadRequestState<E>>,
         columns_req: Option<CustodyRequestState<E>>,
     },
 }
 
+enum PayloadResult<E: EthSpec> {
+    Full(Arc<SignedExecutionPayloadEnvelope<E>>),
+    Empty,
+}
+
+enum CustodyColumnsResult<E: EthSpec> {
+    Columns(DataColumnSidecarList<E>),
+    NoData,
+}
+
 enum BlockExtras<E> {
     Electra(FixedBlobSidecarList<E>),
-    Fulu(CustodyDataColumnList<E>),
-    Gloas(ExecutionPayload<E>, CustodyDataColumnList<E>),
+    Fulu(CustodyColumnsResult<E>),
+    Gloas(PayloadResult<E>, CustodyColumnsResult<E>),
+}
+
+enum ProcessingState {
+    AwaitingProcessing(u8),
+    Processing(u8),
 }
 
 impl<T: BeaconChainTypes> SingleBlockLookup<T> {
@@ -124,7 +139,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         Self {
             id,
             state: LookupState::BlockDownload {
-                block: BlockRequestState::new(requested_block_root),
+                block_req: BlockRequestState::new(requested_block_root),
             },
             peers: Arc::new(RwLock::new(HashSet::from_iter(peers.iter().copied()))),
             block_root: requested_block_root,
@@ -137,15 +152,20 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     /// Reset the status of all internal requests
     pub fn reset_requests(&mut self) {
         self.state = LookupState::BlockDownload {
-            block: BlockRequestState::new(self.block_root),
+            block_req: BlockRequestState::new(self.block_root),
         };
     }
 
     /// Return the slot of this lookup's block if it's currently cached as `AwaitingProcessing`
     pub fn peek_downloaded_block_slot(&self) -> Option<Slot> {
-        self.block_state()
-            .peek_downloaded_data()
-            .map(|block| block.slot())
+        match self.state {
+            LookupState::BlockDownload { block_req } => block_req
+                .state
+                .peek_downloaded_data()
+                .map(|block| block.slot()),
+            LookupState::ExtrasDownload { block, .. } => Some(block.slot()),
+            LookupState::Processing { .. } => todo!(),
+        }
     }
 
     /// Get the block root that is being requested.
@@ -193,32 +213,38 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         self.block_root() == block_root
     }
 
-    /// Returns true if the block has already been downloaded.
-    pub fn all_components_processed(&self) -> bool {
-        match &self.state {
-            LookupState::BlockDownload { block } => block.state.is_processed(),
-            LookupState::ExtrasDownload {
-                block,
-                extra_requests: extras,
-            } => component_states_processed(&block.state, Some(extras)),
-            LookupState::Processing { block, extras } => {
-                component_states_processed(&block.state, extras.as_ref())
-            }
-        }
-    }
-
     /// Returns true if this request is expecting some event to make progress
     pub fn is_awaiting_event(&self) -> bool {
         self.awaiting_parent.is_some()
             || match &self.state {
-                LookupState::BlockDownload { block } => block.state.is_awaiting_event(),
+                LookupState::BlockDownload { block_req } => block_req.state.is_awaiting_event(),
                 LookupState::ExtrasDownload {
-                    block,
+                    block: _,
                     extra_requests: extras,
-                } => component_states_awaiting_event(&block.state, Some(extras)),
-                LookupState::Processing { block, extras } => {
-                    component_states_awaiting_event(&block.state, extras.as_ref())
-                }
+                } => match extras {
+                    BlockExtraRequests::ElectraBlobs(Some(blobs)) => {
+                        blobs.state.is_awaiting_event()
+                    }
+                    BlockExtraRequests::ElectraBlobs(None) => false,
+                    BlockExtraRequests::FuluColumns(Some(columns)) => {
+                        columns.state.is_awaiting_event()
+                    }
+                    BlockExtraRequests::FuluColumns(None) => false,
+                    BlockExtraRequests::Gloas {
+                        payload_req,
+                        columns_req,
+                    } => {
+                        payload_req
+                            .as_ref()
+                            .map(|req| req.state.is_awaiting_event())
+                            .unwrap_or(false)
+                            || columns_req
+                                .as_ref()
+                                .map(|c| c.state.is_awaiting_event())
+                                .unwrap_or(false)
+                    }
+                },
+                LookupState::Processing { .. } => false,
             }
     }
 
@@ -254,7 +280,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                             }
                             ForkName::Deneb | ForkName::Electra => {
                                 BlockExtraRequests::ElectraBlobs(if expected_blobs > 0 {
-                                    Some(BlobRequestState::new(self.block_root))
+                                    Some(BlobRequestState::new(self.block_root, expected_blobs))
                                 } else {
                                     None
                                 })
@@ -267,7 +293,8 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                                 })
                             }
                             ForkName::Gloas => BlockExtraRequests::Gloas {
-                                payload_req: PayloadRequestState::new(self.block_root),
+                                // TODO(gloas): Only request if full
+                                payload_req: Some(PayloadRequestState::new(self.block_root)),
                                 columns_req: if expected_blobs > 0 {
                                     Some(CustodyRequestState::new(self.block_root))
                                 } else {
@@ -280,7 +307,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                             block,
                             extra_requests: extras,
                         };
-                        continue;
+                    } else {
+                        // Awaiting block request
+                        break;
                     }
                 }
                 LookupState::ExtrasDownload {
@@ -319,68 +348,60 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                         BlockExtraRequests::ElectraBlobs(None)
                         | BlockExtraRequests::FuluColumns(None) => {
                             // No data request was needed
-                            Some(block)
+                            todo!();
                         }
                         BlockExtraRequests::Gloas {
                             payload_req,
                             columns_req,
                         } => {
                             // Todo implement, if requests completed or None construct extras for Gloas
+                            if let (Some(payload), Some(columns)) = (
+                                if let Some(req) = payload_req {
+                                    req.completed().map(PayloadResult::Full)
+                                } else {
+                                    Some(PayloadResult::Empty)
+                                },
+                                if let Some(req) = columns_req {
+                                    req.completed().map(CustodyColumnsResult::Columns)
+                                } else {
+                                    Some(CustodyColumnsResult::NoData)
+                                },
+                            ) {
+                                Some(BlockExtras::Gloas(payload, columns))
+                            } else {
+                                None
+                            }
                         }
                     } {
                         self.state = LookupState::Processing { block, extras };
-                        continue;
+                    } else {
+                        // Awaiting some extra request(s)
+                        break;
                     }
                 }
                 LookupState::Processing { mut block, extras } => {
+                    // TODO: Fix this, potentially wrap this in a processing request
+                    // Hmm but processing requests can't be retried, we need to go back to download
                     if !awaiting_parent && let Some(result) = block.state.maybe_start_processing() {
-                        self.state = LookupState::Processing { block, extras };
-                        let DownloadResult {
-                            value,
-                            block_root,
-                            seen_timestamp,
-                            ..
-                        } = result;
-                        return cx
-                            .send_block_for_processing(id, block_root, value, seen_timestamp)
+                        cx.send_block_for_processing(id, block_root, value, seen_timestamp)
                             .map_err(LookupRequestError::SendFailedProcessor)
                             .map(|_| LookupResult::Pending);
+                        break;
                     }
-
-                    state = LookupState::Processing { block, extras };
-                    break;
                 }
             }
         }
 
-        // If all components of this lookup are already processed, there will be no future events
-        // that can make progress so it must be dropped. Consider the lookup completed.
-        // This case can happen if we receive the components from gossip during a retry.
-        if self.all_components_processed() {
-            self.span = Span::none();
-            Ok(LookupResult::Completed)
-        } else {
-            Ok(LookupResult::Pending)
-        }
-    }
-
-    pub(crate) fn block_state(
-        &self,
-    ) -> &SingleLookupRequestState<Arc<SignedBeaconBlock<T::EthSpec>>> {
-        match &self.state {
-            LookupState::BlockDownload { block }
-            | LookupState::ExtrasDownload { block, .. }
-            | LookupState::Processing { block, .. } => &block.state,
-        }
+        Ok(LookupResult::Pending)
     }
 
     pub(crate) fn block_state_mut(
         &mut self,
-    ) -> &mut SingleLookupRequestState<Arc<SignedBeaconBlock<T::EthSpec>>> {
+    ) -> Result<&mut SingleLookupRequestState<Arc<SignedBeaconBlock<T::EthSpec>>>, &'static str>
+    {
         match &mut self.state {
-            LookupState::BlockDownload { block }
-            | LookupState::ExtrasDownload { block, .. }
-            | LookupState::Processing { block, .. } => &mut block.state,
+            LookupState::BlockDownload { block_req } => Ok(&mut block_req.state),
+            _ => Err("block request not active"),
         }
     }
 
@@ -389,13 +410,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     ) -> Result<&mut SingleLookupRequestState<FixedBlobSidecarList<T::EthSpec>>, &'static str> {
         match &mut self.state {
             LookupState::ExtrasDownload {
-                extra_requests: BlockExtraRequests::ElectraBlobs { blobs, .. },
+                extra_requests: BlockExtraRequests::ElectraBlobs(Some(req)),
                 ..
-            }
-            | LookupState::Processing {
-                extras: Some(BlockExtraRequests::ElectraBlobs { blobs, .. }),
-                ..
-            } => Ok(&mut blobs.state),
+            } => Ok(&mut req.state),
             _ => Err("blob request not active"),
         }
     }
@@ -406,29 +423,14 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     {
         match &mut self.state {
             LookupState::ExtrasDownload {
-                extra_requests: BlockExtraRequests::FuluColumns { columns },
-                ..
-            }
-            | LookupState::Processing {
-                extras: Some(BlockExtraRequests::FuluColumns { columns }),
-                ..
-            } => Ok(&mut columns.state),
-            LookupState::ExtrasDownload {
                 extra_requests:
-                    BlockExtraRequests::Gloas {
-                        columns: Some(columns),
+                    BlockExtraRequests::FuluColumns(Some(req))
+                    | BlockExtraRequests::Gloas {
+                        columns_req: Some(req),
                         ..
                     },
                 ..
-            }
-            | LookupState::Processing {
-                extras:
-                    Some(BlockExtraRequests::Gloas {
-                        columns: Some(columns),
-                        ..
-                    }),
-                ..
-            } => Ok(&mut columns.state),
+            } => Ok(&mut req.state),
             _ => Err("custody request not active"),
         }
     }
@@ -461,13 +463,21 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 pub struct BlobRequestState<E: EthSpec> {
     #[educe(Debug(ignore))]
     pub block_root: Hash256,
+    pub expected_blobs: usize,
     pub state: SingleLookupRequestState<FixedBlobSidecarList<E>>,
+    peers: Arc<RwLock<HashSet<PeerId>>>,
 }
 
 impl<E: EthSpec> BlobRequestState<E> {
-    pub fn new(block_root: Hash256) -> Self {
+    pub fn new(
+        peers: Arc<RwLock<HashSet<PeerId>>>,
+        block_root: Hash256,
+        expected_blobs: usize,
+    ) -> Self {
         Self {
+            peers,
             block_root,
+            expected_blobs,
             state: SingleLookupRequestState::new(),
         }
     }
@@ -476,7 +486,12 @@ impl<E: EthSpec> BlobRequestState<E> {
         match self.state.state {
             State::AwaitingDownload(_) => {
                 match cx
-                    .blob_lookup_request(id, peers.clone(), self.block_root, expected_blobs)
+                    .blob_lookup_request(
+                        id,
+                        self.peers.clone(),
+                        self.block_root,
+                        self.expected_blobs,
+                    )
                     .map_err(LookupRequestError::SendFailedNetwork)
                 {
                     LookupRequestResult::RequestSent(req_id) => {
@@ -522,7 +537,7 @@ impl<E: EthSpec> CustodyRequestState<E> {
         match self.state.state {
             State::AwaitingDownload(_) => {
                 match cx
-                    .custody_lookup_request(id, peers.clone(), self.block_root, expected_blobs)
+                    .custody_lookup_request(id, peers.clone(), self.block_root)
                     .map_err(LookupRequestError::SendFailedNetwork)
                 {
                     LookupRequestResult::RequestSent(req_id) => {
@@ -609,6 +624,34 @@ impl<E: EthSpec> PayloadRequestState<E> {
             state: SingleLookupRequestState::new(),
         }
     }
+
+    pub fn continue_request(&mut self, cx: &mut SyncNetworkContext<T>) {
+        match self.state.state {
+            State::AwaitingDownload(_) => {
+                match cx
+                    .block_lookup_request(id, peers.clone(), self.block_root)
+                    .map_err(LookupRequestError::SendFailedNetwork)
+                {
+                    LookupRequestResult::RequestSent(req_id) => {
+                        self.state.on_download_start(req_id)?
+                    }
+                    LookupRequestResult::NoRequestNeeded(reason) => {
+                        self.state.on_completed_request(reason)?
+                    }
+                    LookupRequestResult::Pending(reason) => {
+                        self.state.update_awaiting_download_status(reason);
+                        return Ok(Some(LookupResult::Pending));
+                    }
+                }
+            }
+            State::Downloading(_) => {} // Waiting for event
+            State::Downloaded(_) => {}  // Done
+        }
+    }
+
+    pub fn completed(&self) -> Option<Arc<SignedExecutionPayloadEnvelope<E>>> {
+        todo!();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -672,42 +715,37 @@ impl<T: Clone> DownloadStateOps for SingleLookupRequestState<T> {
     }
 }
 
+struct ProcessingRequest<T> {
+    a: T,
+}
+
+impl ProcessingRequest<T> {
+    pub fn is_processed(&self) -> bool {
+        match self.state {
+            State::AwaitingProcess { .. } | State::Processing { .. } => false,
+            State::Processed { .. } => true,
+        }
+    }
+
+    /// Returns true if we can expect some future event to progress this block component request
+    /// specifically.
+    pub fn is_awaiting_event(&self) -> bool {
+        match self.state {
+            State::AwaitingProcess { .. } => false,
+            // Beacon processor will emit a processing result event
+            State::Processing { .. } => true,
+            // Request complete, no future event left
+            State::Processed { .. } => false,
+        }
+    }
+}
+
 impl<T: Clone> SingleLookupRequestState<T> {
     pub fn new() -> Self {
         Self {
             state: State::AwaitingDownload("not started"),
             failed_processing: 0,
             failed_downloading: 0,
-        }
-    }
-
-    pub fn is_awaiting_download(&self) -> bool {
-        match self.state {
-            State::AwaitingDownload { .. } => true,
-            State::Downloading { .. }
-            | State::AwaitingProcess { .. }
-            | State::Processing { .. }
-            | State::Processed { .. } => false,
-        }
-    }
-
-    pub fn is_processed(&self) -> bool {
-        match self.state {
-            State::AwaitingDownload { .. }
-            | State::Downloading { .. }
-            | State::AwaitingProcess { .. }
-            | State::Processing { .. } => false,
-            State::Processed { .. } => true,
-        }
-    }
-
-    /// Returns true once download has produced data (or was deemed unnecessary).
-    pub fn is_download_complete(&self) -> bool {
-        match self.state {
-            State::AwaitingDownload { .. } | State::Downloading { .. } => false,
-            State::AwaitingProcess { .. } | State::Processing { .. } | State::Processed { .. } => {
-                true
-            }
         }
     }
 
@@ -720,12 +758,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
             State::AwaitingDownload { .. } => false,
             // Network will emit a download success / error event
             State::Downloading { .. } => true,
-            // Not awaiting any external event
-            State::AwaitingProcess { .. } => false,
-            // Beacon processor will emit a processing result event
-            State::Processing { .. } => true,
-            // Request complete, no future event left
-            State::Processed { .. } => false,
+            State::Downloaded(_) => false,
         }
     }
 
@@ -733,9 +766,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
         match &self.state {
             State::AwaitingDownload { .. } => None,
             State::Downloading { .. } => None,
-            State::AwaitingProcess(result) => Some(&result.value),
-            State::Processing(result) => Some(&result.value),
-            State::Processed { .. } => None,
+            State::Downloaded(data) => Some(&data.value),
         }
     }
 
@@ -743,7 +774,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
     /// ignore.
     pub fn insert_verified_response(&mut self, result: DownloadResult<T>) -> bool {
         if let State::AwaitingDownload { .. } = &self.state {
-            self.state = State::AwaitingProcess(result);
+            self.state = State::Downloaded(result);
             true
         } else {
             false
@@ -805,78 +836,11 @@ impl<T: Clone> SingleLookupRequestState<T> {
                         req_id,
                     });
                 }
-                self.state = State::AwaitingProcess(result);
+                self.state = State::Downloaded(result);
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
                 "Bad state on_download_success expected Downloading got {other}"
-            ))),
-        }
-    }
-
-    /// Switch to `Processing` if the request is in `AwaitingProcess` state, otherwise returns None.
-    pub fn maybe_start_processing(&mut self) -> Option<DownloadResult<T>> {
-        // For 2 lines replace state with placeholder to gain ownership of `result`
-        match &self.state {
-            State::AwaitingProcess(result) => {
-                let result = result.clone();
-                self.state = State::Processing(result.clone());
-                Some(result)
-            }
-            _ => None,
-        }
-    }
-
-    /// Revert into `AwaitingProcessing`, if the payload if not invalid and can be submitted for
-    /// processing latter.
-    pub fn revert_to_awaiting_processing(&mut self) -> Result<(), LookupRequestError> {
-        match &self.state {
-            State::Processing(result) => {
-                self.state = State::AwaitingProcess(result.clone());
-                Ok(())
-            }
-            other => Err(LookupRequestError::BadState(format!(
-                "Bad state on revert_to_awaiting_processing expected Processing got {other}"
-            ))),
-        }
-    }
-
-    /// Registers a failure in processing a block.
-    pub fn on_processing_failure(&mut self) -> Result<PeerGroup, LookupRequestError> {
-        match &self.state {
-            State::Processing(result) => {
-                let peers_source = result.peer_group.clone();
-                self.failed_processing = self.failed_processing.saturating_add(1);
-                self.state = State::AwaitingDownload("not started");
-                Ok(peers_source)
-            }
-            other => Err(LookupRequestError::BadState(format!(
-                "Bad state on_processing_failure expected Processing got {other}"
-            ))),
-        }
-    }
-
-    pub fn on_processing_success(&mut self) -> Result<(), LookupRequestError> {
-        match &self.state {
-            State::Processing(_) => {
-                self.state = State::Processed("processing success");
-                Ok(())
-            }
-            other => Err(LookupRequestError::BadState(format!(
-                "Bad state on_processing_success expected Processing got {other}"
-            ))),
-        }
-    }
-
-    /// Mark a request as complete without any download or processing
-    pub fn on_completed_request(&mut self, reason: &'static str) -> Result<(), LookupRequestError> {
-        match &self.state {
-            State::AwaitingDownload { .. } => {
-                self.state = State::Processed(reason);
-                Ok(())
-            }
-            other => Err(LookupRequestError::BadState(format!(
-                "Bad state on_completed_request expected AwaitingDownload got {other}"
             ))),
         }
     }
@@ -905,63 +869,7 @@ impl<T: Clone> std::fmt::Debug for State<T> {
         match self {
             Self::AwaitingDownload(reason) => write!(f, "AwaitingDownload({})", reason),
             Self::Downloading(req_id) => write!(f, "Downloading({:?})", req_id),
-            Self::AwaitingProcess(d) => write!(f, "AwaitingProcess({:?})", d.peer_group),
-            Self::Processing(d) => write!(f, "Processing({:?})", d.peer_group),
-            Self::Processed(reason) => write!(f, "Processed({})", reason),
-        }
-    }
-}
-
-fn component_states_processed<E: EthSpec>(
-    block: &SingleLookupRequestState<Arc<SignedBeaconBlock<E>>>,
-    extras: Option<&BlockExtraRequests<E>>,
-) -> bool {
-    let extras_processed = match extras {
-        None => true,
-        Some(BlockExtraRequests::ElectraBlobs { blobs, .. }) => blobs.state.is_processed(),
-        Some(BlockExtraRequests::FuluColumns { columns }) => columns.state.is_processed(),
-        Some(BlockExtraRequests::Gloas { payload, columns }) => {
-            payload.state.is_processed()
-                && columns
-                    .as_ref()
-                    .map(|c| c.state.is_processed())
-                    .unwrap_or(true)
-        }
-    };
-
-    block.is_processed() && extras_processed
-}
-
-fn component_states_awaiting_event<E: EthSpec>(
-    block: &SingleLookupRequestState<Arc<SignedBeaconBlock<E>>>,
-    extras: Option<&BlockExtraRequests<E>>,
-) -> bool {
-    let extras_awaiting = match extras {
-        None => false,
-        Some(BlockExtraRequests::ElectraBlobs { blobs, .. }) => blobs.state.is_awaiting_event(),
-        Some(BlockExtraRequests::FuluColumns { columns }) => columns.state.is_awaiting_event(),
-        Some(BlockExtraRequests::Gloas { payload, columns }) => {
-            payload.state.is_awaiting_event()
-                || columns
-                    .as_ref()
-                    .map(|c| c.state.is_awaiting_event())
-                    .unwrap_or(false)
-        }
-    };
-
-    block.is_awaiting_event() || extras_awaiting
-}
-
-fn extras_download_complete<E: EthSpec>(extras: &BlockExtraRequests<E>) -> bool {
-    match extras {
-        BlockExtraRequests::ElectraBlobs { blobs, .. } => blobs.state.is_download_complete(),
-        BlockExtraRequests::FuluColumns { columns } => columns.state.is_download_complete(),
-        BlockExtraRequests::Gloas { payload, columns } => {
-            payload.state.is_download_complete()
-                && columns
-                    .as_ref()
-                    .map(|c| c.state.is_download_complete())
-                    .unwrap_or(true)
+            Self::Downloaded(_) => write!(f, "Downloaded()"),
         }
     }
 }

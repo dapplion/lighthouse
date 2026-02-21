@@ -495,54 +495,13 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         response: CustodyDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        // Inline the common download handler for custody. This path only needs to register the
-        // download result in the custody state and trigger lookup progress.
-        let result = (|| {
-            let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
-                debug!(?id, "Block returned for single block lookup not present");
-                return Err(LookupRequestError::UnknownLookup);
-            };
-
-            let block_root = lookup.block_root();
-            let request_state = lookup
-                .custody_state_mut()
-                .map_err(|e| LookupRequestError::BadState(e.to_owned()))?;
-
-            match response {
-                Ok((response, peer_group, seen_timestamp)) => {
-                    debug!(
-                        ?block_root,
-                        ?id,
-                        ?peer_group,
-                        response_type = ?ResponseType::CustodyColumn,
-                        "Received lookup download success"
-                    );
-
-                    request_state.on_download_success(
-                        id.req_id,
-                        DownloadResult {
-                            value: response,
-                            block_root,
-                            seen_timestamp,
-                            peer_group,
-                        },
-                    )?;
-                }
-                Err(e) => {
-                    debug!(
-                        ?block_root,
-                        ?id,
-                        response_type = ?ResponseType::CustodyColumn,
-                        error = ?e,
-                        "Received lookup download failure"
-                    );
-
-                    request_state.on_download_failure(id.req_id)?;
-                }
-            }
-
-            lookup.continue_requests(cx)
-        })();
+        let result = self.on_download_response_inner(
+            id,
+            response,
+            ResponseType::Blob,
+            |lookup| lookup.custody_state_mut(),
+            cx,
+        );
         self.on_lookup_result(id.lookup_id, result, "custody_download_response", cx);
     }
 
