@@ -116,7 +116,6 @@ pub type SingleLookupId = u32;
 
 enum Action {
     Retry,
-    ParentUnknown { parent_root: Hash256 },
     Drop(/* reason: */ String),
     Continue,
 }
@@ -465,7 +464,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             id,
             response,
             ResponseType::Block,
-            |lookup| Ok(lookup.block_state_mut()),
+            |lookup| lookup.block_state_mut(),
             cx,
         );
         self.on_lookup_result(id.lookup_id, result, "block_download_response", cx);
@@ -622,7 +621,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             lookup_id,
             result,
             ResponseType::Block,
-            |lookup| Ok(lookup.block_state_mut()),
+            |lookup| lookup.block_state_mut(),
             cx,
         )
     }
@@ -697,20 +696,11 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents {
                 ..
             }) => {
-                // `on_processing_success` is called here to ensure the request state is updated prior to checking
-                // if both components have been processed.
-                request_state.on_processing_success()?;
-
-                if lookup.all_components_processed() {
-                    // We don't request for other block components until being sure that the block has
-                    // data. If we request blobs / columns to a peer we are sure those must exist.
-                    // Therefore if all components are processed and we still receive `MissingComponents`
-                    // it indicates an internal bug.
-                    return Err(LookupRequestError::MissingComponentsAfterAllProcessed);
-                } else {
-                    // Continue request, potentially request blobs
-                    Action::Retry
-                }
+                // The block is always downloaded first, so we know exactly which components
+                // are needed. Getting MissingComponents after processing is always a bug.
+                return Err(LookupRequestError::InternalError(
+                    "MissingComponents on procesing".to_string(),
+                ));
             }
             BlockProcessingResult::Err(BlockError::DuplicateImportStatusUnknown(..)) => {
                 // This is unreachable because RPC blocks do not undergo gossip verification, and
@@ -734,14 +724,12 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                         error!(%block_root, error = ?e, "Beacon chain error processing lookup component");
                         Action::Drop(format!("{e:?}"))
                     }
-                    BlockError::ParentUnknown { parent_root, .. } => {
-                        // Reverts the status of this request to `AwaitingProcessing` holding the
-                        // downloaded data. A future call to `continue_requests` will re-submit it
-                        // once there are no pending parent requests.
-                        // Note: `BlockError::ParentUnknown` is only returned when processing
-                        // blocks, not blobs.
-                        request_state.revert_to_awaiting_processing()?;
-                        Action::ParentUnknown { parent_root }
+                    BlockError::ParentUnknown { .. } => {
+                        // The parent is checked against fork-choice before sending
+                        // for processing. Getting ParentUnknown here is a bug.
+                        return Err(LookupRequestError::InternalError(
+                            "ParentUnknown on processing".to_string(),
+                        ));
                     }
                     ref e @ BlockError::ExecutionPayloadError(ref epe) if !epe.penalize_peer() => {
                         // These errors indicate that the execution layer is offline
@@ -814,31 +802,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 // Trigger download for all components in case `MissingComponents` failed the blob
                 // request. Also if blobs are `AwaitingProcessing` and need to be progressed
                 lookup.continue_requests(cx)
-            }
-            Action::ParentUnknown { parent_root } => {
-                let peers = lookup.all_peers();
-                // Mark lookup as awaiting **before** creating the parent lookup. At this point the
-                // lookup maybe inconsistent.
-                lookup.set_awaiting_parent(parent_root);
-                let parent_lookup_exists =
-                    self.search_parent_of_child(parent_root, block_root, &peers, cx);
-                if parent_lookup_exists {
-                    // The parent lookup exist or has been created. It's safe for `lookup` to
-                    // reference the parent as awaiting.
-                    debug!(
-                        id = lookup_id,
-                        ?block_root,
-                        ?parent_root,
-                        "Marking lookup as awaiting parent"
-                    );
-                    Ok(LookupResult::Pending)
-                } else {
-                    // The parent lookup is faulty and was not created, we must drop the `lookup` as
-                    // it's in an inconsistent state. We must drop all of its children too.
-                    Err(LookupRequestError::Failed(format!(
-                        "Parent lookup is faulty {parent_root:?}"
-                    )))
-                }
             }
             Action::Drop(reason) => {
                 // Drop with noop
@@ -946,6 +909,32 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     ) -> bool {
         match result {
             Ok(LookupResult::Pending) => true, // no action
+            Ok(LookupResult::ParentUnknown { parent_root }) => {
+                let Some(lookup) = self.single_block_lookups.get_mut(&id) else {
+                    debug!(id, "ParentUnknown for non-existent lookup");
+                    return false;
+                };
+                let block_root = lookup.block_root();
+                let peers = lookup.all_peers();
+                // Mark lookup as awaiting **before** creating the parent lookup.
+                lookup.set_awaiting_parent(parent_root);
+                let parent_lookup_exists =
+                    self.search_parent_of_child(parent_root, block_root, &peers, cx);
+                if parent_lookup_exists {
+                    debug!(
+                        id,
+                        ?block_root,
+                        ?parent_root,
+                        "Marking lookup as awaiting parent"
+                    );
+                    true
+                } else {
+                    // The parent lookup is faulty and was not created, drop the lookup
+                    self.drop_lookup_and_children(id, "Failed");
+                    self.update_metrics();
+                    false
+                }
+            }
             Ok(LookupResult::Completed) => {
                 if let Some(lookup) = self.single_block_lookups.remove(&id) {
                     debug!(
