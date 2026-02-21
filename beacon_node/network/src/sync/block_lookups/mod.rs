@@ -78,6 +78,13 @@ const LOOKUP_MAX_DURATION_NO_PEERS_SECS: u64 = 10;
 /// take at most 2 GB. 200 lookups allow 3 parallel chains of depth 64 (current maximum).
 const MAX_LOOKUPS: usize = 200;
 
+type BlockDownloadResponse<E> =
+    Result<(Arc<SignedBeaconBlock<E>>, PeerGroup, Duration), RpcResponseError>;
+type BlobDownloadResponse<E> =
+    Result<(FixedBlobSidecarList<E>, PeerGroup, Duration), RpcResponseError>;
+type CustodyDownloadResponse<E> =
+    Result<(types::DataColumnSidecarList<E>, PeerGroup, Duration), RpcResponseError>;
+
 pub enum BlockComponent<E: EthSpec> {
     Block(DownloadResult<Arc<SignedBeaconBlock<E>>>),
     Blob(DownloadResult<Arc<BlobSidecar<E>>>),
@@ -451,17 +458,14 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn on_block_download_response(
         &mut self,
         id: SingleLookupReqId,
-        response: Result<
-            (Arc<SignedBeaconBlock<T::EthSpec>>, PeerGroup, Duration),
-            RpcResponseError,
-        >,
+        response: BlockDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
         let result = self.on_download_response_inner(
             id,
             response,
             ResponseType::Block,
-            |lookup| Ok(&mut lookup.block_request_state.state),
+            |lookup| Ok(lookup.block_state_mut()),
             cx,
         );
         self.on_lookup_result(id.lookup_id, result, "block_download_response", cx);
@@ -471,23 +475,14 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn on_blob_download_response(
         &mut self,
         id: SingleLookupReqId,
-        response: Result<(FixedBlobSidecarList<T::EthSpec>, PeerGroup, Duration), RpcResponseError>,
+        response: BlobDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
         let result = self.on_download_response_inner(
             id,
             response,
             ResponseType::Blob,
-            |lookup| match &mut lookup.component_requests {
-                single_block_lookup::ComponentRequests::ActiveBlobRequest(request, _) => {
-                    Ok(&mut request.state)
-                }
-                single_block_lookup::ComponentRequests::WaitingForBlock => Err("waiting for block"),
-                single_block_lookup::ComponentRequests::ActiveCustodyRequest(_) => {
-                    Err("expecting custody request")
-                }
-                single_block_lookup::ComponentRequests::NotNeeded(_) => Err("not needed"),
-            },
+            |lookup| lookup.blob_state_mut(),
             cx,
         );
         self.on_lookup_result(id.lookup_id, result, "blob_download_response", cx);
@@ -497,32 +492,57 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn on_custody_download_response(
         &mut self,
         id: SingleLookupReqId,
-        response: Result<
-            (
-                types::DataColumnSidecarList<T::EthSpec>,
-                PeerGroup,
-                Duration,
-            ),
-            RpcResponseError,
-        >,
+        response: CustodyDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = self.on_download_response_inner(
-            id,
-            response,
-            ResponseType::CustodyColumn,
-            |lookup| match &mut lookup.component_requests {
-                single_block_lookup::ComponentRequests::ActiveCustodyRequest(request) => {
-                    Ok(&mut request.state)
+        // Inline the common download handler for custody. This path only needs to register the
+        // download result in the custody state and trigger lookup progress.
+        let result = (|| {
+            let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
+                debug!(?id, "Block returned for single block lookup not present");
+                return Err(LookupRequestError::UnknownLookup);
+            };
+
+            let block_root = lookup.block_root();
+            let request_state = lookup
+                .custody_state_mut()
+                .map_err(|e| LookupRequestError::BadState(e.to_owned()))?;
+
+            match response {
+                Ok((response, peer_group, seen_timestamp)) => {
+                    debug!(
+                        ?block_root,
+                        ?id,
+                        ?peer_group,
+                        response_type = ?ResponseType::CustodyColumn,
+                        "Received lookup download success"
+                    );
+
+                    request_state.on_download_success(
+                        id.req_id,
+                        DownloadResult {
+                            value: response,
+                            block_root,
+                            seen_timestamp,
+                            peer_group,
+                        },
+                    )?;
                 }
-                single_block_lookup::ComponentRequests::WaitingForBlock => Err("waiting for block"),
-                single_block_lookup::ComponentRequests::ActiveBlobRequest(_, _) => {
-                    Err("expecting blob request")
+                Err(e) => {
+                    debug!(
+                        ?block_root,
+                        ?id,
+                        response_type = ?ResponseType::CustodyColumn,
+                        error = ?e,
+                        "Received lookup download failure"
+                    );
+
+                    request_state.on_download_failure(id.req_id)?;
                 }
-                single_block_lookup::ComponentRequests::NotNeeded(_) => Err("not needed"),
-            },
-            cx,
-        );
+            }
+
+            lookup.continue_requests(cx)
+        })();
         self.on_lookup_result(id.lookup_id, result, "custody_download_response", cx);
     }
 
@@ -643,7 +663,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             lookup_id,
             result,
             ResponseType::Block,
-            |lookup| Ok(&mut lookup.block_request_state.state),
+            |lookup| Ok(lookup.block_state_mut()),
             cx,
         )
     }
@@ -658,16 +678,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             lookup_id,
             result,
             ResponseType::Blob,
-            |lookup| match &mut lookup.component_requests {
-                single_block_lookup::ComponentRequests::ActiveBlobRequest(request, _) => {
-                    Ok(&mut request.state)
-                }
-                single_block_lookup::ComponentRequests::WaitingForBlock => Err("waiting for block"),
-                single_block_lookup::ComponentRequests::ActiveCustodyRequest(_) => {
-                    Err("expecting custody request")
-                }
-                single_block_lookup::ComponentRequests::NotNeeded(_) => Err("not needed"),
-            },
+            |lookup| lookup.blob_state_mut(),
             cx,
         )
     }
@@ -682,16 +693,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             lookup_id,
             result,
             ResponseType::CustodyColumn,
-            |lookup| match &mut lookup.component_requests {
-                single_block_lookup::ComponentRequests::ActiveCustodyRequest(request) => {
-                    Ok(&mut request.state)
-                }
-                single_block_lookup::ComponentRequests::WaitingForBlock => Err("waiting for block"),
-                single_block_lookup::ComponentRequests::ActiveBlobRequest(_, _) => {
-                    Err("expecting blob request")
-                }
-                single_block_lookup::ComponentRequests::NotNeeded(_) => Err("not needed"),
-            },
+            |lookup| lookup.custody_state_mut(),
             cx,
         )
     }

@@ -889,9 +889,32 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             }),
                         );
                     }
-                    // TODO(gloas) support gloas data column variant
+                    // In Gloas, data columns identify the beacon block root but do not carry
+                    // parent root. Treat as an unknown block-root trigger (attestation-style).
                     DataColumnSidecar::Gloas(_) => {
-                        error!("Gloas variant not yet supported")
+                        match self.should_search_for_block(Some(data_column_slot), &peer_id) {
+                            Ok(_) => {
+                                if self.block_lookups.search_unknown_block(
+                                    block_root,
+                                    &[peer_id],
+                                    &mut self.network,
+                                ) {
+                                    debug!(
+                                        ?block_root,
+                                        "Created unknown block lookup from Gloas data column"
+                                    );
+                                } else {
+                                    debug!(?block_root, "No lookup created from Gloas data column");
+                                }
+                            }
+                            Err(reason) => {
+                                debug!(
+                                    %block_root,
+                                    reason,
+                                    "Ignoring Gloas data column unknown block request"
+                                );
+                            }
+                        }
                     }
                 }
             }

@@ -3260,6 +3260,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             "Processing execution payload envelope"
         );
 
+        // Trigger lookup sync by beacon block root. This mirrors unknown-block attestation style
+        // triggering until payload-envelope verification and dedicated payload lookup are wired.
+        self.send_sync_message(SyncMessage::UnknownBlockHashFromAttestation(
+            peer_id,
+            execution_payload.message.beacon_block_root,
+        ));
+
         // For now, ignore all envelopes since verification is not implemented
         self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
     }
@@ -3279,6 +3286,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             value = %payload_bid.message.value,
             "Processing execution payload bid"
         );
+
+        // Keep bids ignored for now.
+        //
+        // Note: bids are weak signals for lookup-sync purposes compared with payload envelopes and
+        // payload attestations, which directly carry a beacon block root that can be used as an
+        // unknown-block trigger. We intentionally avoid adding lookup triggers from bids to reduce
+        // noise until bid verification/integration is fully designed.
 
         // For now, ignore all payload bids since verification is not implemented
         self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
@@ -3300,6 +3314,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             beacon_block_root = %payload_attestation_message.data.beacon_block_root,
             "Processing payload attestation message"
         );
+
+        // Trigger lookup sync by beacon block root. Treat payload attestations as unknown block
+        // root signals (same as attestation-style lookup trigger).
+        self.send_sync_message(SyncMessage::UnknownBlockHashFromAttestation(
+            peer_id,
+            payload_attestation_message.data.beacon_block_root,
+        ));
 
         // For now, ignore all payload attestation messages since verification is not implemented
         self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
