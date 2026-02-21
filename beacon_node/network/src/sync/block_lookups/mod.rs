@@ -29,7 +29,6 @@ use super::manager::{BlockProcessType, BlockProcessingResult, SLOT_IMPORT_TOLERA
 use super::network_context::{PeerGroup, RpcResponseError, SyncNetworkContext};
 use crate::metrics;
 use crate::sync::SyncMessage;
-use crate::sync::block_lookups::common::ResponseType;
 use crate::sync::block_lookups::parent_chain::find_oldest_fork_ancestor;
 use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::data_availability_checker::{
@@ -48,7 +47,6 @@ use tracing::{debug, error, warn};
 use types::data::FixedBlobSidecarList;
 use types::{BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock};
 
-pub mod common;
 pub mod parent_chain;
 mod single_block_lookup;
 
@@ -114,10 +112,11 @@ impl<E: EthSpec> BlockComponent<E> {
 
 pub type SingleLookupId = u32;
 
-enum Action {
-    Retry,
-    Drop(/* reason: */ String),
-    Continue,
+#[derive(Debug, Copy, Clone)]
+pub enum ResponseType {
+    Block,
+    Blob,
+    CustodyColumn,
 }
 
 pub struct BlockLookups<T: BeaconChainTypes> {
@@ -497,7 +496,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         let result = self.on_download_response_inner(
             id,
             response,
-            ResponseType::Blob,
+            ResponseType::CustodyColumn,
             |lookup| lookup.custody_state_mut(),
             cx,
         );
@@ -537,14 +536,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                     "Received lookup download success"
                 );
 
-                // Here we could check if response extends a parent chain beyond its max length.
-                // However we defer that check to the handling of a processing error ParentUnknown.
-                //
-                // Here we could check if there's already a lookup for parent_root of `response`. In
-                // that case we know that sending the response for processing will likely result in
-                // a `ParentUnknown` error. However, for simplicity we choose to not implement this
-                // optimization.
-
                 // Register the download peer here. Once we have received some data over the wire we
                 // attribute it to this peer for scoring latter regardless of how the request was
                 // done.
@@ -557,7 +548,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                         peer_group,
                     },
                 )?;
-                // continue_request will send for  processing as the request state is AwaitingProcessing
             }
             Err(e) => {
                 // No need to log peer source here. When sending a DataColumnsByRoot request we log
@@ -571,7 +561,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 );
 
                 request_state.on_download_failure(id.req_id)?;
-                // continue_request will retry a download as the request state is AwaitingDownload
             }
         }
 
@@ -597,74 +586,15 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         result: BlockProcessingResult,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let lookup_result = match process_type {
-            BlockProcessType::SingleBlock { id } => {
-                self.on_block_processing_result_inner(id, result, cx)
-            }
-            BlockProcessType::SingleBlob { id } => {
-                self.on_blob_processing_result_inner(id, result, cx)
-            }
-            BlockProcessType::SingleCustodyColumn(id) => {
-                self.on_custody_processing_result_inner(id, result, cx)
-            }
-        };
-        self.on_lookup_result(process_type.id(), lookup_result, "processing_result", cx);
+        let lookup_id = process_type.id();
+        let lookup_result = self.on_processing_result_inner(lookup_id, result, cx);
+        self.on_lookup_result(lookup_id, lookup_result, "processing_result", cx);
     }
 
-    fn on_block_processing_result_inner(
+    fn on_processing_result_inner(
         &mut self,
         lookup_id: SingleLookupId,
         result: BlockProcessingResult,
-        cx: &mut SyncNetworkContext<T>,
-    ) -> Result<LookupResult, LookupRequestError> {
-        self.on_processing_result_inner(
-            lookup_id,
-            result,
-            ResponseType::Block,
-            |lookup| lookup.block_state_mut(),
-            cx,
-        )
-    }
-
-    fn on_blob_processing_result_inner(
-        &mut self,
-        lookup_id: SingleLookupId,
-        result: BlockProcessingResult,
-        cx: &mut SyncNetworkContext<T>,
-    ) -> Result<LookupResult, LookupRequestError> {
-        self.on_processing_result_inner(
-            lookup_id,
-            result,
-            ResponseType::Blob,
-            |lookup| lookup.blob_state_mut(),
-            cx,
-        )
-    }
-
-    fn on_custody_processing_result_inner(
-        &mut self,
-        lookup_id: SingleLookupId,
-        result: BlockProcessingResult,
-        cx: &mut SyncNetworkContext<T>,
-    ) -> Result<LookupResult, LookupRequestError> {
-        self.on_processing_result_inner(
-            lookup_id,
-            result,
-            ResponseType::CustodyColumn,
-            |lookup| lookup.custody_state_mut(),
-            cx,
-        )
-    }
-
-    fn on_processing_result_inner<V: Clone>(
-        &mut self,
-        lookup_id: SingleLookupId,
-        result: BlockProcessingResult,
-        response_type: ResponseType,
-        request_state_getter: impl FnOnce(
-            &mut SingleBlockLookup<T>,
-        )
-            -> Result<&mut SingleLookupRequestState<V>, &'static str>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupResult, LookupRequestError> {
         let Some(lookup) = self.single_block_lookups.get_mut(&lookup_id) else {
@@ -673,143 +603,83 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         };
 
         let block_root = lookup.block_root();
-        let request_state =
-            request_state_getter(lookup).map_err(|e| LookupRequestError::BadState(e.to_owned()))?;
 
         debug!(
-            component = ?response_type,
             ?block_root,
             id = lookup_id,
             ?result,
             "Received lookup processing result"
         );
 
-        let action = match result {
+        match result {
             BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(_))
             | BlockProcessingResult::Err(BlockError::DuplicateFullyImported(..))
-            | BlockProcessingResult::Err(BlockError::GenesisBlock) => {
-                // Successfully imported
-                request_state.on_processing_success()?;
-                Action::Continue
-            }
-
+            | BlockProcessingResult::Err(BlockError::GenesisBlock) => Ok(LookupResult::Completed),
             BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents {
                 ..
             }) => {
                 // The block is always downloaded first, so we know exactly which components
                 // are needed. Getting MissingComponents after processing is always a bug.
-                return Err(LookupRequestError::InternalError(
-                    "MissingComponents on procesing".to_string(),
-                ));
-            }
-            BlockProcessingResult::Err(BlockError::DuplicateImportStatusUnknown(..)) => {
-                // This is unreachable because RPC blocks do not undergo gossip verification, and
-                // this error can *only* come from gossip verification.
-                error!(?block_root, "Single block lookup hit unreachable condition");
-                Action::Drop("DuplicateImportStatusUnknown".to_owned())
+                Err(LookupRequestError::InternalError(
+                    "MissingComponents on processing".to_string(),
+                ))
             }
             BlockProcessingResult::Ignored => {
                 // Beacon processor signalled to ignore the block processing result.
                 // This implies that the cpu is overloaded. Drop the request.
-                warn!(
-                    component = ?response_type,
-                    "Lookup component processing ignored, cpu might be overloaded"
-                );
-                Action::Drop("Block processing ignored".to_owned())
+                warn!("Lookup processing ignored, cpu might be overloaded");
+                Err(LookupRequestError::Failed(
+                    "Block processing ignored".to_owned(),
+                ))
             }
             BlockProcessingResult::Err(e) => {
-                match e {
-                    BlockError::BeaconChainError(e) => {
-                        // Internal error
-                        error!(%block_root, error = ?e, "Beacon chain error processing lookup component");
-                        Action::Drop(format!("{e:?}"))
-                    }
+                debug!(?block_root, error = ?e, "Lookup processing error, retrying");
+
+                match &e {
+                    // Parent is checked before processing, this is a bug
                     BlockError::ParentUnknown { .. } => {
-                        // The parent is checked against fork-choice before sending
-                        // for processing. Getting ParentUnknown here is a bug.
                         return Err(LookupRequestError::InternalError(
                             "ParentUnknown on processing".to_string(),
                         ));
                     }
-                    ref e @ BlockError::ExecutionPayloadError(ref epe) if !epe.penalize_peer() => {
-                        // These errors indicate that the execution layer is offline
-                        // and failed to validate the execution payload. Do not downscore peer.
-                        debug!(
-                            ?block_root,
-                            error = ?e,
-                            "Single block lookup failed. Execution layer is offline / unsynced / misconfigured"
-                        );
-                        Action::Drop(format!("{e:?}"))
-                    }
+                    // No penalization for internal / non-attributable errors
+                    BlockError::BeaconChainError(_)
+                    | BlockError::DuplicateImportStatusUnknown(..) => {}
+                    BlockError::ExecutionPayloadError(epe) if !epe.penalize_peer() => {}
                     BlockError::AvailabilityCheck(e)
-                        if e.category() == AvailabilityCheckErrorCategory::Internal =>
-                    {
-                        // There errors indicate internal problems and should not downscore the  peer
-                        warn!(?block_root, error = ?e, "Internal availability check failure");
-
-                        // Here we choose *not* to call `on_processing_failure` because this could result in a bad
-                        // lookup state transition. This error invalidates both blob and block requests, and we don't know the
-                        // state of both requests. Blobs may have already successfullly processed for example.
-                        // We opt to drop the lookup instead.
-                        Action::Drop(format!("{e:?}"))
-                    }
-                    other => {
-                        debug!(
-                            ?block_root,
-                            component = ?response_type,
-                            error = ?other,
-                            "Invalid lookup component"
-                        );
-                        let peer_group = request_state.on_processing_failure()?;
-                        let peers_to_penalize: Vec<_> = match other {
-                            // Note: currenlty only InvalidColumn errors have index granularity,
-                            // but future errors may follow the same pattern. Generalize this
-                            // pattern with https://github.com/sigp/lighthouse/pull/6321
-                            BlockError::AvailabilityCheck(
-                                AvailabilityCheckError::InvalidColumn((index_opt, _)),
-                            ) => {
-                                match index_opt {
-                                    Some(index) => peer_group.of_index(index as usize).collect(),
-                                    // If no index supplied this is an un-attributable fault. In practice
-                                    // this should never happen.
-                                    None => vec![],
-                                }
+                        if e.category() == AvailabilityCheckErrorCategory::Internal => {}
+                    // InvalidColumn: penalize only the peer(s) that served the bad column
+                    BlockError::AvailabilityCheck(AvailabilityCheckError::InvalidColumn((
+                        index_opt,
+                        _,
+                    ))) => {
+                        if let Some(requests_peers) = lookup.requests_peers()
+                            && let Some(custody_pg) = &requests_peers.custody_columns
+                            && let Some(index) = index_opt
+                        {
+                            for peer in custody_pg.of_index(*index as usize) {
+                                cx.report_peer(
+                                    *peer,
+                                    PeerAction::MidToleranceError,
+                                    "lookup_processing_failure",
+                                );
                             }
-                            _ => peer_group.all().collect(),
-                        };
-                        for peer in peers_to_penalize {
+                        }
+                    }
+                    // All other attributable errors: penalize the block peer
+                    _ => {
+                        if let Some(requests_peers) = lookup.requests_peers() {
                             cx.report_peer(
-                                *peer,
+                                requests_peers.block,
                                 PeerAction::MidToleranceError,
-                                match response_type {
-                                    ResponseType::Block => "lookup_block_processing_failure",
-                                    ResponseType::Blob => "lookup_blobs_processing_failure",
-                                    ResponseType::CustodyColumn => {
-                                        "lookup_custody_column_processing_failure"
-                                    }
-                                },
+                                "lookup_processing_failure",
                             );
                         }
-
-                        Action::Retry
                     }
                 }
-            }
-        };
 
-        match action {
-            Action::Retry => {
-                // Trigger download for all components in case `MissingComponents` failed the blob
-                // request. Also if blobs are `AwaitingProcessing` and need to be progressed
+                lookup.reset_requests();
                 lookup.continue_requests(cx)
-            }
-            Action::Drop(reason) => {
-                // Drop with noop
-                Err(LookupRequestError::Failed(reason))
-            }
-            Action::Continue => {
-                // Drop this completed lookup only
-                Ok(LookupResult::Completed)
             }
         }
     }
@@ -832,14 +702,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         let lookup_result = if imported {
             Ok(LookupResult::Completed)
         } else {
-            // A lookup may be in the following state:
-            // - Block awaiting processing from a different source
-            // - Blobs downloaded processed, and inserted into the da_checker
-            //
-            // At this point the block fails processing (e.g. execution engine offline) and it is
-            // removed from the da_checker. Note that ALL components are removed from the da_checker
-            // so when we re-download and process the block we get the error
-            // MissingComponentsAfterAllProcessed and get stuck.
             lookup.reset_requests();
             lookup.continue_requests(cx)
         };
