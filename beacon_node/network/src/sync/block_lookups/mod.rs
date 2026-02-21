@@ -558,11 +558,21 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         cx: &mut SyncNetworkContext<T>,
     ) {
         let lookup_id = process_type.id();
-        let lookup_result = self.on_processing_result_inner(lookup_id, result, cx);
+        let lookup_result = match process_type {
+            BlockProcessType::SingleBlock { .. } => {
+                self.on_block_processing_result(lookup_id, result, cx)
+            }
+            BlockProcessType::SingleBlob { .. } | BlockProcessType::SingleCustodyColumn(_) => {
+                self.on_data_processing_result(lookup_id, result, cx)
+            }
+        };
         self.on_lookup_result(lookup_id, lookup_result, "processing_result", cx);
     }
 
-    fn on_processing_result_inner(
+    /// Handle block processing result. The block is sent for processing alone (without data).
+    /// On success: marks block processing done and advances data/payload streams.
+    /// On error: penalizes block peer, resets all streams, retries from scratch.
+    fn on_block_processing_result(
         &mut self,
         lookup_id: SingleLookupId,
         result: BlockProcessingResult,
@@ -579,35 +589,30 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             ?block_root,
             id = lookup_id,
             ?result,
-            "Received lookup processing result"
+            "Received block processing result"
         );
 
         match result {
+            // Block processed successfully (imported or missing components — both are ok since
+            // we send the block alone first, data follows independently)
             BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(_))
-            | BlockProcessingResult::Err(BlockError::DuplicateFullyImported(..))
-            | BlockProcessingResult::Err(BlockError::GenesisBlock) => Ok(LookupResult::Completed),
-            BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents {
+            | BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents {
                 ..
-            }) => {
-                // The block is always downloaded first, so we know exactly which components
-                // are needed. Getting MissingComponents after processing is always a bug.
-                Err(LookupRequestError::InternalError(
-                    "MissingComponents on processing".to_string(),
-                ))
+            })
+            | BlockProcessingResult::Err(BlockError::DuplicateFullyImported(..))
+            | BlockProcessingResult::Err(BlockError::GenesisBlock) => {
+                lookup.on_block_processing_result(true, cx)
             }
             BlockProcessingResult::Ignored => {
-                // Beacon processor signalled to ignore the block processing result.
-                // This implies that the cpu is overloaded. Drop the request.
-                warn!("Lookup processing ignored, cpu might be overloaded");
+                warn!("Block processing ignored, cpu might be overloaded");
                 Err(LookupRequestError::Failed(
                     "Block processing ignored".to_owned(),
                 ))
             }
             BlockProcessingResult::Err(e) => {
-                debug!(?block_root, error = ?e, "Lookup processing error, retrying");
+                debug!(?block_root, error = ?e, "Block processing error, retrying");
 
                 match &e {
-                    // Parent is checked before processing, this is a bug
                     BlockError::ParentUnknown { .. } => {
                         return Err(LookupRequestError::InternalError(
                             "ParentUnknown on processing".to_string(),
@@ -619,38 +624,107 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                     BlockError::ExecutionPayloadError(epe) if !epe.penalize_peer() => {}
                     BlockError::AvailabilityCheck(e)
                         if e.category() == AvailabilityCheckErrorCategory::Internal => {}
+                    // All other attributable errors: penalize the block peer
+                    _ => {
+                        if let Some(block_peer) = lookup.block_peer() {
+                            cx.report_peer(
+                                block_peer,
+                                PeerAction::MidToleranceError,
+                                "lookup_block_processing_failure",
+                            );
+                        }
+                    }
+                }
+
+                // Block processing failed — reset everything and retry from scratch
+                lookup.on_block_processing_result(false, cx)
+            }
+        }
+    }
+
+    /// Handle data processing result (blobs or custody columns).
+    /// On success: marks data processing done, may complete the lookup.
+    /// On error: penalizes data peers, retries data download only.
+    fn on_data_processing_result(
+        &mut self,
+        lookup_id: SingleLookupId,
+        result: BlockProcessingResult,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        let Some(lookup) = self.single_block_lookups.get_mut(&lookup_id) else {
+            debug!(id = lookup_id, "Unknown single block lookup");
+            return Err(LookupRequestError::UnknownLookup);
+        };
+
+        let block_root = lookup.block_root();
+
+        debug!(
+            ?block_root,
+            id = lookup_id,
+            ?result,
+            "Received data processing result"
+        );
+
+        match result {
+            BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(_))
+            | BlockProcessingResult::Err(BlockError::DuplicateFullyImported(..))
+            | BlockProcessingResult::Err(BlockError::GenesisBlock) => {
+                lookup.on_data_processing_result(true, cx)
+            }
+            BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents {
+                ..
+            }) => {
+                // Data sent for processing but still missing components — this can happen if
+                // the block hasn't been fully validated yet. Treat as success for the data
+                // stream; completion check will handle the rest.
+                lookup.on_data_processing_result(true, cx)
+            }
+            BlockProcessingResult::Ignored => {
+                warn!("Data processing ignored, cpu might be overloaded");
+                Err(LookupRequestError::Failed(
+                    "Data processing ignored".to_owned(),
+                ))
+            }
+            BlockProcessingResult::Err(e) => {
+                debug!(?block_root, error = ?e, "Data processing error, retrying");
+
+                match &e {
+                    // No penalization for internal / non-attributable errors
+                    BlockError::BeaconChainError(_)
+                    | BlockError::DuplicateImportStatusUnknown(..) => {}
+                    BlockError::AvailabilityCheck(e)
+                        if e.category() == AvailabilityCheckErrorCategory::Internal => {}
                     // InvalidColumn: penalize only the peer(s) that served the bad column
                     BlockError::AvailabilityCheck(AvailabilityCheckError::InvalidColumn((
                         index_opt,
                         _,
                     ))) => {
-                        if let Some(requests_peers) = lookup.requests_peers()
-                            && let Some(custody_pg) = &requests_peers.custody_columns
+                        if let Some(custody_pg) = lookup.data_peer_group()
                             && let Some(index) = index_opt
                         {
                             for peer in custody_pg.of_index(*index as usize) {
                                 cx.report_peer(
                                     *peer,
                                     PeerAction::MidToleranceError,
-                                    "lookup_processing_failure",
+                                    "lookup_data_processing_failure",
                                 );
                             }
                         }
                     }
-                    // All other attributable errors: penalize the block peer
+                    // All other attributable errors: penalize the block peer (who also serves blobs)
                     _ => {
-                        if let Some(requests_peers) = lookup.requests_peers() {
+                        if let Some(block_peer) = lookup.block_peer() {
                             cx.report_peer(
-                                requests_peers.block,
+                                block_peer,
                                 PeerAction::MidToleranceError,
-                                "lookup_processing_failure",
+                                "lookup_data_processing_failure",
                             );
                         }
                     }
                 }
 
-                lookup.reset_requests();
-                lookup.continue_requests(cx)
+                // Data processing failed — retry data download only
+                lookup.on_data_processing_result(false, cx)
             }
         }
     }
