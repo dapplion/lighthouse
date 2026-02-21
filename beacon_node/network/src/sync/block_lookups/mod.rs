@@ -22,9 +22,7 @@
 
 use self::parent_chain::{NodeChain, compute_parent_chains};
 pub use self::single_block_lookup::DownloadResult;
-use self::single_block_lookup::{
-    LookupRequestError, LookupResult, SingleBlockLookup, SingleLookupRequestState,
-};
+use self::single_block_lookup::{LookupRequestError, LookupResult, SingleBlockLookup};
 use super::manager::{BlockProcessType, BlockProcessingResult, SLOT_IMPORT_TOLERANCE};
 use super::network_context::{PeerGroup, RpcResponseError, SyncNetworkContext};
 use crate::metrics;
@@ -111,13 +109,6 @@ impl<E: EthSpec> BlockComponent<E> {
 }
 
 pub type SingleLookupId = u32;
-
-#[derive(Debug, Copy, Clone)]
-pub enum ResponseType {
-    Block,
-    Blob,
-    CustodyColumn,
-}
 
 pub struct BlockLookups<T: BeaconChainTypes> {
     /// A cache of block roots that must be ignored for some time to prevent useless searches. For
@@ -459,12 +450,12 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         response: BlockDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = self.on_download_response_inner(
+        let result = self.on_download_response(
             id,
-            response,
-            ResponseType::Block,
-            |lookup| lookup.block_state_mut(),
+            "block",
             cx,
+            |lookup, req_id, result, cx| lookup.on_block_download_response(req_id, result, cx),
+            response,
         );
         self.on_lookup_result(id.lookup_id, result, "block_download_response", cx);
     }
@@ -476,12 +467,12 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         response: BlobDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = self.on_download_response_inner(
+        let result = self.on_download_response(
             id,
-            response,
-            ResponseType::Blob,
-            |lookup| lookup.blob_state_mut(),
+            "blob",
             cx,
+            |lookup, req_id, result, cx| lookup.on_blob_download_response(req_id, result, cx),
+            response,
         );
         self.on_lookup_result(id.lookup_id, result, "blob_download_response", cx);
     }
@@ -493,78 +484,58 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         response: CustodyDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = self.on_download_response_inner(
+        let result = self.on_download_response(
             id,
-            response,
-            ResponseType::CustodyColumn,
-            |lookup| lookup.custody_state_mut(),
+            "custody",
             cx,
+            |lookup, req_id, result, cx| lookup.on_custody_download_response(req_id, result, cx),
+            response,
         );
         self.on_lookup_result(id.lookup_id, result, "custody_download_response", cx);
     }
 
-    fn on_download_response_inner<V: Clone>(
+    fn on_download_response<V>(
         &mut self,
         id: SingleLookupReqId,
-        response: Result<(V, PeerGroup, Duration), RpcResponseError>,
-        response_type: ResponseType,
-        request_state_getter: impl FnOnce(
-            &mut SingleBlockLookup<T>,
-        )
-            -> Result<&mut SingleLookupRequestState<V>, &'static str>,
+        component: &str,
         cx: &mut SyncNetworkContext<T>,
+        handler: impl FnOnce(
+            &mut SingleBlockLookup<T>,
+            super::network_context::ReqId,
+            Result<(V, PeerGroup, Duration), ()>,
+            &mut SyncNetworkContext<T>,
+        ) -> Result<LookupResult, LookupRequestError>,
+        response: Result<(V, PeerGroup, Duration), RpcResponseError>,
     ) -> Result<LookupResult, LookupRequestError> {
         // Note: no need to downscore peers here, already downscored on network context
         let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
-            // We don't have the ability to cancel in-flight RPC requests. So this can happen
-            // if we started this RPC request, and later saw the block/blobs via gossip.
             debug!(?id, "Block returned for single block lookup not present");
             return Err(LookupRequestError::UnknownLookup);
         };
 
         let block_root = lookup.block_root();
-        let request_state =
-            request_state_getter(lookup).map_err(|e| LookupRequestError::BadState(e.to_owned()))?;
 
-        match response {
-            Ok((response, peer_group, seen_timestamp)) => {
+        match &response {
+            Ok((_, peer_group, _)) => {
                 debug!(
                     ?block_root,
                     ?id,
                     ?peer_group,
-                    ?response_type,
+                    component,
                     "Received lookup download success"
                 );
-
-                // Register the download peer here. Once we have received some data over the wire we
-                // attribute it to this peer for scoring latter regardless of how the request was
-                // done.
-                request_state.on_download_success(
-                    id.req_id,
-                    DownloadResult {
-                        value: response,
-                        block_root,
-                        seen_timestamp,
-                        peer_group,
-                    },
-                )?;
             }
             Err(e) => {
-                // No need to log peer source here. When sending a DataColumnsByRoot request we log
-                // the peer and the request ID which is linked to this `id` value here.
                 debug!(
-                    ?block_root,
-                    ?id,
-                    ?response_type,
-                    error = ?e,
+                    ?block_root, ?id, component, error = ?e,
                     "Received lookup download failure"
                 );
-
-                request_state.on_download_failure(id.req_id)?;
             }
         }
 
-        lookup.continue_requests(cx)
+        // Convert RpcResponseError to () — peer scoring is handled at the network layer
+        let result = response.map_err(|_| ());
+        handler(lookup, id.req_id, result, cx)
     }
 
     /* Error responses */

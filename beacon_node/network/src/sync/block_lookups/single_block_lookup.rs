@@ -9,7 +9,6 @@ use educe::Educe;
 use lighthouse_network::service::api_types::Id;
 use parking_lot::RwLock;
 use std::collections::HashSet;
-use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use store::Hash256;
@@ -21,15 +20,14 @@ use types::{
     Slot,
 };
 
-// Dedicated enum for LookupResult to force its usage
-#[must_use = "LookupResult must be handled with on_lookup_result"]
-pub enum LookupResult {
-    /// Lookup completed successfully
-    Completed,
-    /// Lookup is expecting some future event from the network
-    Pending,
-    /// Block's parent is not known to fork-choice, a parent lookup is needed
-    ParentUnknown { parent_root: Hash256 },
+// === Public types re-exported by mod.rs ===
+
+#[derive(Debug, Clone)]
+pub struct DownloadResult<T: Clone> {
+    pub value: T,
+    pub block_root: Hash256,
+    pub seen_timestamp: Duration,
+    pub peer_group: PeerGroup,
 }
 
 #[derive(Debug, PartialEq, Eq, IntoStaticStr)]
@@ -59,38 +57,15 @@ pub enum LookupRequestError {
     InternalError(String),
 }
 
-#[derive(Educe)]
-#[educe(Debug(bound(T: BeaconChainTypes)))]
-pub struct SingleBlockLookup<T: BeaconChainTypes> {
-    pub id: Id,
-    state: LookupState<T::EthSpec>,
-    /// Peers that claim to have imported this set of block components. This state is shared with
-    /// the custody request to have an updated view of the peers that claim to have imported the
-    /// block associated with this lookup. The peer set of a lookup can change rapidly, and faster
-    /// than the lifetime of a custody request.
-    #[educe(Debug(method(fmt_peer_set_as_len)))]
-    peers: Arc<RwLock<HashSet<PeerId>>>,
-    block_root: Hash256,
-    awaiting_parent: Option<Hash256>,
-    created: Instant,
-    pub(crate) span: Span,
-}
-
-#[derive(Debug)]
-enum LookupState<E: EthSpec> {
-    BlockDownload {
-        block_req: BlockRequestState<E>,
-    },
-    ExtrasDownload {
-        block: Arc<SignedBeaconBlock<E>>,
-        block_peer: PeerId,
-        extra_requests: BlockExtraRequests<E>,
-    },
-    Processing {
-        block: Arc<SignedBeaconBlock<E>>,
-        extras: BlockExtras<E>,
-        requests_peers: RequestsPeers,
-    },
+// Dedicated enum for LookupResult to force its usage
+#[must_use = "LookupResult must be handled with on_lookup_result"]
+pub enum LookupResult {
+    /// Lookup completed successfully
+    Completed,
+    /// Lookup is expecting some future event from the network
+    Pending,
+    /// Block's parent is not known to fork-choice, a parent lookup is needed
+    ParentUnknown { parent_root: Hash256 },
 }
 
 /// Tracks which peers served which block components in a completed request. When the
@@ -106,34 +81,35 @@ pub struct RequestsPeers {
     pub custody_columns: Option<PeerGroup>,
 }
 
-#[derive(Debug)]
-enum BlockExtraRequests<E: EthSpec> {
-    ElectraBlobs(Option<BlobRequestState<E>>),
-    FuluColumns(Option<CustodyRequestState<E>>),
-    Gloas {
-        payload_req: Option<PayloadRequestState<E>>,
-        columns_req: Option<CustodyRequestState<E>>,
+// === SingleBlockLookup ===
+
+#[derive(Educe)]
+#[educe(Debug(bound(T: BeaconChainTypes)))]
+pub struct SingleBlockLookup<T: BeaconChainTypes> {
+    pub id: Id,
+    state: LookupState<T>,
+    /// Peers that claim to have imported this set of block components. This state is shared with
+    /// the custody request to have an updated view of the peers that claim to have imported the
+    /// block associated with this lookup. The peer set of a lookup can change rapidly, and faster
+    /// than the lifetime of a custody request.
+    #[educe(Debug(method(fmt_peer_set_as_len)))]
+    peers: Arc<RwLock<HashSet<PeerId>>>,
+    block_root: Hash256,
+    awaiting_parent: Option<Hash256>,
+    created: Instant,
+    pub(crate) span: Span,
+}
+
+#[derive(Educe)]
+#[educe(Debug(bound(T: BeaconChainTypes)))]
+enum LookupState<T: BeaconChainTypes> {
+    Downloading(BlockComponentsByRootRequest<T>),
+    Processing {
+        block: Arc<SignedBeaconBlock<T::EthSpec>>,
+        #[educe(Debug(ignore))]
+        extras: BlockExtras<T::EthSpec>,
+        requests_peers: RequestsPeers,
     },
-}
-
-#[derive(Debug)]
-enum PayloadResult<E: EthSpec> {
-    Full(Arc<SignedExecutionPayloadEnvelope<E>>),
-    Empty,
-}
-
-#[derive(Debug)]
-enum CustodyColumnsResult<E: EthSpec> {
-    Columns(DataColumnSidecarList<E>),
-    NoData,
-}
-
-#[derive(Debug)]
-enum BlockExtras<E: EthSpec> {
-    Electra(FixedBlobSidecarList<E>),
-    Fulu(CustodyColumnsResult<E>),
-    Gloas(PayloadResult<E>, CustodyColumnsResult<E>),
-    None,
 }
 
 impl<T: BeaconChainTypes> SingleBlockLookup<T> {
@@ -149,12 +125,15 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             id = id,
         );
 
+        let peers = Arc::new(RwLock::new(HashSet::from_iter(peers.iter().copied())));
+
         Self {
             id,
-            state: LookupState::BlockDownload {
-                block_req: BlockRequestState::new(requested_block_root),
-            },
-            peers: Arc::new(RwLock::new(HashSet::from_iter(peers.iter().copied()))),
+            state: LookupState::Downloading(BlockComponentsByRootRequest::new(
+                requested_block_root,
+                peers.clone(),
+            )),
+            peers,
             block_root: requested_block_root,
             awaiting_parent,
             created: Instant::now(),
@@ -164,19 +143,16 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
     /// Reset the status of all internal requests
     pub fn reset_requests(&mut self) {
-        self.state = LookupState::BlockDownload {
-            block_req: BlockRequestState::new(self.block_root),
-        };
+        self.state = LookupState::Downloading(BlockComponentsByRootRequest::new(
+            self.block_root,
+            self.peers.clone(),
+        ));
     }
 
     /// Return the slot of this lookup's block if it's currently cached
     pub fn peek_downloaded_block_slot(&self) -> Option<Slot> {
         match &self.state {
-            LookupState::BlockDownload { block_req } => block_req
-                .state
-                .peek_downloaded_data()
-                .map(|block| block.slot()),
-            LookupState::ExtrasDownload { block, .. } => Some(block.slot()),
+            LookupState::Downloading(req) => req.peek_downloaded_block_slot(),
             LookupState::Processing { block, .. } => Some(block.slot()),
         }
     }
@@ -210,13 +186,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     /// Maybe insert a verified response into this lookup. Returns true if imported
     pub fn add_child_components(&mut self, block_component: BlockComponent<T::EthSpec>) -> bool {
         match block_component {
-            BlockComponent::Block(block) => {
-                if let Ok(req) = self.block_state_mut() {
-                    req.insert_verified_response(block)
-                } else {
-                    false
-                }
-            }
+            BlockComponent::Block(block) => match &mut self.state {
+                LookupState::Downloading(req) => req.add_child_block(block),
+                _ => false,
+            },
             BlockComponent::Blob(_) | BlockComponent::DataColumn(_) => {
                 // For now ignore single blobs and columns, as the blob request state assumes all blobs are
                 // attributed to the same peer = the peer serving the remaining blobs. Ignoring this
@@ -236,33 +209,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     pub fn is_awaiting_event(&self) -> bool {
         self.awaiting_parent.is_some()
             || match &self.state {
-                LookupState::BlockDownload { block_req } => block_req.state.is_awaiting_event(),
-                LookupState::ExtrasDownload {
-                    extra_requests: extras,
-                    ..
-                } => match extras {
-                    BlockExtraRequests::ElectraBlobs(Some(blobs)) => {
-                        blobs.state.is_awaiting_event()
-                    }
-                    BlockExtraRequests::ElectraBlobs(None) => false,
-                    BlockExtraRequests::FuluColumns(Some(columns)) => {
-                        columns.state.is_awaiting_event()
-                    }
-                    BlockExtraRequests::FuluColumns(None) => false,
-                    BlockExtraRequests::Gloas {
-                        payload_req,
-                        columns_req,
-                    } => {
-                        payload_req
-                            .as_ref()
-                            .map(|req| req.state.is_awaiting_event())
-                            .unwrap_or(false)
-                            || columns_req
-                                .as_ref()
-                                .map(|c| c.state.is_awaiting_event())
-                                .unwrap_or(false)
-                    }
-                },
+                LookupState::Downloading(req) => req.is_awaiting_event(),
                 LookupState::Processing { .. } => false,
             }
     }
@@ -287,12 +234,272 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
         loop {
             match &mut self.state {
-                LookupState::BlockDownload { block_req } => {
+                LookupState::Downloading(req) => {
+                    let result = req.continue_requests(id, cx)?;
+
+                    if let Some(result) = result {
+                        self.state = LookupState::Processing {
+                            block: result.block,
+                            extras: result.extras,
+                            requests_peers: result.requests_peers,
+                        };
+                        if self.awaiting_parent.is_some() {
+                            break;
+                        }
+                        // Continue the loop to handle Processing
+                    } else {
+                        // Awaiting downloads
+                        break;
+                    }
+                }
+                LookupState::Processing { block, .. } => {
+                    // If awaiting parent, don't send for processing yet
+                    if self.awaiting_parent.is_some() {
+                        break;
+                    }
+
+                    let parent_root = block.parent_root();
+                    if !cx.chain.block_is_known_to_fork_choice(&parent_root) {
+                        return Ok(LookupResult::ParentUnknown { parent_root });
+                    }
+
+                    let block_root = self.block_root;
+
+                    // TODO: Also send extras (blobs/columns) for processing
+                    cx.send_block_for_processing(
+                        id,
+                        block_root,
+                        block.clone(),
+                        Duration::ZERO, // TODO: track seen_timestamp properly
+                    )
+                    .map_err(LookupRequestError::SendFailedProcessor)?;
+
+                    return Ok(LookupResult::Pending);
+                }
+            }
+        }
+
+        Ok(LookupResult::Pending)
+    }
+
+    /// Handle a block download response. Updates download state and advances the lookup.
+    pub fn on_block_download_response(
+        &mut self,
+        req_id: ReqId,
+        result: Result<(Arc<SignedBeaconBlock<T::EthSpec>>, PeerGroup, Duration), ()>,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        match &mut self.state {
+            LookupState::Downloading(req) => {
+                req.on_block_response(req_id, result, self.id, cx)?;
+            }
+            _ => {
+                return Err(LookupRequestError::BadState(
+                    "block response not active".to_owned(),
+                ));
+            }
+        }
+        self.continue_requests(cx)
+    }
+
+    /// Handle a blob download response. Updates download state and advances the lookup.
+    pub fn on_blob_download_response(
+        &mut self,
+        req_id: ReqId,
+        result: Result<(FixedBlobSidecarList<T::EthSpec>, PeerGroup, Duration), ()>,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        match &mut self.state {
+            LookupState::Downloading(req) => {
+                req.on_blob_response(req_id, result, self.id, cx)?;
+            }
+            _ => {
+                return Err(LookupRequestError::BadState(
+                    "blob response not active".to_owned(),
+                ));
+            }
+        }
+        self.continue_requests(cx)
+    }
+
+    /// Handle a custody columns download response. Updates download state and advances the lookup.
+    pub fn on_custody_download_response(
+        &mut self,
+        req_id: ReqId,
+        result: Result<(DataColumnSidecarList<T::EthSpec>, PeerGroup, Duration), ()>,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        match &mut self.state {
+            LookupState::Downloading(req) => {
+                req.on_custody_response(req_id, result, self.id, cx)?;
+            }
+            _ => {
+                return Err(LookupRequestError::BadState(
+                    "custody response not active".to_owned(),
+                ));
+            }
+        }
+        self.continue_requests(cx)
+    }
+
+    /// Get all unique peers that claim to have imported this set of block components
+    pub fn all_peers(&self) -> Vec<PeerId> {
+        self.peers.read().iter().copied().collect()
+    }
+
+    /// Add peer to all request states. The peer must be able to serve this request.
+    /// Returns true if the peer was newly inserted into some request state.
+    pub fn add_peer(&mut self, peer_id: PeerId) -> bool {
+        self.peers.write().insert(peer_id)
+    }
+
+    /// Remove peer from available peers.
+    pub fn remove_peer(&mut self, peer_id: &PeerId) {
+        self.peers.write().remove(peer_id);
+    }
+
+    /// Returns true if this lookup has zero peers
+    pub fn has_no_peers(&self) -> bool {
+        self.peers.read().is_empty()
+    }
+}
+
+// === BlockComponentsByRootRequest — two-phase download state machine ===
+
+/// Result returned when all block components have been downloaded.
+#[derive(Debug)]
+struct BlockComponentsResult<E: EthSpec> {
+    block: Arc<SignedBeaconBlock<E>>,
+    extras: BlockExtras<E>,
+    requests_peers: RequestsPeers,
+}
+
+#[derive(Debug)]
+pub(crate) enum BlockExtras<E: EthSpec> {
+    Electra(FixedBlobSidecarList<E>),
+    Fulu(CustodyColumnsResult<E>),
+    Gloas(PayloadResult<E>, CustodyColumnsResult<E>),
+    None,
+}
+
+#[derive(Debug)]
+enum PayloadResult<E: EthSpec> {
+    Full(Arc<SignedExecutionPayloadEnvelope<E>>),
+    Empty,
+}
+
+#[derive(Debug)]
+enum CustodyColumnsResult<E: EthSpec> {
+    Columns(DataColumnSidecarList<E>),
+    NoData,
+}
+
+/// Manages the download of a block and its associated extras (blobs, custody columns, payload)
+/// via a two-phase state machine: first download the block, then download fork-dependent extras.
+#[derive(Educe)]
+#[educe(Debug(bound(T: BeaconChainTypes)))]
+struct BlockComponentsByRootRequest<T: BeaconChainTypes> {
+    block_root: Hash256,
+    #[educe(Debug(method(fmt_peer_set_as_len)))]
+    peers: Arc<RwLock<HashSet<PeerId>>>,
+    state: DownloadPhase<T::EthSpec>,
+}
+
+#[derive(Debug)]
+enum DownloadPhase<E: EthSpec> {
+    BlockDownload {
+        block_req: BlockRequestState<E>,
+    },
+    ExtrasDownload {
+        block: Arc<SignedBeaconBlock<E>>,
+        block_peer: PeerId,
+        extra_requests: BlockExtraRequests<E>,
+    },
+}
+
+#[derive(Debug)]
+enum BlockExtraRequests<E: EthSpec> {
+    ElectraBlobs(Option<BlobRequestState<E>>),
+    FuluColumns(Option<CustodyRequestState<E>>),
+    Gloas {
+        payload_req: Option<PayloadRequestState<E>>,
+        columns_req: Option<CustodyRequestState<E>>,
+    },
+}
+
+impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
+    fn new(block_root: Hash256, peers: Arc<RwLock<HashSet<PeerId>>>) -> Self {
+        Self {
+            block_root,
+            peers,
+            state: DownloadPhase::BlockDownload {
+                block_req: BlockRequestState::new(block_root),
+            },
+        }
+    }
+
+    fn peek_downloaded_block_slot(&self) -> Option<Slot> {
+        match &self.state {
+            DownloadPhase::BlockDownload { block_req } => block_req
+                .state
+                .peek_downloaded_data()
+                .map(|block| block.slot()),
+            DownloadPhase::ExtrasDownload { block, .. } => Some(block.slot()),
+        }
+    }
+
+    fn is_awaiting_event(&self) -> bool {
+        match &self.state {
+            DownloadPhase::BlockDownload { block_req } => block_req.state.is_awaiting_event(),
+            DownloadPhase::ExtrasDownload {
+                extra_requests: extras,
+                ..
+            } => match extras {
+                BlockExtraRequests::ElectraBlobs(Some(blobs)) => blobs.state.is_awaiting_event(),
+                BlockExtraRequests::ElectraBlobs(None) => false,
+                BlockExtraRequests::FuluColumns(Some(columns)) => columns.state.is_awaiting_event(),
+                BlockExtraRequests::FuluColumns(None) => false,
+                BlockExtraRequests::Gloas {
+                    payload_req,
+                    columns_req,
+                } => {
+                    payload_req
+                        .as_ref()
+                        .map(|req| req.state.is_awaiting_event())
+                        .unwrap_or(false)
+                        || columns_req
+                            .as_ref()
+                            .map(|c| c.state.is_awaiting_event())
+                            .unwrap_or(false)
+                }
+            },
+        }
+    }
+
+    fn add_child_block(
+        &mut self,
+        block: DownloadResult<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) -> bool {
+        match &mut self.state {
+            DownloadPhase::BlockDownload { block_req } => {
+                block_req.state.insert_verified_response(block)
+            }
+            _ => false,
+        }
+    }
+
+    /// Drive the state machine. Returns `Some(result)` when all components are downloaded.
+    fn continue_requests(
+        &mut self,
+        id: Id,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<Option<BlockComponentsResult<T::EthSpec>>, LookupRequestError> {
+        loop {
+            match &mut self.state {
+                DownloadPhase::BlockDownload { block_req } => {
                     block_req.continue_request(id, self.peers.clone(), cx)?;
 
-                    if let Some(block) = block_req.take_completed()
-                        && self.awaiting_parent.is_none()
-                    {
+                    if let Some(block) = block_req.take_completed() {
                         let block_peer = block_req
                             .state
                             .peek_downloaded_peer_group()
@@ -336,18 +543,17 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                             },
                         };
 
-                        self.state = LookupState::ExtrasDownload {
+                        self.state = DownloadPhase::ExtrasDownload {
                             block,
                             block_peer,
                             extra_requests: extras,
                         };
                         // Continue the loop to make progress on extras
                     } else {
-                        // Awaiting block download
                         break;
                     }
                 }
-                LookupState::ExtrasDownload { extra_requests, .. } => {
+                DownloadPhase::ExtrasDownload { extra_requests, .. } => {
                     // Make progress on all extra requests
                     match extra_requests {
                         BlockExtraRequests::ElectraBlobs(Some(blobs_req)) => {
@@ -357,7 +563,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                             columns_req.continue_request(id, self.peers.clone(), cx)?;
                         }
                         BlockExtraRequests::ElectraBlobs(None)
-                        | BlockExtraRequests::FuluColumns(None) => {} // Nothing to do
+                        | BlockExtraRequests::FuluColumns(None) => {}
                         BlockExtraRequests::Gloas {
                             payload_req,
                             columns_req,
@@ -405,7 +611,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     };
 
                     if let Some(extras) = extras_completed {
-                        // Extract custody column peer group before consuming the state
                         let custody_peer_group = match extra_requests {
                             BlockExtraRequests::FuluColumns(Some(req)) => {
                                 req.state.peek_downloaded_peer_group().cloned()
@@ -417,95 +622,117 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                             _ => None,
                         };
 
-                        // Need to take block out of state. Use a temporary placeholder.
                         let old_state = std::mem::replace(
                             &mut self.state,
-                            LookupState::BlockDownload {
+                            DownloadPhase::BlockDownload {
                                 block_req: BlockRequestState::new(self.block_root),
                             },
                         );
                         let (block, block_peer) = match old_state {
-                            LookupState::ExtrasDownload {
+                            DownloadPhase::ExtrasDownload {
                                 block, block_peer, ..
                             } => (block, block_peer),
                             _ => unreachable!(),
                         };
-                        self.state = LookupState::Processing {
+
+                        return Ok(Some(BlockComponentsResult {
                             block,
                             extras,
                             requests_peers: RequestsPeers {
                                 block: block_peer,
                                 custody_columns: custody_peer_group,
                             },
-                        };
-                        // Continue loop to attempt processing
+                        }));
                     } else {
-                        // Awaiting some extra request(s)
                         break;
                     }
-                }
-                LookupState::Processing { block, .. } => {
-                    // If awaiting parent, don't send for processing yet
-                    if self.awaiting_parent.is_some() {
-                        break;
-                    }
-
-                    // Check if the block's parent is known to fork-choice before
-                    // sending for processing. If unknown, signal the caller to
-                    // create a parent lookup.
-                    let parent_root = block.parent_root();
-                    if !cx.chain.block_is_known_to_fork_choice(&parent_root) {
-                        return Ok(LookupResult::ParentUnknown { parent_root });
-                    }
-
-                    let block_root = self.block_root;
-
-                    // Send block for processing
-                    // TODO: Also send extras (blobs/columns) for processing
-                    cx.send_block_for_processing(
-                        id,
-                        block_root,
-                        block.clone(),
-                        Duration::ZERO, // TODO: track seen_timestamp properly
-                    )
-                    .map_err(LookupRequestError::SendFailedProcessor)?;
-
-                    return Ok(LookupResult::Pending);
                 }
             }
         }
 
-        Ok(LookupResult::Pending)
+        Ok(None)
     }
 
-    pub(crate) fn block_state_mut(
+    fn on_block_response(
         &mut self,
-    ) -> Result<&mut SingleLookupRequestState<Arc<SignedBeaconBlock<T::EthSpec>>>, &'static str>
-    {
-        match &mut self.state {
-            LookupState::BlockDownload { block_req } => Ok(&mut block_req.state),
-            _ => Err("block request not active"),
+        req_id: ReqId,
+        result: Result<(Arc<SignedBeaconBlock<T::EthSpec>>, PeerGroup, Duration), ()>,
+        id: Id,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<Option<BlockComponentsResult<T::EthSpec>>, LookupRequestError> {
+        let state = match &mut self.state {
+            DownloadPhase::BlockDownload { block_req } => &mut block_req.state,
+            _ => {
+                return Err(LookupRequestError::BadState(
+                    "block response not active".to_owned(),
+                ));
+            }
+        };
+        match result {
+            Ok((value, peer_group, seen_timestamp)) => {
+                state.on_download_success(
+                    req_id,
+                    DownloadResult {
+                        value,
+                        block_root: self.block_root,
+                        seen_timestamp,
+                        peer_group,
+                    },
+                )?;
+            }
+            Err(()) => {
+                state.on_download_failure(req_id)?;
+            }
         }
+        self.continue_requests(id, cx)
     }
 
-    pub(crate) fn blob_state_mut(
+    fn on_blob_response(
         &mut self,
-    ) -> Result<&mut SingleLookupRequestState<FixedBlobSidecarList<T::EthSpec>>, &'static str> {
-        match &mut self.state {
-            LookupState::ExtrasDownload {
+        req_id: ReqId,
+        result: Result<(FixedBlobSidecarList<T::EthSpec>, PeerGroup, Duration), ()>,
+        id: Id,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<Option<BlockComponentsResult<T::EthSpec>>, LookupRequestError> {
+        let state = match &mut self.state {
+            DownloadPhase::ExtrasDownload {
                 extra_requests: BlockExtraRequests::ElectraBlobs(Some(req)),
                 ..
-            } => Ok(&mut req.state),
-            _ => Err("blob request not active"),
+            } => &mut req.state,
+            _ => {
+                return Err(LookupRequestError::BadState(
+                    "blob response not active".to_owned(),
+                ));
+            }
+        };
+        match result {
+            Ok((value, peer_group, seen_timestamp)) => {
+                state.on_download_success(
+                    req_id,
+                    DownloadResult {
+                        value,
+                        block_root: self.block_root,
+                        seen_timestamp,
+                        peer_group,
+                    },
+                )?;
+            }
+            Err(()) => {
+                state.on_download_failure(req_id)?;
+            }
         }
+        self.continue_requests(id, cx)
     }
 
-    pub(crate) fn custody_state_mut(
+    fn on_custody_response(
         &mut self,
-    ) -> Result<&mut SingleLookupRequestState<DataColumnSidecarList<T::EthSpec>>, &'static str>
-    {
-        match &mut self.state {
-            LookupState::ExtrasDownload {
+        req_id: ReqId,
+        result: Result<(DataColumnSidecarList<T::EthSpec>, PeerGroup, Duration), ()>,
+        id: Id,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<Option<BlockComponentsResult<T::EthSpec>>, LookupRequestError> {
+        let state = match &mut self.state {
+            DownloadPhase::ExtrasDownload {
                 extra_requests:
                     BlockExtraRequests::FuluColumns(Some(req))
                     | BlockExtraRequests::Gloas {
@@ -513,45 +740,46 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                         ..
                     },
                 ..
-            } => Ok(&mut req.state),
-            _ => Err("custody request not active"),
+            } => &mut req.state,
+            _ => {
+                return Err(LookupRequestError::BadState(
+                    "custody response not active".to_owned(),
+                ));
+            }
+        };
+        match result {
+            Ok((value, peer_group, seen_timestamp)) => {
+                state.on_download_success(
+                    req_id,
+                    DownloadResult {
+                        value,
+                        block_root: self.block_root,
+                        seen_timestamp,
+                        peer_group,
+                    },
+                )?;
+            }
+            Err(()) => {
+                state.on_download_failure(req_id)?;
+            }
         }
-    }
-
-    /// Get all unique peers that claim to have imported this set of block components
-    pub fn all_peers(&self) -> Vec<PeerId> {
-        self.peers.read().iter().copied().collect()
-    }
-
-    /// Add peer to all request states. The peer must be able to serve this request.
-    /// Returns true if the peer was newly inserted into some request state.
-    pub fn add_peer(&mut self, peer_id: PeerId) -> bool {
-        self.peers.write().insert(peer_id)
-    }
-
-    /// Remove peer from available peers.
-    pub fn remove_peer(&mut self, peer_id: &PeerId) {
-        self.peers.write().remove(peer_id);
-    }
-
-    /// Returns true if this lookup has zero peers
-    pub fn has_no_peers(&self) -> bool {
-        self.peers.read().is_empty()
+        self.continue_requests(id, cx)
     }
 }
 
-/// The state of the blob request component of a `SingleBlockLookup`.
+// === Per-component request states ===
+
 #[derive(Educe)]
 #[educe(Debug)]
-pub struct BlobRequestState<E: EthSpec> {
+struct BlobRequestState<E: EthSpec> {
     #[educe(Debug(ignore))]
-    pub block_root: Hash256,
-    pub expected_blobs: usize,
-    pub state: SingleLookupRequestState<FixedBlobSidecarList<E>>,
+    block_root: Hash256,
+    expected_blobs: usize,
+    state: SingleLookupRequestState<FixedBlobSidecarList<E>>,
 }
 
 impl<E: EthSpec> BlobRequestState<E> {
-    pub fn new(block_root: Hash256, expected_blobs: usize) -> Self {
+    fn new(block_root: Hash256, expected_blobs: usize) -> Self {
         Self {
             block_root,
             expected_blobs,
@@ -559,7 +787,7 @@ impl<E: EthSpec> BlobRequestState<E> {
         }
     }
 
-    pub fn continue_request<T: BeaconChainTypes<EthSpec = E>>(
+    fn continue_request<T: BeaconChainTypes<EthSpec = E>>(
         &mut self,
         id: Id,
         peers: Arc<RwLock<HashSet<PeerId>>>,
@@ -577,7 +805,7 @@ impl<E: EthSpec> BlobRequestState<E> {
             {
                 LookupRequestResult::RequestSent(req_id) => self.state.on_download_start(req_id)?,
                 LookupRequestResult::NoRequestNeeded(reason) => {
-                    self.state.on_completed_request(reason)?
+                    self.state.on_completed_request(reason)?;
                 }
                 LookupRequestResult::Pending(reason) => {
                     self.state.update_awaiting_download_status(reason);
@@ -587,29 +815,28 @@ impl<E: EthSpec> BlobRequestState<E> {
         Ok(())
     }
 
-    pub fn take_completed(&self) -> Option<FixedBlobSidecarList<E>> {
+    fn take_completed(&self) -> Option<FixedBlobSidecarList<E>> {
         self.state.peek_downloaded_data().cloned()
     }
 }
 
-/// The state of the custody request component of a `SingleBlockLookup`.
 #[derive(Educe)]
 #[educe(Debug)]
-pub struct CustodyRequestState<E: EthSpec> {
+struct CustodyRequestState<E: EthSpec> {
     #[educe(Debug(ignore))]
-    pub block_root: Hash256,
-    pub state: SingleLookupRequestState<DataColumnSidecarList<E>>,
+    block_root: Hash256,
+    state: SingleLookupRequestState<DataColumnSidecarList<E>>,
 }
 
 impl<E: EthSpec> CustodyRequestState<E> {
-    pub fn new(block_root: Hash256) -> Self {
+    fn new(block_root: Hash256) -> Self {
         Self {
             block_root,
             state: SingleLookupRequestState::new(),
         }
     }
 
-    pub fn continue_request<T: BeaconChainTypes<EthSpec = E>>(
+    fn continue_request<T: BeaconChainTypes<EthSpec = E>>(
         &mut self,
         id: Id,
         peers: Arc<RwLock<HashSet<PeerId>>>,
@@ -627,7 +854,7 @@ impl<E: EthSpec> CustodyRequestState<E> {
             {
                 LookupRequestResult::RequestSent(req_id) => self.state.on_download_start(req_id)?,
                 LookupRequestResult::NoRequestNeeded(reason) => {
-                    self.state.on_completed_request(reason)?
+                    self.state.on_completed_request(reason)?;
                 }
                 LookupRequestResult::Pending(reason) => {
                     self.state.update_awaiting_download_status(reason);
@@ -637,29 +864,28 @@ impl<E: EthSpec> CustodyRequestState<E> {
         Ok(())
     }
 
-    pub fn take_completed(&self) -> Option<DataColumnSidecarList<E>> {
+    fn take_completed(&self) -> Option<DataColumnSidecarList<E>> {
         self.state.peek_downloaded_data().cloned()
     }
 }
 
-/// The state of the block request component of a `SingleBlockLookup`.
 #[derive(Educe)]
 #[educe(Debug)]
-pub struct BlockRequestState<E: EthSpec> {
+struct BlockRequestState<E: EthSpec> {
     #[educe(Debug(ignore))]
-    pub block_root: Hash256,
-    pub state: SingleLookupRequestState<Arc<SignedBeaconBlock<E>>>,
+    block_root: Hash256,
+    state: SingleLookupRequestState<Arc<SignedBeaconBlock<E>>>,
 }
 
 impl<E: EthSpec> BlockRequestState<E> {
-    pub fn new(block_root: Hash256) -> Self {
+    fn new(block_root: Hash256) -> Self {
         Self {
             block_root,
             state: SingleLookupRequestState::new(),
         }
     }
 
-    pub fn continue_request<T: BeaconChainTypes<EthSpec = E>>(
+    fn continue_request<T: BeaconChainTypes<EthSpec = E>>(
         &mut self,
         id: Id,
         peers: Arc<RwLock<HashSet<PeerId>>>,
@@ -677,7 +903,7 @@ impl<E: EthSpec> BlockRequestState<E> {
             {
                 LookupRequestResult::RequestSent(req_id) => self.state.on_download_start(req_id)?,
                 LookupRequestResult::NoRequestNeeded(reason) => {
-                    self.state.on_completed_request(reason)?
+                    self.state.on_completed_request(reason)?;
                 }
                 LookupRequestResult::Pending(reason) => {
                     self.state.update_awaiting_download_status(reason);
@@ -687,29 +913,28 @@ impl<E: EthSpec> BlockRequestState<E> {
         Ok(())
     }
 
-    pub fn take_completed(&self) -> Option<Arc<SignedBeaconBlock<E>>> {
+    fn take_completed(&self) -> Option<Arc<SignedBeaconBlock<E>>> {
         self.state.peek_downloaded_data().cloned()
     }
 }
 
-/// The state of the payload request component of a `SingleBlockLookup`.
 #[derive(Educe)]
 #[educe(Debug)]
-pub struct PayloadRequestState<E: EthSpec> {
+struct PayloadRequestState<E: EthSpec> {
     #[educe(Debug(ignore))]
-    pub block_root: Hash256,
-    pub state: SingleLookupRequestState<Arc<SignedExecutionPayloadEnvelope<E>>>,
+    block_root: Hash256,
+    state: SingleLookupRequestState<Arc<SignedExecutionPayloadEnvelope<E>>>,
 }
 
 impl<E: EthSpec> PayloadRequestState<E> {
-    pub fn new(block_root: Hash256) -> Self {
+    fn new(block_root: Hash256) -> Self {
         Self {
             block_root,
             state: SingleLookupRequestState::new(),
         }
     }
 
-    pub fn continue_request<T: BeaconChainTypes<EthSpec = E>>(
+    fn continue_request<T: BeaconChainTypes<EthSpec = E>>(
         &mut self,
         id: Id,
         peers: Arc<RwLock<HashSet<PeerId>>>,
@@ -728,7 +953,7 @@ impl<E: EthSpec> PayloadRequestState<E> {
             {
                 LookupRequestResult::RequestSent(req_id) => self.state.on_download_start(req_id)?,
                 LookupRequestResult::NoRequestNeeded(reason) => {
-                    self.state.on_completed_request(reason)?
+                    self.state.on_completed_request(reason)?;
                 }
                 LookupRequestResult::Pending(reason) => {
                     self.state.update_awaiting_download_status(reason);
@@ -738,21 +963,15 @@ impl<E: EthSpec> PayloadRequestState<E> {
         Ok(())
     }
 
-    pub fn take_completed(&self) -> Option<Arc<SignedExecutionPayloadEnvelope<E>>> {
+    fn take_completed(&self) -> Option<Arc<SignedExecutionPayloadEnvelope<E>>> {
         self.state.peek_downloaded_data().cloned()
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DownloadResult<T: Clone> {
-    pub value: T,
-    pub block_root: Hash256,
-    pub seen_timestamp: Duration,
-    pub peer_group: PeerGroup,
-}
+// === Generic download state machine ===
 
 #[derive(IntoStaticStr)]
-pub enum State<T: Clone> {
+enum DownloadState<T: Clone> {
     AwaitingDownload(/* reason */ &'static str),
     Downloading(ReqId),
     Downloaded(DownloadResult<T>),
@@ -760,80 +979,62 @@ pub enum State<T: Clone> {
 
 /// Object representing the state of a single block or blob lookup request.
 #[derive(Debug)]
-pub struct SingleLookupRequestState<T: Clone> {
-    /// State of this request.
-    state: State<T>,
-    /// How many times have we attempted to process this block or blob.
+struct SingleLookupRequestState<T: Clone> {
+    state: DownloadState<T>,
     failed_processing: u8,
-    /// How many times have we attempted to download this block or blob.
     failed_downloading: u8,
 }
 
 impl<T: Clone> SingleLookupRequestState<T> {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
-            state: State::AwaitingDownload("not started"),
+            state: DownloadState::AwaitingDownload("not started"),
             failed_processing: 0,
             failed_downloading: 0,
         }
     }
 
-    pub fn is_awaiting_download(&self) -> bool {
-        matches!(self.state, State::AwaitingDownload { .. })
+    fn is_awaiting_download(&self) -> bool {
+        matches!(self.state, DownloadState::AwaitingDownload { .. })
     }
 
-    /// Returns true if we can expect some future event to progress this block component request
-    /// specifically.
-    pub fn is_awaiting_event(&self) -> bool {
-        match self.state {
-            // No event will progress this request specifically, but the request may be put on hold
-            // due to some external event
-            State::AwaitingDownload { .. } => false,
-            // Network will emit a download success / error event
-            State::Downloading { .. } => true,
-            State::Downloaded(_) => false,
-        }
+    fn is_awaiting_event(&self) -> bool {
+        matches!(self.state, DownloadState::Downloading { .. })
     }
 
-    pub fn peek_downloaded_data(&self) -> Option<&T> {
+    fn peek_downloaded_data(&self) -> Option<&T> {
         match &self.state {
-            State::AwaitingDownload { .. } => None,
-            State::Downloading { .. } => None,
-            State::Downloaded(data) => Some(&data.value),
-        }
-    }
-
-    pub fn peek_downloaded_peer_group(&self) -> Option<&PeerGroup> {
-        match &self.state {
-            State::Downloaded(data) => Some(&data.peer_group),
+            DownloadState::Downloaded(data) => Some(&data.value),
             _ => None,
         }
     }
 
-    /// Switch to `Downloaded` if the request is in `AwaitingDownload` state, otherwise
-    /// ignore.
-    pub fn insert_verified_response(&mut self, result: DownloadResult<T>) -> bool {
-        if let State::AwaitingDownload { .. } = &self.state {
-            self.state = State::Downloaded(result);
+    fn peek_downloaded_peer_group(&self) -> Option<&PeerGroup> {
+        match &self.state {
+            DownloadState::Downloaded(data) => Some(&data.peer_group),
+            _ => None,
+        }
+    }
+
+    fn insert_verified_response(&mut self, result: DownloadResult<T>) -> bool {
+        if let DownloadState::AwaitingDownload { .. } = &self.state {
+            self.state = DownloadState::Downloaded(result);
             true
         } else {
             false
         }
     }
 
-    /// Append metadata on why this request is in AwaitingDownload status. Very helpful to debug
-    /// stuck lookups. Not fallible as it's purely informational.
-    pub fn update_awaiting_download_status(&mut self, new_status: &'static str) {
-        if let State::AwaitingDownload(status) = &mut self.state {
-            *status = new_status
+    fn update_awaiting_download_status(&mut self, new_status: &'static str) {
+        if let DownloadState::AwaitingDownload(status) = &mut self.state {
+            *status = new_status;
         }
     }
 
-    /// Switch to `Downloading` if the request is in `AwaitingDownload` state, otherwise returns None.
-    pub fn on_download_start(&mut self, req_id: ReqId) -> Result<(), LookupRequestError> {
+    fn on_download_start(&mut self, req_id: ReqId) -> Result<(), LookupRequestError> {
         match &self.state {
-            State::AwaitingDownload { .. } => {
-                self.state = State::Downloading(req_id);
+            DownloadState::AwaitingDownload { .. } => {
+                self.state = DownloadState::Downloading(req_id);
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
@@ -842,11 +1043,9 @@ impl<T: Clone> SingleLookupRequestState<T> {
         }
     }
 
-    /// Registers a failure in downloading a block. This might be a peer disconnection or a wrong
-    /// block.
-    pub fn on_download_failure(&mut self, req_id: ReqId) -> Result<(), LookupRequestError> {
+    fn on_download_failure(&mut self, req_id: ReqId) -> Result<(), LookupRequestError> {
         match &self.state {
-            State::Downloading(expected_req_id) => {
+            DownloadState::Downloading(expected_req_id) => {
                 if req_id != *expected_req_id {
                     return Err(LookupRequestError::UnexpectedRequestId {
                         expected_req_id: *expected_req_id,
@@ -854,7 +1053,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
                     });
                 }
                 self.failed_downloading = self.failed_downloading.saturating_add(1);
-                self.state = State::AwaitingDownload("not started");
+                self.state = DownloadState::AwaitingDownload("not started");
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
@@ -863,20 +1062,20 @@ impl<T: Clone> SingleLookupRequestState<T> {
         }
     }
 
-    pub fn on_download_success(
+    fn on_download_success(
         &mut self,
         req_id: ReqId,
         result: DownloadResult<T>,
     ) -> Result<(), LookupRequestError> {
         match &self.state {
-            State::Downloading(expected_req_id) => {
+            DownloadState::Downloading(expected_req_id) => {
                 if req_id != *expected_req_id {
                     return Err(LookupRequestError::UnexpectedRequestId {
                         expected_req_id: *expected_req_id,
                         req_id,
                     });
                 }
-                self.state = State::Downloaded(result);
+                self.state = DownloadState::Downloaded(result);
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
@@ -885,18 +1084,10 @@ impl<T: Clone> SingleLookupRequestState<T> {
         }
     }
 
-    /// Mark a request as complete without any download or processing
-    pub fn on_completed_request(&mut self, reason: &'static str) -> Result<(), LookupRequestError> {
+    fn on_completed_request(&mut self, reason: &'static str) -> Result<(), LookupRequestError> {
         match &self.state {
-            State::AwaitingDownload { .. } => {
-                // Transition to a terminal-ish state. For download-only state machines,
-                // NoRequestNeeded means the data is already available elsewhere.
-                // We don't have a Processed state anymore, but Downloaded without data
-                // serves a similar purpose. The caller checks via take_completed / peek.
-                // For now, just leave it in AwaitingDownload with an updated reason.
-                // The continue_request won't re-request since is_awaiting_download checks
-                // are gated on this, and the higher-level code can treat this as "done".
-                self.state = State::AwaitingDownload(reason);
+            DownloadState::AwaitingDownload { .. } => {
+                self.state = DownloadState::AwaitingDownload(reason);
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
@@ -905,26 +1096,22 @@ impl<T: Clone> SingleLookupRequestState<T> {
         }
     }
 
-    /// The total number of failures, whether it be processing or downloading.
-    pub fn failed_attempts(&self) -> u8 {
+    fn failed_attempts(&self) -> u8 {
         self.failed_processing + self.failed_downloading
     }
 
-    pub fn more_failed_processing_attempts(&self) -> bool {
+    fn more_failed_processing_attempts(&self) -> bool {
         self.failed_processing >= self.failed_downloading
     }
 }
 
-// Display is used in the BadState assertions above
-impl<T: Clone> std::fmt::Display for State<T> {
+impl<T: Clone> std::fmt::Display for DownloadState<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", Into::<&'static str>::into(self))
     }
 }
 
-// Debug is used in the log_stuck_lookups print to include some more info. Implements custom Debug
-// to not dump an entire block or blob to terminal which don't add valuable data.
-impl<T: Clone> std::fmt::Debug for State<T> {
+impl<T: Clone> std::fmt::Debug for DownloadState<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AwaitingDownload(reason) => write!(f, "AwaitingDownload({})", reason),
