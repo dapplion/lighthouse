@@ -247,50 +247,15 @@ impl<E: EthSpec> DataDownload<E> {
                 expected_blobs,
                 state,
             } => {
-                if state.is_awaiting_download() {
-                    if state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
-                        let cannot_process = state.more_failed_processing_attempts();
-                        return Err(LookupRequestError::TooManyAttempts { cannot_process });
-                    }
-                    match cx
-                        .blob_lookup_request(id, peers, *block_root, *expected_blobs)
-                        .map_err(LookupRequestError::SendFailedNetwork)?
-                    {
-                        LookupRequestResult::RequestSent(req_id) => {
-                            state.on_download_start(req_id)?
-                        }
-                        LookupRequestResult::NoRequestNeeded(reason) => {
-                            state.on_completed_request(reason)?
-                        }
-                        LookupRequestResult::Pending(reason) => {
-                            state.update_awaiting_download_status(reason)
-                        }
-                    }
-                }
+                let br = *block_root;
+                let eb = *expected_blobs;
+                state.make_request(|| cx.blob_lookup_request(id, peers, br, eb))?;
             }
             DataDownload::Columns {
                 block_root, state, ..
             } => {
-                if state.is_awaiting_download() {
-                    if state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
-                        let cannot_process = state.more_failed_processing_attempts();
-                        return Err(LookupRequestError::TooManyAttempts { cannot_process });
-                    }
-                    match cx
-                        .custody_lookup_request(id, *block_root, peers)
-                        .map_err(LookupRequestError::SendFailedNetwork)?
-                    {
-                        LookupRequestResult::RequestSent(req_id) => {
-                            state.on_download_start(req_id)?
-                        }
-                        LookupRequestResult::NoRequestNeeded(reason) => {
-                            state.on_completed_request(reason)?
-                        }
-                        LookupRequestResult::Pending(reason) => {
-                            state.update_awaiting_download_status(reason)
-                        }
-                    }
-                }
+                let br = *block_root;
+                state.make_request(|| cx.custody_lookup_request(id, br, peers))?;
             }
         }
         Ok(())
@@ -580,26 +545,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         loop {
             match &mut self.block_request {
                 BlockRequest::Downloading { block_root, state } => {
-                    if state.is_awaiting_download() {
-                        if state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
-                            let cannot_process = state.more_failed_processing_attempts();
-                            return Err(LookupRequestError::TooManyAttempts { cannot_process });
-                        }
-                        match cx
-                            .block_lookup_request(id, self.peers.clone(), *block_root)
-                            .map_err(LookupRequestError::SendFailedNetwork)?
-                        {
-                            LookupRequestResult::RequestSent(req_id) => {
-                                state.on_download_start(req_id)?
-                            }
-                            LookupRequestResult::NoRequestNeeded(reason) => {
-                                state.on_completed_request(reason)?
-                            }
-                            LookupRequestResult::Pending(reason) => {
-                                state.update_awaiting_download_status(reason)
-                            }
-                        }
-                    }
+                    let peers = self.peers.clone();
+                    let br = *block_root;
+                    state.make_request(|| cx.block_lookup_request(id, peers, br))?;
 
                     if let Some(result) = state.take_download_result() {
                         // Block downloaded :) Transition state and break out of loop
@@ -722,27 +670,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     }
                 }
                 PayloadRequest::Downloading { block_root, state } => {
-                    if state.is_awaiting_download() {
-                        if state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
-                            let cannot_process = state.more_failed_processing_attempts();
-                            return Err(LookupRequestError::TooManyAttempts { cannot_process });
-                        }
-                        if !self.payload_peers.read().is_empty() {
-                            match cx
-                                .payload_lookup_request(id, self.payload_peers.clone(), *block_root)
-                                .map_err(LookupRequestError::SendFailedNetwork)?
-                            {
-                                LookupRequestResult::RequestSent(req_id) => {
-                                    state.on_download_start(req_id)?
-                                }
-                                LookupRequestResult::NoRequestNeeded(reason) => {
-                                    state.on_completed_request(reason)?
-                                }
-                                LookupRequestResult::Pending(reason) => {
-                                    state.update_awaiting_download_status(reason)
-                                }
-                            }
-                        }
+                    if !self.payload_peers.read().is_empty() {
+                        let peers = self.payload_peers.clone();
+                        let br = *block_root;
+                        state.make_request(|| cx.payload_lookup_request(id, peers, br))?;
                     }
                     if let Some(result) = state.take_download_result() {
                         self.payload_request = PayloadRequest::Downloaded {
@@ -958,22 +889,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 "block response but not downloading".to_owned(),
             ));
         };
-        match result {
-            Ok((value, peer_group, seen_timestamp)) => {
-                state.on_download_success(
-                    req_id,
-                    DownloadResult {
-                        value,
-                        block_root: self.block_root,
-                        seen_timestamp,
-                        peer_group,
-                    },
-                )?;
-            }
-            Err(()) => {
-                state.on_download_failure(req_id)?;
-            }
-        }
+        state.on_download_response(req_id, self.block_root, result)?;
         self.continue_requests(cx)
     }
 
@@ -990,22 +906,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 "blob response but not downloading blobs".to_owned(),
             ));
         };
-        match result {
-            Ok((value, peer_group, seen_timestamp)) => {
-                state.on_download_success(
-                    req_id,
-                    DownloadResult {
-                        value,
-                        block_root: self.block_root,
-                        seen_timestamp,
-                        peer_group,
-                    },
-                )?;
-            }
-            Err(()) => {
-                state.on_download_failure(req_id)?;
-            }
-        }
+        state.on_download_response(req_id, self.block_root, result)?;
         self.continue_requests(cx)
     }
 
@@ -1022,22 +923,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 "custody response but not downloading columns".to_owned(),
             ));
         };
-        match result {
-            Ok((value, peer_group, seen_timestamp)) => {
-                state.on_download_success(
-                    req_id,
-                    DownloadResult {
-                        value,
-                        block_root: self.block_root,
-                        seen_timestamp,
-                        peer_group,
-                    },
-                )?;
-            }
-            Err(()) => {
-                state.on_download_failure(req_id)?;
-            }
-        }
+        state.on_download_response(req_id, self.block_root, result)?;
         self.continue_requests(cx)
     }
 
@@ -1104,6 +990,26 @@ impl<T: Clone> SingleLookupRequestState<T> {
         matches!(self.state, DownloadState::AwaitingDownload { .. })
     }
 
+    /// Drive download: check max attempts, issue request, handle result.
+    fn make_request(
+        &mut self,
+        request_fn: impl FnOnce() -> Result<LookupRequestResult, RpcRequestSendError>,
+    ) -> Result<(), LookupRequestError> {
+        if !self.is_awaiting_download() {
+            return Ok(());
+        }
+        if self.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
+            let cannot_process = self.more_failed_processing_attempts();
+            return Err(LookupRequestError::TooManyAttempts { cannot_process });
+        }
+        match request_fn().map_err(LookupRequestError::SendFailedNetwork)? {
+            LookupRequestResult::RequestSent(req_id) => self.on_download_start(req_id)?,
+            LookupRequestResult::NoRequestNeeded(reason) => self.on_completed_request(reason)?,
+            LookupRequestResult::Pending(reason) => self.update_awaiting_download_status(reason),
+        }
+        Ok(())
+    }
+
     fn is_awaiting_event(&self) -> bool {
         matches!(self.state, DownloadState::Downloading { .. })
     }
@@ -1158,6 +1064,27 @@ impl<T: Clone> SingleLookupRequestState<T> {
             other => Err(LookupRequestError::BadState(format!(
                 "Bad state on_download_start expected AwaitingDownload got {other}"
             ))),
+        }
+    }
+
+    /// Handle a download response: dispatch success or failure based on result.
+    fn on_download_response(
+        &mut self,
+        req_id: ReqId,
+        block_root: Hash256,
+        result: Result<(T, PeerGroup, Duration), ()>,
+    ) -> Result<(), LookupRequestError> {
+        match result {
+            Ok((value, peer_group, seen_timestamp)) => self.on_download_success(
+                req_id,
+                DownloadResult {
+                    value,
+                    block_root,
+                    seen_timestamp,
+                    peer_group,
+                },
+            ),
+            Err(()) => self.on_download_failure(req_id),
         }
     }
 
