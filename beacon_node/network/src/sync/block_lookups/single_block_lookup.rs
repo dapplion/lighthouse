@@ -14,12 +14,30 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use store::Hash256;
 use strum::IntoStaticStr;
-use tracing::{Span, debug, debug_span};
+use tracing::{Span, debug_span};
 use types::data::FixedBlobSidecarList;
 use types::{
-    DataColumnSidecarList, EthSpec, ForkName, SignedBeaconBlock, SignedExecutionPayloadEnvelope,
-    Slot,
+    DataColumnSidecarList, EthSpec, ExecutionBlockHash, ForkName, SignedBeaconBlock,
+    SignedExecutionPayloadEnvelope, Slot,
 };
+
+// === AwaitingParent — tracks what a child lookup waits for ===
+
+#[derive(Debug, Clone, Copy)]
+pub enum AwaitingParent {
+    /// Pre-Gloas: wait for parent lookup to fully complete (block + data)
+    PreGloas(Hash256),
+    /// Post-Gloas: also tracks parent_hash to determine full/empty dependency
+    PostGloas(Hash256, ExecutionBlockHash),
+}
+
+impl AwaitingParent {
+    pub fn parent_root(&self) -> Hash256 {
+        match self {
+            AwaitingParent::PreGloas(root) | AwaitingParent::PostGloas(root, _) => *root,
+        }
+    }
+}
 
 // === Public types re-exported by mod.rs ===
 
@@ -67,6 +85,7 @@ pub enum LookupResult {
     Pending,
     /// Block's parent is not known to fork-choice, a parent lookup is needed
     ParentUnknown {
+        awaiting_parent: AwaitingParent,
         parent_root: Hash256,
         block_root: Hash256,
         peers: Vec<PeerId>,
@@ -417,7 +436,7 @@ pub struct SingleBlockLookup<T: BeaconChainTypes> {
     payload_peers: Arc<RwLock<HashSet<PeerId>>>,
 
     // Parent tracking
-    awaiting_parent: Option<Hash256>,
+    awaiting_parent: Option<AwaitingParent>,
     created: Instant,
     pub(crate) span: Span,
 }
@@ -426,8 +445,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     pub fn new(
         requested_block_root: Hash256,
         peers: &[PeerId],
+        peer_type: &PeerType,
         id: Id,
-        awaiting_parent: Option<Hash256>,
+        awaiting_parent: Option<AwaitingParent>,
     ) -> Self {
         let lookup_span = debug_span!(
             "lh_single_block_lookup",
@@ -435,7 +455,17 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             id = id,
         );
 
-        let peers = Arc::new(RwLock::new(HashSet::from_iter(peers.iter().copied())));
+        let peer_set: HashSet<PeerId> = peers.iter().copied().collect();
+        let data_peers = if peer_type.data {
+            peer_set.clone()
+        } else {
+            HashSet::new()
+        };
+        let payload_peers = if peer_type.payload {
+            peer_set.clone()
+        } else {
+            HashSet::new()
+        };
 
         Self {
             id,
@@ -443,12 +473,28 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             block_request: BlockRequest::new(requested_block_root),
             data_request: DataRequest::WaitingForBlock,
             payload_request: PayloadRequest::WaitingForBlock,
-            data_peers: Arc::new(RwLock::new(HashSet::new())),
-            payload_peers: Arc::new(RwLock::new(HashSet::new())),
-            peers,
+            data_peers: Arc::new(RwLock::new(data_peers)),
+            payload_peers: Arc::new(RwLock::new(payload_peers)),
+            peers: Arc::new(RwLock::new(peer_set)),
             awaiting_parent,
             created: Instant::now(),
             span: lookup_span,
+        }
+    }
+
+    pub fn is_full_payload(&self, awaiting_parent: &AwaitingParent) -> bool {
+        match awaiting_parent {
+            AwaitingParent::PreGloas(_) => false,
+            AwaitingParent::PostGloas(_, parent_hash) => {
+                match self.block_request.peek_block() {
+                    Some(block) => match block.message().body().signed_execution_payload_bid() {
+                        Ok(payload) => payload.message.block_hash == *parent_hash,
+                        Err(_) => false,
+                    },
+                    // TODO(gloas): We should cache peers instead of dropping if we don't know
+                    None => false,
+                }
+            }
         }
     }
 
@@ -469,14 +515,8 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         self.block_root
     }
 
-    pub fn awaiting_parent(&self) -> Option<Hash256> {
+    pub fn awaiting_parent(&self) -> Option<AwaitingParent> {
         self.awaiting_parent
-    }
-
-    /// Mark this lookup as awaiting a parent lookup from being processed. Meanwhile don't send
-    /// components for processing.
-    pub fn set_awaiting_parent(&mut self, parent_root: Hash256) {
-        self.awaiting_parent = Some(parent_root)
     }
 
     /// Mark this lookup as no longer awaiting a parent lookup. Components can be sent for
@@ -523,22 +563,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     /// Returns custody column peer group if data has been downloaded. Used for peer penalization.
     pub fn data_peer_group(&self) -> Option<&PeerGroup> {
         self.data_request.peer_group()
-    }
-
-    /// Add peers for data downloads (called when a child needs parent data).
-    pub fn add_data_peers(&self, peers: &[PeerId]) {
-        let mut data_peers = self.data_peers.write();
-        for peer in peers {
-            data_peers.insert(*peer);
-        }
-    }
-
-    /// Add peers for payload downloads (called when a full child needs parent payload).
-    pub fn add_payload_peers(&self, peers: &[PeerId]) {
-        let mut payload_peers = self.payload_peers.write();
-        for peer in peers {
-            payload_peers.insert(*peer);
-        }
     }
 
     // -- Main state machine driver --
@@ -598,8 +622,16 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
                     let parent_root = block.parent_root();
                     if !cx.chain.block_is_known_to_fork_choice(&parent_root) {
-                        self.awaiting_parent = Some(parent_root);
+                        let awaiting_parent = if let Ok(bid) =
+                            block.message().body().signed_execution_payload_bid()
+                        {
+                            AwaitingParent::PostGloas(parent_root, bid.message.parent_block_hash)
+                        } else {
+                            AwaitingParent::PreGloas(parent_root)
+                        };
+                        self.awaiting_parent = Some(awaiting_parent);
                         return Ok(LookupResult::ParentUnknown {
+                            awaiting_parent,
                             parent_root,
                             block_root: self.block_root,
                             peers: self.all_peers(),
@@ -886,15 +918,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             self.payload_request = PayloadRequest::Done;
             self.continue_requests(cx)
         } else {
-            if !matches!(
-                self.payload_request,
-                PayloadRequest::WaitingForBlock | PayloadRequest::Done
-            ) {
-                self.payload_request = PayloadRequest::Downloading {
-                    block_root: self.block_root,
-                    state: SingleLookupRequestState::new(),
-                };
-            }
+            self.payload_request = PayloadRequest::Downloading {
+                block_root: self.block_root,
+                state: SingleLookupRequestState::new(),
+            };
             self.continue_requests(cx)
         }
     }
@@ -1025,7 +1052,13 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
     /// Add peer to all request states. The peer must be able to serve this request.
     /// Returns true if the peer was newly inserted into some request state.
-    pub fn add_peer(&mut self, peer_id: PeerId) -> bool {
+    pub fn add_peer(&mut self, peer_id: PeerId, peer_type: &PeerType) -> bool {
+        if peer_type.payload {
+            self.payload_peers.write().insert(peer_id);
+        }
+        if peer_type.data {
+            self.data_peers.write().insert(peer_id);
+        }
         self.peers.write().insert(peer_id)
     }
 
@@ -1038,6 +1071,11 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     pub fn has_no_peers(&self) -> bool {
         self.peers.read().is_empty()
     }
+}
+
+pub struct PeerType {
+    pub data: bool,
+    pub payload: bool,
 }
 
 // === Generic download state machine ===
