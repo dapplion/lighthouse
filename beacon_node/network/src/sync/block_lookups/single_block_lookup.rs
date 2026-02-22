@@ -66,7 +66,11 @@ pub enum LookupResult {
     /// Lookup is expecting some future event from the network
     Pending,
     /// Block's parent is not known to fork-choice, a parent lookup is needed
-    ParentUnknown { parent_root: Hash256 },
+    ParentUnknown {
+        parent_root: Hash256,
+        block_root: Hash256,
+        peers: Vec<PeerId>,
+    },
 }
 
 // === Block request: Downloading → Downloaded → Processing → Done ===
@@ -353,11 +357,13 @@ impl DataDownloadKind {
     }
 }
 
-// === Payload request: Downloading → Downloaded → Processing → Done ===
+// === Payload request: WaitingForBlock → Downloading → Downloaded → Processing → Done ===
 
 #[derive(Educe)]
 #[educe(Debug)]
 enum PayloadRequest<E: EthSpec> {
+    /// Waiting for block to be downloaded to determine if payload is needed
+    WaitingForBlock,
     Downloading {
         block_root: Hash256,
         state: SingleLookupRequestState<Arc<SignedExecutionPayloadEnvelope<E>>>,
@@ -368,6 +374,7 @@ enum PayloadRequest<E: EthSpec> {
     Processing {
         peer_group: PeerGroup,
     },
+    /// Done (payload processed, or no payload needed)
     Done,
 }
 
@@ -395,8 +402,8 @@ pub struct SingleBlockLookup<T: BeaconChainTypes> {
     // Data request — starts as WaitingForBlock, set after block downloaded
     data_request: DataRequest<T::EthSpec>,
 
-    // Payload request — created after block downloaded if full (Gloas only)
-    payload_request: Option<PayloadRequest<T::EthSpec>>,
+    // Payload request — starts as WaitingForBlock, set after block downloaded
+    payload_request: PayloadRequest<T::EthSpec>,
 
     // Peer sets
     /// Peers for block download (also used for data in pre-Gloas forks)
@@ -435,7 +442,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             block_root: requested_block_root,
             block_request: BlockRequest::new(requested_block_root),
             data_request: DataRequest::WaitingForBlock,
-            payload_request: None,
+            payload_request: PayloadRequest::WaitingForBlock,
             data_peers: Arc::new(RwLock::new(HashSet::new())),
             payload_peers: Arc::new(RwLock::new(HashSet::new())),
             peers,
@@ -449,7 +456,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     pub fn reset_requests(&mut self) {
         self.block_request = BlockRequest::new(self.block_root);
         self.data_request = DataRequest::WaitingForBlock;
-        self.payload_request = None;
+        self.payload_request = PayloadRequest::WaitingForBlock;
     }
 
     /// Return the slot of this lookup's block if it's currently cached
@@ -502,21 +509,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
     /// Returns true if this request is expecting some event to make progress
     pub fn is_awaiting_event(&self) -> bool {
-        if self.awaiting_parent.is_some() {
-            return true;
-        }
-        if self.block_request.is_awaiting_event() {
-            return true;
-        }
-        if self.data_request.is_awaiting_event() {
-            return true;
-        }
-        if let Some(payload_req) = &self.payload_request
-            && payload_req.is_awaiting_event()
-        {
-            return true;
-        }
-        false
+        self.awaiting_parent.is_some()
+            || self.block_request.is_awaiting_event()
+            || self.data_request.is_awaiting_event()
+            || self.payload_request.is_awaiting_event()
     }
 
     /// Returns the block peer if block has been downloaded. Used for peer penalization.
@@ -599,10 +595,17 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     if self.awaiting_parent.is_some() {
                         break;
                     }
+
                     let parent_root = block.parent_root();
                     if !cx.chain.block_is_known_to_fork_choice(&parent_root) {
-                        return Ok(LookupResult::ParentUnknown { parent_root });
+                        self.awaiting_parent = Some(parent_root);
+                        return Ok(LookupResult::ParentUnknown {
+                            parent_root,
+                            block_root: self.block_root,
+                            peers: self.all_peers(),
+                        });
                     }
+
                     let block = block.clone();
                     let peer = *peer;
                     cx.send_block_for_processing(
@@ -625,7 +628,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 DataRequest::WaitingForBlock => {
                     if let Some(block) = self.block_request.peek_block() {
                         let block = block.clone();
-                        self.create_requests_for_block(&block, cx);
+                        self.create_data_request_for_block(&block, cx);
                     } else {
                         // Wait for block to be downloaded
                         break;
@@ -676,18 +679,74 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             }
         }
 
-        // TODO(gloas): Drive payload request similarly
+        // === Payload request ===
+        loop {
+            match &mut self.payload_request {
+                PayloadRequest::WaitingForBlock => {
+                    if let Some(block) = self.block_request.peek_block() {
+                        let block = block.clone();
+                        self.create_payload_request_for_block(&block, cx);
+                    } else {
+                        break;
+                    }
+                }
+                PayloadRequest::Downloading { block_root, state } => {
+                    if state.is_awaiting_download() {
+                        if state.failed_attempts() >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
+                            let cannot_process = state.more_failed_processing_attempts();
+                            return Err(LookupRequestError::TooManyAttempts { cannot_process });
+                        }
+                        if !self.payload_peers.read().is_empty() {
+                            match cx
+                                .payload_lookup_request(id, self.payload_peers.clone(), *block_root)
+                                .map_err(LookupRequestError::SendFailedNetwork)?
+                            {
+                                LookupRequestResult::RequestSent(req_id) => {
+                                    state.on_download_start(req_id)?
+                                }
+                                LookupRequestResult::NoRequestNeeded(reason) => {
+                                    state.on_completed_request(reason)?
+                                }
+                                LookupRequestResult::Pending(reason) => {
+                                    state.update_awaiting_download_status(reason)
+                                }
+                            }
+                        }
+                    }
+                    if let Some(result) = state.take_download_result() {
+                        self.payload_request = PayloadRequest::Downloaded {
+                            peer_group: result.peer_group,
+                        };
+                    } else {
+                        break;
+                    }
+                }
+                PayloadRequest::Downloaded { peer_group } => {
+                    if !self.block_request.is_done() {
+                        break;
+                    }
+                    // TODO(gloas): send payload for processing
+                    // cx.send_payload_for_processing(...)
+                    let peer_group = peer_group.clone();
+                    self.payload_request = PayloadRequest::Processing { peer_group };
+                }
+                PayloadRequest::Processing { .. } | PayloadRequest::Done => break,
+            }
+        }
 
         // === Check completion ===
-        if self.is_complete() {
+        if self.block_request.is_done()
+            && matches!(self.data_request, DataRequest::Done)
+            && matches!(self.payload_request, PayloadRequest::Done)
+        {
             return Ok(LookupResult::Completed);
         }
 
         Ok(LookupResult::Pending)
     }
 
-    /// Create data and payload requests based on the downloaded block's content and fork.
-    fn create_requests_for_block(
+    /// Create data request based on the downloaded block's content and fork.
+    fn create_data_request_for_block(
         &mut self,
         block: &Arc<SignedBeaconBlock<T::EthSpec>>,
         cx: &SyncNetworkContext<T>,
@@ -697,7 +756,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
         match block_fork {
             ForkName::Base | ForkName::Altair | ForkName::Bellatrix | ForkName::Capella => {
-                // No data or payload needed for pre-Deneb forks
                 self.data_request = DataRequest::Done;
             }
             ForkName::Deneb | ForkName::Electra => {
@@ -735,34 +793,39 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 } else {
                     self.data_request = DataRequest::Done;
                 }
-                // TODO(gloas): Determine if block is full, create payload request
-                // if block_is_full {
-                //     self.payload_request = Some(PayloadRequest::Downloading {
-                //         block_root: self.block_root,
-                //         state: SingleLookupRequestState::new(),
-                //     });
-                //     // Payload peers start at 0, populated when full children arrive
-                // }
+            }
+        }
+    }
+
+    /// Create payload request based on the downloaded block's content and fork.
+    fn create_payload_request_for_block(
+        &mut self,
+        block: &Arc<SignedBeaconBlock<T::EthSpec>>,
+        cx: &SyncNetworkContext<T>,
+    ) {
+        let block_fork = cx.chain.spec.fork_name_at_slot::<T::EthSpec>(block.slot());
+
+        match block_fork {
+            ForkName::Base
+            | ForkName::Altair
+            | ForkName::Bellatrix
+            | ForkName::Capella
+            | ForkName::Deneb
+            | ForkName::Electra
+            | ForkName::Fulu => {
+                self.payload_request = PayloadRequest::Done;
+            }
+            ForkName::Gloas => {
+                self.payload_request = PayloadRequest::Downloading {
+                    block_root: self.block_root,
+                    state: SingleLookupRequestState::new(),
+                };
+                // Payload peers start at 0, download gated until children provide peers
             }
         }
     }
 
     /// Returns true when all active requests have completed processing.
-    fn is_complete(&self) -> bool {
-        if !self.block_request.is_done() {
-            return false;
-        }
-        if !matches!(self.data_request, DataRequest::Done) {
-            return false;
-        }
-        if self.payload_request.is_some()
-            && !matches!(self.payload_request, Some(PayloadRequest::Done))
-        {
-            return false;
-        }
-        true
-    }
-
     // -- Processing result handlers --
 
     /// Handle block processing result. Advances the lookup state machine.
@@ -814,19 +877,24 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         result_is_ok: bool,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupResult, LookupRequestError> {
-        if !matches!(
-            self.payload_request,
-            Some(PayloadRequest::Processing { .. })
-        ) {
+        if !matches!(self.payload_request, PayloadRequest::Processing { .. }) {
             return Err(LookupRequestError::BadState(
                 "payload processing result but not in Processing state".to_owned(),
             ));
         }
         if result_is_ok {
-            self.payload_request = Some(PayloadRequest::Done);
+            self.payload_request = PayloadRequest::Done;
             self.continue_requests(cx)
         } else {
-            self.reset_payload_request();
+            if !matches!(
+                self.payload_request,
+                PayloadRequest::WaitingForBlock | PayloadRequest::Done
+            ) {
+                self.payload_request = PayloadRequest::Downloading {
+                    block_root: self.block_root,
+                    state: SingleLookupRequestState::new(),
+                };
+            }
             self.continue_requests(cx)
         }
     }
@@ -846,16 +914,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         };
         if let Some(kind) = kind {
             self.data_request = DataRequest::Downloading(kind.into_fresh_download(self.block_root));
-        }
-    }
-
-    /// Reset payload request to a fresh download.
-    fn reset_payload_request(&mut self) {
-        if self.payload_request.is_some() {
-            self.payload_request = Some(PayloadRequest::Downloading {
-                block_root: self.block_root,
-                state: SingleLookupRequestState::new(),
-            });
         }
     }
 

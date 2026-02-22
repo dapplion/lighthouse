@@ -450,92 +450,52 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         response: BlockDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = self.on_download_response(
-            id,
-            "block",
-            cx,
-            |lookup, req_id, result, cx| lookup.on_block_download_response(req_id, result, cx),
-            response,
+        let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
+            debug!(?id, "Block returned for single block lookup not present");
+            return;
+        };
+        let block_root = lookup.block_root();
+        debug!(
+            ?block_root,
+            ?id,
+            is_ok = response.is_ok(),
+            "Block download response"
         );
+
+        let result = lookup.on_block_download_response(id.req_id, response.map_err(|_| ()), cx);
         self.on_lookup_result(id.lookup_id, result, "block_download_response", cx);
     }
 
-    /// Process a blob response received from a single lookup request.
     pub fn on_blob_download_response(
         &mut self,
         id: SingleLookupReqId,
         response: BlobDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = self.on_download_response(
-            id,
-            "blob",
-            cx,
-            |lookup, req_id, result, cx| lookup.on_blob_download_response(req_id, result, cx),
-            response,
-        );
+        let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
+            debug!(?id, "Blob returned for single block lookup not present");
+            return;
+        };
+        debug!(block_root = ?lookup.block_root(), ?id, is_ok = response.is_ok(), "Blob download response");
+
+        let result = lookup.on_blob_download_response(id.req_id, response.map_err(|_| ()), cx);
         self.on_lookup_result(id.lookup_id, result, "blob_download_response", cx);
     }
 
-    /// Process a custody columns response received from a single lookup request.
     pub fn on_custody_download_response(
         &mut self,
         id: SingleLookupReqId,
         response: CustodyDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
-        let result = self.on_download_response(
-            id,
-            "custody",
-            cx,
-            |lookup, req_id, result, cx| lookup.on_custody_download_response(req_id, result, cx),
-            response,
-        );
-        self.on_lookup_result(id.lookup_id, result, "custody_download_response", cx);
-    }
-
-    fn on_download_response<V>(
-        &mut self,
-        id: SingleLookupReqId,
-        component: &str,
-        cx: &mut SyncNetworkContext<T>,
-        handler: impl FnOnce(
-            &mut SingleBlockLookup<T>,
-            super::network_context::ReqId,
-            Result<(V, PeerGroup, Duration), ()>,
-            &mut SyncNetworkContext<T>,
-        ) -> Result<LookupResult, LookupRequestError>,
-        response: Result<(V, PeerGroup, Duration), RpcResponseError>,
-    ) -> Result<LookupResult, LookupRequestError> {
-        // Note: no need to downscore peers here, already downscored on network context
         let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
-            debug!(?id, "Block returned for single block lookup not present");
-            return Err(LookupRequestError::UnknownLookup);
+            debug!(?id, "Custody returned for single block lookup not present");
+            return;
         };
+        debug!(block_root = ?lookup.block_root(), ?id, is_ok = response.is_ok(), "Custody download response");
 
-        let block_root = lookup.block_root();
-
-        match &response {
-            Ok((_, peer_group, _)) => {
-                debug!(
-                    ?block_root,
-                    ?id,
-                    ?peer_group,
-                    component,
-                    "Received lookup download success"
-                );
-            }
-            Err(e) => {
-                debug!(
-                    ?block_root, ?id, component, error = ?e,
-                    "Received lookup download failure"
-                );
-            }
-        }
-
-        // Convert RpcResponseError to () — peer scoring is handled at the network layer
-        let result = response.map_err(|_| ());
-        handler(lookup, id.req_id, result, cx)
+        let result = lookup.on_custody_download_response(id.req_id, response.map_err(|_| ()), cx);
+        self.on_lookup_result(id.lookup_id, result, "custody_download_response", cx);
     }
 
     /* Error responses */
@@ -815,28 +775,15 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         cx: &mut SyncNetworkContext<T>,
     ) -> bool {
         match result {
-            Ok(LookupResult::Pending) => true, // no action
-            Ok(LookupResult::ParentUnknown { parent_root }) => {
-                let Some(lookup) = self.single_block_lookups.get_mut(&id) else {
-                    debug!(id, "ParentUnknown for non-existent lookup");
-                    return false;
-                };
-                let block_root = lookup.block_root();
-                let peers = lookup.all_peers();
-                // Mark lookup as awaiting **before** creating the parent lookup.
-                lookup.set_awaiting_parent(parent_root);
-                let parent_lookup_exists =
-                    self.search_parent_of_child(parent_root, block_root, &peers, cx);
-                if parent_lookup_exists {
-                    debug!(
-                        id,
-                        ?block_root,
-                        ?parent_root,
-                        "Marking lookup as awaiting parent"
-                    );
+            Ok(LookupResult::Pending) => true,
+            Ok(LookupResult::ParentUnknown {
+                parent_root,
+                block_root,
+                peers,
+            }) => {
+                if self.search_parent_of_child(parent_root, block_root, &peers, cx) {
                     true
                 } else {
-                    // The parent lookup is faulty and was not created, drop the lookup
                     self.drop_lookup_and_children(id, "Failed");
                     self.update_metrics();
                     false
