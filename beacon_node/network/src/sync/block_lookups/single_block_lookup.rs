@@ -42,6 +42,7 @@ impl AwaitingParent {
 // === Public types re-exported by mod.rs ===
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DownloadResult<T: Clone> {
     pub value: T,
     pub block_root: Hash256,
@@ -86,7 +87,6 @@ pub enum LookupResult {
     /// Block's parent is not known to fork-choice, a parent lookup is needed
     ParentUnknown {
         awaiting_parent: AwaitingParent,
-        parent_root: Hash256,
         block_root: Hash256,
         peers: Vec<PeerId>,
     },
@@ -632,7 +632,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                         self.awaiting_parent = Some(awaiting_parent);
                         return Ok(LookupResult::ParentUnknown {
                             awaiting_parent,
-                            parent_root,
                             block_root: self.block_root,
                             peers: self.all_peers(),
                         });
@@ -857,7 +856,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         }
     }
 
-    /// Returns true when all active requests have completed processing.
     // -- Processing result handlers --
 
     /// Handle block processing result. Advances the lookup state machine.
@@ -904,6 +902,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     }
 
     /// Handle payload processing result.
+    #[allow(dead_code)]
     pub fn on_payload_processing_result(
         &mut self,
         result_is_ok: bool,
@@ -947,6 +946,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     // -- Download response handlers --
 
     /// Handle a block download response. Updates download state and advances the lookup.
+    #[allow(clippy::type_complexity)]
     pub fn on_block_download_response(
         &mut self,
         req_id: ReqId,
@@ -984,13 +984,11 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         result: Result<(FixedBlobSidecarList<T::EthSpec>, PeerGroup, Duration), ()>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupResult, LookupRequestError> {
-        let state = match &mut self.data_request {
-            DataRequest::Downloading(DataDownload::Blobs { state, .. }) => state,
-            _ => {
-                return Err(LookupRequestError::BadState(
-                    "blob response but not downloading blobs".to_owned(),
-                ));
-            }
+        let DataRequest::Downloading(DataDownload::Blobs { state, .. }) = &mut self.data_request
+        else {
+            return Err(LookupRequestError::BadState(
+                "blob response but not downloading blobs".to_owned(),
+            ));
         };
         match result {
             Ok((value, peer_group, seen_timestamp)) => {
@@ -1018,13 +1016,11 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         result: Result<(DataColumnSidecarList<T::EthSpec>, PeerGroup, Duration), ()>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupResult, LookupRequestError> {
-        let state = match &mut self.data_request {
-            DataRequest::Downloading(DataDownload::Columns { state, .. }) => state,
-            _ => {
-                return Err(LookupRequestError::BadState(
-                    "custody response but not downloading columns".to_owned(),
-                ));
-            }
+        let DataRequest::Downloading(DataDownload::Columns { state, .. }) = &mut self.data_request
+        else {
+            return Err(LookupRequestError::BadState(
+                "custody response but not downloading columns".to_owned(),
+            ));
         };
         match result {
             Ok((value, peer_group, seen_timestamp)) => {
