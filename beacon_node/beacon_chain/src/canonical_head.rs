@@ -263,23 +263,14 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         snapshot: Arc<BeaconSnapshot<T::EthSpec>>,
         head_block_root: Hash256,
     ) -> Result<Self, Error> {
+        let params = forkchoice_update_parameters::<T>(&fork_choice, head_block_root)?;
         let cached_head = CachedHead {
             snapshot,
             justified_checkpoint: fork_choice.justified_checkpoint(),
             finalized_checkpoint: fork_choice.finalized_checkpoint(),
-            head_hash: fork_choice
-                .get_block_execution_block_hash(&head_block_root)
-                .ok_or(Error::HeadBlockMissingFromForkChoice(head_block_root))?,
-            justified_hash: fork_choice
-                .get_block_execution_block_hash(&fork_choice.justified_checkpoint().root)
-                .ok_or(Error::BlockMissingFromForkChoice(
-                    fork_choice.justified_checkpoint().root,
-                ))?,
-            finalized_hash: fork_choice
-                .get_block_execution_block_hash(&fork_choice.finalized_checkpoint().root)
-                .ok_or(Error::BlockMissingFromForkChoice(
-                    fork_choice.finalized_checkpoint().root,
-                ))?,
+            head_hash: params.head_hash,
+            justified_hash: params.justified_hash,
+            finalized_hash: params.finalized_hash,
         };
 
         Ok(Self {
@@ -324,23 +315,14 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             beacon_state,
         };
 
+        let params = forkchoice_update_parameters::<T>(&fork_choice, beacon_block_root)?;
         let cached_head = CachedHead {
             snapshot: Arc::new(snapshot),
             justified_checkpoint: fork_choice.justified_checkpoint(),
             finalized_checkpoint: fork_choice.finalized_checkpoint(),
-            head_hash: fork_choice
-                .get_block_execution_block_hash(&beacon_block_root)
-                .ok_or(Error::HeadBlockMissingFromForkChoice(beacon_block_root))?,
-            justified_hash: fork_choice
-                .get_block_execution_block_hash(&fork_choice.justified_checkpoint().root)
-                .ok_or(Error::BlockMissingFromForkChoice(
-                    fork_choice.justified_checkpoint().root,
-                ))?,
-            finalized_hash: fork_choice
-                .get_block_execution_block_hash(&fork_choice.finalized_checkpoint().root)
-                .ok_or(Error::BlockMissingFromForkChoice(
-                    fork_choice.finalized_checkpoint().root,
-                ))?,
+            head_hash: params.head_hash,
+            justified_hash: params.justified_hash,
+            finalized_hash: params.finalized_hash,
         };
 
         *fork_choice_write_lock = fork_choice;
@@ -676,22 +658,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         // Get the parameters to update the execution layer since either the head or some finality
         // parameters have changed.
-        let new_forkchoice_update_parameters = ForkchoiceUpdateParameters {
-            head_root: new_head_root,
-            head_hash: fork_choice_read_lock
-                .get_block_execution_block_hash(&new_head_root)
-                .ok_or(Error::HeadBlockMissingFromForkChoice(new_head_root))?,
-            justified_hash: fork_choice_read_lock
-                .get_block_execution_block_hash(&new_view.justified_checkpoint.root)
-                .ok_or(Error::BlockMissingFromForkChoice(
-                    new_view.justified_checkpoint.root,
-                ))?,
-            finalized_hash: fork_choice_read_lock
-                .get_block_execution_block_hash(&new_view.finalized_checkpoint.root)
-                .ok_or(Error::BlockMissingFromForkChoice(
-                    new_view.finalized_checkpoint.root,
-                ))?,
-        };
+        let new_forkchoice_update_parameters =
+            forkchoice_update_parameters::<T>(&*fork_choice_read_lock, new_head_root)?;
 
         perform_debug_logging::<T>(&old_view, &new_view, &fork_choice_read_lock);
 
@@ -1526,4 +1494,27 @@ fn observe_head_block_delays<E: EthSpec, S: SlotClock>(
             );
         }
     }
+}
+
+/// Look up execution block hashes for the head, justified, and finalized blocks from fork choice.
+fn forkchoice_update_parameters<T: BeaconChainTypes>(
+    fork_choice: &BeaconForkChoice<T>,
+    head_root: Hash256,
+) -> Result<ForkchoiceUpdateParameters, Error> {
+    Ok(ForkchoiceUpdateParameters {
+        head_root,
+        head_hash: fork_choice
+            .get_block_execution_block_hash(&head_root)
+            .ok_or(Error::HeadBlockMissingFromForkChoice(head_root))?,
+        justified_hash: fork_choice
+            .get_block_execution_block_hash(&fork_choice.justified_checkpoint().root)
+            .ok_or(Error::BlockMissingFromForkChoice(
+                fork_choice.justified_checkpoint().root,
+            ))?,
+        finalized_hash: fork_choice
+            .get_block_execution_block_hash(&fork_choice.finalized_checkpoint().root)
+            .ok_or(Error::BlockMissingFromForkChoice(
+                fork_choice.finalized_checkpoint().root,
+            ))?,
+    })
 }
