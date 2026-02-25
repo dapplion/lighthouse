@@ -56,11 +56,7 @@ pub enum Error<T> {
         block_slot: Slot,
         state_slot: Slot,
     },
-    InvalidPayloadStatus {
-        block_slot: Slot,
-        block_root: Hash256,
-        payload_verification_status: PayloadVerificationStatus,
-    },
+    MissingExecutionPayload,
     MissingJustifiedBlock {
         justified_checkpoint: Checkpoint,
     },
@@ -194,8 +190,6 @@ pub enum PayloadVerificationStatus {
     Verified,
     /// An EL has not yet made a determination about the execution payload.
     Optimistic,
-    /// The block is either pre-merge-fork, or prior to the terminal PoW block.
-    Irrelevant,
 }
 
 impl PayloadVerificationStatus {
@@ -204,7 +198,6 @@ impl PayloadVerificationStatus {
         match self {
             PayloadVerificationStatus::Verified => false,
             PayloadVerificationStatus::Optimistic => true,
-            PayloadVerificationStatus::Irrelevant => false,
         }
     }
 }
@@ -290,9 +283,9 @@ pub enum AttestationFromBlock {
 pub struct ForkchoiceUpdateParameters {
     /// The most recent result of running `ForkChoice::get_head`.
     pub head_root: Hash256,
-    pub head_hash: Option<ExecutionBlockHash>,
-    pub justified_hash: Option<ExecutionBlockHash>,
-    pub finalized_hash: Option<ExecutionBlockHash>,
+    pub head_hash: ExecutionBlockHash,
+    pub justified_hash: ExecutionBlockHash,
+    pub finalized_hash: ExecutionBlockHash,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -367,21 +360,13 @@ where
             AttestationShufflingId::new(anchor_block_root, anchor_state, RelativeEpoch::Next)
                 .map_err(Error::BeaconStateError)?;
 
-        let execution_status = anchor_block.message().execution_payload().map_or_else(
-            // If the block doesn't have an execution payload then it can't have
-            // execution enabled.
-            |_| ExecutionStatus::irrelevant(),
-            |execution_payload| {
-                if execution_payload.is_default_with_empty_roots() {
-                    // A default payload does not have execution enabled.
-                    ExecutionStatus::irrelevant()
-                } else {
-                    // Assume that this payload is valid, since the anchor should be a trusted block and
-                    // state.
-                    ExecutionStatus::Valid(execution_payload.block_hash())
-                }
-            },
-        );
+        // All post-merge blocks have execution payloads. Assume the anchor payload is valid,
+        // since the anchor should be a trusted block and state.
+        let execution_status = anchor_block
+            .message()
+            .execution_payload()
+            .map(|execution_payload| ExecutionStatus::Valid(execution_payload.block_hash()))
+            .map_err(|_| Error::MissingExecutionPayload)?;
 
         // If the current slot is not provided, use the value that was last provided to the store.
         let current_slot = current_slot.unwrap_or_else(|| fc_store.get_current_slot());
@@ -403,16 +388,15 @@ where
             queued_attestations: vec![],
             // This will be updated during the next call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
-                head_hash: None,
-                justified_hash: None,
-                finalized_hash: None,
-                // This will be updated during the next call to `Self::get_head`.
                 head_root: Hash256::zero(),
+                head_hash: ExecutionBlockHash::zero(),
+                justified_hash: ExecutionBlockHash::zero(),
+                finalized_hash: ExecutionBlockHash::zero(),
             },
             _phantom: PhantomData,
         };
 
-        // Ensure that `fork_choice.forkchoice_update_parameters.head_root` is updated.
+        // Ensure that `fork_choice.forkchoice_update_parameters` is updated.
         fork_choice.get_head(current_slot, spec)?;
 
         Ok(fork_choice)
@@ -501,20 +485,20 @@ where
         // Cache some values for the next forkchoiceUpdate call to the execution layer.
         let head_hash = self
             .get_block(&head_root)
-            .and_then(|b| b.execution_status.block_hash());
+            .and_then(|b| Some(b.execution_status.block_hash()));
         let justified_root = self.justified_checkpoint().root;
         let finalized_root = self.finalized_checkpoint().root;
         let justified_hash = self
             .get_block(&justified_root)
-            .and_then(|b| b.execution_status.block_hash());
+            .and_then(|b| Some(b.execution_status.block_hash()));
         let finalized_hash = self
             .get_block(&finalized_root)
-            .and_then(|b| b.execution_status.block_hash());
+            .and_then(|b| Some(b.execution_status.block_hash()));
         self.forkchoice_update_parameters = ForkchoiceUpdateParameters {
             head_root,
-            head_hash,
-            justified_hash,
-            finalized_hash,
+            head_hash: head_hash.unwrap_or(ExecutionBlockHash::zero()),
+            justified_hash: justified_hash.unwrap_or(ExecutionBlockHash::zero()),
+            finalized_hash: finalized_hash.unwrap_or(ExecutionBlockHash::zero()),
         };
 
         Ok(head_root)
@@ -853,33 +837,17 @@ where
             .on_verified_block(block, block_root, state)
             .map_err(Error::AfterBlockFailed)?;
 
-        let execution_status = if let Ok(execution_payload) = block.body().execution_payload() {
+        let execution_status = {
+            let execution_payload = block
+                .body()
+                .execution_payload()
+                .map_err(|_| Error::MissingExecutionPayload)?;
             let block_hash = execution_payload.block_hash();
 
-            if block_hash == ExecutionBlockHash::zero() {
-                // The block is post-merge-fork, but pre-terminal-PoW block. We don't need to verify
-                // the payload.
-                ExecutionStatus::irrelevant()
-            } else {
-                match payload_verification_status {
-                    PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
-                    PayloadVerificationStatus::Optimistic => {
-                        ExecutionStatus::Optimistic(block_hash)
-                    }
-                    // It would be a logic error to declare a block irrelevant if it has an
-                    // execution payload with a non-zero block hash.
-                    PayloadVerificationStatus::Irrelevant => {
-                        return Err(Error::InvalidPayloadStatus {
-                            block_slot: block.slot(),
-                            block_root,
-                            payload_verification_status,
-                        });
-                    }
-                }
+            match payload_verification_status {
+                PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
+                PayloadVerificationStatus::Optimistic => ExecutionStatus::Optimistic(block_hash),
             }
-        } else {
-            // There is no payload to verify.
-            ExecutionStatus::irrelevant()
         };
 
         // This does not apply a vote to the block, it just makes fork choice aware of the block so
@@ -1476,11 +1444,10 @@ where
             queued_attestations: persisted.queued_attestations,
             // Will be updated in the following call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
-                head_hash: None,
-                justified_hash: None,
-                finalized_hash: None,
-                // Will be updated in the following call to `Self::get_head`.
                 head_root: Hash256::zero(),
+                head_hash: ExecutionBlockHash::zero(),
+                justified_hash: ExecutionBlockHash::zero(),
+                finalized_hash: ExecutionBlockHash::zero(),
             },
             _phantom: PhantomData,
         };

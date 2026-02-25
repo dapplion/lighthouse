@@ -92,9 +92,9 @@ impl<E: EthSpec> MockExecutionLayer<E> {
         let head_block_root = Hash256::repeat_byte(42);
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: head_block_root,
-            head_hash: Some(parent_hash),
-            justified_hash: None,
-            finalized_hash: None,
+            head_hash: parent_hash,
+            justified_hash: ExecutionBlockHash::zero(),
+            finalized_hash: ExecutionBlockHash::zero(),
         };
         let payload_attributes =
             PayloadAttributes::new(timestamp, prev_randao, Address::repeat_byte(42), None, None);

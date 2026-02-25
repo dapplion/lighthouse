@@ -39,73 +39,28 @@ pub enum ExecutionStatus {
     Invalid(ExecutionBlockHash),
     /// An EL has not yet verified the execution payload.
     Optimistic(ExecutionBlockHash),
-    /// The block is either prior to the merge fork, or after the merge fork but before the terminal
-    /// PoW block has been found.
-    ///
-    /// # Note:
-    ///
-    /// This `bool` only exists to satisfy our SSZ implementation which requires all variants
-    /// to have a value. It can be set to anything.
-    Irrelevant(bool),
 }
 
 impl ExecutionStatus {
-    pub fn is_execution_enabled(&self) -> bool {
-        !matches!(self, ExecutionStatus::Irrelevant(_))
-    }
-
-    pub fn irrelevant() -> Self {
-        ExecutionStatus::Irrelevant(false)
-    }
-
-    pub fn block_hash(&self) -> Option<ExecutionBlockHash> {
+    pub fn block_hash(&self) -> ExecutionBlockHash {
         match self {
             ExecutionStatus::Valid(hash)
             | ExecutionStatus::Invalid(hash)
-            | ExecutionStatus::Optimistic(hash) => Some(*hash),
-            ExecutionStatus::Irrelevant(_) => None,
+            | ExecutionStatus::Optimistic(hash) => *hash,
         }
     }
 
-    /// Returns `true` if the block:
-    ///
-    /// - Has a valid payload, OR
-    /// - Does not have execution enabled.
-    ///
-    /// Whenever this function returns `true`, the block is *fully valid*.
-    pub fn is_valid_or_irrelevant(&self) -> bool {
-        matches!(
-            self,
-            ExecutionStatus::Valid(_) | ExecutionStatus::Irrelevant(_)
-        )
-    }
-
-    /// Returns `true` if the block:
-    ///
-    /// - Has execution enabled, AND
-    /// - Has a valid payload
-    ///
-    /// This function will return `false` for any block from a slot prior to the Bellatrix fork.
-    /// This means that some blocks that are perfectly valid will still receive a `false` response.
-    /// See `Self::is_valid_or_irrelevant` for a function that will always return `true` given any
-    /// perfectly valid block.
-    pub fn is_valid_and_post_bellatrix(&self) -> bool {
+    /// Returns `true` if the payload has been verified as valid by an EL.
+    pub fn is_valid(&self) -> bool {
         matches!(self, ExecutionStatus::Valid(_))
     }
 
-    /// Returns `true` if the block:
-    ///
-    /// - Has execution enabled, AND
-    /// - Has a payload that has not yet been verified by an EL.
+    /// Returns `true` if the EL has not yet verified the execution payload.
     pub fn is_strictly_optimistic(&self) -> bool {
         matches!(self, ExecutionStatus::Optimistic(_))
     }
 
-    /// Returns `true` if the block:
-    ///
-    /// - Has execution enabled, AND
-    ///     - Has a payload that has not yet been verified by an EL, OR.
-    ///     - Has a payload that has been deemed invalid by an EL.
+    /// Returns `true` if the payload is either unverified or invalid.
     pub fn is_optimistic_or_invalid(&self) -> bool {
         matches!(
             self,
@@ -113,19 +68,9 @@ impl ExecutionStatus {
         )
     }
 
-    /// Returns `true` if the block:
-    ///
-    /// - Has execution enabled, AND
-    /// - Has an invalid payload.
+    /// Returns `true` if the payload has been deemed invalid by an EL.
     pub fn is_invalid(&self) -> bool {
         matches!(self, ExecutionStatus::Invalid(_))
-    }
-
-    /// Returns `true` if the block:
-    ///
-    /// - Does not have execution enabled (before or after Bellatrix fork)
-    pub fn is_irrelevant(&self) -> bool {
-        matches!(self, ExecutionStatus::Irrelevant(_))
     }
 }
 
@@ -135,7 +80,6 @@ impl fmt::Display for ExecutionStatus {
             ExecutionStatus::Valid(_) => write!(f, "valid"),
             ExecutionStatus::Invalid(_) => write!(f, "invalid"),
             ExecutionStatus::Optimistic(_) => write!(f, "optimistic"),
-            ExecutionStatus::Irrelevant(_) => write!(f, "irrelevant"),
         }
     }
 }
@@ -818,8 +762,6 @@ impl ProtoArrayForkChoice {
                 ExecutionStatus::Valid(block_hash) | ExecutionStatus::Optimistic(block_hash) => {
                     node.execution_status = ExecutionStatus::Optimistic(block_hash)
                 }
-                // An irrelevant node cannot become optimistic, this is a no-op.
-                ExecutionStatus::Irrelevant(_) => (),
             }
         }
 
@@ -1116,7 +1058,7 @@ mod test_compute_deltas {
         let unknown = Hash256::from_low_u64_be(4);
         let junk_shuffling_id =
             AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
-        let execution_status = ExecutionStatus::irrelevant();
+        let execution_status = ExecutionStatus::Valid(ExecutionBlockHash::zero());
 
         let genesis_checkpoint = Checkpoint {
             epoch: genesis_epoch,
@@ -1264,7 +1206,7 @@ mod test_compute_deltas {
         let junk_state_root = Hash256::zero();
         let junk_shuffling_id =
             AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
-        let execution_status = ExecutionStatus::irrelevant();
+        let execution_status = ExecutionStatus::Valid(ExecutionBlockHash::zero());
 
         let genesis_checkpoint = Checkpoint {
             epoch: Epoch::new(0),

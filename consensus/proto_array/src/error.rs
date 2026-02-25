@@ -45,9 +45,6 @@ pub enum Error {
         block_root: Hash256,
         latest_valid_ancestor_hash: Option<ExecutionBlockHash>,
     },
-    IrrelevantDescendant {
-        block_root: Hash256,
-    },
     ParentExecutionStatusIsInvalid {
         block_root: Hash256,
         parent_root: Hash256,

@@ -930,9 +930,9 @@ impl<E: EthSpec> MockBuilder<E> {
             .await;
 
         let forkchoice_update_params = ForkchoiceUpdateParameters {
-            head_hash: Some(head_execution_hash),
-            finalized_hash: Some(finalized_execution_hash),
-            justified_hash: Some(justified_execution_hash),
+            head_hash: head_execution_hash,
+            finalized_hash: finalized_execution_hash,
+            justified_hash: justified_execution_hash,
             head_root: head_block_root,
         };
 

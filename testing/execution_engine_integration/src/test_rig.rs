@@ -294,9 +294,9 @@ impl<Engine: GenericExecutionEngine> TestRig<Engine> {
         let finalized_block_hash = ExecutionBlockHash::zero();
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root,
-            head_hash: Some(parent_hash),
-            justified_hash: Some(justified_block_hash),
-            finalized_hash: Some(finalized_block_hash),
+            head_hash: parent_hash,
+            justified_hash: justified_block_hash,
+            finalized_hash: finalized_block_hash,
         };
         let proposer_index = 0;
 

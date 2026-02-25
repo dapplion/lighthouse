@@ -1546,7 +1546,7 @@ pub struct ForkChoiceNode {
     #[serde(with = "serde_utils::quoted_u64")]
     pub weight: u64,
     pub validity: Option<String>,
-    pub execution_block_hash: Option<Hash256>,
+    pub execution_block_hash: Hash256,
     pub extra_data: ForkChoiceExtraData,
 }
 

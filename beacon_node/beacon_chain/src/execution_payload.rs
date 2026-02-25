@@ -16,11 +16,10 @@ use execution_layer::{
     PayloadParameters, PayloadStatus,
 };
 use fork_choice::{InvalidationOperation, PayloadVerificationStatus};
-use proto_array::{Block as ProtoBlock, ExecutionStatus};
+use proto_array::Block as ProtoBlock;
 use slot_clock::SlotClock;
 use state_processing::per_block_processing::{
-    compute_timestamp_at_slot, get_expected_withdrawals, is_execution_enabled,
-    partially_verify_execution_payload,
+    compute_timestamp_at_slot, get_expected_withdrawals, partially_verify_execution_payload,
 };
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -58,8 +57,8 @@ impl<T: BeaconChainTypes> PayloadNotifier<T> {
     ) -> Result<Self, BlockError> {
         let payload_verification_status = if block.fork_name_unchecked().gloas_enabled() {
             // Gloas blocks don't contain an execution payload.
-            Some(PayloadVerificationStatus::Irrelevant)
-        } else if is_execution_enabled(state, block.message().body()) {
+            Some(PayloadVerificationStatus::Verified)
+        } else {
             // Perform the initial stages of payload verification.
             //
             // We will duplicate these checks again during `per_block_processing`, however these
@@ -94,8 +93,6 @@ impl<T: BeaconChainTypes> PayloadNotifier<T> {
                 }
                 _ => None,
             }
-        } else {
-            Some(PayloadVerificationStatus::Irrelevant)
         };
 
         Ok(Self {
@@ -231,21 +228,15 @@ pub fn validate_execution_payload_for_gossip<T: BeaconChainTypes>(
         // We use only the execution status of the parent here to avoid loading the parent state
         // during gossip verification.
 
-        let parent_has_execution = match parent_block.execution_status {
-            // Parent has valid or optimistic execution status.
-            ExecutionStatus::Valid(_) | ExecutionStatus::Optimistic(_) => true,
-            // Pre-merge blocks have irrelevant execution status.
-            ExecutionStatus::Irrelevant(_) => false,
-            // If the parent has an invalid payload then it's impossible to build a valid block upon
-            // it. Reject the block.
-            ExecutionStatus::Invalid(_) => {
-                return Err(BlockError::ParentExecutionPayloadInvalid {
-                    parent_root: parent_block.root,
-                });
-            }
-        };
+        // If the parent has an invalid payload then it's impossible to build a valid block upon
+        // it. Reject the block.
+        if parent_block.execution_status.is_invalid() {
+            return Err(BlockError::ParentExecutionPayloadInvalid {
+                parent_root: parent_block.root,
+            });
+        }
 
-        if parent_has_execution || !execution_payload.is_default_with_empty_roots() {
+        {
             let expected_timestamp = chain
                 .slot_clock
                 .start_of(block.slot())

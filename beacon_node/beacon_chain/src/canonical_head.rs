@@ -108,13 +108,12 @@ pub struct CachedHead<E: EthSpec> {
     /// This value may be distinct to the `self.snapshot.beacon_state.finalized_checkpoint`.
     /// This value should be used over the beacon state value in practically all circumstances.
     finalized_checkpoint: Checkpoint,
-    /// The `execution_payload.block_hash` of the block at the head of the chain. Set to `None`
-    /// before Bellatrix.
-    head_hash: Option<ExecutionBlockHash>,
-    /// The `execution_payload.block_hash` of the justified block. Set to `None` before Bellatrix.
-    justified_hash: Option<ExecutionBlockHash>,
-    /// The `execution_payload.block_hash` of the finalized block. Set to `None` before Bellatrix.
-    finalized_hash: Option<ExecutionBlockHash>,
+    /// The `execution_payload.block_hash` of the block at the head of the chain.
+    head_hash: ExecutionBlockHash,
+    /// The `execution_payload.block_hash` of the justified block.
+    justified_hash: ExecutionBlockHash,
+    /// The `execution_payload.block_hash` of the finalized block.
+    finalized_hash: ExecutionBlockHash,
 }
 
 impl<E: EthSpec> CachedHead<E> {

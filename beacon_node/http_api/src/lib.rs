@@ -2078,11 +2078,7 @@ pub fn serve<T: BeaconChainTypes>(
                         .nodes
                         .iter()
                         .map(|node| {
-                            let execution_status = if node.execution_status.is_execution_enabled() {
-                                Some(node.execution_status.to_string())
-                            } else {
-                                None
-                            };
+                            let execution_status = Some(node.execution_status.to_string());
 
                             ForkChoiceNode {
                                 slot: node.slot,
@@ -2098,7 +2094,7 @@ pub fn serve<T: BeaconChainTypes>(
                                 execution_block_hash: node
                                     .execution_status
                                     .block_hash()
-                                    .map(|block_hash| block_hash.into_root()),
+                                    .into_root(),
                                 extra_data: ForkChoiceExtraData {
                                     target_root: node.target_root,
                                     justified_root: node.justified_checkpoint.root,

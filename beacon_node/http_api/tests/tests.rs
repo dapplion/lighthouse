@@ -3063,11 +3063,7 @@ impl ApiTester {
             .nodes
             .iter()
             .map(|node| {
-                let execution_status = if node.execution_status.is_execution_enabled() {
-                    Some(node.execution_status.to_string())
-                } else {
-                    None
-                };
+                let execution_status = Some(node.execution_status.to_string());
                 ForkChoiceNode {
                     slot: node.slot,
                     block_root: node.root,
@@ -3079,10 +3075,7 @@ impl ApiTester {
                     finalized_epoch: node.finalized_checkpoint.epoch,
                     weight: node.weight,
                     validity: execution_status,
-                    execution_block_hash: node
-                        .execution_status
-                        .block_hash()
-                        .map(|block_hash| block_hash.into_root()),
+                    execution_block_hash: node.execution_status.block_hash().into_root(),
                     extra_data: ForkChoiceExtraData {
                         target_root: node.target_root,
                         justified_root: node.justified_checkpoint.root,

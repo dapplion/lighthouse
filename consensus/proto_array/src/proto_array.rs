@@ -406,10 +406,6 @@ impl ProtoArray {
                 // We have reached a node that we already know is valid. No need to iterate further
                 // since we assume an ancestors have already been set to valid.
                 ExecutionStatus::Valid(_) => return Ok(()),
-                // We have reached an irrelevant node, this node is prior to a terminal execution
-                // block. There's no need to iterate further, it's impossible for this block to have
-                // any relevant ancestors.
-                ExecutionStatus::Irrelevant(_) => return Ok(()),
                 // The block has an unknown status, set it to valid since any ancestor of a valid
                 // payload can be considered valid.
                 ExecutionStatus::Optimistic(payload_block_hash) => {
@@ -522,7 +518,6 @@ impl ProtoArray {
                         break;
                     }
                 }
-                ExecutionStatus::Irrelevant(_) => break,
             }
 
             // Only invalidate the head block if either:
@@ -557,9 +552,6 @@ impl ProtoArray {
                     // The block is already invalid, but keep going backwards to ensure all ancestors
                     // are updated.
                     ExecutionStatus::Invalid(_) => (),
-                    // This block is pre-merge, therefore it has no execution status. Nor do its
-                    // ancestors.
-                    ExecutionStatus::Irrelevant(_) => break,
                 }
             }
 
@@ -609,11 +601,6 @@ impl ProtoArray {
                     }
                     ExecutionStatus::Optimistic(hash) | ExecutionStatus::Invalid(hash) => {
                         node.execution_status = ExecutionStatus::Invalid(*hash)
-                    }
-                    ExecutionStatus::Irrelevant(_) => {
-                        return Err(Error::IrrelevantDescendant {
-                            block_root: node.root,
-                        });
                     }
                 }
 
@@ -1076,11 +1063,7 @@ impl ProtoArray {
         self.nodes
             .iter()
             .rev()
-            .find(|node| {
-                node.execution_status
-                    .block_hash()
-                    .is_some_and(|node_block_hash| node_block_hash == *block_hash)
-            })
+            .find(|node| node.execution_status.block_hash() == *block_hash)
             .map(|node| node.root)
     }
 
