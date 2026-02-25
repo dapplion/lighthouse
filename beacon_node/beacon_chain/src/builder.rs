@@ -773,13 +773,12 @@ where
             slot_clock.now().ok_or("Unable to read slot")?
         };
 
-        let initial_head_block_root = fork_choice
+        let head_block_root = fork_choice
             .get_head(current_slot, &self.spec)
             .map_err(|e| format!("Unable to get fork choice head: {:?}", e))?;
 
-        let head_block_root = initial_head_block_root;
         let head_block = store
-            .get_full_block(&initial_head_block_root)
+            .get_full_block(&head_block_root)
             .map_err(|e| descriptive_db_error("head block", &e))?
             .ok_or("Head block not found in store")?;
 
@@ -911,7 +910,8 @@ where
 
         let genesis_validators_root = head_snapshot.beacon_state.genesis_validators_root();
         let genesis_time = head_snapshot.beacon_state.genesis_time();
-        let canonical_head = CanonicalHead::new(fork_choice, Arc::new(head_snapshot));
+        let canonical_head =
+            CanonicalHead::new(fork_choice, Arc::new(head_snapshot), head_block_root);
         let shuffling_cache_size = self.chain_config.shuffling_cache_size;
         let complete_blob_backfill = self.chain_config.complete_blob_backfill;
 

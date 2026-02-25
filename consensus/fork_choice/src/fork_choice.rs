@@ -312,8 +312,6 @@ pub struct ForkChoice<T, E> {
     proto_array: ProtoArrayForkChoice,
     /// Attestations that arrived at the current slot and must be queued for later processing.
     queued_attestations: Vec<QueuedAttestation>,
-    /// Stores a cache of the values required to be sent to the execution layer.
-    forkchoice_update_parameters: ForkchoiceUpdateParameters,
     _phantom: PhantomData<E>,
 }
 
@@ -386,28 +384,12 @@ where
             fc_store,
             proto_array,
             queued_attestations: vec![],
-            // This will be updated during the next call to `Self::get_head`.
-            forkchoice_update_parameters: ForkchoiceUpdateParameters {
-                head_root: Hash256::zero(),
-                head_hash: ExecutionBlockHash::zero(),
-                justified_hash: ExecutionBlockHash::zero(),
-                finalized_hash: ExecutionBlockHash::zero(),
-            },
             _phantom: PhantomData,
         };
 
-        // Ensure that `fork_choice.forkchoice_update_parameters` is updated.
         fork_choice.get_head(current_slot, spec)?;
 
         Ok(fork_choice)
-    }
-
-    /// Returns cached information that can be used to issue a `forkchoiceUpdated` message to an
-    /// execution engine.
-    ///
-    /// These values are updated each time `Self::get_head` is called.
-    pub fn get_forkchoice_update_parameters(&self) -> ForkchoiceUpdateParameters {
-        self.forkchoice_update_parameters
     }
 
     /// Returns the block root of an ancestor of `block_root` at the given `slot`. (Note: `slot` refers
@@ -481,25 +463,6 @@ where
             current_slot,
             spec,
         )?;
-
-        // Cache some values for the next forkchoiceUpdate call to the execution layer.
-        let head_hash = self
-            .get_block(&head_root)
-            .and_then(|b| Some(b.execution_status.block_hash()));
-        let justified_root = self.justified_checkpoint().root;
-        let finalized_root = self.finalized_checkpoint().root;
-        let justified_hash = self
-            .get_block(&justified_root)
-            .and_then(|b| Some(b.execution_status.block_hash()));
-        let finalized_hash = self
-            .get_block(&finalized_root)
-            .and_then(|b| Some(b.execution_status.block_hash()));
-        self.forkchoice_update_parameters = ForkchoiceUpdateParameters {
-            head_root,
-            head_hash: head_hash.unwrap_or(ExecutionBlockHash::zero()),
-            justified_hash: justified_hash.unwrap_or(ExecutionBlockHash::zero()),
-            finalized_hash: finalized_hash.unwrap_or(ExecutionBlockHash::zero()),
-        };
 
         Ok(head_root)
     }
@@ -586,16 +549,6 @@ where
     /// ## Notes
     ///
     /// The finalized/justified checkpoints are determined from the fork choice store. Therefore,
-    /// it's possible that the state corresponding to `get_state(get_block(head_block_root))` will
-    /// have *differing* finalized and justified information.
-    pub fn cached_fork_choice_view(&self) -> ForkChoiceView {
-        ForkChoiceView {
-            head_block_root: self.forkchoice_update_parameters.head_root,
-            justified_checkpoint: self.justified_checkpoint(),
-            finalized_checkpoint: self.finalized_checkpoint(),
-        }
-    }
-
     /// See `ProtoArrayForkChoice::process_execution_payload_validation` for documentation.
     pub fn on_valid_execution_payload(
         &mut self,
@@ -1442,13 +1395,6 @@ where
             fc_store,
             proto_array,
             queued_attestations: persisted.queued_attestations,
-            // Will be updated in the following call to `Self::get_head`.
-            forkchoice_update_parameters: ForkchoiceUpdateParameters {
-                head_root: Hash256::zero(),
-                head_hash: ExecutionBlockHash::zero(),
-                justified_hash: ExecutionBlockHash::zero(),
-                finalized_hash: ExecutionBlockHash::zero(),
-            },
             _phantom: PhantomData,
         };
 
