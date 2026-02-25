@@ -1173,6 +1173,15 @@ where
         }
     }
 
+    /// Returns the execution block hash for a block, if known.
+    pub fn get_block_execution_block_hash(
+        &self,
+        block_root: &Hash256,
+    ) -> Option<ExecutionBlockHash> {
+        self.get_block(block_root)
+            .map(|b| b.execution_status.block_hash())
+    }
+
     /// Returns an `ExecutionStatus` if the block is known **and** a descendant of the finalized root.
     pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {

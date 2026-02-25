@@ -172,6 +172,7 @@ pub enum BeaconChainError {
     HeadMissingFromForkChoice(Hash256),
     FinalizedBlockMissingFromForkChoice(Hash256),
     HeadBlockMissingFromForkChoice(Hash256),
+    BlockMissingFromForkChoice(Hash256),
     InvalidFinalizedPayload {
         finalized_root: Hash256,
         execution_block_hash: ExecutionBlockHash,
