@@ -58,6 +58,14 @@ impl<T: BeaconChainTypes> PayloadNotifier<T> {
         let payload_verification_status = if block.fork_name_unchecked().gloas_enabled() {
             // Gloas blocks don't contain an execution payload.
             Some(PayloadVerificationStatus::Verified)
+        } else if block
+            .message()
+            .body()
+            .execution_payload()
+            .is_ok_and(|p| p.is_default_with_empty_roots())
+        {
+            // Pre-merge blocks with default payloads don't need EL verification.
+            Some(PayloadVerificationStatus::Verified)
         } else {
             // Perform the initial stages of payload verification.
             //
@@ -234,6 +242,11 @@ pub fn validate_execution_payload_for_gossip<T: BeaconChainTypes>(
             return Err(BlockError::ParentExecutionPayloadInvalid {
                 parent_root: parent_block.root,
             });
+        }
+
+        if execution_payload.is_default_with_empty_roots() {
+            // Pre-merge blocks with default payloads don't need further validation.
+            return Ok(());
         }
 
         {
