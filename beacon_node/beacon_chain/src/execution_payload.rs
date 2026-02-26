@@ -66,6 +66,9 @@ impl<T: BeaconChainTypes> PayloadNotifier<T> {
         {
             // Pre-merge blocks with default payloads don't need EL verification.
             Some(PayloadVerificationStatus::Verified)
+        } else if block.message().body().execution_payload().is_err() {
+            // Pre-Bellatrix blocks don't have an execution payload.
+            Some(PayloadVerificationStatus::Verified)
         } else {
             // Perform the initial stages of payload verification.
             //

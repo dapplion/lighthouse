@@ -790,17 +790,18 @@ where
             .on_verified_block(block, block_root, state)
             .map_err(Error::AfterBlockFailed)?;
 
-        let execution_status = {
-            let execution_payload = block
-                .body()
-                .execution_payload()
-                .map_err(|_| Error::MissingExecutionPayload)?;
-            let block_hash = execution_payload.block_hash();
-
-            match payload_verification_status {
-                PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
-                PayloadVerificationStatus::Optimistic => ExecutionStatus::Optimistic(block_hash),
+        let execution_status = match block.body().execution_payload() {
+            Ok(execution_payload) => {
+                let block_hash = execution_payload.block_hash();
+                match payload_verification_status {
+                    PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
+                    PayloadVerificationStatus::Optimistic => {
+                        ExecutionStatus::Optimistic(block_hash)
+                    }
+                }
             }
+            // Pre-Bellatrix blocks don't have an execution payload.
+            Err(_) => ExecutionStatus::Valid(ExecutionBlockHash::zero()),
         };
 
         // This does not apply a vote to the block, it just makes fork choice aware of the block so
