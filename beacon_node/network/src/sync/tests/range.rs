@@ -14,12 +14,10 @@ use beacon_chain::{EngineState, NotifyExecutionLayer, block_verification_types::
 use beacon_processor::WorkType;
 use lighthouse_network::rpc::RequestType;
 use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, DataColumnsByRangeRequest, OldBlocksByRangeRequest,
-    OldBlocksByRangeRequestV2, StatusMessageV2,
+    BlobsByRangeRequest, OldBlocksByRangeRequest, OldBlocksByRangeRequestV2, StatusMessageV2,
 };
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, DataColumnsByRangeRequestId,
-    SyncRequestId,
+    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, SyncRequestId,
 };
 use lighthouse_network::{PeerId, SyncInfo};
 use std::time::Duration;
@@ -38,7 +36,7 @@ pub(crate) enum DataSidecars<E: EthSpec> {
 enum ByRangeDataRequestIds {
     PreDeneb,
     PrePeerDAS(BlobsByRangeRequestId, PeerId),
-    PostPeerDAS(Vec<(DataColumnsByRangeRequestId, PeerId)>),
+    PostPeerDAS,
 }
 
 /// Sync tests are usually written in the form:
@@ -236,24 +234,9 @@ impl TestRig {
             });
 
         let by_range_data_requests = if self.is_after_fulu() {
-            let mut data_columns_requests = vec![];
-            while let Ok(data_columns_request) = self.pop_received_network_event(|ev| match ev {
-                NetworkMessage::SendRequest {
-                    peer_id,
-                    request:
-                        RequestType::DataColumnsByRange(DataColumnsByRangeRequest {
-                            start_slot, ..
-                        }),
-                    app_request_id: AppRequestId::Sync(SyncRequestId::DataColumnsByRange(id)),
-                } if filter_f(*peer_id, *start_slot) => Some((*id, *peer_id)),
-                _ => None,
-            }) {
-                data_columns_requests.push(data_columns_request);
-            }
-            if data_columns_requests.is_empty() {
-                panic!("Found zero DataColumnsByRange requests, filter {request_filter:?}");
-            }
-            ByRangeDataRequestIds::PostPeerDAS(data_columns_requests)
+            // Post-PeerDAS: no DataColumnsByRange requests are sent upfront.
+            // Custody-by-root requests are triggered after blocks arrive via continue_requests().
+            ByRangeDataRequestIds::PostPeerDAS
         } else if self.is_after_deneb() {
             let (id, peer) = self
                 .pop_received_network_event(|ev| match ev {
@@ -307,19 +290,9 @@ impl TestRig {
                     seen_timestamp: D,
                 });
             }
-            ByRangeDataRequestIds::PostPeerDAS(data_column_req_ids) => {
-                // Complete the request with a single stream termination
-                for (id, peer_id) in data_column_req_ids {
-                    self.log(&format!(
-                        "Completing DataColumnsByRange request {id:?} with empty stream"
-                    ));
-                    self.send_sync_message(SyncMessage::RpcDataColumn {
-                        sync_request_id: SyncRequestId::DataColumnsByRange(id),
-                        peer_id,
-                        data_column: None,
-                        seen_timestamp: D,
-                    });
-                }
+            ByRangeDataRequestIds::PostPeerDAS => {
+                // Post-PeerDAS: no DataColumnsByRange requests to complete.
+                // With empty blocks, continue_requests() won't trigger custody-by-root.
             }
         }
 
