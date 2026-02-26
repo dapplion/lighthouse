@@ -1324,6 +1324,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         peer_id: PeerId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
     ) {
+        let is_block_response = matches!(range_block_component, RangeBlockComponent::Block(..));
+
         if let Some(resp) = self
             .network
             .range_block_component_response(range_request_id, range_block_component)
@@ -1386,6 +1388,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         }
                     }
                 },
+            }
+        } else if is_block_response {
+            // Blocks arrived but columns are still pending. Notify the chain so it can
+            // start downloading the next batch (the block download gate is now lifted).
+            if let RangeRequestId::RangeSync { chain_id, .. } = range_request_id.requester {
+                self.range_sync
+                    .trigger_batch_downloads(&mut self.network, chain_id);
             }
         }
     }
