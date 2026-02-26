@@ -358,13 +358,13 @@ where
             AttestationShufflingId::new(anchor_block_root, anchor_state, RelativeEpoch::Next)
                 .map_err(Error::BeaconStateError)?;
 
-        // All post-merge blocks have execution payloads. Assume the anchor payload is valid,
-        // since the anchor should be a trusted block and state.
+        // Assume the anchor payload is valid, since the anchor should be a trusted block and
+        // state. Pre-merge blocks without execution payloads use a zero block hash.
         let execution_status = anchor_block
             .message()
             .execution_payload()
             .map(|execution_payload| ExecutionStatus::Valid(execution_payload.block_hash()))
-            .map_err(|_| Error::MissingExecutionPayload)?;
+            .unwrap_or(ExecutionStatus::Valid(ExecutionBlockHash::zero()));
 
         // If the current slot is not provided, use the value that was last provided to the store.
         let current_slot = current_slot.unwrap_or_else(|| fc_store.get_current_slot());
