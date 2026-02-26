@@ -5,7 +5,7 @@ use crate::sync::block_lookups::{
     BlobRequestState, BlockRequestState, CustodyRequestState, PeerId,
 };
 use crate::sync::manager::BlockProcessType;
-use crate::sync::network_context::{LookupRequestResult, SyncNetworkContext};
+use crate::sync::network_context::{LookupRequestResult, RpcRequestSendError, SyncNetworkContext};
 use beacon_chain::BeaconChainTypes;
 use lighthouse_network::service::api_types::{CustodyRequester, Id, SingleLookupReqId};
 use parking_lot::RwLock;
@@ -176,8 +176,33 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
             lookup_id: id,
             req_id: cx.next_id(),
         });
-        cx.custody_lookup_request(requester, self.block_root, lookup_peers)
-            .map_err(LookupRequestError::SendFailedNetwork)
+        // For single lookups, compute custody columns for the current epoch,
+        // excluding columns already imported via gossip.
+        let current_epoch = cx.chain.epoch().map_err(|e| {
+            LookupRequestError::SendFailedNetwork(RpcRequestSendError::InternalError(format!(
+                "Unable to read slot clock {:?}",
+                e
+            )))
+        })?;
+        let custody_indexes_imported = cx
+            .chain
+            .data_availability_checker
+            .cached_data_column_indexes(&self.block_root)
+            .unwrap_or_default();
+        let custody_indexes_to_fetch: Vec<_> = cx
+            .chain
+            .sampling_columns_for_epoch(current_epoch)
+            .iter()
+            .copied()
+            .filter(|index| !custody_indexes_imported.contains(index))
+            .collect();
+        cx.custody_lookup_request(
+            requester,
+            self.block_root,
+            custody_indexes_to_fetch,
+            lookup_peers,
+        )
+        .map_err(LookupRequestError::SendFailedNetwork)
     }
 
     fn send_for_processing(

@@ -932,38 +932,17 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     /// any request to the network if no columns have to be fetched based on the import state of the
     /// node. A custody request is a "super request" that may trigger 0 or more `data_columns_by_root`
     /// requests.
+    ///
+    /// The caller provides `custody_indexes_to_fetch` — the set of column indices needed. For
+    /// single lookups this should be derived from the current epoch minus already-imported columns.
+    /// For range sync this should use the batch epoch columns (already computed at request creation).
     pub fn custody_lookup_request(
         &mut self,
         requester: CustodyRequester,
         block_root: Hash256,
+        mut custody_indexes_to_fetch: Vec<ColumnIndex>,
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Result<LookupRequestResult, RpcRequestSendError> {
-        let current_epoch = self.chain.epoch().map_err(|e| {
-            RpcRequestSendError::InternalError(format!("Unable to read slot clock {:?}", e))
-        })?;
-
-        let mut custody_indexes_to_fetch = match &requester {
-            CustodyRequester::SingleLookup(_) => {
-                // For single lookups, exclude columns already imported via gossip
-                let custody_indexes_imported = self
-                    .chain
-                    .data_availability_checker
-                    .cached_data_column_indexes(&block_root)
-                    .unwrap_or_default();
-                self.chain
-                    .sampling_columns_for_epoch(current_epoch)
-                    .iter()
-                    .copied()
-                    .filter(|index| !custody_indexes_imported.contains(index))
-                    .collect::<Vec<_>>()
-            }
-            CustodyRequester::RangeSync(_) => {
-                // For range sync, blocks haven't been imported yet — fetch all custody columns
-                self.chain
-                    .sampling_columns_for_epoch(current_epoch)
-                    .to_vec()
-            }
-        };
         custody_indexes_to_fetch.sort_unstable();
 
         if custody_indexes_to_fetch.is_empty() {
@@ -977,6 +956,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             %requester,
             "Starting custody columns request"
         );
+
+        // Extract the caller-allocated req_id before continue_requests() increments
+        // self.request_id internally. For single lookups, the caller stores this req_id in
+        // State::Downloading and later matches it against response req_ids.
+        let caller_req_id = match &requester {
+            CustodyRequester::SingleLookup(id) => id.req_id,
+            CustodyRequester::RangeSync(id) => id.id.id,
+        };
 
         let mut request = ActiveCustodyRequest::new(
             block_root,
@@ -992,7 +979,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 // created cannot return data immediately, it must send some request to the network
                 // first. And there must exist some request, `custody_indexes_to_fetch` is not empty.
                 self.custody_by_root_requests.insert(requester, request);
-                Ok(LookupRequestResult::RequestSent(self.request_id))
+                Ok(LookupRequestResult::RequestSent(caller_req_id))
             }
             Err(e) => Err(match e {
                 CustodyRequestError::NoPeer(column_index) => {

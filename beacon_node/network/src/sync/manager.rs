@@ -1301,7 +1301,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             CustodyRequester::RangeSync(range_id) => {
                 // Route custody-by-root results through the standard range components
                 // response path, reusing the same dispatch to range_sync / backfill.
-                let peer_id = PeerId::random();
+                // TODO(das): use PeerGroup instead of single peer https://github.com/sigp/lighthouse/issues/6258
+                let peer_id = response
+                    .as_ref()
+                    .ok()
+                    .and_then(|(_, peer_group, _)| peer_group.all().next().copied())
+                    .unwrap_or(PeerId::random());
                 self.on_range_components_response(
                     range_id.id,
                     peer_id,
