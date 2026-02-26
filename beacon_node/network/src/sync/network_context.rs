@@ -602,112 +602,61 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         Ok(columns_to_request_by_peer)
     }
 
-    /// Received a blocks by range or blobs by range response for a request that couples blocks
-    /// and blobs. After blocks arrive for a CustodyByRoot request, this initiates custody-by-root
-    /// requests for each block that has data.
+    /// Received a blocks by range, blobs by range, or custody-by-root response for a request
+    /// that couples blocks with their data. The coupling struct handles initiating custody-by-root
+    /// requests when blocks arrive.
     pub fn range_block_component_response(
         &mut self,
         id: ComponentsByRangeRequestId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
     ) -> Option<Result<Vec<RpcBlock<T::EthSpec>>, RpcResponseError>> {
-        let Entry::Occupied(mut entry) = self.components_by_range_requests.entry(id) else {
-            metrics::inc_counter_vec(&metrics::SYNC_UNKNOWN_NETWORK_REQUESTS, &["range_blocks"]);
-            return None;
-        };
+        // Remove from map to allow passing &mut self to continue_requests
+        let mut request = self.components_by_range_requests.remove(&id)?;
 
-        if let Err(e) = {
-            let request = entry.get_mut();
-            match range_block_component {
-                RangeBlockComponent::Block(req_id, resp) => resp.and_then(|(blocks, _)| {
-                    request.add_blocks(req_id, blocks).map_err(|e| {
-                        RpcResponseError::BlockComponentCouplingError(CouplingError::InternalError(
-                            e,
-                        ))
-                    })
-                }),
-                RangeBlockComponent::Blob(req_id, resp) => resp.and_then(|(blobs, _)| {
-                    request.add_blobs(req_id, blobs).map_err(|e| {
-                        RpcResponseError::BlockComponentCouplingError(CouplingError::InternalError(
-                            e,
-                        ))
-                    })
-                }),
-                RangeBlockComponent::CustodyResult(block_root, resp) => {
-                    resp.and_then(|(columns, peer_group, _seen_timestamp)| {
-                        request
-                            .add_custody_columns_by_root(block_root, columns, peer_group)
-                            .map_err(|e| {
-                                RpcResponseError::BlockComponentCouplingError(
-                                    CouplingError::InternalError(e),
-                                )
-                            })
-                    })
-                }
+        // Add the incoming component
+        let add_result = match range_block_component {
+            RangeBlockComponent::Block(req_id, resp) => resp.and_then(|(blocks, _)| {
+                request.add_blocks(req_id, blocks).map_err(|e| {
+                    RpcResponseError::BlockComponentCouplingError(CouplingError::InternalError(e))
+                })
+            }),
+            RangeBlockComponent::Blob(req_id, resp) => resp.and_then(|(blobs, _)| {
+                request.add_blobs(req_id, blobs).map_err(|e| {
+                    RpcResponseError::BlockComponentCouplingError(CouplingError::InternalError(e))
+                })
+            }),
+            RangeBlockComponent::CustodyResult(block_root, resp) => {
+                resp.and_then(|(columns, peer_group, _seen_timestamp)| {
+                    request
+                        .add_custody_columns_by_root(block_root, columns, peer_group)
+                        .map_err(|e| {
+                            RpcResponseError::BlockComponentCouplingError(
+                                CouplingError::InternalError(e),
+                            )
+                        })
+                })
             }
-        } {
-            entry.remove();
+        };
+        if let Err(e) = add_result {
             return Some(Err(e));
         }
 
-        // Let the coupling struct decide what follow-up requests are needed.
-        let continue_result = entry.get_mut().continue_requests();
-        // OccupiedEntry borrows self.components_by_range_requests — must be dropped so we can
-        // call other &mut self methods below.
-        {
-            let _entry = entry;
-        }
-
-        if let Some(roots) = continue_result {
-            for block_root in &roots {
-                let lookup_peers = Arc::new(RwLock::new(HashSet::new()));
-                let requester = CustodyRequester::RangeSync(
-                    lighthouse_network::service::api_types::RangeSyncCustodyId {
-                        id,
-                        block_root: *block_root,
-                    },
-                );
-                match self.custody_lookup_request(requester, *block_root, lookup_peers) {
-                    Ok(LookupRequestResult::RequestSent(_)) => {
-                        debug!(?block_root, %id, "Initiated custody-by-root for range block");
-                    }
-                    Ok(LookupRequestResult::NoRequestNeeded(reason)) => {
-                        debug!(?block_root, %id, reason, "Custody-by-root not needed for range block");
-                        if let Some(request) = self.components_by_range_requests.get_mut(&id) {
-                            let _ = request.add_custody_columns_by_root(
-                                *block_root,
-                                vec![],
-                                PeerGroup::from_single(PeerId::random()),
-                            );
-                        }
-                    }
-                    Ok(LookupRequestResult::Pending(reason)) => {
-                        debug!(?block_root, %id, reason, "Custody-by-root pending for range block");
-                    }
-                    Err(e) => {
-                        warn!(?block_root, %id, error = ?e, "Failed to initiate custody-by-root for range block");
-                        self.components_by_range_requests.remove(&id);
-                        return Some(Err(RpcResponseError::BlockComponentCouplingError(
-                            CouplingError::InternalError(format!(
-                                "Failed to initiate custody for {block_root:?}: {e:?}"
-                            )),
-                        )));
-                    }
-                }
-            }
+        // Let the coupling struct initiate any follow-up requests (custody-by-root)
+        if let Err(e) = request.continue_requests(id, self) {
+            return Some(Err(RpcResponseError::BlockComponentCouplingError(
+                CouplingError::InternalError(e),
+            )));
         }
 
         // Check if all components have arrived
-        let Entry::Occupied(mut entry) = self.components_by_range_requests.entry(id) else {
-            return None;
-        };
-        let range_req = entry.get_mut();
-        if let Some(blocks_result) = range_req.responses(
+        if let Some(blocks_result) = request.responses(
             self.chain.data_availability_checker.clone(),
             self.chain.spec.clone(),
         ) {
-            entry.remove();
             Some(blocks_result.map_err(RpcResponseError::BlockComponentCouplingError))
         } else {
+            // Re-insert — still waiting for more components
+            self.components_by_range_requests.insert(id, request);
             None
         }
     }
