@@ -50,8 +50,8 @@ use tokio::sync::mpsc;
 use tracing::{Span, debug, debug_span, error, warn};
 use types::data::FixedBlobSidecarList;
 use types::{
-    BlobSidecar, BlockImportSource, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, EthSpec,
-    ForkContext, Hash256, SignedBeaconBlock, Slot,
+    BlobSidecar, BlockImportSource, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Epoch,
+    EthSpec, ForkContext, Hash256, SignedBeaconBlock, Slot,
 };
 
 pub mod custody;
@@ -68,9 +68,6 @@ macro_rules! new_range_request_span {
         )
     }};
 }
-
-/// Max retries for block components after which we fail the batch.
-pub const MAX_COLUMN_RETRIES: usize = 3;
 
 #[derive(Debug)]
 pub enum RpcEvent<T> {
@@ -247,7 +244,7 @@ pub enum RangeBlockComponent<E: EthSpec> {
     ),
     /// Custody-by-root result for a specific block root. Arrives after blocks and carries
     /// the columns fetched via ActiveCustodyRequest.
-    CustodyResult(Hash256, CustodyByRootResult<E>),
+    CustodyResult(Hash256, CustodyByRootResult<E>, PeerGroup),
 }
 
 #[cfg(test)]
@@ -536,12 +533,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             None
         };
 
-        let info = RangeBlockComponentsRequest::new(
-            blocks_req_id,
-            blobs_req_id,
-            expects_custody_columns,
-            range_request_span,
-        );
+        let info =
+            RangeBlockComponentsRequest::new(blocks_req_id, blobs_req_id, expects_custody_columns);
         self.components_by_range_requests.insert(id, info);
 
         Ok(id.id)
@@ -625,10 +618,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     RpcResponseError::BlockComponentCouplingError(CouplingError::InternalError(e))
                 })
             }),
-            RangeBlockComponent::CustodyResult(block_root, resp) => {
-                resp.and_then(|(columns, peer_group, _seen_timestamp)| {
+            RangeBlockComponent::CustodyResult(block_root, resp, peer_group) => {
+                resp.and_then(|(columns, _peer_group, _seen_timestamp)| {
                     request
-                        .add_custody_columns_by_root(block_root, columns, peer_group)
+                        .add_custody_columns(block_root, columns, peer_group)
                         .map_err(|e| {
                             RpcResponseError::BlockComponentCouplingError(
                                 CouplingError::InternalError(e),
@@ -936,13 +929,36 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     /// The caller provides `custody_indexes_to_fetch` — the set of column indices needed. For
     /// single lookups this should be derived from the current epoch minus already-imported columns.
     /// For range sync this should use the batch epoch columns (already computed at request creation).
+    /// Initiate a custody-by-root request for the given block root.
+    ///
+    /// When `ignore_cache` is true, the DA checker cache is not consulted and all custody
+    /// columns are fetched. This is used by range sync where blocks are historical and
+    /// won't have gossip-imported columns in the cache.
     pub fn custody_lookup_request(
         &mut self,
         requester: CustodyRequester,
         block_root: Hash256,
-        mut custody_indexes_to_fetch: Vec<ColumnIndex>,
+        block_epoch: Epoch,
+        ignore_cache: bool,
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Result<LookupRequestResult, RpcRequestSendError> {
+        let custody_indexes_imported = if ignore_cache {
+            Default::default()
+        } else {
+            self.chain
+                .data_availability_checker
+                .cached_data_column_indexes(&block_root)
+                .unwrap_or_default()
+        };
+
+        // Include only the column indexes not yet imported (received through gossip)
+        let mut custody_indexes_to_fetch = self
+            .chain
+            .sampling_columns_for_epoch(block_epoch)
+            .iter()
+            .copied()
+            .filter(|index| !custody_indexes_imported.contains(index))
+            .collect::<Vec<_>>();
         custody_indexes_to_fetch.sort_unstable();
 
         if custody_indexes_to_fetch.is_empty() {

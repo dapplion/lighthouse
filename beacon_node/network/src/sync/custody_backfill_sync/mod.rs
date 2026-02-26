@@ -596,7 +596,6 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                     && let CouplingError::DataColumnPeerFailure {
                         error,
                         faulty_peers,
-                        exceeded_retries: _,
                     } = coupling_error
                 {
                     for (column_index, faulty_peer) in faulty_peers {

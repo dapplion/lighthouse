@@ -184,22 +184,11 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
                 e
             )))
         })?;
-        let custody_indexes_imported = cx
-            .chain
-            .data_availability_checker
-            .cached_data_column_indexes(&self.block_root)
-            .unwrap_or_default();
-        let custody_indexes_to_fetch: Vec<_> = cx
-            .chain
-            .sampling_columns_for_epoch(current_epoch)
-            .iter()
-            .copied()
-            .filter(|index| !custody_indexes_imported.contains(index))
-            .collect();
         cx.custody_lookup_request(
             requester,
             self.block_root,
-            custody_indexes_to_fetch,
+            current_epoch,
+            false,
             lookup_peers,
         )
         .map_err(LookupRequestError::SendFailedNetwork)

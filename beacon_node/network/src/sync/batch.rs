@@ -260,8 +260,7 @@ impl<E: EthSpec, B: BatchConfig, D: Hash> BatchInfo<E, B, D> {
     /// This can happen if a peer disconnects or some error occurred that was not the peers fault.
     /// The `peer` parameter, when set to `None`, still counts toward
     /// `max_batch_download_attempts` (to prevent infinite retries on persistent failures)
-    /// but does not register a peer in `failed_peers()`. Use
-    /// [`Self::downloading_to_awaiting_download`] to retry without counting a failed attempt.
+    /// but does not register a peer in `failed_peers()`.
     #[must_use = "Batch may have failed"]
     pub fn download_failed(
         &mut self,
@@ -279,31 +278,6 @@ impl<E: EthSpec, B: BatchConfig, D: Hash> BatchInfo<E, B, D> {
                 } else {
                     BatchState::AwaitingDownload
                 };
-                Ok(self.outcome())
-            }
-            BatchState::Poisoned => unreachable!("Poisoned batch"),
-            other => {
-                self.state = other;
-                Err(WrongState(format!(
-                    "Download failed for batch in wrong state {:?}",
-                    self.state
-                )))
-            }
-        }
-    }
-
-    /// Change the batch state from `Self::Downloading` to `Self::AwaitingDownload` without
-    /// registering a failed attempt.
-    ///
-    /// Note: must use this cautiously with some level of retry protection
-    /// as not registering a failed attempt could lead to requesting in a loop.
-    #[must_use = "Batch may have failed"]
-    pub fn downloading_to_awaiting_download(
-        &mut self,
-    ) -> Result<BatchOperationOutcome, WrongState> {
-        match self.state.poison() {
-            BatchState::Downloading(_) => {
-                self.state = BatchState::AwaitingDownload;
                 Ok(self.outcome())
             }
             BatchState::Poisoned => unreachable!("Poisoned batch"),

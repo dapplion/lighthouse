@@ -15,7 +15,7 @@ use parking_lot::RwLock;
 use ssz_types::RuntimeVariableList;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{Span, debug, warn};
+use tracing::debug;
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, EthSpec,
     Hash256, SignedBeaconBlock,
@@ -31,7 +31,7 @@ pub use lighthouse_network::service::api_types::BlobsByRangeRequestId;
 /// This struct acts as temporary storage while multiple network responses arrive:
 /// - Blocks themselves (always required)
 /// - Blob sidecars (pre-Fulu fork)
-/// - Data columns (Fulu fork and later)
+/// - Data columns (Fulu fork and later, via custody-by-root)
 ///
 /// It accumulates responses until all expected components are received, then couples
 /// them together and returns complete `RpcBlock`s ready for processing.
@@ -40,8 +40,6 @@ pub struct RangeBlockComponentsRequest<E: EthSpec> {
     blocks_request: ByRangeRequest<BlocksByRangeRequestId, Vec<Arc<SignedBeaconBlock<E>>>>,
     /// Sidecars we have received awaiting for their corresponding block.
     block_data_request: RangeBlockDataRequest<E>,
-    /// Span to track the range request and all children range requests.
-    pub(crate) request_span: Span,
 }
 
 pub enum ByRangeRequest<I: PartialEq + std::fmt::Display, T> {
@@ -52,20 +50,15 @@ pub enum ByRangeRequest<I: PartialEq + std::fmt::Display, T> {
 enum RangeBlockDataRequest<E: EthSpec> {
     NoData,
     Blobs(ByRangeRequest<BlobsByRangeRequestId, Vec<Arc<BlobSidecar<E>>>>),
-    /// Custody-by-root: after blocks arrive, custody requests are initiated per block root.
-    CustodyByRoot {
-        /// Per-block custody state. Only blocks with data get entries.
-        custody_columns_by_root: HashMap<Hash256, CustodyByRootState<E>>,
+    DataColumns {
+        custody_columns_by_root: HashMap<Hash256, DataColumnsState<E>>,
         expected_custody_columns: Vec<ColumnIndex>,
     },
 }
 
-/// Tracks the custody-by-root state for a single block root.
 #[derive(Clone)]
-enum CustodyByRootState<E: EthSpec> {
-    /// Custody request has been sent, awaiting response.
+enum DataColumnsState<E: EthSpec> {
     Requesting,
-    /// Custody request completed with columns and peer info.
     Complete(DataColumnSidecarList<E>, PeerGroup),
 }
 
@@ -76,7 +69,6 @@ pub(crate) enum CouplingError {
     DataColumnPeerFailure {
         error: String,
         faulty_peers: Vec<(ColumnIndex, PeerId)>,
-        exceeded_retries: bool,
     },
     BlobPeerFailure(String),
 }
@@ -92,12 +84,11 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         blocks_req_id: BlocksByRangeRequestId,
         blobs_req_id: Option<BlobsByRangeRequestId>,
         expects_custody_columns: Option<Vec<ColumnIndex>>,
-        request_span: Span,
     ) -> Self {
         let block_data_request = if let Some(blobs_req_id) = blobs_req_id {
             RangeBlockDataRequest::Blobs(ByRangeRequest::Active(blobs_req_id))
         } else if let Some(expected_custody_columns) = expects_custody_columns {
-            RangeBlockDataRequest::CustodyByRoot {
+            RangeBlockDataRequest::DataColumns {
                 custody_columns_by_root: HashMap::new(),
                 expected_custody_columns,
             }
@@ -108,7 +99,6 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         Self {
             blocks_request: ByRangeRequest::Active(blocks_req_id),
             block_data_request,
-            request_span,
         }
     }
 
@@ -135,55 +125,94 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         match &mut self.block_data_request {
             RangeBlockDataRequest::NoData => Err("received blobs but expected no data".to_owned()),
             RangeBlockDataRequest::Blobs(req) => req.finish(req_id, blobs),
-            RangeBlockDataRequest::CustodyByRoot { .. } => {
+            RangeBlockDataRequest::DataColumns { .. } => {
                 Err("received blobs but expected data columns".to_owned())
             }
         }
     }
 
-    /// Initiate any follow-up requests after a component is added.
+    /// Adds received custody columns for a specific block root.
     ///
-    /// When blocks arrive and we're in CustodyByRoot mode, initiates custody-by-root
-    /// requests for each block that has data. Returns `Err` if a custody request fails
-    /// to send.
+    /// Returns an error if not in DataColumns mode, or if columns for this root
+    /// were already completed.
+    pub fn add_custody_columns(
+        &mut self,
+        block_root: Hash256,
+        columns: DataColumnSidecarList<E>,
+        peer_group: PeerGroup,
+    ) -> Result<(), String> {
+        let RangeBlockDataRequest::DataColumns {
+            custody_columns_by_root,
+            ..
+        } = &mut self.block_data_request
+        else {
+            return Err("received custody columns but not in DataColumns mode".to_owned());
+        };
+        match custody_columns_by_root.get(&block_root) {
+            Some(DataColumnsState::Complete(..)) => Err(format!(
+                "duplicate custody columns for block root {block_root:?}"
+            )),
+            Some(DataColumnsState::Requesting) | None => {
+                custody_columns_by_root
+                    .insert(block_root, DataColumnsState::Complete(columns, peer_group));
+                Ok(())
+            }
+        }
+    }
+
+    /// After blocks arrive, initiates custody-by-root requests for blocks that need data columns.
+    ///
+    /// Only does work when blocks have arrived and we're in DataColumns mode. For each block
+    /// with data, inserts a `Requesting` entry and fires a custody request via the network context.
     pub fn continue_requests<T: BeaconChainTypes<EthSpec = E>>(
         &mut self,
         id: ComponentsByRangeRequestId,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), String> {
-        let (roots, expected_custody_columns) = match self.initiate_custody() {
-            Some(result) => result,
-            None => return Ok(()),
+        let Some(blocks) = self.blocks_request.to_finished() else {
+            return Ok(());
+        };
+        let RangeBlockDataRequest::DataColumns {
+            custody_columns_by_root,
+            ..
+        } = &mut self.block_data_request
+        else {
+            return Ok(());
         };
 
-        for block_root in &roots {
-            let lookup_peers = Arc::new(RwLock::new(HashSet::new()));
-            let requester = CustodyRequester::RangeSync(RangeSyncCustodyId {
-                id,
-                block_root: *block_root,
-            });
+        for block in blocks {
+            if block.num_expected_blobs() == 0 {
+                continue;
+            }
+            let block_root = get_block_root(block);
+            if custody_columns_by_root.contains_key(&block_root) {
+                continue;
+            }
+
+            let block_epoch = block.slot().epoch(E::slots_per_epoch());
+            let requester = CustodyRequester::RangeSync(RangeSyncCustodyId { id, block_root });
             match cx.custody_lookup_request(
                 requester,
-                *block_root,
-                expected_custody_columns.clone(),
-                lookup_peers,
+                block_root,
+                block_epoch,
+                true, // ignore_cache: range blocks won't have gossip-imported columns
+                Arc::new(RwLock::new(HashSet::new())),
             ) {
                 Ok(LookupRequestResult::RequestSent(_)) => {
+                    custody_columns_by_root.insert(block_root, DataColumnsState::Requesting);
                     debug!(?block_root, %id, "Initiated custody-by-root for range block");
                 }
                 Ok(LookupRequestResult::NoRequestNeeded(reason)) => {
-                    debug!(?block_root, %id, reason, "Custody-by-root not needed for range block");
-                    let _ = self.add_custody_columns_by_root(
-                        *block_root,
-                        vec![],
-                        PeerGroup::from_set(Default::default()),
-                    );
+                    return Err(format!(
+                        "Custody request for {block_root:?} not needed: {reason}"
+                    ));
                 }
                 Ok(LookupRequestResult::Pending(reason)) => {
-                    debug!(?block_root, %id, reason, "Custody-by-root pending for range block");
+                    return Err(format!(
+                        "Custody request for {block_root:?} pending: {reason}"
+                    ));
                 }
                 Err(e) => {
-                    warn!(?block_root, %id, error = ?e, "Failed to initiate custody-by-root for range block");
                     return Err(format!(
                         "Failed to initiate custody for {block_root:?}: {e:?}"
                     ));
@@ -192,72 +221,6 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         }
 
         Ok(())
-    }
-
-    /// Compute block roots requiring custody and insert them as `Requesting`.
-    /// Idempotent — roots already tracked are skipped.
-    /// Returns `None` if blocks haven't arrived, not in custody mode, or no new roots needed.
-    /// On success, returns the roots and the expected custody column indices (from the batch epoch).
-    fn initiate_custody(&mut self) -> Option<(Vec<Hash256>, Vec<ColumnIndex>)> {
-        let blocks = self.blocks_request.to_finished()?;
-
-        let RangeBlockDataRequest::CustodyByRoot {
-            custody_columns_by_root,
-            expected_custody_columns,
-        } = &mut self.block_data_request
-        else {
-            return None;
-        };
-
-        let mut roots = Vec::new();
-        for block in blocks {
-            if block.num_expected_blobs() > 0 {
-                let block_root = get_block_root(block);
-                if let std::collections::hash_map::Entry::Vacant(e) =
-                    custody_columns_by_root.entry(block_root)
-                {
-                    e.insert(CustodyByRootState::Requesting);
-                    roots.push(block_root);
-                }
-            }
-        }
-
-        if roots.is_empty() {
-            None
-        } else {
-            Some((roots, expected_custody_columns.clone()))
-        }
-    }
-
-    /// Add custody columns received via custody-by-root for a specific block root.
-    pub fn add_custody_columns_by_root(
-        &mut self,
-        block_root: Hash256,
-        columns: DataColumnSidecarList<E>,
-        peer_group: PeerGroup,
-    ) -> Result<(), String> {
-        match &mut self.block_data_request {
-            RangeBlockDataRequest::CustodyByRoot {
-                custody_columns_by_root,
-                ..
-            } => {
-                let state = custody_columns_by_root
-                    .get_mut(&block_root)
-                    .ok_or_else(|| {
-                        format!("received custody columns for unknown block root {block_root:?}")
-                    })?;
-                match state {
-                    CustodyByRootState::Requesting => {
-                        *state = CustodyByRootState::Complete(columns, peer_group);
-                        Ok(())
-                    }
-                    CustodyByRootState::Complete(..) => Err(format!(
-                        "duplicate custody columns for block root {block_root:?}"
-                    )),
-                }
-            }
-            _ => Err("received custody columns but not in CustodyByRoot mode".to_owned()),
-        }
     }
 
     /// Attempts to construct RPC blocks from all received components.
@@ -295,13 +258,13 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
                     spec,
                 ))
             }
-            RangeBlockDataRequest::CustodyByRoot {
+            RangeBlockDataRequest::DataColumns {
                 custody_columns_by_root,
                 expected_custody_columns,
             } => {
                 if custody_columns_by_root
                     .values()
-                    .any(|s| matches!(s, CustodyByRootState::Requesting))
+                    .any(|s| matches!(s, DataColumnsState::Requesting))
                 {
                     return None;
                 }
@@ -388,7 +351,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
 
     fn responses_with_custody_columns<T>(
         blocks: Vec<Arc<SignedBeaconBlock<E>>>,
-        custody_columns_by_root: HashMap<Hash256, CustodyByRootState<E>>,
+        custody_columns_by_root: HashMap<Hash256, DataColumnsState<E>>,
         expects_custody_columns: &[ColumnIndex],
         da_checker: Arc<DataAvailabilityChecker<T>>,
         spec: Arc<ChainSpec>,
@@ -402,7 +365,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         for block in blocks {
             let block_root = get_block_root(&block);
             rpc_blocks.push(if block.num_expected_blobs() > 0 {
-                let Some(CustodyByRootState::Complete(data_columns, _peer_group)) =
+                let Some(DataColumnsState::Complete(data_columns, _peer_group)) =
                     custody_columns_by_root.remove(&block_root)
                 else {
                     return Err(CouplingError::InternalError(format!(
@@ -410,7 +373,6 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
                     )));
                 };
 
-                // Group columns by index for validation
                 let mut data_columns_by_index =
                     HashMap::<ColumnIndex, Arc<DataColumnSidecar<E>>>::new();
                 for column in data_columns {
@@ -431,7 +393,6 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
                     }
                 }
 
-                // Extra columns are OK, just log
                 if !data_columns_by_index.is_empty() {
                     let remaining_indices = data_columns_by_index.keys().collect::<Vec<_>>();
                     debug!(
@@ -507,7 +468,6 @@ mod tests {
     };
     use rand::SeedableRng;
     use std::sync::Arc;
-    use tracing::Span;
     use types::{Epoch, ForkName, MinimalEthSpec as E, SignedBeaconBlock, test_utils::XorShiftRng};
 
     use crate::sync::network_context::PeerGroup;
@@ -536,12 +496,6 @@ mod tests {
         }
     }
 
-    fn is_finished(info: &mut RangeBlockComponentsRequest<E>) -> bool {
-        let spec = Arc::new(test_spec::<E>());
-        let da_checker = Arc::new(test_da_checker(spec.clone(), NodeCustodyType::Fullnode));
-        info.responses(da_checker, spec).is_some()
-    }
-
     #[test]
     fn no_blobs_into_responses() {
         let mut rng = XorShiftRng::from_seed([42; 16]);
@@ -554,8 +508,7 @@ mod tests {
             .collect::<Vec<Arc<SignedBeaconBlock<E>>>>();
 
         let blocks_req_id = blocks_id(components_id());
-        let mut info =
-            RangeBlockComponentsRequest::<E>::new(blocks_req_id, None, None, Span::none());
+        let mut info = RangeBlockComponentsRequest::<E>::new(blocks_req_id, None, None);
 
         // Send blocks and complete terminate response
         info.add_blocks(blocks_req_id, blocks).unwrap();
@@ -582,12 +535,8 @@ mod tests {
         let components_id = components_id();
         let blocks_req_id = blocks_id(components_id);
         let blobs_req_id = blobs_id(components_id);
-        let mut info = RangeBlockComponentsRequest::<E>::new(
-            blocks_req_id,
-            Some(blobs_req_id),
-            None,
-            Span::none(),
-        );
+        let mut info =
+            RangeBlockComponentsRequest::<E>::new(blocks_req_id, Some(blobs_req_id), None);
 
         // Send blocks and complete terminate response
         info.add_blocks(blocks_req_id, blocks).unwrap();
@@ -632,7 +581,6 @@ mod tests {
             blocks_req_id,
             None,
             Some(expects_custody_columns.clone()),
-            Span::none(),
         );
 
         // Send blocks
@@ -642,12 +590,7 @@ mod tests {
         )
         .unwrap();
 
-        // Initiate custody
-        let (roots, columns) = info.initiate_custody().expect("expected custody roots");
-        assert_eq!(roots.len(), 4);
-        assert_eq!(columns, expects_custody_columns);
-
-        // Add custody columns per block root
+        // Add custody columns per block root (upsert: no separate initiation needed)
         for (block, data_columns) in &blocks {
             let block_root = beacon_chain::get_block_root(block);
             let custody_columns: Vec<_> = data_columns
@@ -655,7 +598,7 @@ mod tests {
                 .filter(|d| expects_custody_columns.contains(d.index()))
                 .cloned()
                 .collect();
-            info.add_custody_columns_by_root(
+            info.add_custody_columns(
                 block_root,
                 custody_columns,
                 PeerGroup::from_set(Default::default()),
@@ -698,7 +641,6 @@ mod tests {
             blocks_req_id,
             None,
             Some(expects_custody_columns),
-            Span::none(),
         );
 
         // Send blocks
@@ -708,10 +650,7 @@ mod tests {
         )
         .unwrap();
 
-        // Initiate custody - no blocks need columns, returns None
-        assert!(info.initiate_custody().is_none());
-
-        // Response should be ready immediately (no pending custody)
+        // Response should be ready immediately (no blocks need custody columns)
         info.responses(da_checker, spec).unwrap().unwrap();
     }
 }
