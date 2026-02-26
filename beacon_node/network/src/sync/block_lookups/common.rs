@@ -7,7 +7,7 @@ use crate::sync::block_lookups::{
 use crate::sync::manager::BlockProcessType;
 use crate::sync::network_context::{LookupRequestResult, SyncNetworkContext};
 use beacon_chain::BeaconChainTypes;
-use lighthouse_network::service::api_types::Id;
+use lighthouse_network::service::api_types::{CustodyRequester, Id, SingleLookupReqId};
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -172,7 +172,11 @@ impl<T: BeaconChainTypes> RequestState<T> for CustodyRequestState<T::EthSpec> {
         _: usize,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<LookupRequestResult, LookupRequestError> {
-        cx.custody_lookup_request(id, self.block_root, lookup_peers)
+        let requester = CustodyRequester::SingleLookup(SingleLookupReqId {
+            lookup_id: id,
+            req_id: cx.next_id(),
+        });
+        cx.custody_lookup_request(requester, self.block_root, lookup_peers)
             .map_err(LookupRequestError::SendFailedNetwork)
     }
 

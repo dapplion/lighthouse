@@ -1278,22 +1278,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             .network
             .on_data_columns_by_range_response(id, peer_id, data_column)
         {
-            match id.parent_request_id {
-                DataColumnsByRangeRequester::ComponentsByRange(components_by_range_req_id) => {
-                    self.on_range_components_response(
-                        components_by_range_req_id,
-                        peer_id,
-                        RangeBlockComponent::CustodyColumns(id, resp),
-                    );
-                }
-                DataColumnsByRangeRequester::CustodyBackfillSync(custody_backfill_req_id) => self
-                    .on_custody_backfill_columns_response(
-                        custody_backfill_req_id,
-                        id,
-                        peer_id,
-                        resp,
-                    ),
-            }
+            let DataColumnsByRangeRequester::CustodyBackfillSync(custody_backfill_req_id) =
+                id.parent_request_id;
+            self.on_custody_backfill_columns_response(custody_backfill_req_id, id, peer_id, resp);
         }
     }
 
@@ -1302,12 +1289,26 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         requester: CustodyRequester,
         response: CustodyByRootResult<T::EthSpec>,
     ) {
-        self.block_lookups
-            .on_download_response::<CustodyRequestState<T::EthSpec>>(
-                requester.0,
-                response,
-                &mut self.network,
-            );
+        match requester {
+            CustodyRequester::SingleLookup(id) => {
+                self.block_lookups
+                    .on_download_response::<CustodyRequestState<T::EthSpec>>(
+                        id,
+                        response,
+                        &mut self.network,
+                    );
+            }
+            CustodyRequester::RangeSync(range_id) => {
+                // Route custody-by-root results through the standard range components
+                // response path, reusing the same dispatch to range_sync / backfill.
+                let peer_id = PeerId::random();
+                self.on_range_components_response(
+                    range_id.id,
+                    peer_id,
+                    RangeBlockComponent::CustodyResult(range_id.block_root, response),
+                );
+            }
+        }
     }
 
     /// Handles receiving a response for a range sync request that should have both blocks and
