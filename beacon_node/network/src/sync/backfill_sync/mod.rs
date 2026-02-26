@@ -673,7 +673,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 // Batches can be in `AwaitingDownload` state if there weren't good data column subnet
                 // peers to send the request to.
                 BatchState::AwaitingDownload => return Ok(ProcessResult::Successful),
-                BatchState::Failed | BatchState::Processing(_) => {
+                BatchState::Failed | BatchState::Processing(..) => {
                     // these are all inconsistent states:
                     // - Failed -> non recoverable batch. Chain should have been removed
                     // - Processing -> `self.current_processing_batch` is None
@@ -779,7 +779,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     crit!("batch indicates inconsistent chain state while advancing chain")
                 }
                 BatchState::AwaitingProcessing(..) => {}
-                BatchState::Processing(_) => {
+                BatchState::Processing(..) => {
                     debug!(batch = %id, %batch, "Advancing chain while processing a batch");
                     if let Some(processing_id) = self.current_processing_batch
                         && id >= processing_id

@@ -293,6 +293,9 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
 
         // TODO(das): should use peer group here https://github.com/sigp/lighthouse/issues/6258
         let received = blocks.len();
+        if let Some(duration) = batch.time_since_downloading() {
+            metrics::observe_duration(&metrics::SYNCING_CHAIN_BATCH_DOWNLOADING, duration);
+        }
         batch.download_completed(blocks, *peer_id)?;
         let awaiting_batches = batch_id
             .saturating_sub(self.optimistic_start.unwrap_or(self.processing_target))
@@ -343,6 +346,15 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
             &metrics::SYNCING_CHAIN_BATCH_AWAITING_PROCESSING,
             duration_in_awaiting_processing,
         );
+        let awaiting_processing_count = self
+            .batches
+            .values()
+            .filter(|b| matches!(b.state(), BatchState::AwaitingProcessing(..)))
+            .count();
+        metrics::observe(
+            &metrics::SYNCING_CHAIN_BATCH_AWAITING_PROCESSING_COUNT,
+            awaiting_processing_count as f64,
+        );
 
         let process_id = ChainSegmentProcessId::RangeBatchId(self.id, batch_id);
         self.current_processing_batch = Some(batch_id);
@@ -392,7 +404,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 // Batches can be in `AwaitingDownload` state if there weren't good data column subnet
                 // peers to send the request to.
                 BatchState::AwaitingDownload => return Ok(KeepChain),
-                BatchState::Processing(_) | BatchState::Failed => {
+                BatchState::Processing(..) | BatchState::Failed => {
                     // these are all inconsistent states:
                     // - Processing -> `self.current_processing_batch` is None
                     // - Failed -> non recoverable batch. For an optimistic batch, it should
@@ -429,7 +441,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 // Batches can be in `AwaitingDownload` state if there weren't good data column subnet
                 // peers to send the request to.
                 BatchState::AwaitingDownload => return Ok(KeepChain),
-                BatchState::Failed | BatchState::Processing(_) => {
+                BatchState::Failed | BatchState::Processing(..) => {
                     // these are all inconsistent states:
                     // - Failed -> non recoverable batch. Chain should have been removed
                     // - AwaitingDownload -> A recoverable failed batch should have been
@@ -514,6 +526,10 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 batch.state(),
             ))
         })?;
+
+        if let Some(duration) = batch.time_since_processing() {
+            metrics::observe_duration(&metrics::SYNCING_CHAIN_BATCH_PROCESSING, duration);
+        }
 
         // Log the process result and the batch for debugging purposes.
         debug!(
@@ -732,7 +748,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                     crit!("batch indicates inconsistent chain state while advancing chain")
                 }
                 BatchState::AwaitingProcessing(..) => {}
-                BatchState::Processing(_) => {
+                BatchState::Processing(..) => {
                     debug!(batch = %id, %batch, "Advancing chain while processing a batch");
                     if let Some(processing_id) = self.current_processing_batch
                         && id <= processing_id
@@ -934,9 +950,8 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 %request_id,
                 "Batch download error"
             );
-            if let BatchOperationOutcome::Failed { blacklist } =
-                batch.download_failed(Some(*peer_id))?
-            {
+            let dl_outcome = batch.download_failed(Some(*peer_id))?;
+            if let BatchOperationOutcome::Failed { blacklist } = dl_outcome {
                 return Err(RemoveChain::ChainFailed {
                     blacklist,
                     failing_batch: batch_id,
