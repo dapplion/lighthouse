@@ -177,9 +177,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .map(|epoch| epoch.start_slot(T::EthSpec::slots_per_epoch()));
 
         let blob_info = self.store.get_blob_info();
-        let oldest_blob_slot = match blob_info.oldest_blob_slot {
-            Some(slot) => slot,
-            None => return Ok(result),
+        let Some(oldest_blob_slot) = blob_info.oldest_blob_slot else {
+            return Ok(result);
         };
 
         for res in self
@@ -248,9 +247,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         };
 
         let data_column_info = self.store.get_data_column_info();
-        let oldest_data_column_slot = match data_column_info.oldest_data_column_slot {
-            Some(slot) => slot,
-            None => return Ok(result),
+        let Some(oldest_data_column_slot) = data_column_info.oldest_data_column_slot else {
+            return Ok(result);
         };
 
         // Get custody columns for the current head epoch. Historical epochs may have different
