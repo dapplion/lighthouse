@@ -22,10 +22,10 @@
 //! era_dir.import_all(&store, &spec)?;
 //! ```
 
+use crate::BeaconForkChoiceStore;
 use crate::beacon_chain::FORK_CHOICE_DB_KEY;
 use crate::beacon_fork_choice_store::PersistedForkChoiceStore;
 use crate::persisted_fork_choice::PersistedForkChoice;
-use crate::BeaconForkChoiceStore;
 use bls::FixedBytesExtended;
 use fork_choice::ForkChoice;
 use rayon::prelude::*;
@@ -318,9 +318,8 @@ impl EraFileDir {
             proposer_boost_root: Hash256::zero(),
             equivocating_indices: BTreeSet::new(),
         };
-        let fc_store =
-            BeaconForkChoiceStore::from_persisted(persisted_fc_store, store.clone())
-                .map_err(|e| format!("failed to create fork choice store: {e:?}"))?;
+        let fc_store = BeaconForkChoiceStore::from_persisted(persisted_fc_store, store.clone())
+            .map_err(|e| format!("failed to create fork choice store: {e:?}"))?;
         let fork_choice = ForkChoice::from_anchor(
             fc_store,
             head_block_root,

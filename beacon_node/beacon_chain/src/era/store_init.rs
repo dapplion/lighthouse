@@ -4,11 +4,11 @@
 //! can import ERA files and then [`crate::builder::BeaconChainBuilder::resume_from_db`] can boot
 //! a chain from the result.
 
-use bls::FixedBytesExtended;
 use crate::beacon_chain::{BEACON_CHAIN_DB_KEY, FORK_CHOICE_DB_KEY};
 use crate::persisted_beacon_chain::PersistedBeaconChain;
 use crate::persisted_fork_choice::PersistedForkChoice;
 use crate::{BeaconForkChoiceStore, BeaconSnapshot};
+use bls::FixedBytesExtended;
 use fork_choice::ForkChoice;
 use std::sync::Arc;
 use store::{HotColdDB, ItemStore, StoreItem};
@@ -56,7 +56,12 @@ pub fn init_genesis_store<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     let mut batch = vec![];
     batch.push(
         store
-            .init_anchor_info(signed_block.parent_root(), Slot::new(0), Slot::new(0), false)
+            .init_anchor_info(
+                signed_block.parent_root(),
+                Slot::new(0),
+                Slot::new(0),
+                false,
+            )
             .map_err(|e| format!("failed to init anchor: {e:?}"))?,
     );
     batch.push(

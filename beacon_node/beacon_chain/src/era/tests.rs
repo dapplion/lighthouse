@@ -61,7 +61,8 @@ fn load_spec() -> ChainSpec {
 }
 
 fn load_metadata() -> Metadata {
-    let data = std::fs::read_to_string(vectors().join("metadata.json")).expect("read metadata.json");
+    let data =
+        std::fs::read_to_string(vectors().join("metadata.json")).expect("read metadata.json");
     serde_json::from_str(&data).expect("parse metadata.json")
 }
 
@@ -129,7 +130,9 @@ fn store_with_genesis(spec: &ChainSpec) -> TestStore {
     let mut genesis = load_genesis_state(spec);
     let root = genesis.canonical_root().expect("hash");
     let mut ops = vec![];
-    store.store_cold_state(&root, &genesis, &mut ops).expect("ops");
+    store
+        .store_cold_state(&root, &genesis, &mut ops)
+        .expect("ops");
     store.cold_db.do_atomically(ops).expect("write");
     store
 }
@@ -176,7 +179,10 @@ fn assert_import_fails(corrupt_file: &str, target_pattern: &str, target_era: u64
     let err = era_dir
         .import_era_file(&store, target_era, &spec)
         .unwrap_err();
-    assert!(err.contains(expected), "expected \"{expected}\", got: {err}");
+    assert!(
+        err.contains(expected),
+        "expected \"{expected}\", got: {err}"
+    );
 }
 
 /// Assert that EraFileDir::new fails with a corrupt file.
@@ -191,7 +197,10 @@ fn assert_init_fails(corrupt_file: &str, target_pattern: &str, expected: &str) {
         &spec,
     )
     .unwrap_err();
-    assert!(err.contains(expected), "expected \"{expected}\", got: {err}");
+    assert!(
+        err.contains(expected),
+        "expected \"{expected}\", got: {err}"
+    );
 }
 
 // Single #[test] to avoid nextest parallel download races.
@@ -315,7 +324,12 @@ fn rejects_corrupted_reference_state() {
 }
 
 fn rejects_wrong_era_content() {
-    assert_import_fails("era3-wrong-content.era", "-00003-", 3, "era state slot mismatch");
+    assert_import_fails(
+        "era3-wrong-content.era",
+        "-00003-",
+        3,
+        "era state slot mismatch",
+    );
 }
 
 fn rejects_wrong_era_root() {
@@ -332,7 +346,12 @@ fn rejects_corrupt_block_summary() {
 }
 
 fn rejects_wrong_block_root() {
-    assert_import_fails("era2-wrong-block-root.era", "-00002-", 2, "block root mismatch");
+    assert_import_fails(
+        "era2-wrong-block-root.era",
+        "-00002-",
+        2,
+        "block root mismatch",
+    );
 }
 
 fn rejects_mutated_reference_state_with_trusted_root() {
@@ -398,9 +417,9 @@ fn chain_boots_from_imported_db(store: Arc<TestStore>, spec: &ChainSpec, metadat
     // Boot via resume_from_db — the same path lighthouse bn uses on restart.
     // The slot clock must be at or beyond the head slot, as the real beacon node would be.
     // The ERA boundary slot is one past the head block slot (the split point).
-    let era_boundary_slot = (metadata.head_slot / MinimalEthSpec::slots_per_historical_root() as u64
-        + 1)
-        * MinimalEthSpec::slots_per_historical_root() as u64;
+    let era_boundary_slot =
+        (metadata.head_slot / MinimalEthSpec::slots_per_historical_root() as u64 + 1)
+            * MinimalEthSpec::slots_per_historical_root() as u64;
     let genesis_time = Duration::from_secs(spec.min_genesis_time);
     let slot_duration = Duration::from_secs(spec.seconds_per_slot);
     let clock_time = genesis_time + slot_duration * era_boundary_slot as u32;
