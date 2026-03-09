@@ -43,9 +43,7 @@ use super::range_sync::{EPOCHS_PER_BATCH, RangeSync, RangeSyncType};
 use crate::network_beacon_processor::{ChainSegmentProcessId, NetworkBeaconProcessor};
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
-use crate::sync::block_lookups::{
-    BlobRequestState, BlockComponent, BlockRequestState, CustodyRequestState, DownloadResult,
-};
+use crate::sync::block_lookups::{BlockComponent, DownloadResult};
 use crate::sync::custody_backfill_sync::CustodyBackFillSync;
 use crate::sync::network_context::{PeerGroup, RpcResponseResult};
 use beacon_chain::block_verification_types::AsBlock;
@@ -894,9 +892,33 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             }),
                         );
                     }
-                    // TODO(gloas) support gloas data column variant
+                    // In Gloas, data columns identify the beacon block root but do not carry
+                    // parent root. Treat as an unknown block-root trigger (attestation-style).
+                    // The peer is marked as data-capable since it sent us a data column.
                     DataColumnSidecar::Gloas(_) => {
-                        error!("Gloas variant not yet supported")
+                        match self.should_search_for_block(Some(data_column_slot), &peer_id) {
+                            Ok(_) => {
+                                if self.block_lookups.search_unknown_block_with_data_peer(
+                                    block_root,
+                                    &[peer_id],
+                                    &mut self.network,
+                                ) {
+                                    debug!(
+                                        ?block_root,
+                                        "Created unknown block lookup from Gloas data column"
+                                    );
+                                } else {
+                                    debug!(?block_root, "No lookup created from Gloas data column");
+                                }
+                            }
+                            Err(reason) => {
+                                debug!(
+                                    %block_root,
+                                    reason,
+                                    "Ignoring Gloas data column unknown block request"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1137,14 +1159,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
         if let Some(resp) = self.network.on_single_block_response(id, peer_id, block) {
-            self.block_lookups
-                .on_download_response::<BlockRequestState<T::EthSpec>>(
-                    id,
-                    resp.map(|(value, seen_timestamp)| {
-                        (value, PeerGroup::from_single(peer_id), seen_timestamp)
-                    }),
-                    &mut self.network,
-                )
+            self.block_lookups.on_block_download_response(
+                id,
+                resp.map(|(value, seen_timestamp)| {
+                    (value, PeerGroup::from_single(peer_id), seen_timestamp)
+                }),
+                &mut self.network,
+            )
         }
     }
 
@@ -1207,14 +1228,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         blob: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
     ) {
         if let Some(resp) = self.network.on_single_blob_response(id, peer_id, blob) {
-            self.block_lookups
-                .on_download_response::<BlobRequestState<T::EthSpec>>(
-                    id,
-                    resp.map(|(value, seen_timestamp)| {
-                        (value, PeerGroup::from_single(peer_id), seen_timestamp)
-                    }),
-                    &mut self.network,
-                )
+            self.block_lookups.on_blob_download_response(
+                id,
+                resp.map(|(value, seen_timestamp)| {
+                    (value, PeerGroup::from_single(peer_id), seen_timestamp)
+                }),
+                &mut self.network,
+            )
         }
     }
 
@@ -1306,11 +1326,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         response: CustodyByRootResult<T::EthSpec>,
     ) {
         self.block_lookups
-            .on_download_response::<CustodyRequestState<T::EthSpec>>(
-                requester.0,
-                response,
-                &mut self.network,
-            );
+            .on_custody_download_response(requester.0, response, &mut self.network);
     }
 
     /// Handles receiving a response for a range sync request that should have both blocks and

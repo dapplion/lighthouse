@@ -927,6 +927,20 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         Ok(LookupRequestResult::RequestSent(id.req_id))
     }
 
+    /// Placeholder for payload envelope lookup requests.
+    ///
+    /// This intentionally returns `NoRequestNeeded` until payload-by-root RPC is wired.
+    pub fn payload_lookup_request(
+        &mut self,
+        _lookup_id: SingleLookupId,
+        _lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
+        _block_root: Hash256,
+    ) -> Result<LookupRequestResult, RpcRequestSendError> {
+        Ok(LookupRequestResult::NoRequestNeeded(
+            "payload lookup rpc not wired",
+        ))
+    }
+
     /// Request necessary blobs for `block_root`. Requests only the necessary blobs by checking:
     /// - If we have a downloaded but not yet processed block
     /// - If the da_checker has a pending block
