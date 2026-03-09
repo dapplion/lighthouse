@@ -157,7 +157,10 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
             Some(DataColumnsState::Complete(..)) => Err(format!(
                 "duplicate custody columns for block root {block_root:?}"
             )),
-            Some(DataColumnsState::Requesting) | None => {
+            None => Err(format!(
+                "received custody columns for unregistered block root {block_root:?}"
+            )),
+            Some(DataColumnsState::Requesting) => {
                 custody_columns_by_root
                     .insert(block_root, DataColumnsState::Complete(columns, peer_group));
                 Ok(())
@@ -185,6 +188,8 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
             return Ok(());
         };
 
+        let mut errors = vec![];
+
         for block in blocks {
             if block.num_expected_blobs() == 0 {
                 continue;
@@ -208,24 +213,44 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
                     debug!(?block_root, %id, "Initiated custody-by-root for range block");
                 }
                 Ok(LookupRequestResult::NoRequestNeeded(reason)) => {
-                    return Err(format!(
-                        "Custody request for {block_root:?} not needed: {reason}"
-                    ));
+                    // All columns already available (e.g. arrived via gossip). Mark as complete.
+                    debug!(?block_root, %id, %reason, "Custody-by-root not needed for range block");
+                    custody_columns_by_root.insert(
+                        block_root,
+                        DataColumnsState::Complete(vec![], PeerGroup::from_set(Default::default())),
+                    );
                 }
                 Ok(LookupRequestResult::Pending(reason)) => {
-                    return Err(format!(
+                    errors.push(format!(
                         "Custody request for {block_root:?} pending: {reason}"
                     ));
                 }
                 Err(e) => {
-                    return Err(format!(
+                    errors.push(format!(
                         "Failed to initiate custody for {block_root:?}: {e:?}"
                     ));
                 }
             }
         }
 
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    /// Registers a block root as awaiting custody columns. Used in tests to simulate
+    /// the effect of `continue_requests` without requiring a full network context.
+    #[cfg(test)]
+    pub fn register_custody_block(&mut self, block_root: Hash256) {
+        if let RangeBlockDataRequest::DataColumns {
+            custody_columns_by_root,
+            ..
+        } = &mut self.block_data_request
+        {
+            custody_columns_by_root.insert(block_root, DataColumnsState::Requesting);
+        }
     }
 
     /// Attempts to construct RPC blocks from all received components.
@@ -595,7 +620,11 @@ mod tests {
         )
         .unwrap();
 
-        // Add custody columns per block root (upsert: no separate initiation needed)
+        // Register block roots as awaiting custody, then add columns
+        for (block, _) in &blocks {
+            let block_root = beacon_chain::get_block_root(block);
+            info.register_custody_block(block_root);
+        }
         for (block, data_columns) in &blocks {
             let block_root = beacon_chain::get_block_root(block);
             let custody_columns: Vec<_> = data_columns

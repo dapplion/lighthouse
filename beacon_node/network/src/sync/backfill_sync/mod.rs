@@ -312,7 +312,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         &mut self,
         network: &mut SyncNetworkContext<T>,
         batch_id: BatchId,
-        peer_id: &PeerId,
+        peer_id: Option<&PeerId>,
         request_id: Id,
         err: RpcResponseError,
     ) -> Result<(), BackFillError> {
@@ -339,7 +339,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 return Ok(());
             }
             debug!(batch_epoch = %batch_id, error = ?err, "Batch download failed");
-            match batch.download_failed(Some(*peer_id)) {
+            match batch.download_failed(peer_id.copied()) {
                 Err(e) => self.fail_sync(BackFillError::BatchInvalidState(batch_id, e.0)),
                 Ok(BatchOperationOutcome::Failed { blacklist: _ }) => {
                     self.fail_sync(BackFillError::BatchDownloadFailed(batch_id))

@@ -908,7 +908,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         &mut self,
         network: &mut SyncNetworkContext<T>,
         batch_id: BatchId,
-        peer_id: &PeerId,
+        peer_id: Option<&PeerId>,
         request_id: Id,
         err: RpcResponseError,
     ) -> ProcessingResult {
@@ -935,7 +935,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 debug!(
                     batch_epoch = %batch_id,
                     batch_state = ?batch.state(),
-                    %peer_id,
+                    ?peer_id,
                     %request_id,
                     ?batch_state,
                     "Batch not expecting block"
@@ -946,11 +946,11 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
                 batch_epoch = %batch_id,
                 batch_state = ?batch.state(),
                 error = ?err,
-                %peer_id,
+                ?peer_id,
                 %request_id,
                 "Batch download error"
             );
-            let dl_outcome = batch.download_failed(Some(*peer_id))?;
+            let dl_outcome = batch.download_failed(peer_id.copied())?;
             if let BatchOperationOutcome::Failed { blacklist } = dl_outcome {
                 return Err(RemoveChain::ChainFailed {
                     blacklist,
@@ -964,7 +964,7 @@ impl<T: BeaconChainTypes> SyncingChain<T> {
         } else {
             debug!(
                 batch_epoch = %batch_id,
-                %peer_id,
+                ?peer_id,
                 %request_id,
                 batch_state,
                 "Batch not found"

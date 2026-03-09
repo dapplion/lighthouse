@@ -301,7 +301,7 @@ where
     pub fn inject_error(
         &mut self,
         network: &mut SyncNetworkContext<T>,
-        peer_id: PeerId,
+        peer_id: Option<PeerId>,
         batch_id: BatchId,
         chain_id: ChainId,
         request_id: Id,
@@ -309,7 +309,7 @@ where
     ) {
         // check that this request is pending
         match self.chains.call_by_id(chain_id, |chain| {
-            chain.inject_error(network, batch_id, &peer_id, request_id, err)
+            chain.inject_error(network, batch_id, peer_id.as_ref(), request_id, err)
         }) {
             Ok((removed_chain, sync_type)) => {
                 if let Some((removed_chain, remove_reason)) = removed_chain {
@@ -388,7 +388,16 @@ where
             .call_by_id(chain_id, |chain| chain.request_batches(network))
         {
             Ok((None, _)) => {}
-            _ => {
+            Ok((Some((removed_chain, remove_reason)), sync_type)) => {
+                self.on_chain_removed(
+                    removed_chain,
+                    sync_type,
+                    remove_reason,
+                    network,
+                    "trigger_batch_downloads",
+                );
+            }
+            Err(_) => {
                 debug!(%chain_id, "trigger_batch_downloads for removed chain");
             }
         }
