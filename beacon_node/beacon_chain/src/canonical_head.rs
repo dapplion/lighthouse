@@ -1497,6 +1497,16 @@ fn observe_head_block_delays<E: EthSpec, S: SlotClock>(
 }
 
 /// Look up execution block hashes for the head, justified, and finalized blocks from fork choice.
+///
+/// Each lookup can only fail if the block is unknown to fork choice, which should not happen
+/// during normal operation since:
+///
+/// - The head root was just returned by `get_head`, so it must exist.
+/// - The justified and finalized roots are maintained as invariants by fork choice — they always
+///   reference blocks that are ancestors of the head and therefore present in the proto-array.
+///
+/// A missing block indicates a bug (e.g. corruption or a logic error in fork choice pruning).
+/// We return an error rather than panicking so the caller can log the issue and continue.
 fn forkchoice_update_parameters<T: BeaconChainTypes>(
     fork_choice: &BeaconForkChoice<T>,
     head_root: Hash256,
