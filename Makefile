@@ -297,7 +297,8 @@ lint:
 		-A clippy::vec-init-then-push \
 		-A clippy::question-mark \
 		-A clippy::uninlined-format-args \
-		-A clippy::enum_variant_names
+		-A clippy::enum_variant_names \
+		-A clippy::result_large_err
 
 # Lints the code using Clippy and automatically fix some simple compiler warnings.
 lint-fix:
@@ -321,8 +322,8 @@ make-ef-tests-nightly:
 
 # Verifies that crates compile with fuzzing features enabled
 arbitrary-fuzz:
-	cargo check -p state_processing --features arbitrary,$(TEST_FEATURES)
-	cargo check -p slashing_protection --features arbitrary,$(TEST_FEATURES)
+	cargo check -p state_processing --features arbitrary-fuzz,$(TEST_FEATURES)
+	cargo check -p slashing_protection --features arbitrary-fuzz,$(TEST_FEATURES)
 
 # Runs cargo audit (Audit Cargo.lock files for crates with security vulnerabilities reported to the RustSec Advisory Database)
 audit: install-audit audit-CI
