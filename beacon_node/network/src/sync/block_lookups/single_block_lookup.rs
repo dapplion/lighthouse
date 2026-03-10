@@ -129,6 +129,13 @@ impl<E: EthSpec> BlockRequest<E> {
         }
     }
 
+    fn new_with_processing_failures(block_root: Hash256, failed_processing: u8) -> Self {
+        BlockRequest::Downloading {
+            block_root,
+            state: SingleLookupRequestState::new_with_processing_failures(failed_processing),
+        }
+    }
+
     fn peek_block(&self) -> Option<&Arc<SignedBeaconBlock<E>>> {
         match self {
             BlockRequest::Downloading { state, .. } => state.peek_downloaded_data(),
@@ -404,6 +411,9 @@ pub struct SingleBlockLookup<T: BeaconChainTypes> {
     awaiting_parent: Option<AwaitingParent>,
     created: Instant,
     pub(crate) span: Span,
+
+    // Retry tracking
+    failed_processing: u8,
 }
 
 impl<T: BeaconChainTypes> SingleBlockLookup<T> {
@@ -443,6 +453,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             peers: Arc::new(RwLock::new(peer_set)),
             awaiting_parent,
             created: Instant::now(),
+            failed_processing: 0,
             span: lookup_span,
         }
     }
@@ -465,7 +476,11 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
     /// Reset the status of all requests (used on block processing failure)
     pub fn reset_requests(&mut self) {
-        self.block_request = BlockRequest::new(self.block_root);
+        // Increment processing failure counter (we're resetting due to processing error)
+        self.failed_processing = self.failed_processing.saturating_add(1);
+        // Reset to fresh Downloading state with the updated counter
+        self.block_request =
+            BlockRequest::new_with_processing_failures(self.block_root, self.failed_processing);
         self.data_request = DataRequest::WaitingForBlock;
         self.payload_request = PayloadRequest::WaitingForBlock;
     }
@@ -569,7 +584,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     }
 
                     let parent_root = block.parent_root();
-                    if !cx.chain.block_is_known_to_fork_choice(&parent_root) {
+                    // Zero hash is the parent of the genesis block — not a real block.
+                    if parent_root != Hash256::ZERO
+                        && !cx.chain.block_is_known_to_fork_choice(&parent_root)
+                    {
                         let awaiting_parent = if let Ok(bid) =
                             block.message().body().signed_execution_payload_bid()
                         {
@@ -1004,6 +1022,14 @@ impl<T: Clone> SingleLookupRequestState<T> {
         Self {
             state: DownloadState::AwaitingDownload("not started"),
             failed_processing: 0,
+            failed_downloading: 0,
+        }
+    }
+
+    fn new_with_processing_failures(failed_processing: u8) -> Self {
+        Self {
+            state: DownloadState::AwaitingDownload("reset after processing failure"),
+            failed_processing,
             failed_downloading: 0,
         }
     }
