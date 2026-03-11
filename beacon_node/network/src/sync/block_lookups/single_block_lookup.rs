@@ -585,22 +585,69 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
                     let parent_root = block.parent_root();
                     // Zero hash is the parent of the genesis block — not a real block.
-                    if parent_root != Hash256::ZERO
-                        && !cx.chain.block_is_known_to_fork_choice(&parent_root)
-                    {
-                        let awaiting_parent = if let Ok(bid) =
-                            block.message().body().signed_execution_payload_bid()
-                        {
-                            AwaitingParent::PostGloas(parent_root, bid.message.parent_block_hash)
-                        } else {
-                            AwaitingParent::PreGloas(parent_root)
+                    if parent_root != Hash256::ZERO {
+                        let Some(_parent_proto_block) = cx
+                            .chain
+                            .canonical_head
+                            .fork_choice_read_lock()
+                            .get_block(&parent_root)
+                        else {
+                            let awaiting_parent = if let Ok(bid) =
+                                block.message().body().signed_execution_payload_bid()
+                            {
+                                AwaitingParent::PostGloas(
+                                    parent_root,
+                                    bid.message.parent_block_hash,
+                                )
+                            } else {
+                                AwaitingParent::PreGloas(parent_root)
+                            };
+                            self.awaiting_parent = Some(awaiting_parent);
+                            return Ok(LookupResult::ParentUnknown {
+                                awaiting_parent,
+                                block_root: self.block_root,
+                                peers: self.all_peers(),
+                            });
                         };
-                        self.awaiting_parent = Some(awaiting_parent);
-                        return Ok(LookupResult::ParentUnknown {
-                            awaiting_parent,
-                            block_root: self.block_root,
-                            peers: self.all_peers(),
-                        });
+                        // post-gloas we need to also check if the envelope is known to fork choice
+                        if let Ok(child_bid) = block.message().body().signed_execution_payload_bid()
+                        {
+                            // TODO(gloas): after fork-choice: use parent_proto_block.execution_payload_block_hash here
+                            let parent_is_full = cx
+                                .chain
+                                .get_blinded_block(&parent_root)
+                                .map(|maybe_parent_block| {
+                                    if let Some(parent_block) = maybe_parent_block {
+                                        parent_block
+                                            .message()
+                                            .body()
+                                            .signed_execution_payload_bid()
+                                            .map(|parent_bid| {
+                                                parent_bid.message.block_hash
+                                                    == child_bid.message.parent_block_hash
+                                            })
+                                            .unwrap_or(false)
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false);
+
+                            if parent_is_full
+                                && !cx.chain.envelope_is_known_to_fork_choice(&parent_root)
+                            {
+                                let awaiting_parent = AwaitingParent::PostGloas(
+                                    parent_root,
+                                    child_bid.message.parent_block_hash,
+                                );
+                                self.awaiting_parent = Some(awaiting_parent);
+                                return Ok(LookupResult::ParentUnknown {
+                                    awaiting_parent,
+                                    block_root: self.block_root,
+                                    peers: self.all_peers(),
+                                });
+                            }
+                        }
                     }
 
                     let block = block.clone();
