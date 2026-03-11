@@ -24,7 +24,9 @@ Each lookup contains three independent streams with their own lifecycle:
 ```
 BLOCK stream:
   1. download block (has peers from lookup creation)
-  2. wait for parent processed (block_is_known_to_fork_choice)
+  2. wait for parent ready:
+     - Pre-Gloas: parent block is in fork choice (block_is_known_to_fork_choice)
+     - Gloas: parent block is in fork choice AND (parent is empty OR parent envelope imported)
   3. send block for processing
   4. block processing done
 
