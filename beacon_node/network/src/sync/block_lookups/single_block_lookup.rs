@@ -1034,6 +1034,8 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     /// Remove peer from available peers.
     pub fn remove_peer(&mut self, peer_id: &PeerId) {
         self.peers.write().remove(peer_id);
+        self.data_peers.write().remove(peer_id);
+        self.payload_peers.write().remove(peer_id);
     }
 
     /// Returns true if this lookup has zero peers
@@ -1054,6 +1056,8 @@ enum DownloadState<T: Clone> {
     AwaitingDownload(/* reason */ &'static str),
     Downloading(ReqId),
     Downloaded(DownloadResult<T>),
+    /// Download completed with no request needed (e.g. all components already imported)
+    Completed(/* reason */ &'static str),
 }
 
 /// Object representing the state of a single block or blob lookup request.
@@ -1227,7 +1231,7 @@ impl<T: Clone> SingleLookupRequestState<T> {
     fn on_completed_request(&mut self, reason: &'static str) -> Result<(), LookupRequestError> {
         match &self.state {
             DownloadState::AwaitingDownload { .. } => {
-                self.state = DownloadState::AwaitingDownload(reason);
+                self.state = DownloadState::Completed(reason);
                 Ok(())
             }
             other => Err(LookupRequestError::BadState(format!(
@@ -1257,6 +1261,7 @@ impl<T: Clone> std::fmt::Debug for DownloadState<T> {
             Self::AwaitingDownload(reason) => write!(f, "AwaitingDownload({})", reason),
             Self::Downloading(req_id) => write!(f, "Downloading({:?})", req_id),
             Self::Downloaded(_) => write!(f, "Downloaded()"),
+            Self::Completed(reason) => write!(f, "Completed({})", reason),
         }
     }
 }
