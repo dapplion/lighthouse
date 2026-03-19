@@ -182,6 +182,8 @@ pub struct Block {
     /// post-Gloas fields
     pub execution_payload_parent_hash: Option<ExecutionBlockHash>,
     pub execution_payload_block_hash: Option<ExecutionBlockHash>,
+    /// The proposer index of this block (only needed for Gloas equivocation checks).
+    pub proposer_index: Option<u64>,
 }
 
 impl Block {
@@ -473,6 +475,7 @@ impl ProtoArrayForkChoice {
             unrealized_finalized_checkpoint: Some(finalized_checkpoint),
             execution_payload_parent_hash,
             execution_payload_block_hash,
+            proposer_index: None, // Genesis/finalized block doesn't need proposer_index
         };
 
         proto_array
@@ -965,6 +968,7 @@ impl ProtoArrayForkChoice {
             unrealized_finalized_checkpoint: block.unrealized_finalized_checkpoint(),
             execution_payload_parent_hash: None,
             execution_payload_block_hash: block.execution_payload_block_hash().ok(),
+            proposer_index: block.proposer_index().ok(),
         })
     }
 
@@ -1354,6 +1358,7 @@ mod test_compute_deltas {
                     unrealized_finalized_checkpoint: Some(genesis_checkpoint),
                     execution_payload_parent_hash: None,
                     execution_payload_block_hash: None,
+                    proposer_index: None,
                 },
                 genesis_slot + 1,
                 genesis_checkpoint,
@@ -1382,6 +1387,7 @@ mod test_compute_deltas {
                     unrealized_finalized_checkpoint: None,
                     execution_payload_parent_hash: None,
                     execution_payload_block_hash: None,
+                    proposer_index: None,
                 },
                 genesis_slot + 1,
                 genesis_checkpoint,
@@ -1517,6 +1523,7 @@ mod test_compute_deltas {
                         unrealized_finalized_checkpoint: Some(genesis_checkpoint),
                         execution_payload_parent_hash: None,
                         execution_payload_block_hash: None,
+                        proposer_index: None,
                     },
                     Slot::from(block.slot),
                     genesis_checkpoint,
