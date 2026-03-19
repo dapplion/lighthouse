@@ -1,6 +1,7 @@
 use super::*;
 use crate::decode::{ssz_decode_file, ssz_decode_file_with, ssz_decode_state, yaml_decode_file};
 use ::fork_choice::{PayloadVerificationStatus, ProposerHeadError};
+
 use beacon_chain::beacon_proposer_cache::compute_proposer_duties_from_head;
 use beacon_chain::blob_verification::GossipBlobError;
 use beacon_chain::block_verification_types::LookupBlock;
@@ -340,13 +341,65 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
             return Err(Error::SkippedKnownFailure);
         }
 
+        // Debug: only run a specific case if EF_TEST_DEBUG_CASE is set
+        if let Ok(target) = std::env::var("EF_TEST_DEBUG_CASE") {
+            if !self.description.contains(&target) {
+                return Err(Error::SkippedKnownFailure);
+            }
+            if let Ok(target_fork) = std::env::var("EF_TEST_DEBUG_FORK")
+                && format!("{:?}", fork_name) != target_fork
+            {
+                return Err(Error::SkippedKnownFailure);
+            }
+        }
+
         let tester = Tester::new(self, testing_spec::<E>(fork_name))?;
 
-        for step in &self.steps {
-            match step {
-                Step::Tick { tick } => tester.set_tick(*tick),
+        for (step_index, step) in self.steps.iter().enumerate() {
+            let step_label = match step {
+                Step::Tick { tick } => format!("step {}: tick({})", step_index, tick),
                 Step::ValidBlock { block } => {
-                    tester.process_block_and_blobs(block.clone(), None, None, true)?
+                    format!("step {}: block(slot={})", step_index, block.slot())
+                }
+                Step::MaybeValidBlockAndBlobs { block, valid, .. } => {
+                    format!(
+                        "step {}: block(slot={}, valid={})",
+                        step_index,
+                        block.slot(),
+                        valid
+                    )
+                }
+                Step::Attestation { .. } => format!("step {}: attestation", step_index),
+                Step::AttesterSlashing { .. } => format!("step {}: attester_slashing", step_index),
+                Step::PowBlock { .. } => format!("step {}: pow_block", step_index),
+                Step::OnPayloadInfo { block_hash, .. } => {
+                    format!("step {}: on_payload_info({})", step_index, block_hash)
+                }
+                Step::Checks { .. } => format!("step {}: checks", step_index),
+                Step::MaybeValidBlockAndColumns { block, valid, .. } => {
+                    format!(
+                        "step {}: block_and_columns(slot={}, valid={})",
+                        step_index,
+                        block.slot(),
+                        valid
+                    )
+                }
+                Step::OnExecutionPayload { valid, .. } => {
+                    format!("step {}: on_execution_payload(valid={})", step_index, valid)
+                }
+            };
+
+            if std::env::var("EF_TEST_DEBUG_FC").is_ok() {
+                eprintln!(">>> {}", step_label);
+            }
+
+            let result: Result<(), Error> = (|| match step {
+                Step::Tick { tick } => {
+                    tester.set_tick(*tick);
+                    Ok(())
+                }
+                Step::ValidBlock { block } => {
+                    tester.process_block_and_blobs(block.clone(), None, None, true)
                 }
                 Step::MaybeValidBlockAndBlobs {
                     block,
@@ -358,12 +411,16 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
                     blobs.clone(),
                     proofs.clone(),
                     *valid,
-                )?,
-                Step::Attestation { attestation } => tester.process_attestation(attestation)?,
+                ),
+                Step::Attestation { attestation } => tester.process_attestation(attestation),
                 Step::AttesterSlashing { attester_slashing } => {
-                    tester.process_attester_slashing(attester_slashing.to_ref())
+                    tester.process_attester_slashing(attester_slashing.to_ref());
+                    Ok(())
                 }
-                Step::PowBlock { pow_block } => tester.process_pow_block(pow_block),
+                Step::PowBlock { pow_block } => {
+                    tester.process_pow_block(pow_block);
+                    Ok(())
+                }
                 Step::OnPayloadInfo {
                     block_hash,
                     payload_status,
@@ -371,6 +428,7 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
                     let el = tester.harness.mock_execution_layer.as_ref().unwrap();
                     el.server
                         .set_payload_statuses(*block_hash, payload_status.clone().into());
+                    Ok(())
                 }
                 Step::Checks { checks } => {
                     let Checks {
@@ -436,22 +494,32 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
                     if let Some(expected_status) = head_payload_status {
                         tester.check_head_payload_status(*expected_status)?;
                     }
+
+                    Ok(())
                 }
 
                 Step::MaybeValidBlockAndColumns {
                     block,
                     columns,
                     valid,
-                } => {
-                    tester.process_block_and_columns(block.clone(), columns.clone(), *valid)?;
-                }
+                } => tester.process_block_and_columns(block.clone(), columns.clone(), *valid),
                 Step::OnExecutionPayload {
                     execution_payload,
                     valid,
                 } => {
-                    tester
-                        .process_execution_payload(execution_payload.beacon_block_root(), *valid)?;
+                    tester.process_execution_payload(execution_payload.beacon_block_root(), *valid)
                 }
+            })();
+
+            if let Err(e) = result {
+                return Err(Error::NotEqual(format!(
+                    "failed at {} | {}",
+                    step_label,
+                    match e {
+                        Error::NotEqual(msg) => msg,
+                        other => format!("{:?}", other),
+                    }
+                )));
             }
         }
 
@@ -622,6 +690,18 @@ impl<E: EthSpec> Tester<E> {
             self.apply_invalid_block(&block)?;
         }
 
+        // Per spec test runner: an on_block step implies receiving block's attestations
+        // and attester slashings.
+        if success {
+            for attestation in block.message().body().attestations() {
+                let att = attestation.clone_as_attestation();
+                let _ = self.process_attestation(&att);
+            }
+            for attester_slashing in block.message().body().attester_slashings() {
+                self.process_attester_slashing(attester_slashing);
+            }
+        }
+
         Ok(())
     }
 
@@ -710,6 +790,32 @@ impl<E: EthSpec> Tester<E> {
 
         if !valid && blobs.is_none() {
             self.apply_invalid_block(&block)?;
+        }
+
+        // Per spec test runner: an on_block step implies receiving block's attestations
+        // and attester slashings. Apply them to fork choice.
+        if success {
+            let att_count = block.message().body().attestations().count();
+            if std::env::var("EF_TEST_DEBUG_FC").is_ok() {
+                eprintln!("  processing {} in-block attestations", att_count);
+            }
+            for attestation in block.message().body().attestations() {
+                let att = attestation.clone_as_attestation();
+                if let Err(e) = self.process_attestation(&att) {
+                    if std::env::var("EF_TEST_DEBUG_FC").is_ok() {
+                        eprintln!("  in-block attestation failed: {:?}", e);
+                    }
+                } else if std::env::var("EF_TEST_DEBUG_FC").is_ok() {
+                    eprintln!(
+                        "  in-block attestation OK: slot={} index={}",
+                        att.data().slot,
+                        att.data().index
+                    );
+                }
+            }
+            for attester_slashing in block.message().body().attester_slashings() {
+                self.process_attester_slashing(attester_slashing);
+            }
         }
 
         Ok(())

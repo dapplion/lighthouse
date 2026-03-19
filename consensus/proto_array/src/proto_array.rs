@@ -357,6 +357,12 @@ impl ProtoArray {
                 node_delta.delta
             };
 
+            // For V29 nodes: `empty_delta`/`full_delta` accumulate weight supporting
+            // the EMPTY/FULL virtual children of this node. This includes:
+            // 1. Direct votes for this node (split by `payload_present` in compute_deltas)
+            // 2. Back-propagated weight from children (routed by `parent_payload_status`)
+            // By the time we process this node, children have already back-propagated
+            // their total deltas into the correct bucket based on their `parent_payload_status`.
             let (node_empty_delta, node_full_delta) = if node.as_v29().is_ok() {
                 (node_delta.empty_delta, node_delta.full_delta)
             } else {
@@ -429,17 +435,31 @@ impl ProtoArray {
                     .ok_or(Error::DeltaOverflow(parent_index))?;
 
                 // Per spec's `is_supporting_vote`: a vote supports a parent's
-                // FULL/EMPTY virtual node based on the voter's `payload_present`
-                // flag, NOT based on which child the vote goes through.
-                // Propagate each child's full/empty deltas independently.
-                parent_delta.full_delta = parent_delta
-                    .full_delta
-                    .checked_add(node_full_delta)
-                    .ok_or(Error::DeltaOverflow(parent_index))?;
-                parent_delta.empty_delta = parent_delta
-                    .empty_delta
-                    .checked_add(node_empty_delta)
-                    .ok_or(Error::DeltaOverflow(parent_index))?;
+                // FULL/EMPTY virtual node based on the **ancestor path direction**,
+                // i.e., the child's `parent_payload_status`. If this child is on the
+                // FULL path from the parent, ALL weight from this child (regardless
+                // of the voter's `payload_present` flag) supports the parent's FULL
+                // virtual node. Similarly for EMPTY.
+                if let Ok(child_v29) = node.as_v29() {
+                    if child_v29.parent_payload_status == PayloadStatus::Full {
+                        parent_delta.full_delta = parent_delta
+                            .full_delta
+                            .checked_add(delta)
+                            .ok_or(Error::DeltaOverflow(parent_index))?;
+                    } else {
+                        parent_delta.empty_delta = parent_delta
+                            .empty_delta
+                            .checked_add(delta)
+                            .ok_or(Error::DeltaOverflow(parent_index))?;
+                    }
+                } else {
+                    // V17 child of a V29 parent (fork transition): treat as FULL
+                    // since V17 nodes always have execution payloads inline.
+                    parent_delta.full_delta = parent_delta
+                        .full_delta
+                        .checked_add(delta)
+                        .ok_or(Error::DeltaOverflow(parent_index))?;
+                }
             }
         }
 
@@ -533,26 +553,16 @@ impl ProtoArray {
             let parent_payload_status: PayloadStatus = if let Some(parent_node) =
                 parent_index.and_then(|idx| self.nodes.get(idx))
             {
-                // Get the parent's execution block hash, handling both V17 and V29 nodes.
-                // V17 parents occur during the Gloas fork transition.
-                // TODO(gloas): the spec's `get_parent_payload_status` assumes all blocks are
-                // post-Gloas with bids. Revisit once the spec clarifies fork-transition behavior.
                 let parent_el_block_hash = match parent_node {
                     ProtoNode::V29(v29) => Some(v29.execution_payload_block_hash),
                     ProtoNode::V17(v17) => v17.execution_status.block_hash(),
                 };
-                // Per spec's `is_parent_node_full`: if the child's EL parent hash
-                // matches the parent's EL block hash, the child extends the parent's
-                // payload chain, meaning the parent was Full.
                 if parent_el_block_hash.is_some_and(|hash| execution_payload_parent_hash == hash) {
                     PayloadStatus::Full
                 } else {
                     PayloadStatus::Empty
                 }
             } else {
-                // Parent is missing (genesis or pruned due to finalization). Default to Full
-                // since this path should only be hit at Gloas genesis, and extending the payload
-                // chain is the safe default.
                 PayloadStatus::Full
             };
 
@@ -582,8 +592,27 @@ impl ProtoArray {
                 empty_payload_weight: 0,
                 full_payload_weight: 0,
                 execution_payload_block_hash,
-                payload_timeliness_votes: BitVector::default(),
-                payload_data_availability_votes: BitVector::default(),
+                // Per spec `get_forkchoice_store`: the anchor block's PTC votes are
+                // initialized to all-True, ensuring `is_payload_timely` and
+                // `is_payload_data_available` return true for the anchor.
+                payload_timeliness_votes: if is_genesis {
+                    let mut bv = BitVector::default();
+                    for i in 0..std::cmp::min(E::ptc_size(), 512) {
+                        bv.set(i, true).ok();
+                    }
+                    bv
+                } else {
+                    BitVector::default()
+                },
+                payload_data_availability_votes: if is_genesis {
+                    let mut bv = BitVector::default();
+                    for i in 0..std::cmp::min(E::ptc_size(), 512) {
+                        bv.set(i, true).ok();
+                    }
+                    bv
+                } else {
+                    BitVector::default()
+                },
                 payload_received: is_genesis,
             })
         };
@@ -969,6 +998,95 @@ impl ProtoArray {
             });
         }
 
+        // For V29 (Gloas) nodes, implement the spec's virtual tree walk.
+        // At each V29 node, determine the preferred direction (FULL or EMPTY)
+        // by comparing weights. Then follow only children matching that direction.
+        // Use best_child when it matches the preferred direction; otherwise scan
+        // for the best child with matching direction.
+        if justified_node.as_v29().is_ok() {
+            let ptc_size = E::ptc_size();
+            let mut current_index = justified_index;
+
+            loop {
+                let node = self
+                    .nodes
+                    .get(current_index)
+                    .ok_or(Error::InvalidNodeIndex(current_index))?;
+
+                let Ok(v29) = node.as_v29() else { break };
+
+                // Determine preferred payload direction.
+                let has_full = v29.payload_received;
+                let use_tiebreaker_only = node.slot() + 1 == current_slot;
+
+                let prefer_full = if !has_full {
+                    false
+                } else if !use_tiebreaker_only {
+                    if v29.full_payload_weight > v29.empty_payload_weight {
+                        true
+                    } else if v29.empty_payload_weight > v29.full_payload_weight {
+                        false
+                    } else {
+                        v29.payload_received
+                    }
+                } else {
+                    is_payload_timely(
+                        &v29.payload_timeliness_votes,
+                        ptc_size,
+                        v29.payload_received,
+                    ) && is_payload_data_available(
+                        &v29.payload_data_availability_votes,
+                        ptc_size,
+                        v29.payload_received,
+                    )
+                };
+
+                let preferred_status = if prefer_full {
+                    PayloadStatus::Full
+                } else {
+                    PayloadStatus::Empty
+                };
+
+                // Try to use best_child if it matches the preferred direction.
+                let next = if let Some(bc_idx) = node.best_child() {
+                    let bc = self
+                        .nodes
+                        .get(bc_idx)
+                        .ok_or(Error::InvalidNodeIndex(bc_idx))?;
+                    let bc_matches = bc
+                        .as_v29()
+                        .is_ok_and(|v| v.parent_payload_status == preferred_status);
+                    if bc_matches {
+                        Some(bc_idx)
+                    } else {
+                        // best_child is on the wrong direction. Find best on preferred.
+                        self.find_best_child_with_status::<E>(
+                            current_index,
+                            preferred_status,
+                            current_slot,
+                            best_justified_checkpoint,
+                            best_finalized_checkpoint,
+                        )?
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(child_index) = next {
+                    current_index = child_index;
+                } else {
+                    break;
+                }
+            }
+
+            let head_node = self
+                .nodes
+                .get(current_index)
+                .ok_or(Error::InvalidNodeIndex(current_index))?;
+            return Ok(head_node.root());
+        }
+
+        // Pre-Gloas path: use best_descendant directly.
         let best_descendant_index = justified_node.best_descendant().unwrap_or(justified_index);
 
         let best_node = self
@@ -995,6 +1113,52 @@ impl ProtoArray {
         }
 
         Ok(best_node.root())
+    }
+
+    /// Find the best viable child of `parent_index` whose `parent_payload_status` matches
+    /// `target_status`. Returns `None` if no matching viable child exists.
+    fn find_best_child_with_status<E: EthSpec>(
+        &self,
+        parent_index: usize,
+        target_status: PayloadStatus,
+        current_slot: Slot,
+        best_justified_checkpoint: Checkpoint,
+        best_finalized_checkpoint: Checkpoint,
+    ) -> Result<Option<usize>, Error> {
+        let mut best: Option<(usize, u64, Hash256)> = None;
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if node.parent() != Some(parent_index) {
+                continue;
+            }
+            if !node
+                .as_v29()
+                .is_ok_and(|v| v.parent_payload_status == target_status)
+            {
+                continue;
+            }
+            if !self.node_leads_to_viable_head::<E>(
+                node,
+                current_slot,
+                best_justified_checkpoint,
+                best_finalized_checkpoint,
+            )? {
+                continue;
+            }
+
+            let w = node.weight();
+            let r = node.root();
+            let replace = if let Some((_, bw, br)) = best {
+                w > bw || (w == bw && r >= br)
+            } else {
+                true
+            };
+
+            if replace {
+                best = Some((idx, w, r));
+            }
+        }
+
+        Ok(best.map(|(idx, _, _)| idx))
     }
 
     /// Update the tree with new finalization information. The tree is only actually pruned if both
