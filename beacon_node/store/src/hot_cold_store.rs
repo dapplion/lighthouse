@@ -44,6 +44,16 @@ use types::data::{ColumnIndex, DataColumnSidecar, DataColumnSidecarList};
 use types::*;
 use zstd::{Decoder, Encoder};
 
+fn era_import_pointer_key() -> &'static [u8] {
+    b"era_import_ptr"
+}
+
+fn era_reconstruction_key(era_number: u64) -> Vec<u8> {
+    let mut key = b"era_recon:".to_vec();
+    key.extend_from_slice(&era_number.to_be_bytes());
+    key
+}
+
 /// On-disk database that stores finalized states efficiently.
 ///
 /// Stores vector fields like the `block_roots` and `state_roots` separately, and only stores
@@ -1906,6 +1916,51 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         }
     }
 
+    /// Recompute the payload status for a state at `slot` that is stored in the cold DB.
+    ///
+    /// This function returns an error for any `slot` that is outside the range of slots stored in
+    /// the freezer DB.
+    ///
+    /// For all slots prior to Gloas, it returns `Pending`.
+    ///
+    /// For post-Gloas slots the algorithm is:
+    ///
+    /// 1. Load the most recently applied block at `slot` (may not be from `slot` in case of a skip)
+    /// 2. Load the canonical `state_root` at the slot of the block. If this `state_root` matches
+    ///    the one in the block then we know the state at *that* slot is canonically empty (no
+    ///    payload). Conversely, if it is different, we know that the block's slot is full (assuming
+    ///    no database corruption).
+    /// 3. The payload status of `slot` is the same as the payload status of `block.slot()`, because
+    ///    we only care about whether a beacon block or payload was applied most recently, and
+    ///    `block` is by definition the most-recently-applied block.
+    ///
+    /// All of this mucking around could be avoided if we do a schema migration to record the
+    /// payload status in the database. For now, this is simpler.
+    fn get_cold_state_payload_status(&self, slot: Slot) -> Result<StatePayloadStatus, Error> {
+        // Pre-Gloas states are always `Pending`.
+        if !self.spec.fork_name_at_slot::<E>(slot).gloas_enabled() {
+            return Ok(StatePayloadStatus::Pending);
+        }
+
+        let block_root = self
+            .get_cold_block_root(slot)?
+            .ok_or(HotColdDBError::MissingFrozenBlock(slot))?;
+
+        let block = self
+            .get_blinded_block(&block_root)?
+            .ok_or(Error::MissingBlock(block_root))?;
+
+        let state_root = self
+            .get_cold_state_root(block.slot())?
+            .ok_or(HotColdDBError::MissingRestorePointState(block.slot()))?;
+
+        if block.state_root() != state_root {
+            Ok(StatePayloadStatus::Full)
+        } else {
+            Ok(StatePayloadStatus::Pending)
+        }
+    }
+
     fn load_hot_hdiff_buffer(&self, state_root: Hash256) -> Result<HDiffBuffer, Error> {
         if let Some(buffer) = self
             .state_cache
@@ -2161,6 +2216,17 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             state_root.as_slice().to_vec(),
         ));
         Ok(())
+    }
+
+    /// Store a pre-finalization state in the freezer database, applying ops atomically.
+    pub fn put_cold_state(
+        &self,
+        state_root: &Hash256,
+        state: &BeaconState<E>,
+    ) -> Result<(), Error> {
+        let mut ops: Vec<KeyValueStoreOp> = Vec::new();
+        self.store_cold_state(state_root, state, &mut ops)?;
+        self.cold_db.do_atomically(ops)
     }
 
     /// Store a pre-finalization state in the freezer database.
@@ -2454,8 +2520,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             self.forwards_state_roots_iterator_until(base_state.slot(), slot, || {
                 Err(Error::StateShouldNotBeRequired(slot))
             })?;
-        // TODO(gloas): calculate correct payload status for cold states
-        let payload_status = StatePayloadStatus::Pending;
+        let payload_status = self.get_cold_state_payload_status(slot)?;
         let state = self.replay_blocks(
             base_state,
             blocks,
@@ -2591,9 +2656,10 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         {
             return Ok((blocks, vec![]));
         }
-        // TODO(gloas): wire this up
-        let end_block_root = Hash256::ZERO;
-        let desired_payload_status = StatePayloadStatus::Pending;
+        let end_block_root = self
+            .get_cold_block_root(end_slot)?
+            .ok_or(HotColdDBError::MissingFrozenBlock(end_slot))?;
+        let desired_payload_status = self.get_cold_state_payload_status(end_slot)?;
         let envelopes = self.load_payload_envelopes_for_blocks(
             &blocks,
             end_block_root,
@@ -3325,6 +3391,41 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     /// Return `true` if compaction on finalization/pruning is enabled.
     pub fn compact_on_prune(&self) -> bool {
         self.config.compact_on_prune
+    }
+
+    pub fn get_era_import_pointer(&self) -> Result<Option<u64>, Error> {
+        let Some(bytes) = self
+            .hot_db
+            .get_bytes(DBColumn::BeaconMeta, era_import_pointer_key())?
+        else {
+            return Ok(None);
+        };
+        let bytes: [u8; 8] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::InvalidBytes)?;
+        Ok(Some(u64::from_be_bytes(bytes)))
+    }
+
+    pub fn set_era_import_pointer(&self, era_number: u64) -> Result<(), Error> {
+        self.hot_db.put_bytes(
+            DBColumn::BeaconMeta,
+            era_import_pointer_key(),
+            &era_number.to_be_bytes(),
+        )
+    }
+
+    pub fn era_reconstruction_done(&self, era_number: u64) -> Result<bool, Error> {
+        self.hot_db
+            .key_exists(DBColumn::BeaconMeta, &era_reconstruction_key(era_number))
+    }
+
+    pub fn set_era_reconstruction_done(&self, era_number: u64) -> Result<(), Error> {
+        self.hot_db.put_bytes(
+            DBColumn::BeaconMeta,
+            &era_reconstruction_key(era_number),
+            &[1u8],
+        )
     }
 
     /// Load the timestamp of the last compaction as a `Duration` since the UNIX epoch.

@@ -1,7 +1,8 @@
 //! Implementation of historic state reconstruction (given complete block history).
+use crate::forwards_iter::FrozenForwardsIterator;
 use crate::hot_cold_store::{HotColdDB, HotColdDBError};
 use crate::metrics;
-use crate::{Error, ItemStore};
+use crate::{DBColumn, Error, ItemStore, KeyValueStoreOp};
 use itertools::{Itertools, process_results};
 use state_processing::{
     BlockSignatureStrategy, ConsensusContext, VerifyBlockRoot, per_block_processing,
@@ -9,7 +10,7 @@ use state_processing::{
 };
 use std::sync::Arc;
 use tracing::{debug, info};
-use types::EthSpec;
+use types::{EthSpec, Slot};
 
 impl<E, Hot, Cold> HotColdDB<E, Hot, Cold>
 where
@@ -187,6 +188,104 @@ where
         if split != latest_split {
             return Err(Error::SplitPointModified(latest_split.slot, split.slot));
         }
+
+        Ok(())
+    }
+
+    /// Reconstruct historic states for a specific slot range.
+    ///
+    /// Loads the state at `with_state_at_slot`, replays blocks from `from_slot` to `to_slot`,
+    /// and stores all intermediate states. Used by ERA file import for parallel per-ERA
+    /// reconstruction.
+    pub fn reconstruct_historic_states_on_range(
+        self: &Arc<Self>,
+        with_state_at_slot: Slot,
+        from_slot: Slot,
+        to_slot: Slot,
+    ) -> Result<(), Error> {
+        debug!(
+            %from_slot,
+            %to_slot,
+            "Starting state reconstruction batch"
+        );
+
+        let _t = metrics::start_timer(&metrics::STORE_BEACON_RECONSTRUCTION_TIME);
+
+        let block_root_iter =
+            FrozenForwardsIterator::new(self, DBColumn::BeaconBlockRoots, from_slot, to_slot)?;
+
+        let mut state = self.load_cold_state_by_slot(with_state_at_slot)?;
+        state.build_caches(&self.spec)?;
+
+        process_results(block_root_iter, |iter| -> Result<(), Error> {
+            let mut io_batch = vec![];
+            let mut prev_state_root = None;
+
+            for (block_root, slot) in iter {
+                io_batch.push(KeyValueStoreOp::PutKeyValue(
+                    DBColumn::BeaconBlockRoots,
+                    slot.as_u64().to_be_bytes().to_vec(),
+                    block_root.as_slice().to_vec(),
+                ));
+
+                let block = {
+                    let block = self
+                        .get_blinded_block(&block_root)?
+                        .ok_or(Error::BlockNotFound(block_root))?;
+                    if block.slot() == slot && block.slot() > self.spec.genesis_slot {
+                        Some(block)
+                    } else {
+                        None
+                    }
+                };
+
+                while state.slot() < slot {
+                    per_slot_processing(&mut state, prev_state_root.take(), &self.spec)
+                        .map_err(HotColdDBError::BlockReplaySlotError)?;
+                }
+
+                if let Some(block) = block {
+                    let mut ctxt = ConsensusContext::new(block.slot())
+                        .set_current_block_root(block_root)
+                        .set_proposer_index(block.message().proposer_index());
+
+                    per_block_processing(
+                        &mut state,
+                        &block,
+                        BlockSignatureStrategy::NoVerification,
+                        VerifyBlockRoot::True,
+                        &mut ctxt,
+                        &self.spec,
+                    )
+                    .map_err(HotColdDBError::BlockReplayBlockError)?;
+
+                    prev_state_root = Some(block.state_root());
+                }
+
+                let state_root = prev_state_root
+                    .ok_or(())
+                    .or_else(|_| state.update_tree_hash_cache())?;
+
+                self.store_cold_state(&state_root, &state, &mut io_batch)?;
+
+                let batch_complete = slot + 1 == to_slot;
+
+                if self.hierarchy.should_commit_immediately(slot)? || batch_complete {
+                    self.cold_db.do_atomically(std::mem::take(&mut io_batch))?;
+
+                    if batch_complete {
+                        debug!(
+                            start_slot = %from_slot,
+                            end_slot = %slot,
+                            "Finished state reconstruction batch"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
+            Ok(())
+        })??;
 
         Ok(())
     }

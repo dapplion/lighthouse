@@ -1,0 +1,11 @@
+/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/deps/archery-5a2c8b176fc0bf5c.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/arc/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/rc/mod.rs
+
+/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/deps/libarchery-5a2c8b176fc0bf5c.rlib: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/arc/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/rc/mod.rs
+
+/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/deps/libarchery-5a2c8b176fc0bf5c.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/arc/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/rc/mod.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/mod.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/mod.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/arc/mod.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/archery-0.4.0/src/shared_pointer/kind/rc/mod.rs:
