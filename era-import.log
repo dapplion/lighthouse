@@ -1,0 +1,69 @@
+No logfile path provided, logging to file is disabled
+Mar 09 20:16:55.416 [32mINFO[0m  [1mOpening database[0m                              [1mhot_path[0m: /mnt/ssd/era-test-db/chain_db, [1mcold_path[0m: /mnt/ssd/era-test-db/freezer_db, [1mera_dir[0m: /mnt/ssd/era-mainnet-test
+Mar 09 20:16:55.430 [34mDEBUG[0m [1mOpening HotColdDB[0m                           
+Mar 09 20:16:55.430 [34mDEBUG[0m [1mOpening LevelDB[0m                               [1mhot_path[0m: "/mnt/ssd/era-test-db/chain_db"
+Mar 09 20:16:55.436 [34mDEBUG[0m [1mLoaded anchor info[0m                            [1manchor_info[0m: RwLock { data: AnchorInfo { anchor_slot: Slot(18446744073709551615), oldest_block_slot: Slot(18446744073709551615), oldest_block_parent: 0x0000000000000000000000000000000000000000000000000000000000000000, state_upper_limit: Slot(18446744073709551615), state_lower_limit: Slot(0) } }
+Mar 09 20:16:55.446 [32mINFO[0m  [1mBlob DB initialized[0m                           [1mpath[0m: "/mnt/ssd/era-test-db/blobs_db", [1moldest_blob_slot[0m: Some(Slot(8626176)), [1moldest_data_column_slot[0m: Some(Slot(13164544))
+Mar 09 20:16:55.447 [34mDEBUG[0m [1mStore anchor info[0m                             [1manchor[0m: AnchorInfo { anchor_slot: Slot(18446744073709551615), oldest_block_slot: Slot(18446744073709551615), oldest_block_parent: 0x0000000000000000000000000000000000000000000000000000000000000000, state_upper_limit: Slot(18446744073709551615), state_lower_limit: Slot(0) }
+Mar 09 20:16:55.518 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "snapshot", [1mslot[0m: 0
+Mar 09 20:16:55.686 [34mDEBUG[0m [1mImporting era file[0m                            [1mpath[0m: "/mnt/ssd/era-mainnet-test/mainnet-00001-40cf2f3c.era", [1mera_number[0m: 1
+Mar 09 20:16:55.760 [34mDEBUG[0m [1mImporting blocks from era file[0m                [1mera_number[0m: 1
+Mar 09 20:16:58.028 [34mDEBUG[0m [1mImporting state from era file[0m                 [1mera_number[0m: 1
+Mar 09 20:16:58.068 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "diff", [1mfrom_slot[0m: 0, [1mslot[0m: 8192, [1mera_number[0m: 1
+Mar 09 20:16:58.108 [34mDEBUG[0m [1mCached state and hdiff buffer[0m                 [1mload_time_ms[0m: 39, [1mslot[0m: 0, [1mera_number[0m: 1
+Mar 09 20:16:58.273 [32mINFO[0m  [1mImported era file[0m                             [1mera_number[0m: 1, [1mmax_era[0m: 9
+Mar 09 20:16:58.294 [34mDEBUG[0m [1mImporting era file[0m                            [1mpath[0m: "/mnt/ssd/era-mainnet-test/mainnet-00002-74a3850f.era", [1mera_number[0m: 2
+Mar 09 20:16:58.407 [34mDEBUG[0m [1mImporting blocks from era file[0m                [1mera_number[0m: 2
+Mar 09 20:16:59.590 [34mDEBUG[0m [1mImporting state from era file[0m                 [1mera_number[0m: 2
+Mar 09 20:16:59.617 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "diff", [1mfrom_slot[0m: 0, [1mslot[0m: 16384, [1mera_number[0m: 2
+Mar 09 20:16:59.618 [34mDEBUG[0m [1mHit hdiff buffer cache[0m                        [1mslot[0m: 0, [1mera_number[0m: 2
+Mar 09 20:16:59.725 [32mINFO[0m  [1mImported era file[0m                             [1mera_number[0m: 2, [1mmax_era[0m: 9
+Mar 09 20:16:59.725 [34mDEBUG[0m [1mImporting era file[0m                            [1mpath[0m: "/mnt/ssd/era-mainnet-test/mainnet-00003-76b05bfe.era", [1mera_number[0m: 3
+Mar 09 20:16:59.826 [34mDEBUG[0m [1mImporting blocks from era file[0m                [1mera_number[0m: 3
+Mar 09 20:17:00.884 [34mDEBUG[0m [1mImporting state from era file[0m                 [1mera_number[0m: 3
+Mar 09 20:17:00.941 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "diff", [1mfrom_slot[0m: 0, [1mslot[0m: 24576, [1mera_number[0m: 3
+Mar 09 20:17:00.942 [34mDEBUG[0m [1mHit hdiff buffer cache[0m                        [1mslot[0m: 0, [1mera_number[0m: 3
+Mar 09 20:17:01.072 [32mINFO[0m  [1mImported era file[0m                             [1mera_number[0m: 3, [1mmax_era[0m: 9
+Mar 09 20:17:01.072 [34mDEBUG[0m [1mImporting era file[0m                            [1mpath[0m: "/mnt/ssd/era-mainnet-test/mainnet-00004-f82d21ce.era", [1mera_number[0m: 4
+Mar 09 20:17:01.156 [34mDEBUG[0m [1mImporting blocks from era file[0m                [1mera_number[0m: 4
+Mar 09 20:17:02.239 [34mDEBUG[0m [1mImporting state from era file[0m                 [1mera_number[0m: 4
+Mar 09 20:17:02.280 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "diff", [1mfrom_slot[0m: 0, [1mslot[0m: 32768, [1mera_number[0m: 4
+Mar 09 20:17:02.282 [34mDEBUG[0m [1mHit hdiff buffer cache[0m                        [1mslot[0m: 0, [1mera_number[0m: 4
+Mar 09 20:17:02.436 [32mINFO[0m  [1mImported era file[0m                             [1mera_number[0m: 4, [1mmax_era[0m: 9
+Mar 09 20:17:02.436 [34mDEBUG[0m [1mImporting era file[0m                            [1mpath[0m: "/mnt/ssd/era-mainnet-test/mainnet-00005-4ec633af.era", [1mera_number[0m: 5
+Mar 09 20:17:02.499 [34mDEBUG[0m [1mImporting blocks from era file[0m                [1mera_number[0m: 5
+Mar 09 20:17:03.503 [34mDEBUG[0m [1mImporting state from era file[0m                 [1mera_number[0m: 5
+Mar 09 20:17:03.553 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "diff", [1mfrom_slot[0m: 0, [1mslot[0m: 40960, [1mera_number[0m: 5
+Mar 09 20:17:03.554 [34mDEBUG[0m [1mHit hdiff buffer cache[0m                        [1mslot[0m: 0, [1mera_number[0m: 5
+Mar 09 20:17:03.677 [32mINFO[0m  [1mImported era file[0m                             [1mera_number[0m: 5, [1mmax_era[0m: 9
+Mar 09 20:17:03.677 [34mDEBUG[0m [1mImporting era file[0m                            [1mpath[0m: "/mnt/ssd/era-mainnet-test/mainnet-00006-eef40204.era", [1mera_number[0m: 6
+Mar 09 20:17:03.747 [34mDEBUG[0m [1mImporting blocks from era file[0m                [1mera_number[0m: 6
+Mar 09 20:17:04.896 [34mDEBUG[0m [1mImporting state from era file[0m                 [1mera_number[0m: 6
+Mar 09 20:17:04.928 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "diff", [1mfrom_slot[0m: 0, [1mslot[0m: 49152, [1mera_number[0m: 6
+Mar 09 20:17:04.930 [34mDEBUG[0m [1mHit hdiff buffer cache[0m                        [1mslot[0m: 0, [1mera_number[0m: 6
+Mar 09 20:17:05.110 [32mINFO[0m  [1mImported era file[0m                             [1mera_number[0m: 6, [1mmax_era[0m: 9
+Mar 09 20:17:05.111 [34mDEBUG[0m [1mImporting era file[0m                            [1mpath[0m: "/mnt/ssd/era-mainnet-test/mainnet-00007-ce8f6ccd.era", [1mera_number[0m: 7
+Mar 09 20:17:05.188 [34mDEBUG[0m [1mImporting blocks from era file[0m                [1mera_number[0m: 7
+Mar 09 20:17:06.479 [34mDEBUG[0m [1mImporting state from era file[0m                 [1mera_number[0m: 7
+Mar 09 20:17:06.535 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "diff", [1mfrom_slot[0m: 0, [1mslot[0m: 57344, [1mera_number[0m: 7
+Mar 09 20:17:06.537 [34mDEBUG[0m [1mHit hdiff buffer cache[0m                        [1mslot[0m: 0, [1mera_number[0m: 7
+Mar 09 20:17:06.676 [32mINFO[0m  [1mImported era file[0m                             [1mera_number[0m: 7, [1mmax_era[0m: 9
+Mar 09 20:17:06.676 [34mDEBUG[0m [1mImporting era file[0m                            [1mpath[0m: "/mnt/ssd/era-mainnet-test/mainnet-00008-f0d27f1e.era", [1mera_number[0m: 8
+Mar 09 20:17:06.848 [34mDEBUG[0m [1mImporting blocks from era file[0m                [1mera_number[0m: 8
+Mar 09 20:17:08.048 [34mDEBUG[0m [1mImporting state from era file[0m                 [1mera_number[0m: 8
+Mar 09 20:17:08.075 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "diff", [1mfrom_slot[0m: 0, [1mslot[0m: 65536, [1mera_number[0m: 8
+Mar 09 20:17:08.077 [34mDEBUG[0m [1mHit hdiff buffer cache[0m                        [1mslot[0m: 0, [1mera_number[0m: 8
+Mar 09 20:17:08.335 [32mINFO[0m  [1mImported era file[0m                             [1mera_number[0m: 8, [1mmax_era[0m: 9
+Mar 09 20:17:08.354 [34mDEBUG[0m [1mImporting era file[0m                            [1mpath[0m: "/mnt/ssd/era-mainnet-test/mainnet-00009-9ba3d167.era", [1mera_number[0m: 9
+Mar 09 20:17:08.408 [34mDEBUG[0m [1mImporting blocks from era file[0m                [1mera_number[0m: 9
+Mar 09 20:17:10.230 [34mDEBUG[0m [1mImporting state from era file[0m                 [1mera_number[0m: 9
+Mar 09 20:17:10.274 [34mDEBUG[0m [1mStoring cold state[0m                            [1mstrategy[0m: "diff", [1mfrom_slot[0m: 65536, [1mslot[0m: 73728, [1mera_number[0m: 9
+Mar 09 20:17:10.275 [34mDEBUG[0m [1mHit hdiff buffer cache[0m                        [1mslot[0m: 0, [1mera_number[0m: 9
+Mar 09 20:17:10.312 [34mDEBUG[0m [1mCached hdiff buffer[0m                           [1mload_time_ms[0m: 37, [1mslot[0m: 65536, [1mera_number[0m: 9
+Mar 09 20:17:10.530 [32mINFO[0m  [1mImported era file[0m                             [1mera_number[0m: 9, [1mmax_era[0m: 9
+Mar 09 20:17:10.550 [34mDEBUG[0m [1mHit hdiff buffer cache[0m                        [1mslot[0m: 65536
+Mar 09 20:17:10.559 [34mDEBUG[0m [1mCached hdiff buffer[0m                           [1mload_time_ms[0m: 24, [1mslot[0m: 73728
+Mar 09 20:17:10.698 [34mDEBUG[0m [1mCached state[0m                                  [1mstate_root[0m: 0x445aa7e5a6ea97da15cb6e300bac93db4b02321ba9f2b7a77bd874254ec97ff9, [1mstate_slot[0m: 73728, [1mdeleted_states[0m: [], [1mlocation[0m: "store_hot_state"
+Mar 09 20:17:10.775 [34mDEBUG[0m [1mStoring hot state summary and diffs[0m           [1mstate_root[0m: 0x445aa7e5a6ea97da15cb6e300bac93db4b02321ba9f2b7a77bd874254ec97ff9, [1mslot[0m: 73728, [1mstorage_strategy[0m: Snapshot, [1mdiff_base_state[0m: snapshot, [1mprevious_state_root[0m: 0x1659c0e1d2c9a9a545fd05313eca06e2ccca952c1adfd4b969dcbbd2570e10b6
+Mar 09 20:17:10.802 [32mINFO[0m  [1mAdvanced store to latest ERA boundary[0m         [1mhead_slot[0m: 73728, [1mhead_block_root[0m: 0xc56c2a2c564921b81da4842bfd5787c5c4d19e115a1077c332a9bf4baf26dab5
+Mar 09 20:17:10.802 [32mINFO[0m  [1mERA file import complete[0m                      [1mmax_era[0m: 9, [1melapsed[0m: 15.115943072s

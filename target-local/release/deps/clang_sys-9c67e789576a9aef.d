@@ -1,0 +1,14 @@
+/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/deps/clang_sys-9c67e789576a9aef.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/support.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/link.rs /root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/macros.rs /root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/common.rs /root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/dynamic.rs
+
+/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/deps/libclang_sys-9c67e789576a9aef.rlib: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/support.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/link.rs /root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/macros.rs /root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/common.rs /root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/dynamic.rs
+
+/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/deps/libclang_sys-9c67e789576a9aef.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/support.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/link.rs /root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/macros.rs /root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/common.rs /root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/dynamic.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/support.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/clang-sys-1.8.1/src/link.rs:
+/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/macros.rs:
+/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/common.rs:
+/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out/dynamic.rs:
+
+# env-dep:OUT_DIR=/root/.openclaw/workspace/lighthouse-pr-69/target-local/release/build/clang-sys-2793b19cf2cf2a38/out
