@@ -193,8 +193,11 @@ impl ProtoNode {
     pub fn attestation_score(&self, payload_status: PayloadStatus) -> u64 {
         match payload_status {
             PayloadStatus::Pending => self.weight(),
-            PayloadStatus::Empty => self.empty_payload_weight().unwrap_or(0),
-            PayloadStatus::Full => self.full_payload_weight().unwrap_or(0),
+            // For pre-Gloas (V17) nodes, empty/full_payload_weight is unavailable.
+            // Fall back to total weight so V17 nodes behave correctly in the virtual
+            // tree walk (all weight goes through the single EMPTY virtual child).
+            PayloadStatus::Empty => self.empty_payload_weight().unwrap_or(self.weight()),
+            PayloadStatus::Full => self.full_payload_weight().unwrap_or(self.weight()),
         }
     }
 
@@ -1181,6 +1184,87 @@ impl ProtoArray {
         Ok((best_fc_node.root, best_fc_node.payload_status))
     }
 
+    /// Spec: `filter_block_tree(store, block_root, blocks)`
+    ///
+    /// Recursively filters the block tree to only include branches with viable leaves.
+    /// Returns true if this subtree contains at least one viable leaf.
+    fn filter_block_tree<E: EthSpec>(
+        &self,
+        block_index: usize,
+        current_slot: Slot,
+        best_justified_checkpoint: Checkpoint,
+        best_finalized_checkpoint: Checkpoint,
+        viable_nodes: &mut HashSet<usize>,
+    ) -> bool {
+        // Spec: children = [root for root in store.blocks if store.blocks[root].parent_root == block_root]
+        let children: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.parent() == Some(block_index))
+            .map(|(i, _)| i)
+            .collect();
+
+        if !children.is_empty() {
+            // Spec: filter_block_tree_result = [filter_block_tree(..., child, ...) for child in children]
+            // Note: must evaluate ALL children (no short-circuit) so each viable subtree is added.
+            let filter_results: Vec<bool> = children
+                .iter()
+                .map(|&child_index| {
+                    self.filter_block_tree::<E>(
+                        child_index,
+                        current_slot,
+                        best_justified_checkpoint,
+                        best_finalized_checkpoint,
+                        viable_nodes,
+                    )
+                })
+                .collect();
+            // Spec: if any(filter_block_tree_result): blocks[block_root] = block; return True
+            let any_viable = filter_results.iter().any(|&v| v);
+            if any_viable {
+                viable_nodes.insert(block_index);
+                return true;
+            }
+            return false;
+        }
+
+        // Leaf node: check viability directly.
+        let node = &self.nodes[block_index];
+        if self.node_is_viable_for_head::<E>(
+            node,
+            current_slot,
+            best_justified_checkpoint,
+            best_finalized_checkpoint,
+        ) {
+            viable_nodes.insert(block_index);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Spec: `get_filtered_block_tree(store)`
+    ///
+    /// Returns the set of node indices on viable branches.
+    fn get_filtered_block_tree<E: EthSpec>(
+        &self,
+        start_index: usize,
+        current_slot: Slot,
+        best_justified_checkpoint: Checkpoint,
+        best_finalized_checkpoint: Checkpoint,
+    ) -> HashSet<usize> {
+        let mut viable_nodes = HashSet::new();
+        self.filter_block_tree::<E>(
+            start_index,
+            current_slot,
+            best_justified_checkpoint,
+            best_finalized_checkpoint,
+            &mut viable_nodes,
+        );
+        viable_nodes
+    }
+
     /// Spec: `get_head`.
     #[allow(clippy::too_many_arguments)]
     fn find_head_walk<E: EthSpec>(
@@ -1193,6 +1277,14 @@ impl ProtoArray {
         justified_balances: &JustifiedBalances,
         spec: &ChainSpec,
     ) -> Result<IndexedForkChoiceNode, Error> {
+        // Spec: blocks = get_filtered_block_tree(store)
+        let viable_nodes = self.get_filtered_block_tree::<E>(
+            start_index,
+            current_slot,
+            best_justified_checkpoint,
+            best_finalized_checkpoint,
+        );
+
         let mut head = IndexedForkChoiceNode {
             root: best_justified_checkpoint.root,
             proto_node_index: start_index,
@@ -1200,27 +1292,14 @@ impl ProtoArray {
         };
 
         // Compute once rather than per-child per-level.
-        let apply_proposer_boost = self.should_apply_proposer_boost::<E>(
-            proposer_boost_root,
-            justified_balances,
-            spec,
-        )?;
+        let apply_proposer_boost =
+            self.should_apply_proposer_boost::<E>(proposer_boost_root, justified_balances, spec)?;
 
         loop {
             let children: Vec<_> = self
                 .get_node_children(&head)?
                 .into_iter()
-                .filter(|(_, proto_node)| {
-                    // Spec: `get_filtered_block_tree` pre-filters to only include
-                    // blocks on viable branches. We approximate this by checking
-                    // viability of each child during the walk.
-                    self.node_is_viable_for_head::<E>(
-                        proto_node,
-                        current_slot,
-                        best_justified_checkpoint,
-                        best_finalized_checkpoint,
-                    )
-                })
+                .filter(|(child, _)| viable_nodes.contains(&child.proto_node_index))
                 .collect();
 
             if children.is_empty() {
@@ -1373,9 +1452,7 @@ impl ProtoArray {
             }
 
             child_index = current_index;
-            current_index = current
-                .parent()
-                .ok_or(Error::NodeUnknown(current.root()))?;
+            current_index = current.parent().ok_or(Error::NodeUnknown(current.root()))?;
         }
     }
 
