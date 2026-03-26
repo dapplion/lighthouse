@@ -1182,6 +1182,26 @@ impl ProtoArray {
         Ok((best_fc_node.root, best_fc_node.payload_status))
     }
 
+    /// Build a parent->children index. Invalid nodes are excluded
+    /// (they aren't in store.blocks in the spec).
+    fn build_children_index(&self) -> Vec<Vec<usize>> {
+        let mut children = vec![vec![]; self.nodes.len()];
+        for (i, node) in self.nodes.iter().enumerate() {
+            if node
+                .execution_status()
+                .is_ok_and(|status| status.is_invalid())
+            {
+                continue;
+            }
+            if let Some(parent) = node.parent() {
+                if parent < children.len() {
+                    children[parent].push(i);
+                }
+            }
+        }
+        children
+    }
+
     /// Spec: `get_filtered_block_tree`.
     ///
     /// Returns the set of node indices on viable branches — those with at least
@@ -1192,6 +1212,7 @@ impl ProtoArray {
         current_slot: Slot,
         best_justified_checkpoint: Checkpoint,
         best_finalized_checkpoint: Checkpoint,
+        children_index: &[Vec<usize>],
     ) -> HashSet<usize> {
         let mut viable = HashSet::new();
         self.filter_block_tree::<E>(
@@ -1199,6 +1220,7 @@ impl ProtoArray {
             current_slot,
             best_justified_checkpoint,
             best_finalized_checkpoint,
+            children_index,
             &mut viable,
         );
         viable
@@ -1211,27 +1233,17 @@ impl ProtoArray {
         current_slot: Slot,
         best_justified_checkpoint: Checkpoint,
         best_finalized_checkpoint: Checkpoint,
+        children_index: &[Vec<usize>],
         viable: &mut HashSet<usize>,
     ) -> bool {
         let Some(node) = self.nodes.get(node_index) else {
             return false;
         };
 
-
-
-        // Skip invalid children — they aren't in store.blocks in the spec.
-        let children: Vec<usize> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, child)| {
-                child.parent() == Some(node_index)
-                    && !child
-                        .execution_status()
-                        .is_ok_and(|status| status.is_invalid())
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let children = children_index
+            .get(node_index)
+            .map(|c| c.as_slice())
+            .unwrap_or(&[]);
 
         if !children.is_empty() {
             // Evaluate ALL children (no short-circuit) to mark all viable branches.
@@ -1243,6 +1255,7 @@ impl ProtoArray {
                         current_slot,
                         best_justified_checkpoint,
                         best_finalized_checkpoint,
+                        children_index,
                         viable,
                     )
                 })
@@ -1287,12 +1300,16 @@ impl ProtoArray {
             payload_status: PayloadStatus::Pending,
         };
 
+        // Build parent->children index once for O(1) lookups.
+        let children_index = self.build_children_index();
+
         // Spec: `get_filtered_block_tree`.
         let viable_nodes = self.get_filtered_block_tree::<E>(
             start_index,
             current_slot,
             best_justified_checkpoint,
             best_finalized_checkpoint,
+            &children_index,
         );
 
         // Compute once rather than per-child per-level.
@@ -1301,7 +1318,7 @@ impl ProtoArray {
 
         loop {
             let children: Vec<_> = self
-                .get_node_children(&head)?
+                .get_node_children(&head, &children_index)?
                 .into_iter()
                 .filter(|(fc_node, _)| viable_nodes.contains(&fc_node.proto_node_index))
                 .collect();
@@ -1464,6 +1481,7 @@ impl ProtoArray {
     fn get_node_children(
         &self,
         node: &IndexedForkChoiceNode,
+        children_index: &[Vec<usize>],
     ) -> Result<Vec<(IndexedForkChoiceNode, ProtoNode)>, Error> {
         if node.payload_status == PayloadStatus::Pending {
             let proto_node = self
@@ -1477,23 +1495,25 @@ impl ProtoArray {
             }
             Ok(children)
         } else {
-            Ok(self
-                .nodes
+            let child_indices = children_index
+                .get(node.proto_node_index)
+                .map(|c| c.as_slice())
+                .unwrap_or(&[]);
+            Ok(child_indices
                 .iter()
-                .enumerate()
-                .filter(|(_, child_node)| {
-                    child_node.parent() == Some(node.proto_node_index)
-                        && child_node.get_parent_payload_status() == node.payload_status
-                })
-                .map(|(child_index, child_node)| {
-                    (
+                .filter_map(|&child_index| {
+                    let child_node = self.nodes.get(child_index)?;
+                    if child_node.get_parent_payload_status() != node.payload_status {
+                        return None;
+                    }
+                    Some((
                         IndexedForkChoiceNode {
                             root: child_node.root(),
                             proto_node_index: child_index,
                             payload_status: PayloadStatus::Pending,
                         },
                         child_node.clone(),
-                    )
+                    ))
                 })
                 .collect())
         }
