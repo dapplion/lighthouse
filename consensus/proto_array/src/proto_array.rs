@@ -17,6 +17,21 @@ use types::{
 four_byte_option_impl!(four_byte_option_usize, usize);
 four_byte_option_impl!(four_byte_option_checkpoint, Checkpoint);
 
+#[derive(Clone, Debug, PartialEq)]
+enum PayloadStatus {
+    Pending,
+    Empty,
+    Full,
+}
+
+#[derive(Clone, Debug)]
+pub struct ForkChoiceNode {
+    root: Hash256,
+    payload_status: PayloadStatus,
+}
+
+const PAYLOAD_TIMELY_THRESHOLD: usize = 256;
+
 /// Defines an operation which may invalidate the `execution_status` of some nodes.
 #[derive(Clone, Debug)]
 pub enum InvalidationOperation {
@@ -109,6 +124,8 @@ pub struct ProtoNode {
     pub unrealized_justified_checkpoint: Option<Checkpoint>,
     #[ssz(with = "four_byte_option_checkpoint")]
     pub unrealized_finalized_checkpoint: Option<Checkpoint>,
+    /// TODO(gloas): Use a bitfield for memory efficiency
+    pub ptc_votes: Vec<bool>,
 }
 
 #[derive(PartialEq, Debug, Encode, Decode, Serialize, Deserialize, Copy, Clone)]
@@ -217,9 +234,9 @@ impl ProtoArray {
             // https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/fork-choice.md#get_latest_attesting_balance
             if let Some(proposer_score_boost) = spec.proposer_score_boost
                 && proposer_boost_root != Hash256::zero()
-                    && proposer_boost_root == node.root
-                    // Invalid nodes (or their ancestors) should not receive a proposer boost.
-                    && !execution_status_is_invalid
+                && proposer_boost_root == node.root
+                // Invalid nodes (or their ancestors) should not receive a proposer boost.
+                && !execution_status_is_invalid
             {
                 proposer_score =
                     calculate_committee_fraction::<E>(new_justified_balances, proposer_score_boost)
@@ -332,6 +349,7 @@ impl ProtoArray {
             execution_status: block.execution_status,
             unrealized_justified_checkpoint: block.unrealized_justified_checkpoint,
             unrealized_finalized_checkpoint: block.unrealized_finalized_checkpoint,
+            ptc_votes: <_>::default(),
         };
 
         // If the parent has an invalid execution status, return an error before adding the block to
@@ -638,7 +656,7 @@ impl ProtoArray {
         current_slot: Slot,
         best_justified_checkpoint: Checkpoint,
         best_finalized_checkpoint: Checkpoint,
-    ) -> Result<Hash256, Error> {
+    ) -> Result<ForkChoiceNode, Error> {
         let justified_index = self
             .indices
             .get(justified_root)
@@ -688,7 +706,9 @@ impl ProtoArray {
             })));
         }
 
-        Ok(best_node.root)
+        Ok(ForkChoiceNode {
+            root: best_node.root,
+        })
     }
 
     /// Update the tree with new finalization information. The tree is only actually pruned if both
@@ -840,10 +860,18 @@ impl ProtoArray {
                         no_change
                     } else if child.weight == best_child.weight {
                         // Tie-breaker of equal weights by root.
-                        if child.root >= best_child.root {
+                        if child.root > best_child.root {
                             change_to_child
-                        } else {
+                        } else if child.weight < best_child.weight {
                             no_change
+                        } else {
+                            if get_payload_status_tiebreaker(best_child)
+                                > get_payload_status_tiebreaker(child)
+                            {
+                                change_to_child
+                            } else {
+                                no_change
+                            }
                         }
                     } else {
                         // Choose the winner by weight.
@@ -1103,6 +1131,56 @@ impl ProtoArray {
                     )
             })
             .collect()
+    }
+
+    fn should_extend_payload(&self, node: &ProtoNode) -> Result<bool, Error> {
+        let proposer_boost_root = self.previous_proposer_boost.root;
+        let proposer_boost_node = self
+            .get_node(&proposer_boost_root)
+            .ok_or(Error::NodeUnknown(proposer_boost_root))?;
+        Ok(self.is_payload_timely(&node.root)
+            || proposer_boost_root == Hash256::ZERO
+            || proposer_boost_node.parent == node_index
+            || self.is_parent_node_full(&proposer_boost_node)?)
+    }
+
+    fn is_parent_node_full(&self, node: &ProtoNode) -> Result<bool, Error> {
+        Ok(self.get_parent_payload_status(node)? == PayloadStatus::Full)
+    }
+
+    fn get_parent_payload_status(&self, node: &ProtoNode) -> Result<PayloadStatus, Error> {
+        let Some(parent_index) = node.parent else {
+            return Err(Error::ParentNotSet(node.root));
+        };
+        let parent = self
+            .nodes
+            .get(parent_index)
+            .ok_or(Error::InvalidNodeIndex(parent_index))?;
+        let parent_block_hash = node.bid_message.parent_block_hash;
+        let message_block_hash = parent.bid_message.block_hash;
+        if parent_block_hash == message_block_hash {
+            Ok(PayloadStatus::Full)
+        } else {
+            Ok(PayloadStatus::Empty)
+        }
+    }
+
+    /// Return whether the execution payload for the beacon block with root ``root``
+    /// was voted as present by the PTC, and was locally determined to be available.
+    fn is_payload_timely(&self, root: &Hash256) -> bool {
+        // If the payload is not locally available, the payload
+        // is not considered available regardless of the PTC vote
+        // TODO(gloas): Check that the payload for `root` has been seen
+
+        // The beacon block root must be known
+        match self.get_node(root) {
+            Some(node) => node.ptc_votes.iter().filter(|bit| bit).sum() > PAYLOAD_TIMELY_THRESHOLD,
+            None => false,
+        }
+    }
+
+    fn get_node(&self, root: &Hash256) -> Option<&ProtoNode> {
+        self.nodes.get(*self.indices.get(root)?)
     }
 }
 

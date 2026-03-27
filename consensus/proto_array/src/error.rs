@@ -54,6 +54,7 @@ pub enum Error {
     },
     InvalidEpochOffset(u64),
     Arith(ArithError),
+    ParentNotSet(Hash256),
 }
 
 impl From<ArithError> for Error {
