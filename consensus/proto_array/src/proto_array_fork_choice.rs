@@ -45,16 +45,27 @@ pub struct VoteTrackerV28 {
 // The payload status is `false` for pre-Gloas nodes.
 impl From<VoteTrackerV28> for VoteTracker {
     fn from(v: VoteTrackerV28) -> Self {
+        // Use the epoch number as a conservative slot estimate. The true slot is
+        // epoch * slots_per_epoch (>= epoch), so this is safe: it prevents replay
+        // of attestations from before this epoch while accepting all newer ones.
+        let slot = Slot::new(v.next_epoch.as_u64());
         VoteTracker {
             current_root: v.current_root,
             next_root: v.next_root,
-            // The v28 format stored next_epoch rather than slots. Default to 0 since the
-            // vote tracker will be updated on the next attestation.
-            current_slot: Slot::new(0),
-            next_slot: Slot::new(0),
+            current_slot: slot,
+            next_slot: slot,
             current_payload_present: false,
             next_payload_present: false,
         }
+    }
+}
+
+impl VoteTracker {
+    /// Set the slot fields. Used during schema migration to convert epoch-based
+    /// slots to actual slot values once `slots_per_epoch` is known.
+    pub fn set_slots(&mut self, current_slot: Slot, next_slot: Slot) {
+        self.current_slot = current_slot;
+        self.next_slot = next_slot;
     }
 }
 
