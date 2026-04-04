@@ -243,6 +243,7 @@ impl<E: EthSpec> HotColdDB<E, MemoryStore<E>, MemoryStore<E>> {
                 config.state_cache_size,
                 config.state_cache_headroom,
                 config.hot_hdiff_buffer_cache_size,
+                config.state_cache_max_mb.map(|mb| mb * 1_048_576),
             )),
             historic_state_cache: Mutex::new(HistoricStateCache::new(
                 config.cold_hdiff_buffer_cache_size,
@@ -297,6 +298,7 @@ impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>> {
                 config.state_cache_size,
                 config.state_cache_headroom,
                 config.hot_hdiff_buffer_cache_size,
+                config.state_cache_max_mb.map(|mb| mb * 1_048_576),
             )),
             historic_state_cache: Mutex::new(HistoricStateCache::new(
                 config.cold_hdiff_buffer_cache_size,
@@ -514,6 +516,10 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         metrics::set_gauge(
             &metrics::STORE_BEACON_STATE_CACHE_SIZE,
             state_cache.len() as i64,
+        );
+        metrics::set_gauge(
+            &metrics::STORE_BEACON_STATE_CACHE_ESTIMATED_BYTE_SIZE,
+            state_cache.cached_bytes() as i64,
         );
         metrics::set_gauge_vec(
             &metrics::STORE_BEACON_HDIFF_BUFFER_CACHE_SIZE,

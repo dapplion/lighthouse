@@ -7,7 +7,9 @@ use lru::LruCache;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use tracing::instrument;
-use types::{BeaconState, ChainSpec, Epoch, EthSpec, Hash256, Slot, execution::StatePayloadStatus};
+use types::{
+    BeaconState, ChainSpec, Epoch, EthSpec, Hash256, Slot, Validator, execution::StatePayloadStatus,
+};
 
 /// Fraction of the LRU cache to leave intact during culling.
 const CULL_EXEMPT_NUMERATOR: usize = 1;
@@ -16,6 +18,68 @@ const CULL_EXEMPT_DENOMINATOR: usize = 10;
 /// States that are less than or equal to this many epochs old *could* become finalized and will not
 /// be culled from the cache.
 const EPOCH_FINALIZATION_LIMIT: u64 = 4;
+
+/// Estimate the marginal memory cost of a cached state relative to the finalized base.
+///
+/// Uses knowledge of the consensus spec to approximate how many milhouse tree leaves were
+/// copy-on-write'd since the state was rebased on finalized. No milhouse instrumentation required.
+///
+/// The key insight: after `rebase_on_finalized()`, all cached states share the finalized state's
+/// tree as their base. Each state's COW allocations are independent, so estimates can be summed.
+pub fn estimated_marginal_bytes<E: EthSpec>(state: &BeaconState<E>) -> usize {
+    let n = state.validators().len();
+    let is_epoch_boundary = state.slot() % E::slots_per_epoch() == 0;
+
+    // Balances: epoch processing touches ALL validators, mid-epoch only the proposer.
+    let balances_dirty = if is_epoch_boundary { n } else { 1 };
+    let inactivity_dirty = if is_epoch_boundary { n } else { 0 };
+
+    // Participation lists (u8 per validator): epoch boundary rewrites both lists,
+    // mid-epoch ~committee_size attesters get flagged per slot.
+    let participation_dirty = if is_epoch_boundary {
+        n
+    } else {
+        // Approximate one committee per slot. Mainnet target is 128, minimal is 4.
+        // Use 128 as a reasonable upper bound — the cost is small (u8 leaves).
+        128
+    };
+
+    // Validators: only mutated on activation/exit (rare). Negligible for estimation.
+    let validators_dirty: usize = 0;
+
+    // Fixed-size vectors: 1-2 leaves per slot, negligible but included for completeness.
+    let roots_dirty: usize = 2; // state_roots + block_roots
+    let randao_dirty: usize = 1;
+
+    estimate_tree_bytes::<u64>(balances_dirty, n)
+        + estimate_tree_bytes::<u64>(inactivity_dirty, n)
+        // Two participation lists (previous + current), each List<u8, N>
+        + 2 * estimate_tree_bytes::<u8>(participation_dirty, n)
+        + estimate_tree_bytes::<Validator>(validators_dirty, n)
+        + estimate_tree_bytes::<Hash256>(roots_dirty, E::slots_per_historical_root())
+        + estimate_tree_bytes::<Hash256>(randao_dirty, E::epochs_per_historical_vector())
+}
+
+/// Estimate bytes consumed by COW'd nodes in a milhouse tree.
+///
+/// For sparse changes: each dirty leaf creates ~log2(total) new internal nodes along its path.
+/// For fully-dirty trees: the entire tree is a fresh allocation (~2*total nodes).
+/// The sparse formula overcounts for adjacent dirty leaves (shared internal paths) — this is
+/// intentional as an upper bound (safe direction for eviction decisions).
+fn estimate_tree_bytes<T>(dirty: usize, total: usize) -> usize {
+    if dirty == 0 || total == 0 {
+        return 0;
+    }
+    let node_size = std::mem::size_of::<T>();
+    if dirty >= total {
+        // Full tree copy: all leaves + all internal nodes ≈ 2*total
+        2 * total * node_size
+    } else {
+        // Sparse: each dirty leaf COW's ~log2(total) internal nodes
+        let depth = usize::BITS as u32 - total.leading_zeros();
+        dirty * depth as usize * node_size
+    }
+}
 
 #[derive(Debug)]
 pub struct FinalizedState<E: EthSpec> {
@@ -38,14 +102,17 @@ pub struct SlotMap {
 #[derive(Debug)]
 pub struct StateCache<E: EthSpec> {
     finalized_state: Option<FinalizedState<E>>,
-    // Stores the tuple (state_root, state) as LruCache only returns the value on put and we need
-    // the state_root
-    states: LruCache<Hash256, (Hash256, BeaconState<E>)>,
+    /// Stores (state_root, state, estimated_marginal_bytes) per cached state.
+    states: LruCache<Hash256, (Hash256, BeaconState<E>, usize)>,
     block_map: BlockMap,
     hdiff_buffers: HotHDiffBufferCache,
     max_epoch: Epoch,
     head_block_root: Hash256,
     headroom: NonZeroUsize,
+    /// Sum of `estimated_marginal_bytes` across all cached states.
+    cached_bytes: usize,
+    /// Optional byte budget. When set, eviction triggers when `cached_bytes` exceeds this.
+    max_bytes: Option<usize>,
 }
 
 /// Cache of hdiff buffers for hot states.
@@ -83,6 +150,7 @@ impl<E: EthSpec> StateCache<E> {
         state_capacity: NonZeroUsize,
         headroom: NonZeroUsize,
         hdiff_capacity: NonZeroUsize,
+        max_bytes: Option<usize>,
     ) -> Self {
         StateCache {
             finalized_state: None,
@@ -92,6 +160,8 @@ impl<E: EthSpec> StateCache<E> {
             max_epoch: Epoch::new(0),
             head_block_root: Hash256::ZERO,
             headroom,
+            cached_bytes: 0,
+            max_bytes,
         }
     }
 
@@ -109,6 +179,11 @@ impl<E: EthSpec> StateCache<E> {
 
     pub fn hdiff_buffer_mem_usage(&self) -> usize {
         self.hdiff_buffers.mem_usage()
+    }
+
+    /// Total estimated bytes consumed by cached states.
+    pub fn cached_bytes(&self) -> usize {
+        self.cached_bytes
     }
 
     /// Return all state roots currently held in the cache, including the finalized state.
@@ -167,7 +242,8 @@ impl<E: EthSpec> StateCache<E> {
 
         // Delete states.
         for state_root in state_roots_to_prune {
-            if let Some((_, state)) = self.states.pop(&state_root) {
+            if let Some((_, state, cost)) = self.states.pop(&state_root) {
+                self.cached_bytes = self.cached_bytes.saturating_sub(cost);
                 // Add the hdiff buffer for this state to the hdiff cache if it is now part of
                 // the pre-finalized grid. The `put` method will take care of keeping the most
                 // useful buffers.
@@ -252,7 +328,9 @@ impl<E: EthSpec> StateCache<E> {
         // Update the cache's idea of the max epoch.
         self.max_epoch = std::cmp::max(state.current_epoch(), self.max_epoch);
 
-        // If the cache is full, use the custom cull routine to make room.
+        let cost = estimated_marginal_bytes::<E>(state);
+
+        // If the cache is full (by count), use the custom cull routine to make room.
         let mut deleted_states =
             if let Some(over_capacity) = self.len().checked_sub(self.capacity()) {
                 // The `over_capacity` should always be 0, but we add it here just in case.
@@ -261,12 +339,27 @@ impl<E: EthSpec> StateCache<E> {
                 vec![]
             };
 
+        // If adding this state would exceed the byte budget, cull until under budget.
+        if let Some(max_bytes) = self.max_bytes {
+            while self.cached_bytes.saturating_add(cost) > max_bytes && self.len() > 0 {
+                let culled = self.cull(1);
+                if culled.is_empty() {
+                    // Nothing left to cull (all states are exempt).
+                    break;
+                }
+                deleted_states.extend(culled);
+            }
+        }
+
         // Insert the full state into the cache.
-        if let Some((deleted_state_root, _)) =
-            self.states.put(state_root, (state_root, state.clone()))
+        if let Some((deleted_state_root, _, old_cost)) = self
+            .states
+            .put(state_root, (state_root, state.clone(), cost))
         {
+            self.cached_bytes = self.cached_bytes.saturating_sub(old_cost);
             deleted_states.push(deleted_state_root);
         }
+        self.cached_bytes = self.cached_bytes.saturating_add(cost);
 
         // Record the connection from block root and slot to this state.
         let slot = state.slot();
@@ -283,7 +376,9 @@ impl<E: EthSpec> StateCache<E> {
         {
             return Some(finalized_state.state.clone());
         }
-        self.states.get(&state_root).map(|(_, state)| state.clone())
+        self.states
+            .get(&state_root)
+            .map(|(_, state, _)| state.clone())
     }
 
     pub fn put_hdiff_buffer(&mut self, state_root: Hash256, slot: Slot, buffer: &HDiffBuffer) {
@@ -340,7 +435,9 @@ impl<E: EthSpec> StateCache<E> {
     }
 
     pub fn delete_state(&mut self, state_root: &Hash256) {
-        self.states.pop(state_root);
+        if let Some((_, _, cost)) = self.states.pop(state_root) {
+            self.cached_bytes = self.cached_bytes.saturating_sub(cost);
+        }
         self.block_map.delete(state_root);
     }
 
@@ -352,7 +449,9 @@ impl<E: EthSpec> StateCache<E> {
             .flatten()
         {
             for state_root in slot_map.slots.values() {
-                self.states.pop(state_root);
+                if let Some((_, _, cost)) = self.states.pop(state_root) {
+                    self.cached_bytes = self.cached_bytes.saturating_sub(cost);
+                }
             }
         }
     }
@@ -379,7 +478,7 @@ impl<E: EthSpec> StateCache<E> {
 
         // Skip the `cull_exempt` most-recently used, then reverse the iterator to start at
         // least-recently used states.
-        for (&state_root, (_, state)) in self.states.iter().skip(cull_exempt).rev() {
+        for (&state_root, (_, state, _)) in self.states.iter().skip(cull_exempt).rev() {
             let is_advanced = state.slot() > state.latest_block_header().slot;
             let is_boundary = state.slot() % E::slots_per_epoch() == 0;
             let could_finalize =
