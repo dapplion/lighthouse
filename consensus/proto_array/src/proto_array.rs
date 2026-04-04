@@ -1720,13 +1720,22 @@ impl ProtoArray {
         &self,
         best_finalized_checkpoint: Checkpoint,
     ) -> Vec<&ProtoNode> {
+        // Build a set of nodes that are parents (i.e. have at least one child).
+        // This avoids an O(n²) scan that counted children per node.
+        let mut has_children = vec![false; self.nodes.len()];
+        for node in &self.nodes {
+            if let Some(parent_idx) = node.parent() {
+                if parent_idx < has_children.len() {
+                    has_children[parent_idx] = true;
+                }
+            }
+        }
+
         self.nodes
             .iter()
             .enumerate()
             .filter(|(i, node)| {
-                // TODO(gloas): we unoptimized this for Gloas fork choice, could re-optimize.
-                let num_children = self.nodes.iter().filter(|n| n.parent() == Some(*i)).count();
-                num_children == 0
+                !has_children[*i]
                     && self.is_finalized_checkpoint_or_descendant::<E>(
                         node.root(),
                         best_finalized_checkpoint,
