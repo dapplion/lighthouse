@@ -593,7 +593,11 @@ impl ProtoArray {
             // Without `payload_received = true` on genesis, the FULL virtual
             // child doesn't exist in the spec's `get_node_children`, making all
             // Full concrete children of genesis unreachable in `get_head`.
-            let is_genesis = parent_index.is_none();
+            //
+            // Use slot == 0 to distinguish actual genesis from checkpoint sync anchors.
+            // Checkpoint sync anchors also have no parent, but their state is Pending
+            // (we don't download the Full state), so payload_received must be false.
+            let is_genesis = parent_index.is_none() && block.slot == 0;
 
             ProtoNode::V29(ProtoNodeV29 {
                 slot: block.slot,

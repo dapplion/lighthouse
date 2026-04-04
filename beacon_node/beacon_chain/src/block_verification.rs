@@ -95,7 +95,7 @@ use std::sync::Arc;
 use store::{Error as DBError, KeyValueStore};
 use strum::AsRefStr;
 use task_executor::JoinHandle;
-use tracing::{Instrument, Span, debug, debug_span, error, info_span, instrument};
+use tracing::{Instrument, Span, debug, debug_span, error, info_span, instrument, warn};
 use types::{
     BeaconBlockRef, BeaconState, BeaconStateError, BlobsList, ChainSpec, DataColumnSidecarList,
     Epoch, EthSpec, FullPayload, Hash256, InconsistentFork, KzgProofs, RelativeEpoch,
@@ -1973,26 +1973,74 @@ fn load_parent<T: BeaconChainTypes, B: AsBlock<T::EthSpec>>(
         {
             // Post-Gloas Full block case.
             // TODO(gloas): loading the envelope here is not very efficient
-            let Some(envelope) = chain.store.get_payload_envelope(&root)? else {
-                return Err(BeaconChainError::DBInconsistent(format!(
-                    "Missing envelope for parent block {root:?}",
-                ))
-                .into());
-            };
-            let state_root = envelope.message.state_root;
-            (StatePayloadStatus::Full, state_root)
+            match chain.store.get_payload_envelope(&root)? {
+                Some(envelope) => {
+                    let state_root = envelope.message.state_root;
+                    (StatePayloadStatus::Full, state_root)
+                }
+                None => {
+                    // Envelope not found - this can happen during checkpoint sync.
+                    // The checkpoint block envelope wasn't downloaded.
+                    // Fall back to using the Pending state - this may cause state root
+                    // mismatches but allows sync to attempt to proceed.
+                    warn!(
+                        %root,
+                        block_slot = %parent_block.slot(),
+                        "Missing envelope for parent block, using Pending state as fallback"
+                    );
+                    (StatePayloadStatus::Pending, parent_block.state_root())
+                }
+            }
         } else {
             // Post-Gloas empty block case (also covers the Gloas fork transition).
             (StatePayloadStatus::Pending, parent_block.state_root())
         };
-        let (parent_state_root, state) = chain
+        let (parent_state_root, mut state) = chain
             .store
             .get_advanced_hot_state(root, payload_status, block.slot(), parent_state_root)?
+            .or_else(|| {
+                // During checkpoint sync, the Full state may not exist — only the Pending
+                // (epoch boundary) state is available. Fall back to loading as Pending.
+                if payload_status == StatePayloadStatus::Full {
+                    warn!(
+                        %root,
+                        "Full state not found for parent block, falling back to Pending"
+                    );
+                    chain
+                        .store
+                        .get_advanced_hot_state(
+                            root,
+                            StatePayloadStatus::Pending,
+                            block.slot(),
+                            parent_block.state_root(),
+                        )
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                }
+            })
             .ok_or_else(|| {
                 BeaconChainError::DBInconsistent(
                     format!("Missing state for parent block {root:?}",),
                 )
             })?;
+
+        // If we needed the Full state but fell back to Pending (checkpoint sync case),
+        // apply the envelope's block_hash to the in-memory state so child block bid
+        // validation passes (ParentBlockHashMismatch). This only mutates the in-memory
+        // state, not the stored one — the on-disk state keeps its correct root.
+        if payload_status == StatePayloadStatus::Full
+            && let Ok(Some(envelope)) = chain.store.get_payload_envelope(&root)
+            && let Ok(hash_mut) = state.latest_block_hash_mut()
+        {
+            debug!(
+                %root,
+                block_hash = %envelope.message.payload.block_hash,
+                "Patching in-memory state latest_block_hash from envelope"
+            );
+            *hash_mut = envelope.message.payload.block_hash;
+        }
 
         if !state.all_caches_built() {
             debug!(

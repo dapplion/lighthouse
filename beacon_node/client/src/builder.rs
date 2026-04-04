@@ -372,6 +372,7 @@ where
                     anchor_state,
                     anchor_block,
                     anchor_blobs,
+                    None,
                     genesis_state,
                 )?
             }
@@ -445,16 +446,54 @@ where
                     None
                 };
 
+                // Download execution payload envelope for Gloas blocks.
+                // The checkpoint server returns the Pending state (before envelope),
+                // so we can't check is_parent_block_full() — it will always be false.
+                // Instead, try to download the envelope unconditionally for Gloas blocks.
+                // If the server returns 404, the block was empty (no envelope delivered).
+                let is_gloas = spec
+                    .fork_name_at_slot::<E>(finalized_block_slot)
+                    .gloas_enabled();
+                let envelope = if is_gloas {
+                    debug!("Downloading finalized execution payload envelope");
+                    match remote
+                        .get_beacon_execution_payload_envelope_ssz::<E>(BlockId::Root(block_root))
+                        .await
+                    {
+                        Ok(Some(env)) => {
+                            info!("Downloaded finalized execution payload envelope");
+                            Some(env)
+                        }
+                        Ok(None) => {
+                            info!(
+                                "No execution payload envelope for checkpoint block (empty block)"
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            warn!(
+                                block_root = %block_root,
+                                error = %e,
+                                "Error fetching execution payload envelope, continuing without it"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let genesis_state = genesis_state(&runtime_context, &config).await?;
 
                 info!(
                     block_slot = %block.slot(),
                     state_slot = %state.slot(),
                     block_root = ?block_root,
+                    has_envelope = envelope.is_some(),
                     "Loaded checkpoint block and state"
                 );
 
-                builder.weak_subjectivity_state(state, block, blobs, genesis_state)?
+                builder.weak_subjectivity_state(state, block, blobs, envelope, genesis_state)?
             }
             ClientGenesis::DepositContract => {
                 return Err("Loading genesis from deposit contract no longer supported".to_string());
