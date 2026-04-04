@@ -45,7 +45,9 @@ use std::time::Duration;
 use store::Hash256;
 use tracing::{debug, error, warn};
 use types::data::FixedBlobSidecarList;
-use types::{BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock};
+use types::{
+    BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock, SignedExecutionPayloadEnvelope,
+};
 
 pub mod parent_chain;
 mod single_block_lookup;
@@ -82,6 +84,8 @@ type BlobDownloadResponse<E> =
     Result<(FixedBlobSidecarList<E>, PeerGroup, Duration), RpcResponseError>;
 type CustodyDownloadResponse<E> =
     Result<(types::DataColumnSidecarList<E>, PeerGroup, Duration), RpcResponseError>;
+type EnvelopeDownloadResponse<E> =
+    Result<(Arc<SignedExecutionPayloadEnvelope<E>>, PeerGroup, Duration), RpcResponseError>;
 
 pub enum BlockComponent<E: EthSpec> {
     Block(DownloadResult<Arc<SignedBeaconBlock<E>>>),
@@ -579,6 +583,29 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         self.on_lookup_result(id.lookup_id, result, "custody_download_response", cx);
     }
 
+    pub fn on_payload_envelope_download_response(
+        &mut self,
+        id: SingleLookupReqId,
+        response: EnvelopeDownloadResponse<T::EthSpec>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
+            debug!(?id, "Envelope returned for single block lookup not present");
+            return;
+        };
+        let block_root = lookup.block_root();
+        debug!(
+            ?block_root,
+            ?id,
+            is_ok = response.is_ok(),
+            "Payload envelope download response"
+        );
+
+        let result =
+            lookup.on_payload_envelope_download_response(id.req_id, response.map_err(|_| ()), cx);
+        self.on_lookup_result(id.lookup_id, result, "envelope_download_response", cx);
+    }
+
     /* Error responses */
 
     pub fn peer_disconnected(&mut self, peer_id: &PeerId) {
@@ -605,6 +632,9 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             }
             BlockProcessType::SingleBlob { .. } | BlockProcessType::SingleCustodyColumn(_) => {
                 self.on_data_processing_result(lookup_id, result, cx)
+            }
+            BlockProcessType::SinglePayloadEnvelope { .. } => {
+                self.on_payload_processing_result(lookup_id, result, cx)
             }
         };
         self.on_lookup_result(lookup_id, lookup_result, "processing_result", cx);
@@ -766,6 +796,50 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
 
                 // Data processing failed — retry data download only
                 lookup.on_data_processing_result(false, cx)
+            }
+        }
+    }
+
+    /// Handle payload envelope processing result.
+    fn on_payload_processing_result(
+        &mut self,
+        lookup_id: SingleLookupId,
+        result: BlockProcessingResult,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        let Some(lookup) = self.single_block_lookups.get_mut(&lookup_id) else {
+            debug!(id = lookup_id, "Unknown single block lookup");
+            return Err(LookupRequestError::UnknownLookup);
+        };
+
+        let block_root = lookup.block_root();
+
+        debug!(
+            ?block_root,
+            id = lookup_id,
+            ?result,
+            "Received payload processing result"
+        );
+
+        match result {
+            BlockProcessingResult::Ok(AvailabilityProcessingStatus::Imported(_))
+            | BlockProcessingResult::Ok(AvailabilityProcessingStatus::MissingComponents {
+                ..
+            })
+            | BlockProcessingResult::Err(BlockError::DuplicateFullyImported(..))
+            | BlockProcessingResult::Err(BlockError::GenesisBlock) => {
+                lookup.on_payload_processing_result(true, cx)
+            }
+            BlockProcessingResult::Ignored => {
+                warn!("Payload processing ignored, cpu might be overloaded");
+                Err(LookupRequestError::Failed(
+                    "Payload processing ignored".to_owned(),
+                ))
+            }
+            BlockProcessingResult::Err(e) => {
+                debug!(?block_root, error = ?e, "Payload processing error, retrying");
+                // Payload processing failed — retry payload download
+                lookup.on_payload_processing_result(false, cx)
             }
         }
     }

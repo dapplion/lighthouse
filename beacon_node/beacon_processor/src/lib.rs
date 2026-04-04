@@ -416,6 +416,9 @@ pub enum Work<E: EthSpec> {
     RpcBlobs {
         process_fn: AsyncFn,
     },
+    RpcPayloadEnvelope {
+        process_fn: AsyncFn,
+    },
     RpcCustodyColumn(AsyncFn),
     ColumnReconstruction(AsyncFn),
     IgnoredRpcBlock {
@@ -481,6 +484,7 @@ pub enum WorkType {
     GossipLightClientOptimisticUpdate,
     RpcBlock,
     RpcBlobs,
+    RpcPayloadEnvelope,
     RpcCustodyColumn,
     ColumnReconstruction,
     IgnoredRpcBlock,
@@ -542,6 +546,7 @@ impl<E: EthSpec> Work<E> {
             Work::GossipProposerPreferences(_) => WorkType::GossipProposerPreferences,
             Work::RpcBlock { .. } => WorkType::RpcBlock,
             Work::RpcBlobs { .. } => WorkType::RpcBlobs,
+            Work::RpcPayloadEnvelope { .. } => WorkType::RpcPayloadEnvelope,
             Work::RpcCustodyColumn { .. } => WorkType::RpcCustodyColumn,
             Work::ColumnReconstruction(_) => WorkType::ColumnReconstruction,
             Work::IgnoredRpcBlock { .. } => WorkType::IgnoredRpcBlock,
@@ -1173,7 +1178,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             Work::GossipLightClientOptimisticUpdate { .. } => work_queues
                                 .lc_gossip_optimistic_update_queue
                                 .push(work, work_id),
-                            Work::RpcBlock { .. } | Work::IgnoredRpcBlock { .. } => {
+                            Work::RpcBlock { .. }
+                            | Work::IgnoredRpcBlock { .. }
+                            | Work::RpcPayloadEnvelope { .. } => {
                                 work_queues.rpc_block_queue.push(work, work_id)
                             }
                             Work::RpcBlobs { .. } => work_queues.rpc_blob_queue.push(work, work_id),
@@ -1305,7 +1312,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         WorkType::GossipLightClientOptimisticUpdate => {
                             work_queues.lc_gossip_optimistic_update_queue.len()
                         }
-                        WorkType::RpcBlock => work_queues.rpc_block_queue.len(),
+                        WorkType::RpcBlock | WorkType::RpcPayloadEnvelope => {
+                            work_queues.rpc_block_queue.len()
+                        }
                         WorkType::RpcBlobs | WorkType::IgnoredRpcBlock => {
                             work_queues.rpc_blob_queue.len()
                         }
@@ -1500,6 +1509,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
                 beacon_block_root: _,
             }
             | Work::RpcBlobs { process_fn }
+            | Work::RpcPayloadEnvelope { process_fn }
             | Work::RpcCustodyColumn(process_fn)
             | Work::ColumnReconstruction(process_fn) => task_spawner.spawn_async(process_fn),
             Work::IgnoredRpcBlock { process_fn } => task_spawner.spawn_blocking(process_fn),

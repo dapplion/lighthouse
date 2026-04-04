@@ -3,7 +3,11 @@
 ## Goal
 Make Lighthouse checkpoint sync against epbs-devnet-1 and follow head.
 
-## Status: CHECKPOINT SYNC WORKS — peer connectivity issue blocks syncing to head
+## Status: CHECKPOINT SYNC WORKS + ENVELOPE LOOKUP WIRED
+- Checkpoint sync initializes correctly, zero block rejections, finalized root matches devnet
+- Cannot test full sync-to-head: our IP (85.10.201.236) is banned by all 3 Prysm peers
+- Prysm ban persists >2.5 hours. Need fresh IP or ethpandaops to clear bans
+- 10-minute wait between attempts did not clear the ban
 
 ## Devnet State (checked 2026-04-04)
 - Devnet alive, head slot ~25232, synced, not optimistic
@@ -86,7 +90,7 @@ Mutating it changes the root, making our node incompatible. Need a different app
   similar to how `DataColumnsByRange` was integrated. This is a significant change to the
   range sync pipeline and coupling logic.
 
-### Bug 5: Prysm peers send Goodbye:Fault (NETWORKING)
+### Bug 5: Prysm peers IP-banned from previous broken sessions (NETWORKING)
 - Prysm sends `Goodbye: Fault` immediately after status exchange
 - Happens BEFORE any data requests — not caused by rate limiting
 - Our finalized_root and epoch match the devnet's canonical chain
