@@ -167,6 +167,9 @@ pub enum HotColdDBError {
     /// Recoverable error indicating that the database freeze point couldn't be updated
     /// due to the finalized block not lying on an epoch boundary (should be infrequent).
     FreezeSlotUnaligned(Slot),
+    UnableToFreezeFullState {
+        state_root: Hash256,
+    },
     FreezeSlotError {
         current_split_slot: Slot,
         proposed_split_slot: Slot,
@@ -198,6 +201,7 @@ pub enum HotColdDBError {
     BlockReplayBeaconError(BeaconStateError),
     BlockReplaySlotError(SlotProcessingError),
     BlockReplayBlockError(BlockProcessingError),
+    BlockReplayEnvelopeError(String),
     InvalidSlotsPerRestorePoint {
         slots_per_restore_point: u64,
         slots_per_historical_root: u64,
@@ -1093,6 +1097,12 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     /// will be returned if the provided `state_root` doesn't match the state root of the
     /// frozen state at `slot`. Consequently, if a state from a non-canonical chain is desired, it's
     /// best to set `slot` to `None`, or call `load_hot_state` directly.
+    ///
+    /// **Gloas note**: For Gloas blocks, `block.state_root()` returns the *pending* state root,
+    /// which may differ from the root stored in the cold DB (which could be the full state root,
+    /// whatever is canonical).
+    /// Callers looking up cold Gloas states should use `get_cold_state_root(slot)` to obtain the
+    /// actual key stored in the freezer.
     pub fn get_state(
         &self,
         state_root: &Hash256,
@@ -1863,6 +1873,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     /// migration. For now we use an extra read from the DB to determine it.
     fn get_hot_state_summary_payload_status(
         &self,
+        state_root: &Hash256,
         summary: &HotStateSummary,
     ) -> Result<StatePayloadStatus, Error> {
         // Treat pre-Gloas states as `Pending`.
@@ -1877,6 +1888,12 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         // Treat genesis state as `Pending` (`BeaconBlock` state).
         let previous_state_root = summary.previous_state_root;
         if previous_state_root.is_zero() {
+            return Ok(StatePayloadStatus::Pending);
+        }
+
+        // If this state is the split state, it is always Pending.
+        let split = self.get_split_info();
+        if *state_root == split.state_root {
             return Ok(StatePayloadStatus::Pending);
         }
 
@@ -1902,7 +1919,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         } else if summary.slot == summary.latest_block_slot {
             Ok(StatePayloadStatus::Pending)
         } else {
-            self.get_hot_state_summary_payload_status(&previous_state_summary)
+            self.get_hot_state_summary_payload_status(&previous_state_root, &previous_state_summary)
         }
     }
 
@@ -2055,11 +2072,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             },
         ) = self.load_hot_state_summary(state_root)?
         {
-            let payload_status = self.get_hot_state_summary_payload_status(&summary)?;
             debug!(
                 %slot,
                 ?state_root,
-                ?payload_status,
                 "Loading hot state"
             );
             let mut state = match self.hot_storage_strategy(slot)? {
@@ -2087,6 +2102,11 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
                     state
                 }
                 StorageStrategy::ReplayFrom(from_slot) => {
+                    // We only compute the `payload_status` in the `ReplayFrom` case because the
+                    // function `get_hot_state_summary_payload_status` will fail for `Full` states
+                    // prior to the split slot (the ones required for the hdiff grid).
+                    let payload_status =
+                        self.get_hot_state_summary_payload_status(state_root, &summary)?;
                     let from_state_root = diff_base_state.get_root(from_slot)?;
 
                     let (mut base_state, _) = self
@@ -2143,6 +2163,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             slot,
             latest_block_root,
             desired_payload_status,
+            base_state.payload_status(),
         )?;
         let _t = metrics::start_timer(&metrics::STORE_BEACON_REPLAY_HOT_BLOCKS_TIME);
 
@@ -2490,7 +2511,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             return Ok(base_state);
         }
 
-        let (blocks, envelopes) = self.load_cold_blocks(base_state.slot() + 1, slot)?;
+        let base_slot = base_state.slot();
+        let (blocks, envelopes) =
+            self.load_cold_blocks(base_slot + 1, slot, base_state.payload_status(), base_slot)?;
 
         // Include state root for base state as it is required by block processing to not
         // have to hash the state.
@@ -2607,6 +2630,8 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         start_slot: Slot,
         end_slot: Slot,
+        base_payload_status: StatePayloadStatus,
+        base_state_slot: Slot,
     ) -> Result<
         (
             Vec<SignedBlindedBeaconBlock<E>>,
@@ -2643,6 +2668,8 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             &blocks,
             end_block_root,
             desired_payload_status,
+            base_payload_status,
+            base_state_slot,
         )?;
 
         Ok((blocks, envelopes))
@@ -2664,6 +2691,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         end_slot: Slot,
         end_block_root: Hash256,
         desired_payload_status: StatePayloadStatus,
+        base_payload_status: StatePayloadStatus,
     ) -> Result<
         (
             Vec<SignedBlindedBeaconBlock<E>>,
@@ -2711,6 +2739,8 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             &blocks,
             end_block_root,
             desired_payload_status,
+            base_payload_status,
+            start_slot,
         )?;
 
         Ok((blocks, envelopes))
@@ -2721,11 +2751,24 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         blocks: &[SignedBlindedBeaconBlock<E>],
         end_block_root: Hash256,
         desired_payload_status: StatePayloadStatus,
+        base_payload_status: StatePayloadStatus,
+        base_state_slot: Slot,
     ) -> Result<Vec<SignedExecutionPayloadEnvelope<E>>, Error> {
         let mut envelopes = vec![];
 
-        for (block, next_block) in blocks.iter().tuple_windows() {
+        for (i, (block, next_block)) in blocks.iter().tuple_windows().enumerate() {
             if block.fork_name_unchecked().gloas_enabled() {
+                // Skip the anchor block's envelope if the base state already has it applied
+                // (Full status). The anchor block is at the base state's slot and is skipped
+                // by the block replayer. If the base state is Full, the replayer won't consume
+                // this block's envelope, so including it would cause the iterator to misalign.
+                if i == 0
+                    && base_payload_status == StatePayloadStatus::Full
+                    && block.slot() <= base_state_slot
+                {
+                    continue;
+                }
+
                 // Check next block to see if this block's payload is canonical on this chain.
                 let block_hash = block.payload_bid_block_hash()?;
                 if !next_block.is_parent_block_full(block_hash) {
@@ -2741,8 +2784,13 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             }
         }
 
-        // Load the payload for the last block if desired.
-        if let StatePayloadStatus::Full = desired_payload_status {
+        // Load the payload for the last block if desired, unless the base state is already Full
+        // and no blocks after the base will be applied (the replayer will skip them all).
+        let base_already_full = base_payload_status == StatePayloadStatus::Full
+            && blocks.last().is_none_or(|b| b.slot() <= base_state_slot);
+        if let StatePayloadStatus::Full = desired_payload_status
+            && !base_already_full
+        {
             let envelope = self.get_payload_envelope(&end_block_root)?.ok_or(
                 HotColdDBError::MissingExecutionPayloadEnvelope(end_block_root),
             )?;
@@ -3800,6 +3848,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
 ) -> Result<SplitChange, Error> {
     debug!(
         slot = %finalized_state.slot(),
+        state_root = ?finalized_state_root,
         "Freezer migration started"
     );
 
@@ -3817,10 +3866,22 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         .into());
     }
 
-    // finalized_state.slot() must be at an epoch boundary
-    // else we may introduce bugs to the migration/pruning logic
+    // finalized_state.slot() must be at an epoch boundary else we may introduce bugs to the
+    // migration/pruning logic
     if finalized_state.slot() % E::slots_per_epoch() != 0 {
         return Err(HotColdDBError::FreezeSlotUnaligned(finalized_state.slot()).into());
+    }
+
+    // If the finalized state is from the same slot as the finalized block, then it must be the
+    // pending state for that slot. Finalization only finalizes the block root, and NOT the payload,
+    // so it would be wrong to finalize the full state.
+    if finalized_state.latest_block_header().slot == finalized_state.slot()
+        && finalized_state.payload_status() == StatePayloadStatus::Full
+    {
+        return Err(HotColdDBError::UnableToFreezeFullState {
+            state_root: finalized_state_root,
+        }
+        .into());
     }
 
     let mut cold_db_block_ops = vec![];
