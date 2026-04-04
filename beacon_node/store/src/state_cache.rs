@@ -76,7 +76,7 @@ fn estimate_tree_bytes<T>(dirty: usize, total: usize) -> usize {
         2 * total * node_size
     } else {
         // Sparse: each dirty leaf COW's ~log2(total) internal nodes
-        let depth = usize::BITS as u32 - total.leading_zeros();
+        let depth = usize::BITS - total.leading_zeros();
         dirty * depth as usize * node_size
     }
 }
