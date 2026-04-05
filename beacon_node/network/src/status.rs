@@ -23,6 +23,16 @@ pub(crate) fn status_message<T: BeaconChainTypes>(beacon_chain: &BeaconChain<T>)
     let cached_head = beacon_chain.canonical_head.cached_head();
     let mut finalized_checkpoint = cached_head.finalized_checkpoint();
 
+    // During checkpoint sync, the fork choice's finalized checkpoint is set to the anchor
+    // block's epoch, which may be ahead of the network-agreed finalized epoch stored in the
+    // state. Other clients (e.g. Prysm) reject peers whose finalized_root doesn't match
+    // their IsFinalized check. Use the state's finalized checkpoint when it's behind the
+    // fork choice value, as it reflects the actual network consensus.
+    let state_finalized = cached_head.snapshot.beacon_state.finalized_checkpoint();
+    if state_finalized.epoch < finalized_checkpoint.epoch {
+        finalized_checkpoint = state_finalized;
+    }
+
     // Alias the genesis checkpoint root to `0x00`.
     let spec = &beacon_chain.spec;
     let genesis_epoch = spec.genesis_slot.epoch(T::EthSpec::slots_per_epoch());
