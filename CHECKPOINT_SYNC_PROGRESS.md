@@ -5,9 +5,10 @@ Make Lighthouse checkpoint sync against epbs-devnet-1 and follow head.
 
 ## Status: CHECKPOINT SYNC WORKS + ENVELOPE LOOKUP WIRED
 - Checkpoint sync initializes correctly, zero block rejections, finalized root matches devnet
-- Cannot test full sync-to-head: our IP (85.10.201.236) is banned by all 3 Prysm peers
-- Prysm ban persists >2.5 hours. Need fresh IP or ethpandaops to clear bans
-- 10-minute wait between attempts did not clear the ban
+- Cannot test full sync-to-head: Prysm collocation limit blocks our IP
+- Root cause: 22 peer IDs stored from our IP 85.10.201.236, exceeds Prysm's CollocationLimit=5
+- Not an IP ban — it's an anti-Sybil measure in `beacon-chain/p2p/peers/status.go:isfromBadIP`
+- Need: fresh IP, Prysm restart (clear peer store), or different machine
 
 ## Devnet State (checked 2026-04-04)
 - Devnet alive, head slot ~25232, synced, not optimistic
