@@ -5,8 +5,6 @@ use ssz_types::BitList;
 use test_random_derive::TestRandom;
 use tree_hash_derive::TreeHash;
 
-use milhouse::mem::MemorySize;
-
 use crate::{attestation::AttestationData, core::EthSpec, fork::ForkName, test_utils::TestRandom};
 
 /// An attestation that has been included in the state but not yet fully processed.
@@ -26,20 +24,6 @@ pub struct PendingAttestation<E: EthSpec> {
     pub inclusion_delay: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub proposer_index: u64,
-}
-
-impl<E: EthSpec> MemorySize for PendingAttestation<E> {
-    fn self_pointer(&self) -> usize {
-        self as *const _ as usize
-    }
-
-    fn subtrees(&self) -> Vec<&dyn MemorySize> {
-        vec![]
-    }
-
-    fn intrinsic_size(&self) -> usize {
-        std::mem::size_of::<Self>()
-    }
 }
 
 #[cfg(test)]

@@ -1,9 +1,6 @@
-//! Benchmarks for state memory measurement approaches.
-//!
-//! Compares cow_bytes (pairwise tree walk) vs MemoryTracker at mainnet scale.
+//! Benchmarks for state memory measurement using cow_bytes (pairwise tree walk).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use milhouse::mem::MemoryTracker;
 use milhouse::{List, Vector};
 use ssz_types::BitVector;
 use std::hint::black_box;
@@ -132,32 +129,5 @@ fn bench_cow_bytes(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_tracker_comparison(c: &mut Criterion) {
-    let mut group = c.benchmark_group("tracker_comparison");
-    group.sample_size(10);
-
-    // Compare cow_bytes vs MemoryTracker at 1M validators.
-    let n = 1_000_000;
-    eprintln!("Building tracker comparison states ({n} validators)...");
-    let base = make_state(n);
-    let post_slot = make_slot_transition(&base, n);
-
-    group.bench_function("cow_bytes_slot_1M", |b| {
-        b.iter(|| black_box(cow_bytes_between(&base, &post_slot)));
-    });
-
-    group.bench_function("tracker_slot_1M", |b| {
-        b.iter(|| {
-            let mut tracker = MemoryTracker::default();
-            tracker.track_item(&base);
-            let pre = tracker.total_size();
-            tracker.track_item(&post_slot);
-            black_box(tracker.total_size() - pre);
-        });
-    });
-
-    group.finish();
-}
-
-criterion_group!(benches, bench_cow_bytes, bench_tracker_comparison);
+criterion_group!(benches, bench_cow_bytes);
 criterion_main!(benches);

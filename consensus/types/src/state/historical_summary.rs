@@ -1,6 +1,5 @@
 use compare_fields::CompareFields;
 use context_deserialize::context_deserialize;
-use milhouse::mem::MemorySize;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use test_random_derive::TestRandom;
@@ -39,20 +38,6 @@ use crate::{
 pub struct HistoricalSummary {
     block_summary_root: Hash256,
     state_summary_root: Hash256,
-}
-
-impl MemorySize for HistoricalSummary {
-    fn self_pointer(&self) -> usize {
-        self as *const _ as usize
-    }
-
-    fn subtrees(&self) -> Vec<&dyn MemorySize> {
-        vec![]
-    }
-
-    fn intrinsic_size(&self) -> usize {
-        std::mem::size_of::<Self>()
-    }
 }
 
 impl HistoricalSummary {

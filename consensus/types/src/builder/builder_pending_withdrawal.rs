@@ -1,7 +1,6 @@
 use crate::test_utils::TestRandom;
 use crate::{Address, ForkName};
 use context_deserialize::context_deserialize;
-use milhouse::mem::MemorySize;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use test_random_derive::TestRandom;
@@ -30,20 +29,6 @@ pub struct BuilderPendingWithdrawal {
     pub amount: u64,
     #[serde(with = "serde_utils::quoted_u64")]
     pub builder_index: u64,
-}
-
-impl MemorySize for BuilderPendingWithdrawal {
-    fn self_pointer(&self) -> usize {
-        self as *const _ as usize
-    }
-
-    fn subtrees(&self) -> Vec<&dyn MemorySize> {
-        vec![]
-    }
-
-    fn intrinsic_size(&self) -> usize {
-        std::mem::size_of::<Self>()
-    }
 }
 
 #[cfg(test)]

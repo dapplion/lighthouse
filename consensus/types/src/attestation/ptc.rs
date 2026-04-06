@@ -1,5 +1,4 @@
 use crate::EthSpec;
-use milhouse::mem::MemorySize;
 use serde::{Deserialize, Serialize};
 use ssz_types::FixedVector;
 use std::ops::Deref;
@@ -48,21 +47,6 @@ impl<N: Unsigned + Clone> PtcWindowEntry<N> {
 
     pub fn new(vec: Vec<u64>) -> Result<Self, ssz_types::Error> {
         Ok(PtcWindowEntry(FixedVector::new(vec)?))
-    }
-}
-
-impl<N: Unsigned + Clone> MemorySize for PtcWindowEntry<N> {
-    fn self_pointer(&self) -> usize {
-        self as *const _ as usize
-    }
-
-    fn subtrees(&self) -> Vec<&dyn MemorySize> {
-        vec![]
-    }
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn intrinsic_size(&self) -> usize {
-        std::mem::size_of::<Self>() + self.0.len() * std::mem::size_of::<u64>()
     }
 }
 

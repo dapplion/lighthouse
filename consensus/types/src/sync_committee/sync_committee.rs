@@ -94,18 +94,3 @@ impl<E: EthSpec> SyncCommittee<E> {
         self.pubkeys.contains(pubkey)
     }
 }
-
-impl<E: EthSpec> milhouse::mem::MemorySize for SyncCommittee<E> {
-    fn self_pointer(&self) -> usize {
-        self as *const _ as usize
-    }
-
-    fn subtrees(&self) -> Vec<&dyn milhouse::mem::MemorySize> {
-        vec![]
-    }
-
-    #[allow(clippy::arithmetic_side_effects)]
-    fn intrinsic_size(&self) -> usize {
-        std::mem::size_of::<Self>() + self.pubkeys.len() * std::mem::size_of::<PublicKeyBytes>()
-    }
-}

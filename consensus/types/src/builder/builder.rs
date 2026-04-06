@@ -2,7 +2,6 @@ use crate::test_utils::TestRandom;
 use crate::{Address, ChainSpec, Epoch, ForkName};
 use bls::PublicKeyBytes;
 use context_deserialize::context_deserialize;
-use milhouse::mem::MemorySize;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use test_random_derive::TestRandom;
@@ -24,20 +23,6 @@ pub struct Builder {
     pub balance: u64,
     pub deposit_epoch: Epoch,
     pub withdrawable_epoch: Epoch,
-}
-
-impl MemorySize for Builder {
-    fn self_pointer(&self) -> usize {
-        self as *const _ as usize
-    }
-
-    fn subtrees(&self) -> Vec<&dyn MemorySize> {
-        vec![]
-    }
-
-    fn intrinsic_size(&self) -> usize {
-        std::mem::size_of::<Self>()
-    }
 }
 
 impl Builder {
