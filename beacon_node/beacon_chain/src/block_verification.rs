@@ -82,8 +82,11 @@ use ssz_derive::{Decode, Encode};
 use state_processing::per_block_processing::errors::IntoWithIndex;
 use state_processing::{
     AllCaches, BlockProcessingError, BlockSignatureStrategy, ConsensusContext, SlotProcessingError,
-    VerifyBlockRoot,
+    VerifyBlockRoot, VerifySignatures,
     block_signature_verifier::{BlockSignatureVerifier, Error as BlockSignatureVerifierError},
+    envelope_processing::{
+        VerifyStateRoot as VerifyEnvelopeStateRoot, process_execution_payload_envelope,
+    },
     per_block_processing, per_slot_processing,
     state_advance::partial_state_advance,
 };
@@ -2026,20 +2029,32 @@ fn load_parent<T: BeaconChainTypes, B: AsBlock<T::EthSpec>>(
                 )
             })?;
 
-        // If we needed the Full state but fell back to Pending (checkpoint sync case),
-        // apply the envelope's block_hash to the in-memory state so child block bid
-        // validation passes (ParentBlockHashMismatch). This only mutates the in-memory
-        // state, not the stored one — the on-disk state keeps its correct root.
+        // If we needed the Full state but fell back to Pending (checkpoint sync / range sync),
+        // apply the full envelope processing to transform Pending → Full in-memory.
+        // This is necessary because the Full state differs from Pending in many fields
+        // (deposits, withdrawals, builder payments, execution availability, block hash).
         if payload_status == StatePayloadStatus::Full
             && let Ok(Some(envelope)) = chain.store.get_payload_envelope(&root)
-            && let Ok(hash_mut) = state.latest_block_hash_mut()
         {
             debug!(
                 %root,
                 block_hash = %envelope.message.payload.block_hash,
-                "Patching in-memory state latest_block_hash from envelope"
+                "Applying envelope to Pending state to derive Full state"
             );
-            *hash_mut = envelope.message.payload.block_hash;
+            if let Err(e) = process_execution_payload_envelope(
+                &mut state,
+                Some(parent_state_root),
+                &envelope,
+                VerifySignatures::False,
+                VerifyEnvelopeStateRoot::False,
+                &chain.spec,
+            ) {
+                warn!(
+                    %root,
+                    error = ?e,
+                    "Failed to apply envelope to derive Full state, proceeding with Pending"
+                );
+            }
         }
 
         if !state.all_caches_built() {
