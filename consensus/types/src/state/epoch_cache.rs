@@ -152,3 +152,38 @@ impl EpochCache {
         Ok(&inner.activation_queue)
     }
 }
+
+impl milhouse::mem::MemorySize for EpochCache {
+    fn self_pointer(&self) -> usize {
+        self as *const _ as usize
+    }
+
+    fn subtrees(&self) -> Vec<&dyn milhouse::mem::MemorySize> {
+        if let Some(inner) = &self.inner {
+            vec![&**inner]
+        } else {
+            vec![]
+        }
+    }
+
+    fn intrinsic_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
+impl milhouse::mem::MemorySize for Inner {
+    fn self_pointer(&self) -> usize {
+        self as *const _ as usize
+    }
+
+    fn subtrees(&self) -> Vec<&dyn milhouse::mem::MemorySize> {
+        vec![]
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn intrinsic_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.effective_balances.capacity() * std::mem::size_of::<u64>()
+            + self.base_rewards.capacity() * std::mem::size_of::<u64>()
+    }
+}

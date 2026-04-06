@@ -27,7 +27,7 @@ use crate::{
     Address, ExecutionBlockHash, ExecutionPayloadBid, Withdrawal,
     attestation::{
         AttestationData, AttestationDuty, BeaconCommittee, Checkpoint, CommitteeIndex, PTC,
-        ParticipationFlags, PendingAttestation,
+        ParticipationFlags, PendingAttestation, PtcWindowEntry,
     },
     block::{BeaconBlock, BeaconBlockHeader, SignedBeaconBlockHash},
     builder::{Builder, BuilderIndex, BuilderPendingPayment, BuilderPendingWithdrawal},
@@ -670,7 +670,7 @@ where
     #[compare_fields(as_iter)]
     #[test_random(default)]
     #[superstruct(only(Gloas))]
-    pub ptc_window: Vector<FixedVector<u64, E::PTCSize>, E::PtcWindowLength>,
+    pub ptc_window: Vector<PtcWindowEntry<E::PTCSize>, E::PtcWindowLength>,
 
     // Caching (not in the spec)
     #[serde(skip_serializing, skip_deserializing)]
@@ -3150,7 +3150,7 @@ impl<E: EthSpec> BeaconState<E> {
             .get(index)
             .ok_or(BeaconStateError::SlotOutOfBounds)?;
 
-        // Convert from FixedVector<u64, PTCSize> to PTC<E> (FixedVector<usize, PTCSize>)
+        // Convert from PtcWindowEntry (FixedVector<u64, PTCSize>) to PTC<E> (FixedVector<usize, PTCSize>)
         let indices: Vec<usize> = entry.iter().map(|&v| v as usize).collect();
         Ok(PTC(FixedVector::new(indices)?))
     }
@@ -3552,6 +3552,86 @@ pub fn compute_weak_subjectivity_period_electra(
         .safe_add(epochs_for_validator_set_churn)?;
 
     Ok(ws_period)
+}
+
+impl<E: EthSpec> milhouse::mem::MemorySize for BeaconState<E> {
+    fn self_pointer(&self) -> usize {
+        self as *const _ as usize
+    }
+
+    fn subtrees(&self) -> Vec<&dyn milhouse::mem::MemorySize> {
+        // Use raw pointers to work around variance issues with `&mut Vec<&dyn Trait>` in
+        // metastruct-generated closures. The pointers are derived from `&self` and converted
+        // back to references before returning, so the lifetimes are sound.
+        let mut ptrs: Vec<*const dyn milhouse::mem::MemorySize> = vec![];
+
+        // All tree-backed fields (milhouse List/Vector).
+        match self {
+            Self::Base(inner) => {
+                map_beacon_state_base_tree_list_fields_immutable!(inner, |_, field| {
+                    ptrs.push(field as &dyn milhouse::mem::MemorySize);
+                });
+            }
+            Self::Altair(inner) => {
+                map_beacon_state_altair_tree_list_fields_immutable!(inner, |_, field| {
+                    ptrs.push(field as &dyn milhouse::mem::MemorySize);
+                });
+            }
+            Self::Bellatrix(inner) => {
+                map_beacon_state_bellatrix_tree_list_fields_immutable!(inner, |_, field| {
+                    ptrs.push(field as &dyn milhouse::mem::MemorySize);
+                });
+            }
+            Self::Capella(inner) => {
+                map_beacon_state_capella_tree_list_fields_immutable!(inner, |_, field| {
+                    ptrs.push(field as &dyn milhouse::mem::MemorySize);
+                });
+            }
+            Self::Deneb(inner) => {
+                map_beacon_state_deneb_tree_list_fields_immutable!(inner, |_, field| {
+                    ptrs.push(field as &dyn milhouse::mem::MemorySize);
+                });
+            }
+            Self::Electra(inner) => {
+                map_beacon_state_electra_tree_list_fields_immutable!(inner, |_, field| {
+                    ptrs.push(field as &dyn milhouse::mem::MemorySize);
+                });
+            }
+            Self::Fulu(inner) => {
+                map_beacon_state_fulu_tree_list_fields_immutable!(inner, |_, field| {
+                    ptrs.push(field as &dyn milhouse::mem::MemorySize);
+                });
+            }
+            Self::Gloas(inner) => {
+                map_beacon_state_gloas_tree_list_fields_immutable!(inner, |_, field| {
+                    ptrs.push(field as &dyn milhouse::mem::MemorySize);
+                });
+            }
+        }
+
+        // SAFETY: All pointers were derived from `&self` which is borrowed for the duration
+        // of this method call. The returned references share the lifetime of `&self`.
+        let mut subtrees: Vec<&dyn milhouse::mem::MemorySize> =
+            ptrs.into_iter().map(|p| unsafe { &*p }).collect();
+
+        // Arc-shared caches and sync committees.
+        if let Ok(sc) = self.current_sync_committee() {
+            subtrees.push(&**sc);
+        }
+        if let Ok(sc) = self.next_sync_committee() {
+            subtrees.push(&**sc);
+        }
+        for cc in self.committee_caches() {
+            subtrees.push(&**cc);
+        }
+        subtrees.push(self.epoch_cache() as &dyn milhouse::mem::MemorySize);
+
+        subtrees
+    }
+
+    fn intrinsic_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 #[cfg(test)]

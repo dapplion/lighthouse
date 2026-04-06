@@ -48,3 +48,7 @@ tempfile = { workspace = true }
 [[bench]]
 name = "hdiff"
 harness = false
+
+[[bench]]
+name = "state_memory"
+harness = false

@@ -1,4 +1,5 @@
 use context_deserialize::context_deserialize;
+use milhouse::mem::MemorySize;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use ssz_types::VariableList;
@@ -25,6 +26,20 @@ pub struct Withdrawal {
     pub address: Address,
     #[serde(with = "serde_utils::quoted_u64")]
     pub amount: u64,
+}
+
+impl MemorySize for Withdrawal {
+    fn self_pointer(&self) -> usize {
+        self as *const _ as usize
+    }
+
+    fn subtrees(&self) -> Vec<&dyn MemorySize> {
+        vec![]
+    }
+
+    fn intrinsic_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 pub type Withdrawals<E> = VariableList<Withdrawal, <E as EthSpec>::MaxWithdrawalsPerPayload>;

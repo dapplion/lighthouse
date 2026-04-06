@@ -484,3 +484,20 @@ impl Decode for NonZeroUsizeOption {
         four_byte_option_non_zero_usize::decode::from_ssz_bytes(bytes).map(Self)
     }
 }
+
+impl milhouse::mem::MemorySize for CommitteeCache {
+    fn self_pointer(&self) -> usize {
+        self as *const _ as usize
+    }
+
+    fn subtrees(&self) -> Vec<&dyn milhouse::mem::MemorySize> {
+        vec![]
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn intrinsic_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.shuffling.capacity() * std::mem::size_of::<usize>()
+            + self.shuffling_positions.capacity() * std::mem::size_of::<NonZeroUsizeOption>()
+    }
+}

@@ -37,7 +37,7 @@ pub use payload_attestation::PayloadAttestation;
 pub use payload_attestation_data::PayloadAttestationData;
 pub use payload_attestation_message::PayloadAttestationMessage;
 pub use pending_attestation::PendingAttestation;
-pub use ptc::PTC;
+pub use ptc::{PTC, PtcWindowEntry};
 pub use selection_proof::SelectionProof;
 pub use shuffling_id::AttestationShufflingId;
 pub use signed_aggregate_and_proof::{

@@ -5,6 +5,8 @@ use ssz_derive::{Decode, Encode};
 use test_random_derive::TestRandom;
 use tree_hash_derive::TreeHash;
 
+use milhouse::mem::MemorySize;
+
 use crate::{
     core::{Hash256, Slot},
     fork::ForkName,
@@ -23,6 +25,20 @@ pub struct PendingDeposit {
     pub amount: u64,
     pub signature: SignatureBytes,
     pub slot: Slot,
+}
+
+impl MemorySize for PendingDeposit {
+    fn self_pointer(&self) -> usize {
+        self as *const _ as usize
+    }
+
+    fn subtrees(&self) -> Vec<&dyn MemorySize> {
+        vec![]
+    }
+
+    fn intrinsic_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 #[cfg(test)]
