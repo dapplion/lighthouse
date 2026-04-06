@@ -276,6 +276,19 @@ pub static STORE_BEACON_STATE_CACHE_ESTIMATED_BYTE_SIZE: LazyLock<Result<IntGaug
             "Estimated memory consumed by states in the state cache (bytes)",
         )
     });
+pub static STORE_BEACON_STATE_CACHE_COW_BYTE_SIZE: LazyLock<Result<IntGauge>> =
+    LazyLock::new(|| {
+        try_create_int_gauge(
+            "store_beacon_state_cache_cow_byte_size",
+            "Total unique COW bytes across all cached states (from ApproxOwnedBytes)",
+        )
+    });
+pub static STORE_BEACON_STATE_CACHE_EVICTIONS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "store_beacon_state_cache_evictions_total",
+        "Total number of states evicted from the state cache due to byte budget",
+    )
+});
 pub static STORE_BEACON_HISTORIC_STATE_CACHE_SIZE: LazyLock<Result<IntGauge>> =
     LazyLock::new(|| {
         try_create_int_gauge(

@@ -3,7 +3,6 @@
 //! Compares cow_bytes (pairwise tree walk) vs MemoryTracker at mainnet scale.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use fixed_bytes::FixedBytesExtended;
 use milhouse::mem::MemoryTracker;
 use milhouse::{List, Vector};
 use ssz_types::BitVector;

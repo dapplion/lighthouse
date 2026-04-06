@@ -199,16 +199,14 @@ pub struct SlotMap {
 #[derive(Debug)]
 pub struct StateCache<E: EthSpec> {
     finalized_state: Option<FinalizedState<E>>,
-    /// Stores (state_root, state, estimated_marginal_bytes) per cached state.
-    states: LruCache<Hash256, (Hash256, BeaconState<E>, usize)>,
+    /// Stores (state_root, state) per cached state.
+    states: LruCache<Hash256, (Hash256, BeaconState<E>)>,
     block_map: BlockMap,
     hdiff_buffers: HotHDiffBufferCache,
     max_epoch: Epoch,
     head_block_root: Hash256,
     headroom: NonZeroUsize,
-    /// Sum of `estimated_marginal_bytes` across all cached states.
-    cached_bytes: usize,
-    /// Optional byte budget. When set, eviction triggers when `cached_bytes` exceeds this.
+    /// Optional byte budget. When set, eviction triggers when total COW bytes exceed this.
     max_bytes: Option<usize>,
 }
 
@@ -257,7 +255,6 @@ impl<E: EthSpec> StateCache<E> {
             max_epoch: Epoch::new(0),
             head_block_root: Hash256::ZERO,
             headroom,
-            cached_bytes: 0,
             max_bytes,
         }
     }
@@ -278,9 +275,10 @@ impl<E: EthSpec> StateCache<E> {
         self.hdiff_buffers.mem_usage()
     }
 
-    /// Total estimated bytes consumed by cached states.
+    /// Total bytes consumed by cached states, computed by deduplicating shared
+    /// `ApproxOwnedBytes` segments across all states (including finalized).
     pub fn cached_bytes(&self) -> usize {
-        self.cached_bytes
+        self.total_approx_owned_bytes()
     }
 
     /// Return all state roots currently held in the cache, including the finalized state.
@@ -339,8 +337,7 @@ impl<E: EthSpec> StateCache<E> {
 
         // Delete states.
         for state_root in state_roots_to_prune {
-            if let Some((_, state, cost)) = self.states.pop(&state_root) {
-                self.cached_bytes = self.cached_bytes.saturating_sub(cost);
+            if let Some((_, state)) = self.states.pop(&state_root) {
                 // Add the hdiff buffer for this state to the hdiff cache if it is now part of
                 // the pre-finalized grid. The `put` method will take care of keeping the most
                 // useful buffers.
@@ -356,6 +353,12 @@ impl<E: EthSpec> StateCache<E> {
         // States loaded from disk or constructed from genesis start with an empty list.
         if state.approx_owned_bytes().0.is_empty() {
             let base_bytes = types::total_state_tree_bytes(&state);
+            tracing::debug!(
+                base_bytes,
+                slot = %state.slot(),
+                validators = state.validators().len(),
+                "measured finalized state base tree size"
+            );
             state.approx_owned_bytes_mut().push(base_bytes);
         }
 
@@ -393,6 +396,11 @@ impl<E: EthSpec> StateCache<E> {
             // After rebase, the state shares the finalized tree. Recompute owned bytes:
             // adopt the finalized state's list + measure the remaining unique cost.
             let unique_bytes = types::cow_bytes_between(&finalized_state.state, state);
+            tracing::debug!(
+                unique_bytes,
+                slot = %state.slot(),
+                "rebased state cow_bytes vs finalized"
+            );
             state
                 .approx_owned_bytes_mut()
                 .reset_to_base(finalized_state.state.approx_owned_bytes(), unique_bytes);
@@ -439,8 +447,6 @@ impl<E: EthSpec> StateCache<E> {
         // Update the cache's idea of the max epoch.
         self.max_epoch = std::cmp::max(state.current_epoch(), self.max_epoch);
 
-        let cost = estimated_marginal_bytes::<E>(state);
-
         // If the cache is full (by count), use the custom cull routine to make room.
         let mut deleted_states =
             if let Some(over_capacity) = self.len().checked_sub(self.capacity()) {
@@ -451,26 +457,42 @@ impl<E: EthSpec> StateCache<E> {
             };
 
         // If adding this state would exceed the byte budget, cull until under budget.
+        // total_approx_owned_bytes deduplicates shared ApproxOwnedBytes segments across
+        // all cached states, so it reflects actual memory, not double-counted estimates.
         if let Some(max_bytes) = self.max_bytes {
-            while self.cached_bytes.saturating_add(cost) > max_bytes && self.len() > 0 {
+            let total_before = self.total_approx_owned_bytes();
+            let mut evicted = 0;
+            while self.total_approx_owned_bytes() > max_bytes && self.len() > 0 {
                 let culled = self.cull(1);
                 if culled.is_empty() {
-                    // Nothing left to cull (all states are exempt).
                     break;
                 }
+                evicted += culled.len();
                 deleted_states.extend(culled);
+            }
+            if evicted > 0 {
+                let total_after = self.total_approx_owned_bytes();
+                tracing::debug!(
+                    max_bytes,
+                    total_before,
+                    total_after,
+                    evicted,
+                    remaining = self.len(),
+                    "state cache byte budget eviction"
+                );
+                metrics::inc_counter_by(
+                    &metrics::STORE_BEACON_STATE_CACHE_EVICTIONS,
+                    evicted as u64,
+                );
             }
         }
 
         // Insert the full state into the cache.
-        if let Some((deleted_state_root, _, old_cost)) = self
-            .states
-            .put(state_root, (state_root, state.clone(), cost))
+        if let Some((deleted_state_root, _)) =
+            self.states.put(state_root, (state_root, state.clone()))
         {
-            self.cached_bytes = self.cached_bytes.saturating_sub(old_cost);
             deleted_states.push(deleted_state_root);
         }
-        self.cached_bytes = self.cached_bytes.saturating_add(cost);
 
         // Record the connection from block root and slot to this state.
         let slot = state.slot();
@@ -487,9 +509,7 @@ impl<E: EthSpec> StateCache<E> {
         {
             return Some(finalized_state.state.clone());
         }
-        self.states
-            .get(&state_root)
-            .map(|(_, state, _)| state.clone())
+        self.states.get(&state_root).map(|(_, state)| state.clone())
     }
 
     pub fn put_hdiff_buffer(&mut self, state_root: Hash256, slot: Slot, buffer: &HDiffBuffer) {
@@ -546,9 +566,7 @@ impl<E: EthSpec> StateCache<E> {
     }
 
     pub fn delete_state(&mut self, state_root: &Hash256) {
-        if let Some((_, _, cost)) = self.states.pop(state_root) {
-            self.cached_bytes = self.cached_bytes.saturating_sub(cost);
-        }
+        self.states.pop(state_root);
         self.block_map.delete(state_root);
     }
 
@@ -560,9 +578,7 @@ impl<E: EthSpec> StateCache<E> {
             .flatten()
         {
             for state_root in slot_map.slots.values() {
-                if let Some((_, _, cost)) = self.states.pop(state_root) {
-                    self.cached_bytes = self.cached_bytes.saturating_sub(cost);
-                }
+                self.states.pop(state_root);
             }
         }
     }
@@ -579,7 +595,7 @@ impl<E: EthSpec> StateCache<E> {
         let cached = self
             .states
             .iter()
-            .map(|(_, (_, state, _))| state.approx_owned_bytes());
+            .map(|(_, (_, state))| state.approx_owned_bytes());
         types::sum_approx_owned_bytes(finalized.into_iter().chain(cached))
     }
 
@@ -605,7 +621,7 @@ impl<E: EthSpec> StateCache<E> {
 
         // Skip the `cull_exempt` most-recently used, then reverse the iterator to start at
         // least-recently used states.
-        for (&state_root, (_, state, _)) in self.states.iter().skip(cull_exempt).rev() {
+        for (&state_root, (_, state)) in self.states.iter().skip(cull_exempt).rev() {
             let is_advanced = state.slot() > state.latest_block_header().slot;
             let is_boundary = state.slot() % E::slots_per_epoch() == 0;
             let could_finalize =
@@ -1162,13 +1178,8 @@ mod tests {
         let mut derived = base.clone();
         // Spread mutations evenly across the list
         let step = if dirty >= n { 1 } else { n / dirty };
-        let mut count = 0;
-        for i in (0..n).step_by(step) {
-            if count >= dirty {
-                break;
-            }
+        for i in (0..n).step_by(step).take(dirty) {
             *derived.balances_mut().get_mut(i).unwrap() += 1;
-            count += 1;
         }
         derived.apply_pending_mutations().unwrap();
 

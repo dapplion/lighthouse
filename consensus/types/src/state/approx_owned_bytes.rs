@@ -56,11 +56,11 @@ impl ApproxOwnedBytesList {
 /// Deduplicates by `Arc` pointer identity — shared entries are counted once.
 pub fn sum_approx_owned_bytes<'a>(states: impl Iterator<Item = &'a ApproxOwnedBytesList>) -> usize {
     let mut seen = HashSet::new();
-    let mut total = 0;
+    let mut total: usize = 0;
     for list in states {
         for entry in &list.0 {
             if seen.insert(Arc::as_ptr(entry)) {
-                total += entry.bytes;
+                total = total.saturating_add(entry.bytes);
             }
         }
     }
@@ -95,58 +95,61 @@ impl<E: EthSpec> TreeSnapshot<E> {
 ///
 /// For each milhouse `List`/`Vector` field, calls `cow_bytes` which walks both trees
 /// in parallel, skipping shared subtrees via `Arc::ptr_eq`. O(dirty_nodes) total.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn cow_bytes_between<E: EthSpec>(base: &BeaconState<E>, derived: &BeaconState<E>) -> usize {
-    let mut total = 0;
+    let mut total: usize = 0;
 
     // Fields common to all forks.
-    total += derived.validators().cow_bytes(base.validators());
-    total += derived.balances().cow_bytes(base.balances());
-    total += derived.state_roots().cow_bytes(base.state_roots());
-    total += derived.block_roots().cow_bytes(base.block_roots());
-    total += derived.randao_mixes().cow_bytes(base.randao_mixes());
-    total += derived.slashings().cow_bytes(base.slashings());
-    total += derived.eth1_data_votes().cow_bytes(base.eth1_data_votes());
-    total += derived
-        .historical_roots()
-        .cow_bytes(base.historical_roots());
+    total = total.saturating_add(derived.validators().cow_bytes(base.validators()));
+    total = total.saturating_add(derived.balances().cow_bytes(base.balances()));
+    total = total.saturating_add(derived.state_roots().cow_bytes(base.state_roots()));
+    total = total.saturating_add(derived.block_roots().cow_bytes(base.block_roots()));
+    total = total.saturating_add(derived.randao_mixes().cow_bytes(base.randao_mixes()));
+    total = total.saturating_add(derived.slashings().cow_bytes(base.slashings()));
+    total = total.saturating_add(derived.eth1_data_votes().cow_bytes(base.eth1_data_votes()));
+    total = total.saturating_add(
+        derived
+            .historical_roots()
+            .cow_bytes(base.historical_roots()),
+    );
 
     // Altair+ fields.
     if let (Ok(d), Ok(b)) = (derived.inactivity_scores(), base.inactivity_scores()) {
-        total += d.cow_bytes(b);
+        total = total.saturating_add(d.cow_bytes(b));
     }
     if let (Ok(d), Ok(b)) = (
         derived.previous_epoch_participation(),
         base.previous_epoch_participation(),
     ) {
-        total += d.cow_bytes(b);
+        total = total.saturating_add(d.cow_bytes(b));
     }
     if let (Ok(d), Ok(b)) = (
         derived.current_epoch_participation(),
         base.current_epoch_participation(),
     ) {
-        total += d.cow_bytes(b);
+        total = total.saturating_add(d.cow_bytes(b));
     }
 
     // Capella+ fields.
     if let (Ok(d), Ok(b)) = (derived.historical_summaries(), base.historical_summaries()) {
-        total += d.cow_bytes(b);
+        total = total.saturating_add(d.cow_bytes(b));
     }
 
     // Electra+ fields.
     if let (Ok(d), Ok(b)) = (derived.pending_deposits(), base.pending_deposits()) {
-        total += d.cow_bytes(b);
+        total = total.saturating_add(d.cow_bytes(b));
     }
     if let (Ok(d), Ok(b)) = (
         derived.pending_partial_withdrawals(),
         base.pending_partial_withdrawals(),
     ) {
-        total += d.cow_bytes(b);
+        total = total.saturating_add(d.cow_bytes(b));
     }
     if let (Ok(d), Ok(b)) = (
         derived.pending_consolidations(),
         base.pending_consolidations(),
     ) {
-        total += d.cow_bytes(b);
+        total = total.saturating_add(d.cow_bytes(b));
     }
 
     total
@@ -156,38 +159,39 @@ pub fn cow_bytes_between<E: EthSpec>(base: &BeaconState<E>, derived: &BeaconStat
 ///
 /// Uses `total_tree_bytes()` on each milhouse field — O(all_nodes) walk, but only
 /// needed once when the finalized state is set.
+#[allow(clippy::arithmetic_side_effects)]
 pub fn total_state_tree_bytes<E: EthSpec>(state: &BeaconState<E>) -> usize {
-    let mut total = 0;
+    let mut total: usize = 0;
 
-    total += state.validators().total_tree_bytes();
-    total += state.balances().total_tree_bytes();
-    total += state.state_roots().total_tree_bytes();
-    total += state.block_roots().total_tree_bytes();
-    total += state.randao_mixes().total_tree_bytes();
-    total += state.slashings().total_tree_bytes();
-    total += state.eth1_data_votes().total_tree_bytes();
-    total += state.historical_roots().total_tree_bytes();
+    total = total.saturating_add(state.validators().total_tree_bytes());
+    total = total.saturating_add(state.balances().total_tree_bytes());
+    total = total.saturating_add(state.state_roots().total_tree_bytes());
+    total = total.saturating_add(state.block_roots().total_tree_bytes());
+    total = total.saturating_add(state.randao_mixes().total_tree_bytes());
+    total = total.saturating_add(state.slashings().total_tree_bytes());
+    total = total.saturating_add(state.eth1_data_votes().total_tree_bytes());
+    total = total.saturating_add(state.historical_roots().total_tree_bytes());
 
     if let Ok(f) = state.inactivity_scores() {
-        total += f.total_tree_bytes();
+        total = total.saturating_add(f.total_tree_bytes());
     }
     if let Ok(f) = state.previous_epoch_participation() {
-        total += f.total_tree_bytes();
+        total = total.saturating_add(f.total_tree_bytes());
     }
     if let Ok(f) = state.current_epoch_participation() {
-        total += f.total_tree_bytes();
+        total = total.saturating_add(f.total_tree_bytes());
     }
     if let Ok(f) = state.historical_summaries() {
-        total += f.total_tree_bytes();
+        total = total.saturating_add(f.total_tree_bytes());
     }
     if let Ok(f) = state.pending_deposits() {
-        total += f.total_tree_bytes();
+        total = total.saturating_add(f.total_tree_bytes());
     }
     if let Ok(f) = state.pending_partial_withdrawals() {
-        total += f.total_tree_bytes();
+        total = total.saturating_add(f.total_tree_bytes());
     }
     if let Ok(f) = state.pending_consolidations() {
-        total += f.total_tree_bytes();
+        total = total.saturating_add(f.total_tree_bytes());
     }
 
     total

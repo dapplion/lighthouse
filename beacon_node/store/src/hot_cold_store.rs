@@ -518,7 +518,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             state_cache.len() as i64,
         );
         metrics::set_gauge(
-            &metrics::STORE_BEACON_STATE_CACHE_ESTIMATED_BYTE_SIZE,
+            &metrics::STORE_BEACON_STATE_CACHE_COW_BYTE_SIZE,
             state_cache.cached_bytes() as i64,
         );
         metrics::set_gauge_vec(
