@@ -8469,6 +8469,7 @@ dependencies = [
  "ethereum_ssz",
  "ethereum_ssz_derive",
  "fixed_bytes",
+ "genesis",
  "itertools 0.14.0",
  "leveldb",
  "logging",

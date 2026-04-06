@@ -7,8 +7,10 @@ use lru::LruCache;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use tracing::instrument;
+use typenum::Unsigned;
 use types::{
-    BeaconState, ChainSpec, Epoch, EthSpec, Hash256, Slot, Validator, execution::StatePayloadStatus,
+    BeaconState, ChainSpec, Epoch, Eth1Data, EthSpec, Hash256, HistoricalSummary, Slot, Validator,
+    execution::StatePayloadStatus,
 };
 
 /// Fraction of the LRU cache to leave intact during culling.
@@ -44,40 +46,135 @@ pub fn estimated_marginal_bytes<E: EthSpec>(state: &BeaconState<E>) -> usize {
         128
     };
 
-    // Validators: only mutated on activation/exit (rare). Negligible for estimation.
+    // Validators: effective_balance_updates at epoch boundary can mutate validators whose
+    // balance crossed a threshold. In normal operation this is a very small number (0-10).
+    // We don't attempt to estimate it — the cost is dominated by the large per-validator
+    // Leaf<Validator> + Arc<Validator> node size, so even a few would dominate incorrectly.
     let validators_dirty: usize = 0;
 
-    // Fixed-size vectors: 1-2 leaves per slot, negligible but included for completeness.
+    // Fixed-size vectors: 1-2 leaves per slot.
     let roots_dirty: usize = 2; // state_roots + block_roots
     let randao_dirty: usize = 1;
 
-    estimate_tree_bytes::<u64>(balances_dirty, n)
-        + estimate_tree_bytes::<u64>(inactivity_dirty, n)
-        // Two participation lists (previous + current), each List<u8, N>
-        + 2 * estimate_tree_bytes::<u8>(participation_dirty, n)
-        + estimate_tree_bytes::<Validator>(validators_dirty, n)
-        + estimate_tree_bytes::<Hash256>(roots_dirty, E::slots_per_historical_root())
-        + estimate_tree_bytes::<Hash256>(randao_dirty, E::epochs_per_historical_vector())
+    // Slashings: epoch boundary resets one entry.
+    let slashings_dirty: usize = if is_epoch_boundary { 1 } else { 0 };
+    let slashings_cap = E::EpochsPerSlashingsVector::to_usize();
+
+    // Eth1 data votes: accumulates 1 per slot since the last voting period reset.
+    // Use the current list length as a proxy for how many leaves have changed.
+    let eth1_votes_len = state.eth1_data_votes().len();
+    let eth1_votes_dirty = if is_epoch_boundary && eth1_votes_len == 0 {
+        // Just reset — the list is now empty so no COW cost.
+        0
+    } else {
+        eth1_votes_len
+    };
+    let eth1_votes_cap = E::SlotsPerEth1VotingPeriod::to_usize();
+
+    // Historical summaries (Capella+): 1 appended per epoch boundary.
+    let historical_summaries_dirty = if is_epoch_boundary { 1 } else { 0 };
+    let historical_summaries_len = state.historical_summaries().map(|s| s.len()).unwrap_or(0);
+    let historical_roots_cap = E::HistoricalRootsLimit::to_usize();
+
+    // Tree capacity for each field.
+    let validator_registry_cap = E::ValidatorRegistryLimit::to_usize();
+    let roots_cap = E::slots_per_historical_root();
+    let randao_cap = E::epochs_per_historical_vector();
+
+    // Container overhead: each milhouse List/Vector struct has intrinsic overhead that
+    // MemoryTracker counts as differential. Count all tree-backed fields.
+    const NUM_FIELDS: usize = 11; // bal, inact, 2×part, val, 2×roots, randao, slash, eth1, hist
+    let container_overhead = NUM_FIELDS * std::mem::size_of::<milhouse::List<u64, typenum::U1>>();
+
+    estimate_tree_bytes::<u64>(balances_dirty, n, validator_registry_cap)
+        + estimate_tree_bytes::<u64>(inactivity_dirty, n, validator_registry_cap)
+        + 2 * estimate_tree_bytes::<u8>(participation_dirty, n, validator_registry_cap)
+        + estimate_tree_bytes::<Validator>(validators_dirty, n, validator_registry_cap)
+        + estimate_tree_bytes::<Hash256>(roots_dirty, roots_cap, roots_cap)
+        + estimate_tree_bytes::<Hash256>(randao_dirty, randao_cap, randao_cap)
+        + estimate_tree_bytes::<u64>(slashings_dirty, slashings_cap, slashings_cap)
+        + estimate_tree_bytes::<Eth1Data>(eth1_votes_dirty, eth1_votes_len, eth1_votes_cap)
+        + estimate_tree_bytes::<HistoricalSummary>(
+            historical_summaries_dirty,
+            historical_summaries_len,
+            historical_roots_cap,
+        )
+        + container_overhead
 }
 
 /// Estimate bytes consumed by COW'd nodes in a milhouse tree.
 ///
-/// For sparse changes: each dirty leaf creates ~log2(total) new internal nodes along its path.
-/// For fully-dirty trees: the entire tree is a fresh allocation (~2*total nodes).
-/// The sparse formula overcounts for adjacent dirty leaves (shared internal paths) — this is
-/// intentional as an upper bound (safe direction for eviction decisions).
-fn estimate_tree_bytes<T>(dirty: usize, total: usize) -> usize {
+/// Milhouse trees pack small values into leaves (`PackedLeaf`), so the number of tree nodes
+/// is less than the number of values. Each node (`Tree<T>` wrapped in `Arc`) carries overhead
+/// for hashes, child pointers, and enum discriminant, which dominates for small `T`.
+///
+/// - `dirty`: number of values modified.
+/// - `total`: current number of values in the list/vector.
+/// - `capacity`: the list/vector's maximum capacity (`N` type parameter). Milhouse sizes its
+///   tree for this capacity, so the root-to-leaf path length is `log₂(capacity / packing)`.
+///
+/// For fully-dirty trees: all leaves and internal nodes are fresh allocations, plus the
+/// spine from the populated subtree to the root and Zero-node siblings along it (worst
+/// case: the list is replaced entirely, so Zero nodes are distinct from the base).
+/// For sparse changes: each dirty leaf COW's one root-to-leaf path of internal nodes.
+/// The sparse formula overcounts for adjacent dirty values (they may share both the packed
+/// leaf and internal path nodes) — intentional as an upper bound for eviction decisions.
+///
+/// Does NOT include the List/Vector container struct overhead — callers must add that
+/// separately (see `estimated_marginal_bytes`'s `container_overhead`).
+fn estimate_tree_bytes<T: milhouse::Value>(dirty: usize, total: usize, capacity: usize) -> usize {
     if dirty == 0 || total == 0 {
         return 0;
     }
-    let node_size = std::mem::size_of::<T>();
-    if dirty >= total {
-        // Full tree copy: all leaves + all internal nodes ≈ 2*total
-        2 * total * node_size
+    // Small types (u8, u64) are packed into 32-byte leaves. Large/composite types get 1 per leaf.
+    let packing_factor = (32 / std::mem::size_of::<T>()).max(1);
+
+    // Per-node overhead: Tree<T> enum (hash + child ptrs + discriminant) + Arc wrapper.
+    let node_overhead = std::mem::size_of::<milhouse::Tree<T>>()
+        + std::mem::size_of::<milhouse::Arc<milhouse::Tree<T>>>();
+    // Extra data stored in each leaf. For PackedLeaf: the Vec's heap allocation.
+    // For Leaf<T> (packing_factor==1): Arc<T> wrapper + T value.
+    let leaf_arc_overhead = if packing_factor == 1 {
+        std::mem::size_of::<milhouse::Arc<T>>()
     } else {
-        // Sparse: each dirty leaf COW's ~log2(total) internal nodes
-        let depth = usize::BITS - total.leading_zeros();
-        dirty * depth as usize * node_size
+        0
+    };
+    let leaf_data = leaf_arc_overhead + packing_factor * std::mem::size_of::<T>();
+
+    let num_leaves = total.div_ceil(packing_factor);
+    // Tree depth from root to leaf is based on max capacity, not current length.
+    let capacity_leaves = capacity.div_ceil(packing_factor);
+    let tree_depth = if capacity_leaves <= 1 {
+        0
+    } else {
+        usize::BITS - (capacity_leaves - 1).leading_zeros()
+    } as usize;
+
+    // Full-tree cost: all leaves + internal nodes + spine + Zero siblings.
+    // This is an upper bound regardless of how many leaves are dirty.
+    let populated_depth = if num_leaves <= 1 {
+        0
+    } else {
+        usize::BITS - (num_leaves - 1).leading_zeros()
+    } as usize;
+    let spine = tree_depth.saturating_sub(populated_depth);
+    let full_tree = num_leaves * (node_overhead + leaf_data)
+        + num_leaves.saturating_sub(1) * node_overhead // internal nodes in populated subtree
+        + spine * node_overhead                        // spine from populated subtree to root
+        + spine * node_overhead; // Zero-node siblings along the spine
+
+    if dirty >= total {
+        full_tree
+    } else {
+        // Sparse: each dirty value may hit a separate packed leaf in the worst case
+        // (scattered mutations). Cap at num_leaves.
+        let dirty_leaves = dirty.min(num_leaves);
+        // Cost per dirty path: tree_depth internal nodes + 1 leaf node.
+        let sparse = dirty_leaves * (tree_depth * node_overhead + node_overhead + leaf_data);
+        // The sparse formula overcounts when many leaves are dirty because it charges
+        // a full root-to-leaf path per dirty leaf, ignoring shared internal nodes.
+        // Cap at the full-tree cost which is always a valid upper bound.
+        sparse.min(full_tree)
     }
 }
 
@@ -285,6 +382,14 @@ impl<E: EthSpec> StateCache<E> {
             && state.slot() >= finalized_state.state.slot()
         {
             state.rebase_on(&finalized_state.state, spec)?;
+
+            // After rebase, the state shares the finalized tree. Recompute owned bytes:
+            // adopt the finalized state's list + measure the remaining unique cost.
+            let unique_bytes =
+                types::TreeSnapshot::new(&finalized_state.state).approx_owned_bytes(state);
+            state
+                .approx_owned_bytes_mut()
+                .reset_to_base(finalized_state.state.approx_owned_bytes(), unique_bytes);
         }
 
         Ok(())
@@ -454,6 +559,22 @@ impl<E: EthSpec> StateCache<E> {
                 }
             }
         }
+    }
+
+    /// Compute the total unique COW bytes across all cached states.
+    ///
+    /// Iterates all states and deduplicates `CowSegment`s by `Arc` pointer identity.
+    /// Shared segments (from common ancestors) are counted once.
+    pub fn total_approx_owned_bytes(&self) -> usize {
+        let finalized = self
+            .finalized_state
+            .as_ref()
+            .map(|f| f.state.approx_owned_bytes());
+        let cached = self
+            .states
+            .iter()
+            .map(|(_, (_, state, _))| state.approx_owned_bytes());
+        types::sum_approx_owned_bytes(finalized.into_iter().chain(cached))
     }
 
     /// Cull approximately `count` states from the cache.
@@ -643,5 +764,785 @@ impl HotHDiffBufferCache {
             .iter()
             .map(|(_, (_, buffer))| buffer.size())
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fixed_bytes::FixedBytesExtended;
+    use milhouse::mem::MemoryTracker;
+    use milhouse::{List, Vector};
+    use ssz_types::BitVector;
+    use std::sync::Arc;
+    use types::state::ProgressiveBalancesCache;
+    use types::{
+        BeaconBlockHeader, BeaconStateAltair, Checkpoint, CommitteeCache, EpochCache, Eth1Data,
+        ExitCache, Fork, MinimalEthSpec, ParticipationFlags, PubkeyCache, SlashingsCache, Slot,
+        SyncCommittee,
+    };
+
+    type E = MinimalEthSpec;
+
+    fn make_test_validator() -> Validator {
+        Validator {
+            pubkey: bls::PublicKeyBytes::empty(),
+            withdrawal_credentials: Hash256::zero(),
+            effective_balance: 32_000_000_000,
+            slashed: false,
+            activation_eligibility_epoch: Epoch::new(0),
+            activation_epoch: Epoch::new(0),
+            exit_epoch: Epoch::new(u64::MAX),
+            withdrawable_epoch: Epoch::new(u64::MAX),
+        }
+    }
+
+    /// Create an Altair state with `n` validators at the given `slot`.
+    fn make_altair_state(n: usize, slot: Slot) -> BeaconState<E> {
+        let validators = List::new(vec![make_test_validator(); n]).unwrap();
+        let balances = List::new(vec![32_000_000_000u64; n]).unwrap();
+        let inactivity_scores = List::new(vec![0u64; n]).unwrap();
+        let participation = List::new(vec![ParticipationFlags::default(); n]).unwrap();
+        let default_committee_cache = Arc::new(CommitteeCache::default());
+        let sync_committee = Arc::new(SyncCommittee::temporary());
+
+        BeaconState::Altair(BeaconStateAltair {
+            genesis_time: 0,
+            genesis_validators_root: Hash256::zero(),
+            slot,
+            fork: Fork::default(),
+            latest_block_header: BeaconBlockHeader::empty(),
+            block_roots: Vector::default(),
+            state_roots: Vector::default(),
+            historical_roots: List::default(),
+            eth1_data: Eth1Data::default(),
+            eth1_data_votes: List::default(),
+            eth1_deposit_index: 0,
+            validators,
+            balances,
+            randao_mixes: Vector::default(),
+            slashings: Vector::default(),
+            previous_epoch_participation: participation.clone(),
+            current_epoch_participation: participation,
+            justification_bits: BitVector::new(),
+            previous_justified_checkpoint: Checkpoint::default(),
+            current_justified_checkpoint: Checkpoint::default(),
+            finalized_checkpoint: Checkpoint::default(),
+            inactivity_scores,
+            current_sync_committee: sync_committee.clone(),
+            next_sync_committee: sync_committee,
+            total_active_balance: None,
+            progressive_balances_cache: ProgressiveBalancesCache::default(),
+            committee_caches: [
+                default_committee_cache.clone(),
+                default_committee_cache.clone(),
+                default_committee_cache,
+            ],
+            pubkey_cache: PubkeyCache::default(),
+            exit_cache: ExitCache::default(),
+            slashings_cache: SlashingsCache::default(),
+            epoch_cache: EpochCache::default(),
+            approx_owned_bytes: types::ApproxOwnedBytesList::default(),
+        })
+    }
+
+    /// Measure actual differential bytes for all milhouse fields between base and derived state.
+    ///
+    /// Tracks base fields first (marking shared nodes as seen), then derived fields.
+    /// The differential_size of each derived field is the actual COW memory cost.
+    fn measure_actual_differential_bytes(base: &BeaconState<E>, derived: &BeaconState<E>) -> usize {
+        let mut tracker = MemoryTracker::default();
+
+        // Track base fields — marks shared tree nodes as "seen"
+        tracker.track_item(base.validators());
+        tracker.track_item(base.balances());
+        tracker.track_item(base.inactivity_scores().unwrap());
+        tracker.track_item(base.previous_epoch_participation().unwrap());
+        tracker.track_item(base.current_epoch_participation().unwrap());
+        tracker.track_item(base.state_roots());
+        tracker.track_item(base.block_roots());
+        tracker.track_item(base.randao_mixes());
+        tracker.track_item(base.slashings());
+        tracker.track_item(base.eth1_data_votes());
+
+        // Track derived fields — differential_size captures new COW'd allocations
+        let mut total = 0;
+        total += tracker.track_item(derived.validators()).differential_size;
+        total += tracker.track_item(derived.balances()).differential_size;
+        total += tracker
+            .track_item(derived.inactivity_scores().unwrap())
+            .differential_size;
+        total += tracker
+            .track_item(derived.previous_epoch_participation().unwrap())
+            .differential_size;
+        total += tracker
+            .track_item(derived.current_epoch_participation().unwrap())
+            .differential_size;
+        total += tracker.track_item(derived.state_roots()).differential_size;
+        total += tracker.track_item(derived.block_roots()).differential_size;
+        total += tracker.track_item(derived.randao_mixes()).differential_size;
+        total += tracker.track_item(derived.slashings()).differential_size;
+        total += tracker
+            .track_item(derived.eth1_data_votes())
+            .differential_size;
+        total
+    }
+
+    // ── estimate_tree_bytes: sparse mutations ──────────────────────────────
+
+    /// The capacity for test lists (List<_, U1048576>).
+    const TEST_CAP: usize = 1048576;
+
+    /// Assert estimate is an upper bound within the given max ratio.
+    fn assert_upper_bound(label: &str, estimated: usize, actual: usize, max_ratio: f64) {
+        let ratio = estimated as f64 / actual as f64;
+        eprintln!("{label}: estimated={estimated}, actual={actual}, ratio={ratio:.2}");
+        assert!(
+            estimated >= actual,
+            "{label}: estimate ({estimated}) must be >= actual ({actual})"
+        );
+        assert!(
+            ratio <= max_ratio,
+            "{label}: ratio {ratio:.2} exceeds max {max_ratio:.1}"
+        );
+    }
+
+    #[test]
+    fn estimate_tree_bytes_sparse_single() {
+        // Mutate 1 out of 1024 leaves in a List<u64>
+        let total = 1024;
+        let base = List::<u64, typenum::U1048576>::new(vec![0u64; total]).unwrap();
+        let mut derived = base.clone();
+        *derived.get_mut(0).unwrap() = 1;
+        derived.apply_updates().unwrap();
+
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(&base);
+        let actual = tracker.track_item(&derived).differential_size;
+        // MemoryTracker includes the List struct overhead; estimate_tree_bytes only covers tree
+        // nodes, so add the container size for a fair comparison.
+        let container = std::mem::size_of_val(&derived);
+        let estimated = estimate_tree_bytes::<u64>(1, total, TEST_CAP) + container;
+        assert_upper_bound("sparse(1/1024)", estimated, actual, 1.5);
+    }
+
+    #[test]
+    fn estimate_tree_bytes_sparse_many() {
+        // Mutate 100 scattered leaves out of 4096
+        let total = 4096;
+        let base = List::<u64, typenum::U1048576>::new(vec![0u64; total]).unwrap();
+        let mut derived = base.clone();
+        // Spread mutations across the tree to minimize path sharing
+        for i in (0..total).step_by(total / 100) {
+            *derived.get_mut(i).unwrap() = 1;
+        }
+        derived.apply_updates().unwrap();
+
+        let dirty = 100;
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(&base);
+        let actual = tracker.track_item(&derived).differential_size;
+        let container = std::mem::size_of_val(&derived);
+        let estimated = estimate_tree_bytes::<u64>(dirty, total, TEST_CAP) + container;
+        assert_upper_bound("sparse(100/4096)", estimated, actual, 4.0);
+    }
+
+    #[test]
+    fn estimate_tree_bytes_sparse_adjacent() {
+        // Mutate 100 adjacent leaves — worst case for overcounting (shared paths).
+        // Adjacent mutations share nearly all internal nodes, but the sparse formula
+        // charges each a full path. The full-tree cap limits the damage but it's still
+        // a significant overcount for this pathological layout.
+        let total = 4096;
+        let base = List::<u64, typenum::U1048576>::new(vec![0u64; total]).unwrap();
+        let mut derived = base.clone();
+        for i in 0..100 {
+            *derived.get_mut(i).unwrap() = 1;
+        }
+        derived.apply_updates().unwrap();
+
+        let dirty = 100;
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(&base);
+        let actual = tracker.track_item(&derived).differential_size;
+        let container = std::mem::size_of_val(&derived);
+        let estimated = estimate_tree_bytes::<u64>(dirty, total, TEST_CAP) + container;
+        // Adjacent is the worst case for the sparse formula — allow more headroom.
+        assert_upper_bound("adjacent(100/4096)", estimated, actual, 30.0);
+    }
+
+    #[test]
+    fn estimate_tree_bytes_full() {
+        let total = 1024;
+        let base = List::<u64, typenum::U1048576>::new(vec![0u64; total]).unwrap();
+        let mut derived = base.clone();
+        for i in 0..total {
+            *derived.get_mut(i).unwrap() = 1;
+        }
+        derived.apply_updates().unwrap();
+
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(&base);
+        let actual = tracker.track_item(&derived).differential_size;
+        let container = std::mem::size_of_val(&derived);
+        let estimated = estimate_tree_bytes::<u64>(total, total, TEST_CAP) + container;
+        assert_upper_bound("full(1024/1024)", estimated, actual, 1.5);
+    }
+
+    // ── estimated_marginal_bytes: epoch boundary ───────────────────────────
+
+    #[test]
+    fn estimated_marginal_bytes_epoch_boundary() {
+        let n = 1024;
+        let slots_per_epoch = E::slots_per_epoch();
+        let slot = Slot::new(slots_per_epoch); // epoch boundary
+        let base = make_altair_state(n, slot);
+        let mut derived = base.clone();
+
+        // Simulate epoch processing: all balances rewritten
+        for i in 0..n {
+            *derived.balances_mut().get_mut(i).unwrap() += 1;
+        }
+        // All inactivity scores rewritten
+        for i in 0..n {
+            *derived.inactivity_scores_mut().unwrap().get_mut(i).unwrap() += 1;
+        }
+        // Both participation lists replaced (epoch rotation creates new lists)
+        *derived.previous_epoch_participation_mut().unwrap() =
+            List::new(vec![ParticipationFlags::default(); n]).unwrap();
+        *derived.current_epoch_participation_mut().unwrap() =
+            List::new(vec![ParticipationFlags::default(); n]).unwrap();
+        // Roots and randao
+        *derived.state_roots_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0x01);
+        *derived.block_roots_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0x02);
+        *derived.randao_mixes_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0x03);
+
+        derived.apply_pending_mutations().unwrap();
+
+        let actual = measure_actual_differential_bytes(&base, &derived);
+        let estimated = estimated_marginal_bytes::<E>(&derived);
+
+        assert_upper_bound("epoch_boundary(n=1024)", estimated, actual, 1.5);
+    }
+
+    // ── estimated_marginal_bytes: mid-epoch ────────────────────────────────
+
+    #[test]
+    fn estimated_marginal_bytes_mid_epoch() {
+        let n = 1024;
+        let slot = Slot::new(1); // mid-epoch
+        let base = make_altair_state(n, slot);
+        let mut derived = base.clone();
+
+        // Simulate mid-epoch: 1 proposer reward
+        *derived.balances_mut().get_mut(0).unwrap() += 1;
+        // ~128 attesters update participation flags
+        for i in 0..128.min(n) {
+            derived
+                .current_epoch_participation_mut()
+                .unwrap()
+                .get_mut(i)
+                .unwrap()
+                .add_flag(0)
+                .unwrap();
+        }
+        // Roots and randao
+        *derived.state_roots_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0x01);
+        *derived.block_roots_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0x02);
+        *derived.randao_mixes_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0x03);
+
+        derived.apply_pending_mutations().unwrap();
+
+        let actual = measure_actual_differential_bytes(&base, &derived);
+        let estimated = estimated_marginal_bytes::<E>(&derived);
+
+        assert_upper_bound("mid_epoch(n=1024)", estimated, actual, 4.0);
+    }
+
+    // ── estimate_tree_bytes: u8 (participation) ────────────────────────────
+
+    #[test]
+    fn estimate_tree_bytes_u8_full() {
+        // ParticipationFlags are u8-sized — test with a u8 list
+        let total = 1024;
+        let base = List::<u8, typenum::U1048576>::new(vec![0u8; total]).unwrap();
+        let mut derived = base.clone();
+        for i in 0..total {
+            *derived.get_mut(i).unwrap() = 1;
+        }
+        derived.apply_updates().unwrap();
+
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(&base);
+        let actual = tracker.track_item(&derived).differential_size;
+        let container = std::mem::size_of_val(&derived);
+        let estimated = estimate_tree_bytes::<u8>(total, total, TEST_CAP) + container;
+        assert_upper_bound("u8_full(1024/1024)", estimated, actual, 1.5);
+    }
+
+    #[test]
+    fn estimate_tree_bytes_hash256_sparse() {
+        // Vectors like state_roots / block_roots use Hash256
+        let total = 64; // MinimalEthSpec::SlotsPerHistoricalRoot
+        let base = Vector::<Hash256, typenum::U64>::default();
+        let mut derived = base.clone();
+        *derived.get_mut(0).unwrap() = Hash256::repeat_byte(0x01);
+        *derived.get_mut(1).unwrap() = Hash256::repeat_byte(0x02);
+        derived.apply_updates().unwrap();
+
+        let dirty = 2;
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(&base);
+        let actual = tracker.track_item(&derived).differential_size;
+        // For vectors, capacity == total (fixed size)
+        let container = std::mem::size_of_val(&derived);
+        let estimated = estimate_tree_bytes::<Hash256>(dirty, total, total) + container;
+
+        assert_upper_bound("hash256_sparse(2/64)", estimated, actual, 2.0);
+    }
+
+    // ── estimate_tree_bytes: additional type coverage ──────────────────────
+
+    #[test]
+    fn estimate_tree_bytes_hash256_full() {
+        let total = 64;
+        let base = Vector::<Hash256, typenum::U64>::default();
+        let mut derived = base.clone();
+        for i in 0..total {
+            *derived.get_mut(i).unwrap() = Hash256::repeat_byte(i as u8);
+        }
+        derived.apply_updates().unwrap();
+
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(&base);
+        let actual = tracker.track_item(&derived).differential_size;
+        let container = std::mem::size_of_val(&derived);
+        let estimated = estimate_tree_bytes::<Hash256>(total, total, total) + container;
+        assert_upper_bound("hash256_full(64/64)", estimated, actual, 1.5);
+    }
+
+    #[test]
+    fn estimate_tree_bytes_slashings_single() {
+        let total = 64;
+        let base = Vector::<u64, typenum::U64>::default();
+        let mut derived = base.clone();
+        *derived.get_mut(0).unwrap() = 1_000_000;
+        derived.apply_updates().unwrap();
+
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(&base);
+        let actual = tracker.track_item(&derived).differential_size;
+        let container = std::mem::size_of_val(&derived);
+        let estimated = estimate_tree_bytes::<u64>(1, total, total) + container;
+
+        assert_upper_bound("slashings(1/64)", estimated, actual, 1.5);
+    }
+
+    // ── Per-field differential tests ──────────────────────────────────────
+
+    /// Track a single milhouse field's differential between base and derived states.
+    fn field_differential<T: milhouse::mem::MemorySize>(
+        base_field: &T,
+        derived_field: &T,
+    ) -> usize {
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(base_field);
+        tracker.track_item(derived_field).differential_size
+    }
+
+    /// Helper: mutate `dirty` scattered balance entries out of `n`, measure estimate vs actual.
+    fn check_balances_estimate(n: usize, dirty: usize, max_ratio: f64) {
+        let base = make_altair_state(n, Slot::new(1));
+        let mut derived = base.clone();
+        // Spread mutations evenly across the list
+        let step = if dirty >= n { 1 } else { n / dirty };
+        let mut count = 0;
+        for i in (0..n).step_by(step) {
+            if count >= dirty {
+                break;
+            }
+            *derived.balances_mut().get_mut(i).unwrap() += 1;
+            count += 1;
+        }
+        derived.apply_pending_mutations().unwrap();
+
+        let actual = field_differential(base.balances(), derived.balances());
+        let container = std::mem::size_of_val(derived.balances());
+        let cap = <E as types::EthSpec>::ValidatorRegistryLimit::to_usize();
+        let estimated = estimate_tree_bytes::<u64>(dirty, n, cap) + container;
+        assert_upper_bound(
+            &format!("balances({dirty}/{n})"),
+            estimated,
+            actual,
+            max_ratio,
+        );
+    }
+
+    #[test]
+    fn per_field_balances_single() {
+        check_balances_estimate(1024, 1, 1.5);
+    }
+
+    #[test]
+    fn per_field_balances_10pct() {
+        check_balances_estimate(1024, 102, 3.0);
+    }
+
+    #[test]
+    fn per_field_balances_50pct() {
+        check_balances_estimate(1024, 512, 2.0);
+    }
+
+    #[test]
+    fn per_field_balances_all() {
+        check_balances_estimate(1024, 1024, 1.5);
+    }
+
+    #[test]
+    fn per_field_participation_committee() {
+        let n = 1024;
+        let base = make_altair_state(n, Slot::new(1));
+        let mut derived = base.clone();
+        // ~128 attesters update current participation
+        for i in 0..128.min(n) {
+            derived
+                .current_epoch_participation_mut()
+                .unwrap()
+                .get_mut(i)
+                .unwrap()
+                .add_flag(0)
+                .unwrap();
+        }
+        derived.apply_pending_mutations().unwrap();
+
+        let actual = field_differential(
+            base.current_epoch_participation().unwrap(),
+            derived.current_epoch_participation().unwrap(),
+        );
+        let container = std::mem::size_of_val(derived.current_epoch_participation().unwrap());
+        let cap = <E as types::EthSpec>::ValidatorRegistryLimit::to_usize();
+        let estimated = estimate_tree_bytes::<u8>(128, n, cap) + container;
+        assert_upper_bound("participation(128/1024)", estimated, actual, 4.0);
+    }
+
+    #[test]
+    fn per_field_state_roots_single() {
+        let n = 1024;
+        let base = make_altair_state(n, Slot::new(1));
+        let mut derived = base.clone();
+        *derived.state_roots_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0xAA);
+        derived.apply_pending_mutations().unwrap();
+
+        let actual = field_differential(base.state_roots(), derived.state_roots());
+        let container = std::mem::size_of_val(derived.state_roots());
+        let cap = E::slots_per_historical_root();
+        let estimated = estimate_tree_bytes::<Hash256>(1, cap, cap) + container;
+        assert_upper_bound("state_roots(1/64)", estimated, actual, 1.5);
+    }
+
+    #[test]
+    fn per_field_randao_single() {
+        let n = 1024;
+        let base = make_altair_state(n, Slot::new(1));
+        let mut derived = base.clone();
+        *derived.randao_mixes_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0xBB);
+        derived.apply_pending_mutations().unwrap();
+
+        let actual = field_differential(base.randao_mixes(), derived.randao_mixes());
+        let container = std::mem::size_of_val(derived.randao_mixes());
+        let cap = E::epochs_per_historical_vector();
+        let estimated = estimate_tree_bytes::<Hash256>(1, cap, cap) + container;
+        assert_upper_bound("randao(1/64)", estimated, actual, 1.5);
+    }
+
+    #[test]
+    fn per_field_inactivity_all() {
+        let n = 1024;
+        let base = make_altair_state(n, Slot::new(8));
+        let mut derived = base.clone();
+        for i in 0..n {
+            *derived.inactivity_scores_mut().unwrap().get_mut(i).unwrap() += 1;
+        }
+        derived.apply_pending_mutations().unwrap();
+
+        let actual = field_differential(
+            base.inactivity_scores().unwrap(),
+            derived.inactivity_scores().unwrap(),
+        );
+        let container = std::mem::size_of_val(derived.inactivity_scores().unwrap());
+        let cap = <E as types::EthSpec>::ValidatorRegistryLimit::to_usize();
+        let estimated = estimate_tree_bytes::<u64>(n, n, cap) + container;
+        assert_upper_bound("inactivity(1024/1024)", estimated, actual, 1.5);
+    }
+
+    #[test]
+    fn per_field_participation_replaced() {
+        let n = 1024;
+        let base = make_altair_state(n, Slot::new(8));
+        let mut derived = base.clone();
+        *derived.previous_epoch_participation_mut().unwrap() =
+            List::new(vec![ParticipationFlags::default(); n]).unwrap();
+        derived.apply_pending_mutations().unwrap();
+
+        let actual = field_differential(
+            base.previous_epoch_participation().unwrap(),
+            derived.previous_epoch_participation().unwrap(),
+        );
+        let container = std::mem::size_of_val(derived.previous_epoch_participation().unwrap());
+        let cap = <E as types::EthSpec>::ValidatorRegistryLimit::to_usize();
+        let estimated = estimate_tree_bytes::<u8>(n, n, cap) + container;
+        assert_upper_bound("participation_replaced(1024/1024)", estimated, actual, 1.5);
+    }
+
+    // ── Clone chain / shared COW tests ────────────────────────────────────
+
+    #[test]
+    fn clone_chain_shared_cow() {
+        // State A cloned from base, mutated.
+        // State B cloned from A, mutated further.
+        // Verify that B's differential relative to base includes both A's and B's mutations.
+        let n = 512;
+        let base = make_altair_state(n, Slot::new(1));
+
+        // State A: modify first half of balances
+        let mut state_a = base.clone();
+        for i in 0..n / 2 {
+            *state_a.balances_mut().get_mut(i).unwrap() += 1;
+        }
+        state_a.apply_pending_mutations().unwrap();
+
+        // State B: clone A, modify second half of balances
+        let mut state_b = state_a.clone();
+        for i in n / 2..n {
+            *state_b.balances_mut().get_mut(i).unwrap() += 1;
+        }
+        state_b.apply_pending_mutations().unwrap();
+
+        // B's cost relative to base should be ~full (all balances dirty)
+        let b_vs_base = field_differential(base.balances(), state_b.balances());
+        // B's cost relative to A should be ~half (only second half dirty)
+        let b_vs_a = field_differential(state_a.balances(), state_b.balances());
+        // A's cost relative to base should be ~half
+        let a_vs_base = field_differential(base.balances(), state_a.balances());
+
+        eprintln!("clone_chain: a_vs_base={a_vs_base}, b_vs_a={b_vs_a}, b_vs_base={b_vs_base}");
+        // B vs base should be >= A vs base (B has all A's mutations plus its own)
+        assert!(
+            b_vs_base >= a_vs_base,
+            "B's cost vs base ({b_vs_base}) should be >= A's cost vs base ({a_vs_base})"
+        );
+        // The key property: B's cost vs base < A's + B_vs_A because they share COW nodes
+        // (A's mutations are shared, not duplicated)
+        assert!(
+            b_vs_base <= a_vs_base + b_vs_a,
+            "B vs base shouldn't exceed sum of parts"
+        );
+    }
+
+    #[test]
+    fn prune_intermediate_state() {
+        // After dropping state A, state B's total_size (not differential) should remain the same.
+        // The MemoryTracker sees all of B's nodes regardless of whether A exists.
+        let n = 512;
+        let base = make_altair_state(n, Slot::new(1));
+
+        let mut state_a = base.clone();
+        for i in 0..n / 2 {
+            *state_a.balances_mut().get_mut(i).unwrap() += 1;
+        }
+        state_a.apply_pending_mutations().unwrap();
+
+        let mut state_b = state_a.clone();
+        for i in n / 2..n {
+            *state_b.balances_mut().get_mut(i).unwrap() += 1;
+        }
+        state_b.apply_pending_mutations().unwrap();
+
+        // Measure B's total size while A is alive
+        let b_total_with_a = {
+            let mut t = MemoryTracker::default();
+            t.track_item(state_b.balances()).total_size
+        };
+
+        // Drop A
+        drop(state_a);
+
+        // Measure B's total size after A is dropped — should be identical
+        let b_total_without_a = {
+            let mut t = MemoryTracker::default();
+            t.track_item(state_b.balances()).total_size
+        };
+
+        eprintln!("prune: b_total_with_a={b_total_with_a}, b_total_without_a={b_total_without_a}");
+        assert_eq!(
+            b_total_with_a, b_total_without_a,
+            "B's total_size should not change when A is dropped"
+        );
+    }
+
+    #[test]
+    fn prune_shared_base_differential_increases() {
+        // When base is dropped, derived's differential relative to nothing is its full size.
+        // This demonstrates the "pruning hazard": if the only state sharing nodes with B is
+        // the finalized state, and we measure B's differential against finalized, it's small.
+        // But if finalized is updated (rebased), B's differential could be large.
+        let n = 512;
+        let base = make_altair_state(n, Slot::new(1));
+
+        let mut derived = base.clone();
+        *derived.balances_mut().get_mut(0).unwrap() += 1;
+        derived.apply_pending_mutations().unwrap();
+
+        // Differential with base tracked = small (only 1 dirty path)
+        let diff_with_base = field_differential(base.balances(), derived.balances());
+
+        // Total size = everything (no sharing baseline)
+        let total = {
+            let mut t = MemoryTracker::default();
+            t.track_item(derived.balances()).total_size
+        };
+
+        eprintln!(
+            "prune_hazard: diff_with_base={diff_with_base}, total={total}, ratio={:.1}x",
+            total as f64 / diff_with_base as f64
+        );
+        // Total should be much larger than the marginal differential
+        assert!(
+            total > diff_with_base * 5,
+            "total ({total}) should be much larger than marginal diff ({diff_with_base})"
+        );
+    }
+
+    #[test]
+    fn two_states_same_slot_independent_cow() {
+        // Two states at the same slot (e.g. pending vs full payload) independently cloned from
+        // base. Both mutate the same indices but with different values. Their COW'd nodes are
+        // completely independent — no sharing between A and B.
+        //
+        // When measured together (track base, then A, then B), B's differential is 0 for the
+        // shared base but full for its own COW'd paths (same as A's).
+        //
+        // estimated_marginal_bytes counts each independently = 2x cost. This is correct
+        // because each state independently owns its COW'd nodes.
+        let n = 1024;
+        let base = make_altair_state(n, Slot::new(1));
+
+        let mut state_a = base.clone();
+        *state_a.balances_mut().get_mut(0).unwrap() += 1;
+        *state_a.state_roots_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0x01);
+        state_a.apply_pending_mutations().unwrap();
+
+        let mut state_b = base.clone();
+        *state_b.balances_mut().get_mut(0).unwrap() += 2;
+        *state_b.state_roots_mut().get_mut(0).unwrap() = Hash256::repeat_byte(0x02);
+        state_b.apply_pending_mutations().unwrap();
+
+        // Measure combined: track base, then A, then B
+        let mut tracker = MemoryTracker::default();
+        tracker.track_item(base.balances());
+        tracker.track_item(base.state_roots());
+        tracker.track_item(base.block_roots());
+        tracker.track_item(base.randao_mixes());
+        let a_bal = tracker.track_item(state_a.balances()).differential_size;
+        tracker.track_item(state_a.state_roots());
+        let b_bal = tracker.track_item(state_b.balances()).differential_size;
+        tracker.track_item(state_b.state_roots());
+
+        eprintln!("same_slot: a_bal_diff={a_bal}, b_bal_diff={b_bal}");
+        // Both should have non-zero differential (independent COW'd paths)
+        assert!(a_bal > 0, "A should have non-zero balance diff");
+        assert!(b_bal > 0, "B should have non-zero balance diff");
+        // Both get the same estimate (same slot position)
+        let est_a = estimated_marginal_bytes::<E>(&state_a);
+        let est_b = estimated_marginal_bytes::<E>(&state_b);
+        assert_eq!(est_a, est_b, "same-slot states get identical estimates");
+    }
+
+    // ── Multi-slot accumulation ───────────────────────────────────────────
+
+    #[test]
+    fn multi_slot_accumulation() {
+        // Simulate several mid-epoch slots accumulating mutations.
+        // The estimate for a later slot should be >= actual (even with accumulated changes).
+        let n = 512;
+        let slots_per_epoch = E::slots_per_epoch();
+        let base = make_altair_state(n, Slot::new(0));
+        let mut state = base.clone();
+
+        // Simulate 4 mid-epoch slots
+        for s in 0..4.min(slots_per_epoch) {
+            // Each slot: 1 proposer reward, ~128 participation, 1 root, 1 randao
+            *state.balances_mut().get_mut(s as usize).unwrap() += 1;
+            for i in 0..128.min(n) {
+                state
+                    .current_epoch_participation_mut()
+                    .unwrap()
+                    .get_mut(i)
+                    .unwrap()
+                    .add_flag(0)
+                    .ok(); // ok if flag already set
+            }
+            let root_idx = s as usize % E::slots_per_historical_root();
+            *state.state_roots_mut().get_mut(root_idx).unwrap() = Hash256::repeat_byte(s as u8 + 1);
+            *state.block_roots_mut().get_mut(root_idx).unwrap() =
+                Hash256::repeat_byte(s as u8 + 0x10);
+            let randao_idx = s as usize % E::epochs_per_historical_vector();
+            *state.randao_mixes_mut().get_mut(randao_idx).unwrap() =
+                Hash256::repeat_byte(s as u8 + 0x20);
+        }
+        state.apply_pending_mutations().unwrap();
+
+        let actual = measure_actual_differential_bytes(&base, &state);
+        let estimated = estimated_marginal_bytes::<E>(&state);
+        assert_upper_bound("multi_slot(4 slots)", estimated, actual, 8.0);
+    }
+
+    // ── Real epoch transition ─────────────────────────────────────────────
+
+    #[test]
+    fn real_epoch_transition() {
+        use state_processing::per_slot_processing;
+        use types::ChainSpec;
+
+        let mut spec = ChainSpec::minimal();
+        // Start at Altair so we have participation lists and inactivity scores.
+        spec.altair_fork_epoch = Some(Epoch::new(0));
+        let n = 64;
+        let slots_per_epoch = E::slots_per_epoch();
+
+        // Build a valid genesis state with committee caches.
+        let keypairs = types::test_utils::generate_deterministic_keypairs(n);
+        let mut state = genesis::interop_genesis_state::<E>(
+            &keypairs,
+            1_567_552_690,
+            Hash256::repeat_byte(0x42),
+            None,
+            &spec,
+        )
+        .unwrap();
+        state.build_caches(&spec).unwrap();
+        state.apply_pending_mutations().unwrap();
+
+        let base = state.clone();
+
+        // Advance through a full epoch to the epoch boundary.
+        for _ in 0..slots_per_epoch {
+            per_slot_processing(&mut state, None, &spec).unwrap();
+        }
+        state.apply_pending_mutations().unwrap();
+
+        assert_eq!(
+            state.slot() % slots_per_epoch,
+            0,
+            "should be at epoch boundary"
+        );
+
+        let actual = measure_actual_differential_bytes(&base, &state);
+        let estimated = estimated_marginal_bytes::<E>(&state);
+        // The ratio is higher than the simulated epoch_boundary test because
+        // per_slot_processing without blocks produces no attestation rewards, so
+        // balances and inactivity scores are unchanged — but the estimate assumes
+        // they're all dirty (the normal case with active validators).
+        assert_upper_bound("real_epoch_transition", estimated, actual, 3.5);
     }
 }
