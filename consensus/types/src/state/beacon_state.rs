@@ -45,9 +45,9 @@ use crate::{
         FINALIZED_ROOT_INDEX_ELECTRA, NEXT_SYNC_COMMITTEE_INDEX, NEXT_SYNC_COMMITTEE_INDEX_ELECTRA,
     },
     state::{
-        BlockRootsIter, CommitteeCache, EpochCache, EpochCacheError, ExitCache, HistoricalBatch,
-        HistoricalSummary, ProgressiveBalancesCache, PubkeyCache, SlashingsCache,
-        get_active_validator_indices,
+        ApproxOwnedBytesList, BlockRootsIter, CommitteeCache, EpochCache, EpochCacheError,
+        ExitCache, HistoricalBatch, HistoricalSummary, ProgressiveBalancesCache, PubkeyCache,
+        SlashingsCache, get_active_validator_indices,
     },
     sync_committee::{SyncCommittee, SyncDuty},
     test_utils::TestRandom,
@@ -716,6 +716,14 @@ where
     #[test_random(default)]
     #[metastruct(exclude)]
     pub epoch_cache: EpochCache,
+    /// COW memory tracking. Each entry is a segment of tree memory — the base tree
+    /// size or the COW bytes from a transition. Shared via `Arc` with cloned states.
+    #[serde(skip_serializing, skip_deserializing)]
+    #[ssz(skip_serializing, skip_deserializing)]
+    #[tree_hash(skip_hashing)]
+    #[test_random(default)]
+    #[metastruct(exclude)]
+    pub approx_owned_bytes: ApproxOwnedBytesList,
 }
 
 impl<E: EthSpec> BeaconState<E> {
@@ -778,6 +786,7 @@ impl<E: EthSpec> BeaconState<E> {
             exit_cache: ExitCache::default(),
             slashings_cache: SlashingsCache::default(),
             epoch_cache: EpochCache::default(),
+            approx_owned_bytes: ApproxOwnedBytesList::default(),
         })
     }
 

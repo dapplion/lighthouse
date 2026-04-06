@@ -117,6 +117,9 @@ pub fn per_block_processing<E: EthSpec, Payload: AbstractExecPayload<E>>(
     ctxt: &mut ConsensusContext<E>,
     spec: &ChainSpec,
 ) -> Result<(), BlockProcessingError> {
+    // Snapshot tree roots before mutations for COW tracking.
+    let pre_snapshot = TreeSnapshot::new(state);
+
     let block = signed_block.message();
 
     // Verify that the `SignedBeaconBlock` instantiation matches the fork at `signed_block.slot()`.
@@ -214,6 +217,10 @@ pub fn per_block_processing<E: EthSpec, Payload: AbstractExecPayload<E>>(
     if is_progressive_balances_enabled(state) {
         update_progressive_balances_metrics(state.progressive_balances_cache())?;
     }
+
+    // Record COW bytes from this block transition.
+    let delta = pre_snapshot.approx_owned_bytes(state);
+    state.approx_owned_bytes_mut().push(delta);
 
     Ok(())
 }
