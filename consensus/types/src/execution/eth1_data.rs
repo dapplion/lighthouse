@@ -1,4 +1,5 @@
 use context_deserialize::context_deserialize;
+use milhouse::mem::MemorySize;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use test_random_derive::TestRandom;
@@ -30,6 +31,20 @@ pub struct Eth1Data {
     #[serde(with = "serde_utils::quoted_u64")]
     pub deposit_count: u64,
     pub block_hash: Hash256,
+}
+
+impl MemorySize for Eth1Data {
+    fn self_pointer(&self) -> usize {
+        self as *const _ as usize
+    }
+
+    fn subtrees(&self) -> Vec<&dyn MemorySize> {
+        vec![]
+    }
+
+    fn intrinsic_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 #[cfg(test)]

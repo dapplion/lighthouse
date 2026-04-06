@@ -1,6 +1,7 @@
 use bls::PublicKeyBytes;
 use context_deserialize::context_deserialize;
 use fixed_bytes::FixedBytesExtended;
+use milhouse::mem::MemorySize;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use test_random_derive::TestRandom;
@@ -32,6 +33,20 @@ pub struct Validator {
     pub activation_epoch: Epoch,
     pub exit_epoch: Epoch,
     pub withdrawable_epoch: Epoch,
+}
+
+impl MemorySize for Validator {
+    fn self_pointer(&self) -> usize {
+        self as *const _ as usize
+    }
+
+    fn subtrees(&self) -> Vec<&dyn MemorySize> {
+        vec![]
+    }
+
+    fn intrinsic_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 impl Validator {

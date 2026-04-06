@@ -1,3 +1,4 @@
+use milhouse::mem::MemorySize;
 use safe_arith::{ArithError, SafeArith};
 use serde::{Deserialize, Serialize};
 use ssz::{Decode, DecodeError, Encode};
@@ -74,6 +75,20 @@ impl Encode for ParticipationFlags {
 
     fn as_ssz_bytes(&self) -> Vec<u8> {
         self.bits.as_ssz_bytes()
+    }
+}
+
+impl MemorySize for ParticipationFlags {
+    fn self_pointer(&self) -> usize {
+        self as *const _ as usize
+    }
+
+    fn subtrees(&self) -> Vec<&dyn MemorySize> {
+        vec![]
+    }
+
+    fn intrinsic_size(&self) -> usize {
+        std::mem::size_of::<Self>()
     }
 }
 
