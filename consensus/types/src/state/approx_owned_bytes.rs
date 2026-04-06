@@ -91,15 +91,16 @@ impl<E: EthSpec> TreeSnapshot<E> {
     }
 }
 
-/// Compute the COW bytes between two states across all tree-backed fields.
+/// Compute the COW bytes between two states across all tree-backed fields and caches.
 ///
-/// For each milhouse `List`/`Vector` field, calls `cow_bytes` which walks both trees
-/// in parallel, skipping shared subtrees via `Arc::ptr_eq`. O(dirty_nodes) total.
+/// IMPORTANT: this list must be kept in sync with `BeaconState::rebase_on` which uses
+/// `bimap_beacon_state_*_tree_list_fields!` macros. When a new fork adds a tree-backed
+/// field, add it here too.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn cow_bytes_between<E: EthSpec>(base: &BeaconState<E>, derived: &BeaconState<E>) -> usize {
     let mut total: usize = 0;
 
-    // Fields common to all forks.
+    // Tree-backed fields (common to all forks).
     total = total.saturating_add(derived.validators().cow_bytes(base.validators()));
     total = total.saturating_add(derived.balances().cow_bytes(base.balances()));
     total = total.saturating_add(derived.state_roots().cow_bytes(base.state_roots()));
@@ -152,17 +153,40 @@ pub fn cow_bytes_between<E: EthSpec>(base: &BeaconState<E>, derived: &BeaconStat
         total = total.saturating_add(d.cow_bytes(b));
     }
 
+    // Caches: count as COW if they point to different Arc allocations.
+    for (d, b) in derived
+        .committee_caches()
+        .iter()
+        .zip(base.committee_caches())
+    {
+        if !Arc::ptr_eq(d, b) {
+            total = total.saturating_add(d.approx_heap_bytes());
+        }
+    }
+    if let (Ok(d), Ok(b)) = (
+        derived.current_sync_committee(),
+        base.current_sync_committee(),
+    ) && !Arc::ptr_eq(d, b)
+    {
+        total = total.saturating_add(std::mem::size_of_val(&**d));
+    }
+    if let (Ok(d), Ok(b)) = (derived.next_sync_committee(), base.next_sync_committee())
+        && !Arc::ptr_eq(d, b)
+    {
+        total = total.saturating_add(std::mem::size_of_val(&**d));
+    }
+
     total
 }
 
-/// Compute the total tree bytes for a densely-packed state (e.g. loaded from disk).
+/// Compute the total bytes for a state's tree-backed fields and caches (no sharing).
 ///
-/// Uses `total_tree_bytes()` on each milhouse field — O(all_nodes) walk, but only
-/// needed once when the finalized state is set.
+/// IMPORTANT: must be kept in sync with `cow_bytes_between`.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn total_state_tree_bytes<E: EthSpec>(state: &BeaconState<E>) -> usize {
     let mut total: usize = 0;
 
+    // Tree-backed fields.
     total = total.saturating_add(state.validators().total_tree_bytes());
     total = total.saturating_add(state.balances().total_tree_bytes());
     total = total.saturating_add(state.state_roots().total_tree_bytes());
@@ -192,6 +216,17 @@ pub fn total_state_tree_bytes<E: EthSpec>(state: &BeaconState<E>) -> usize {
     }
     if let Ok(f) = state.pending_consolidations() {
         total = total.saturating_add(f.total_tree_bytes());
+    }
+
+    // Caches.
+    for cc in state.committee_caches() {
+        total = total.saturating_add(cc.approx_heap_bytes());
+    }
+    if let Ok(sc) = state.current_sync_committee() {
+        total = total.saturating_add(std::mem::size_of_val(&**sc));
+    }
+    if let Ok(sc) = state.next_sync_committee() {
+        total = total.saturating_add(std::mem::size_of_val(&**sc));
     }
 
     total
