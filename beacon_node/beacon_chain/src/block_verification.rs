@@ -1998,64 +1998,76 @@ fn load_parent<T: BeaconChainTypes, B: AsBlock<T::EthSpec>>(
             // Post-Gloas empty block case (also covers the Gloas fork transition).
             (StatePayloadStatus::Pending, parent_block.state_root())
         };
-        let (parent_state_root, mut state) = chain
-            .store
-            .get_advanced_hot_state(root, payload_status, block.slot(), parent_state_root)?
-            .or_else(|| {
-                // During checkpoint sync, the Full state may not exist — only the Pending
-                // (epoch boundary) state is available. Fall back to loading as Pending.
-                if payload_status == StatePayloadStatus::Full {
-                    warn!(
-                        %root,
-                        "Full state not found for parent block, falling back to Pending"
-                    );
-                    chain
+        let (parent_state_root, state) = if payload_status == StatePayloadStatus::Full {
+            // For Full state: try cache/DB first, then derive from Pending + envelope.
+            chain
+                .store
+                .get_advanced_hot_state(root, payload_status, block.slot(), parent_state_root)?
+                .or_else(|| {
+                    warn!(%root, "Full state not found, deriving from Pending + envelope");
+                    let envelope = chain.store.get_payload_envelope(&root).ok().flatten()?;
+                    // Load Pending state at parent's slot (not advanced)
+                    let (_, mut pending_state) = chain
                         .store
                         .get_advanced_hot_state(
                             root,
                             StatePayloadStatus::Pending,
-                            block.slot(),
+                            parent_block.slot(),
                             parent_block.state_root(),
                         )
                         .ok()
-                        .flatten()
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| {
-                BeaconChainError::DBInconsistent(
-                    format!("Missing state for parent block {root:?}",),
-                )
-            })?;
-
-        // If we needed the Full state but fell back to Pending (checkpoint sync / range sync),
-        // apply the full envelope processing to transform Pending → Full in-memory.
-        // This is necessary because the Full state differs from Pending in many fields
-        // (deposits, withdrawals, builder payments, execution availability, block hash).
-        if payload_status == StatePayloadStatus::Full
-            && let Ok(Some(envelope)) = chain.store.get_payload_envelope(&root)
-        {
-            debug!(
-                %root,
-                block_hash = %envelope.message.payload.block_hash,
-                "Applying envelope to Pending state to derive Full state"
-            );
-            if let Err(e) = process_execution_payload_envelope(
-                &mut state,
-                Some(parent_state_root),
-                &envelope,
-                VerifySignatures::False,
-                VerifyEnvelopeStateRoot::False,
-                &chain.spec,
-            ) {
-                warn!(
-                    %root,
-                    error = ?e,
-                    "Failed to apply envelope to derive Full state, proceeding with Pending"
-                );
-            }
+                        .flatten()?;
+                    // Skip if already Full (checkpoint state downloaded as finalized/Full)
+                    let already_full = pending_state
+                        .latest_block_hash()
+                        .ok()
+                        .map(|h| *h == envelope.message.payload.block_hash)
+                        .unwrap_or(false);
+                    if !already_full {
+                        let pending_root = pending_state.canonical_root().ok()?;
+                        if let Err(e) = process_execution_payload_envelope(
+                            &mut pending_state,
+                            Some(pending_root),
+                            &envelope,
+                            VerifySignatures::False,
+                            VerifyEnvelopeStateRoot::True,
+                            &chain.spec,
+                        ) {
+                            warn!(%root, ?e, "Envelope state root verification FAILED");
+                            return None;
+                        }
+                    }
+                    // Use the envelope's state_root as the Full state root
+                    // (avoids canonical_root() tree hash cache issues).
+                    let full_state_root = if already_full {
+                        pending_state.canonical_root().ok()?
+                    } else {
+                        envelope.message.state_root
+                    };
+                    // Advance to child block's slot
+                    if pending_state.slot() < block.slot() {
+                        partial_state_advance(
+                            &mut pending_state,
+                            Some(full_state_root),
+                            block.slot(),
+                            &chain.spec,
+                        )
+                        .ok()?;
+                    }
+                    let advanced_root = pending_state.canonical_root().ok()?;
+                    Some((advanced_root, pending_state))
+                })
+        } else {
+            chain.store.get_advanced_hot_state(
+                root,
+                payload_status,
+                block.slot(),
+                parent_state_root,
+            )?
         }
+        .ok_or_else(|| {
+            BeaconChainError::DBInconsistent(format!("Missing state for parent block {root:?}",))
+        })?;
 
         if !state.all_caches_built() {
             debug!(

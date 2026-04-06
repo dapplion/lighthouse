@@ -5,7 +5,11 @@ participants:
   - el_type: geth
     el_image: ethpandaops/geth:epbs-devnet-1
     cl_type: prysm
-    cl_image: ethpandaops/prysm-beacon-chain:epbs-devnet-1
+    cl_image: prysm-beacon-patched
+    cl_extra_params:
+      - --p2p-colocation-whitelist=0.0.0.0/0
+      - --block-batch-limit=128
+      - --block-batch-limit-burst-factor=8
     vc_type: prysm
     vc_image: ethpandaops/prysm-validator:epbs-devnet-1
     count: 2
