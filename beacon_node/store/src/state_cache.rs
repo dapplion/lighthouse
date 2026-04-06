@@ -188,18 +188,19 @@ impl<E: EthSpec> StateCache<E> {
             }
         }
 
-        // Ensure the finalized state has a base size entry in its approx_owned_bytes.
-        // States loaded from disk or constructed from genesis start with an empty list.
-        if state.approx_owned_bytes().0.is_empty() {
-            let base_bytes = types::total_state_tree_bytes(&state);
-            tracing::debug!(
-                base_bytes,
-                slot = %state.slot(),
-                validators = state.validators().len(),
-                "measured finalized state base tree size"
-            );
-            state.approx_owned_bytes_mut().push(base_bytes);
-        }
+        // Compact the finalized state's approx_owned_bytes to a single entry.
+        // The finalized state is the shared base — it doesn't need per-transition
+        // history. Compacting prevents unbounded growth across finalizations.
+        let base_bytes = types::total_state_tree_bytes(&state);
+        tracing::debug!(
+            base_bytes,
+            prev_segments = state.approx_owned_bytes().0.len(),
+            slot = %state.slot(),
+            validators = state.validators().len(),
+            "measured finalized state base tree size"
+        );
+        *state.approx_owned_bytes_mut() = types::ApproxOwnedBytesList::default();
+        state.approx_owned_bytes_mut().push(base_bytes);
 
         // Update finalized state.
         self.finalized_state = Some(FinalizedState { state_root, state });
@@ -427,6 +428,20 @@ impl<E: EthSpec> StateCache<E> {
     /// Iterates all states and deduplicates `CowSegment`s by `Arc` pointer identity.
     /// Shared segments (from common ancestors) are counted once.
     pub fn total_approx_owned_bytes(&self) -> usize {
+        // Record segment counts per state for observability.
+        if let Some(ref fin) = self.finalized_state {
+            metrics::observe(
+                &metrics::STORE_BEACON_STATE_CACHE_SEGMENT_COUNT,
+                fin.state.approx_owned_bytes().0.len() as f64,
+            );
+        }
+        for (_, (_, state)) in self.states.iter() {
+            metrics::observe(
+                &metrics::STORE_BEACON_STATE_CACHE_SEGMENT_COUNT,
+                state.approx_owned_bytes().0.len() as f64,
+            );
+        }
+
         let finalized = self
             .finalized_state
             .as_ref()
