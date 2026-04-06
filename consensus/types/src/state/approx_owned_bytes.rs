@@ -72,6 +72,10 @@ pub fn sum_approx_owned_bytes<'a>(states: impl Iterator<Item = &'a ApproxOwnedBy
 /// IMPORTANT: this list must be kept in sync with `BeaconState::rebase_on` which uses
 /// `bimap_beacon_state_*_tree_list_fields!` macros. When a new fork adds a tree-backed
 /// field, add it here too.
+///
+/// NOTE: milhouse's `cow_bytes` uses `size_of::<T>()` for leaf data, which only counts
+/// stack size. If a future leaf type has heap allocations (Vec, String, etc.), they won't
+/// be counted. All current beacon state leaf types are fully inline, so this is correct today.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn cow_bytes_between<E: EthSpec>(base: &BeaconState<E>, derived: &BeaconState<E>) -> usize {
     let mut total: usize = 0;
