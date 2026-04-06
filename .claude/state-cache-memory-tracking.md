@@ -3,210 +3,110 @@
 ## Problem
 
 The state cache needs to know how much memory cached states consume to enforce
-a byte budget and avoid OOM. States share tree nodes via milhouse COW — the
-marginal cost of a state depends on which nodes it shares with other states.
+a byte budget (`--state-cache-max-mb`) and avoid OOM. States share tree nodes
+via milhouse COW — the marginal cost depends on which nodes are shared.
 
-Prior art: sigp/lighthouse#7803 implemented full `MemoryTracker` walks over all
-cached states on every Nth insert. Rejected — walking every node of every cached
-state is O(all_nodes × all_states), far too expensive at mainnet scale.
+### Prior art
 
-## Design: ApproxOwnedBytes
+- **sigp/lighthouse#7803** — Full `MemoryTracker` walk over all cached states.
+  Rejected: 450ms+ per measurement at mainnet scale, holds cache mutex.
+- **sigp/lighthouse#7449, #7450** — Tracking issues for cache size measurement.
+- **Spec-derived estimation** (`estimated_marginal_bytes`) — O(1) heuristic from
+  spec knowledge. Implemented in this branch as a fallback, with 25 tests. Tight
+  at epoch boundary (1.04x) but loose mid-epoch (3x). No milhouse dependency.
 
-Each `BeaconState` carries a `Vec<Arc<ApproxOwnedBytes>>` — a list of byte counts
-representing chunks of tree memory it owns. States that share ancestry (via clone)
-share the same `Arc` entries. Total cache memory = sum of unique entries (deduplicated
-by Arc pointer identity) across all cached states.
+## Current design: ApproxOwnedBytes + cow_bytes
 
-### Data structures
+### How it works
 
-```rust
-// On BeaconState (skipped from serde/ssz/tree_hash):
-pub approx_owned_bytes: ApproxOwnedBytesList,
+Each `BeaconState` carries a `Vec<Arc<ApproxOwnedBytes>>` — byte counts for
+chunks of tree memory it owns. States that share ancestry (via clone) share the
+same `Arc` entries. Total cache memory = sum of unique entries (deduplicated by
+Arc pointer) across all cached states.
 
-// where:
-pub struct ApproxOwnedBytes { pub bytes: usize }
-pub struct ApproxOwnedBytesList(pub Vec<Arc<ApproxOwnedBytes>>);
-```
+Measurement uses milhouse's `cow_bytes` (PR sigp/milhouse#100): a pairwise tree
+walk that compares two trees by `Arc::ptr_eq` at each node, skipping shared
+subtrees. O(dirty_nodes) with zero allocations.
 
-### Operations
+### Three measurement points
 
-- **Clone**: `Vec<Arc<_>>` is cloned — same Arcs, refcounts bump. O(entries).
-- **Push**: after measuring a transition's COW cost, push a new entry.
-- **Reset**: after rebase, replace with finalized's entries + unique cost entry.
-- **Total**: iterate all cached states, deduplicate by Arc pointer, sum bytes.
-  ~100 states × ~64 entries = ~6400 pointer comparisons. Trivial.
+1. **Initial finalized state** — `total_state_tree_bytes()` walks all tree nodes
+   once. ~25ms at 1M validators. Happens once per finalization (~every 6 min).
 
-## Three measurement cases
+2. **State loaded from disk after rebase** — `cow_bytes_between(finalized, state)`
+   measures unique bytes vs finalized. O(dirty_nodes).
 
-Every state in the cache enters through one of these paths:
+3. **After block/slot processing** — `TreeSnapshot` clones pre-state (cheap Arc
+   bumps), then `cow_bytes_between(pre, post)` after transition. Pushed as a new
+   `ApproxOwnedBytes` entry.
 
-### Case 1: Initial finalized state
+### Performance (benchmarked at 1M validators, MainnetEthSpec)
 
-The finalized state is set once (and updated when finalization advances). We need
-its full tree size as the base `ApproxOwnedBytes` entry.
+| Operation | Time |
+|-----------|------|
+| cow_bytes slot transition | **541 ns** |
+| cow_bytes epoch transition | **12.8 ms** |
+| total_tree_bytes (initial) | **25.1 ms** |
+| MemoryTracker (for comparison) | **458 ms** |
 
-**Approach**: Full `MemoryTracker::track_item(&state)` walk. Returns `total_size`.
+### Eviction
 
-**Cost**: ~450ms at 1M validators, ~1s at 2M. Acceptable — happens rarely
-(once per finalization advance, every ~6 minutes).
+`put_state` checks `total_approx_owned_bytes()` against `max_bytes`. If over
+budget, culls states by priority (advanced → old boundary → mid-epoch → good
+boundary) until under budget. The total is recomputed each check by iterating
+all cached states and deduplicating `ApproxOwnedBytes` entries — ~6400 pointer
+comparisons, trivial.
 
-### Case 2: State loaded from disk after rebase
-
-States loaded from disk are rebased onto the finalized state via `rebase_on_finalized`.
-After rebase, the state shares the finalized tree — we need the remaining unique cost.
-
-**Approach**: The finalized state's nodes are already in the tracker (from Case 1).
-Call `tracker.track_item(&loaded_state)` — shared nodes are already in the seen-set
-and return `differential_size: 0`. Only unique nodes are counted.
-
-**Cost**: O(unique_nodes). For a state close to finalized, this is cheap (few dirty
-paths). For a state far from finalized, it could be significant but still less than
-a full walk since shared nodes are skipped.
-
-### Case 3: New owned data after block/slot processing
-
-After `per_slot_processing` or `per_block_processing`, we need the COW bytes
-produced by that transition.
-
-**Approach**: Use `MemoryTracker::total_size()` delta:
-```
-tracker already has pre-state nodes (from the previous measurement)
-→ track_item(&post_state)
-→ delta = tracker.total_size() - pre_total
-→ push ApproxOwnedBytes { bytes: delta }
-```
-
-The post-state walk only visits new COW'd nodes (shared nodes already in the seen-set).
-
-**Cost at 1M validators** (benchmarked):
-- Slot transition (mid-epoch): ~2ms — few dirty paths
-- Epoch transition: ~115ms — all balances/participation rewritten
-
-## Current status
-
-### Completed
-
-- [x] `ApproxOwnedBytes` / `ApproxOwnedBytesList` types in `consensus/types`
-- [x] Field on `BeaconState` (all variants, skipped from serde/ssz/tree_hash)
-- [x] Push sites in `per_slot_processing` and `per_block_processing`
-- [x] All 7 fork upgrades preserve field via `mem::take`
-- [x] `rebase_on_finalized` resets to finalized's entries + unique cost
-- [x] `StateCache::total_approx_owned_bytes()` — iterate + deduplicate
-- [x] `MemorySize` impls for `BeaconState` and all subtypes (tree fields, caches,
-      sync committees, all leaf types) — cherry-picked from #7803
-- [x] Benchmarks: `state_memory` bench with 1M and 2M validators
-- [x] `estimated_marginal_bytes` — spec-derived fallback (25 tests with ratio bounds)
-
-### Stubbed (returns 0)
-
-- [ ] `TreeSnapshot::approx_owned_bytes()` — the actual measurement. Currently
-      returns 0. Needs to be replaced with the MemoryTracker approach.
-
-## Challenge: making the measurement fast
-
-The core tension is that `MemoryTracker::track_item` needs a seen-set of all
-previously-tracked nodes to identify shared vs new nodes. Building this set from
-scratch costs ~450ms at 1M validators (full tree walk). But once built, subsequent
-walks are cheap (only visit new nodes).
-
-### The persistent tracker approach
-
-Keep a `MemoryTracker` alive across transitions:
+### Data flow
 
 ```
-Finalization:
-  tracker = MemoryTracker::new()
-  tracker.track_item(&finalized_state)     // ~450ms, once
-  base_total = tracker.total_size()
-
-Per slot:
-  // pre-state nodes already in tracker from previous slot
-  tracker.track_item(&post_state)          // ~2ms (only new nodes)
-  delta = tracker.total_size() - prev_total
+per_slot_processing / per_block_processing:
+  TreeSnapshot::new(state)     ← cheap clone (Arc bumps)
+  ... process ...
+  snapshot.cow_bytes(state)    ← O(dirty_nodes), ~541ns slot / ~12.8ms epoch
   state.approx_owned_bytes.push(delta)
-  prev_total = tracker.total_size()
+
+rebase_on_finalized:
+  state.rebase_on(finalized)
+  cow_bytes_between(finalized, state)  ← O(dirty_nodes)
+  state.approx_owned_bytes = finalized.approx_owned_bytes + unique
+
+update_finalized_state:
+  total_state_tree_bytes(state)  ← O(all_nodes), ~25ms, once
+  state.approx_owned_bytes.push(base_size)
+
+put_state:
+  total = total_approx_owned_bytes()  ← deduplicate Arc pointers
+  if total > max_bytes: cull(...)
 ```
 
-**Problem: where does the tracker live?**
+## What's implemented
 
-The tracker is a `HashMap<usize, usize>` with millions of entries (~100MB at 1M
-validators). It can't travel with the state (too expensive to clone). It needs to
-live in the processing pipeline — tied to a specific chain of state transitions.
+- `ApproxOwnedBytes` / `ApproxOwnedBytesList` on `BeaconState` (all variants)
+- `cow_bytes_between()`, `total_state_tree_bytes()` in `consensus/types`
+- `TreeSnapshot` in `per_slot_processing` and `per_block_processing`
+- `rebase_on_finalized` resets segments to finalized's + unique cost
+- `update_finalized_state` measures base size for new finalized states
+- `total_approx_owned_bytes()` on `StateCache`
+- Eviction wired to `total_approx_owned_bytes()` in `put_state`
+- `--state-cache-max-mb` CLI flag (default: None = count-based only)
+- Metrics: `store_beacon_state_cache_cow_byte_size` gauge,
+  `store_beacon_state_cache_evictions_total` counter
+- Debug tracing on finalized base size, rebase cow_bytes, eviction events
+- `MemorySize` for `BeaconState` and all subtypes (from #7803)
+- `estimated_marginal_bytes` fallback with 25 tests (not used for eviction)
+- milhouse `cow_bytes` PR: sigp/milhouse#100
 
-Options:
+## What's not tracked
 
-1. **On the `BeaconChain` struct** — one tracker per chain. Reset on finalization.
-   Simple but requires plumbing through the call stack to `per_slot_processing`.
+- **Non-tree caches**: committee_caches (~30-60MB Arc-shared), pubkey_cache
+  (~100-150MB rpds), epoch_cache (~5MB Arc). Marginal cost ~0 when shared,
+  but the base finalized state's caches aren't measured.
+- **Scalar fields**: fork, checkpoints, eth1_data. Small, fixed per state.
 
-2. **Thread-local** — no plumbing needed but tricky with async/tokio.
+## References
 
-3. **Passed as a parameter** — explicit but invasive API change.
-
-### The fork problem
-
-When the chain forks, multiple states diverge from a common ancestor. A single
-persistent tracker accumulates nodes from all forks. This means:
-
-- Nodes from fork A are in the seen-set when measuring fork B
-- This causes undercounting — fork B's nodes might be falsely "seen" if fork A
-  happened to allocate at the same address (after fork A's nodes were freed)
-
-In practice this is unlikely (Arc allocations at the same address require the
-original to be freed first, which means no state holds it). But it's a
-correctness concern.
-
-**Mitigation**: The tracker is approximate (it's `ApproxOwnedBytes`, not exact).
-Small undercounting from address reuse is acceptable for eviction decisions.
-
-### The HashMap memory overhead
-
-At 1M validators, the tracker's HashMap has ~2-4M entries (one per unique tree
-node across all tracked states). At ~40 bytes per entry, that's ~80-160MB just
-for the tracker itself.
-
-**Mitigation**: Reset the tracker on each finalization advance. The finalized
-walk rebuilds it from scratch (~450ms). Between finalizations, the tracker
-grows by the COW nodes from ~32 slots × ~100 cached states. This is bounded.
-
-### Alternative: milhouse-native cow_bytes
-
-Instead of using `MemoryTracker` (external HashMap), milhouse could expose a
-pairwise tree walk:
-
-```rust
-fn cow_bytes<T: Value>(base: &Arc<Tree<T>>, derived: &Arc<Tree<T>>) -> usize {
-    if Arc::ptr_eq(base, derived) { return 0; }
-    let cost = node_size(derived);
-    match (base.as_ref(), derived.as_ref()) {
-        (Node { left: bl, right: br, .. },
-         Node { left: dl, right: dr, .. }) => {
-            cost + cow_bytes(bl, dl) + cow_bytes(br, dr)
-        }
-        _ => cost
-    }
-}
-```
-
-This is O(dirty_nodes) with zero external state — no HashMap, no persistent
-tracker. But it requires changes to milhouse and doesn't cover non-tree fields
-(caches). The MemoryTracker approach covers everything MemorySize is implemented for.
-
-## Benchmarks (MinimalEthSpec)
-
-| Benchmark | 1024 vals |
-|-----------|-----------|
-| Full walk | 316 µs |
-| Pre+post slot | 350 µs |
-| Pre+post epoch | 343 µs |
-
-## Benchmarks (MainnetEthSpec, synthetic state)
-
-| Benchmark | 1M validators | 2M validators |
-|-----------|--------------|--------------|
-| Full walk | 459 ms | 1.07 s |
-| Pre+post slot transition | 451 ms | 1.02 s |
-| Pre+post epoch transition | 566 ms | 1.32 s |
-
-The pre+post cost is dominated by the pre-state walk (~450ms). The post-state
-delta adds ~2ms (slot) or ~115ms (epoch). With a persistent tracker, only the
-delta cost is paid per transition.
+- sigp/lighthouse#7449 — Measure state cache size
+- sigp/lighthouse#7450 — Prune state cache based on size
+- sigp/lighthouse#7803 — Memory Aware Caching (rejected)
+- sigp/milhouse#100 — cow_bytes pairwise tree walk
