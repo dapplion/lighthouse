@@ -300,7 +300,7 @@ impl<E: EthSpec> StateCache<E> {
         &mut self,
         state_root: Hash256,
         block_root: Hash256,
-        state: BeaconState<E>,
+        mut state: BeaconState<E>,
         pre_finalized_slots_to_retain: &[Slot],
     ) -> Result<(), Error> {
         if state.slot() % E::slots_per_epoch() != 0 {
@@ -352,6 +352,13 @@ impl<E: EthSpec> StateCache<E> {
             }
         }
 
+        // Ensure the finalized state has a base size entry in its approx_owned_bytes.
+        // States loaded from disk or constructed from genesis start with an empty list.
+        if state.approx_owned_bytes().0.is_empty() {
+            let base_bytes = types::total_state_tree_bytes(&state);
+            state.approx_owned_bytes_mut().push(base_bytes);
+        }
+
         // Update finalized state.
         self.finalized_state = Some(FinalizedState { state_root, state });
         Ok(())
@@ -385,8 +392,7 @@ impl<E: EthSpec> StateCache<E> {
 
             // After rebase, the state shares the finalized tree. Recompute owned bytes:
             // adopt the finalized state's list + measure the remaining unique cost.
-            let unique_bytes =
-                types::TreeSnapshot::new(&finalized_state.state).approx_owned_bytes(state);
+            let unique_bytes = types::cow_bytes_between(&finalized_state.state, state);
             state
                 .approx_owned_bytes_mut()
                 .reset_to_base(finalized_state.state.approx_owned_bytes(), unique_bytes);

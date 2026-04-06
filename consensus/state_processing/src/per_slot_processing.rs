@@ -113,7 +113,7 @@ pub fn per_slot_processing<E: EthSpec>(
     }
 
     // Record COW bytes from this slot transition.
-    let delta = pre_snapshot.approx_owned_bytes(state);
+    let delta = pre_snapshot.cow_bytes(state);
     state.approx_owned_bytes_mut().push(delta);
 
     Ok(summary)

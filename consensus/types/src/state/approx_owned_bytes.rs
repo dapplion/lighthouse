@@ -67,30 +67,130 @@ pub fn sum_approx_owned_bytes<'a>(states: impl Iterator<Item = &'a ApproxOwnedBy
     total
 }
 
-/// Snapshot of a `BeaconState`'s tree roots before a transition.
+/// Snapshot of a `BeaconState` before a transition.
 ///
-/// Used to measure the bytes of new tree nodes produced by a slot or block transition.
-/// After the transition, call `approx_owned_bytes` to get the delta.
-///
-/// TODO: implement actual pairwise tree walk in milhouse. Currently returns 0.
-pub struct TreeSnapshot {
-    _private: (),
+/// Captures a cheap clone (Arc bumps only) of the state. After the transition,
+/// call `cow_bytes` to measure the new tree nodes in the post-state.
+pub struct TreeSnapshot<E: EthSpec> {
+    pre: BeaconState<E>,
 }
 
-impl TreeSnapshot {
+impl<E: EthSpec> TreeSnapshot<E> {
     /// Capture tree root pointers from the pre-transition state.
-    pub fn new<E: EthSpec>(_state: &BeaconState<E>) -> Self {
-        // TODO: capture Arc<Tree<T>> root pointers for each tree-backed field.
-        // When milhouse exposes a pairwise diff, store the roots here.
-        TreeSnapshot { _private: () }
+    ///
+    /// This is a cheap clone — milhouse trees are Arc-shared, caches are Arc-shared.
+    pub fn new(state: &BeaconState<E>) -> Self {
+        TreeSnapshot { pre: state.clone() }
     }
 
     /// Measure the bytes of new tree nodes produced since the snapshot was taken.
-    pub fn approx_owned_bytes<E: EthSpec>(self, _state: &BeaconState<E>) -> usize {
-        // TODO: for each tree-backed field, compare old root vs new root using
-        // milhouse's pairwise tree walk. Sum the divergent node bytes.
-        0
+    ///
+    /// Calls `cow_bytes` on each tree-backed field, summing the results.
+    pub fn cow_bytes(self, post: &BeaconState<E>) -> usize {
+        cow_bytes_between(&self.pre, post)
     }
+}
+
+/// Compute the COW bytes between two states across all tree-backed fields.
+///
+/// For each milhouse `List`/`Vector` field, calls `cow_bytes` which walks both trees
+/// in parallel, skipping shared subtrees via `Arc::ptr_eq`. O(dirty_nodes) total.
+pub fn cow_bytes_between<E: EthSpec>(base: &BeaconState<E>, derived: &BeaconState<E>) -> usize {
+    let mut total = 0;
+
+    // Fields common to all forks.
+    total += derived.validators().cow_bytes(base.validators());
+    total += derived.balances().cow_bytes(base.balances());
+    total += derived.state_roots().cow_bytes(base.state_roots());
+    total += derived.block_roots().cow_bytes(base.block_roots());
+    total += derived.randao_mixes().cow_bytes(base.randao_mixes());
+    total += derived.slashings().cow_bytes(base.slashings());
+    total += derived.eth1_data_votes().cow_bytes(base.eth1_data_votes());
+    total += derived
+        .historical_roots()
+        .cow_bytes(base.historical_roots());
+
+    // Altair+ fields.
+    if let (Ok(d), Ok(b)) = (derived.inactivity_scores(), base.inactivity_scores()) {
+        total += d.cow_bytes(b);
+    }
+    if let (Ok(d), Ok(b)) = (
+        derived.previous_epoch_participation(),
+        base.previous_epoch_participation(),
+    ) {
+        total += d.cow_bytes(b);
+    }
+    if let (Ok(d), Ok(b)) = (
+        derived.current_epoch_participation(),
+        base.current_epoch_participation(),
+    ) {
+        total += d.cow_bytes(b);
+    }
+
+    // Capella+ fields.
+    if let (Ok(d), Ok(b)) = (derived.historical_summaries(), base.historical_summaries()) {
+        total += d.cow_bytes(b);
+    }
+
+    // Electra+ fields.
+    if let (Ok(d), Ok(b)) = (derived.pending_deposits(), base.pending_deposits()) {
+        total += d.cow_bytes(b);
+    }
+    if let (Ok(d), Ok(b)) = (
+        derived.pending_partial_withdrawals(),
+        base.pending_partial_withdrawals(),
+    ) {
+        total += d.cow_bytes(b);
+    }
+    if let (Ok(d), Ok(b)) = (
+        derived.pending_consolidations(),
+        base.pending_consolidations(),
+    ) {
+        total += d.cow_bytes(b);
+    }
+
+    total
+}
+
+/// Compute the total tree bytes for a densely-packed state (e.g. loaded from disk).
+///
+/// Uses `total_tree_bytes()` on each milhouse field — O(all_nodes) walk, but only
+/// needed once when the finalized state is set.
+pub fn total_state_tree_bytes<E: EthSpec>(state: &BeaconState<E>) -> usize {
+    let mut total = 0;
+
+    total += state.validators().total_tree_bytes();
+    total += state.balances().total_tree_bytes();
+    total += state.state_roots().total_tree_bytes();
+    total += state.block_roots().total_tree_bytes();
+    total += state.randao_mixes().total_tree_bytes();
+    total += state.slashings().total_tree_bytes();
+    total += state.eth1_data_votes().total_tree_bytes();
+    total += state.historical_roots().total_tree_bytes();
+
+    if let Ok(f) = state.inactivity_scores() {
+        total += f.total_tree_bytes();
+    }
+    if let Ok(f) = state.previous_epoch_participation() {
+        total += f.total_tree_bytes();
+    }
+    if let Ok(f) = state.current_epoch_participation() {
+        total += f.total_tree_bytes();
+    }
+    if let Ok(f) = state.historical_summaries() {
+        total += f.total_tree_bytes();
+    }
+    if let Ok(f) = state.pending_deposits() {
+        total += f.total_tree_bytes();
+    }
+    if let Ok(f) = state.pending_partial_withdrawals() {
+        total += f.total_tree_bytes();
+    }
+    if let Ok(f) = state.pending_consolidations() {
+        total += f.total_tree_bytes();
+    }
+
+    total
 }
 
 #[cfg(test)]

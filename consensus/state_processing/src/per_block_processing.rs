@@ -219,7 +219,7 @@ pub fn per_block_processing<E: EthSpec, Payload: AbstractExecPayload<E>>(
     }
 
     // Record COW bytes from this block transition.
-    let delta = pre_snapshot.approx_owned_bytes(state);
+    let delta = pre_snapshot.cow_bytes(state);
     state.approx_owned_bytes_mut().push(delta);
 
     Ok(())
