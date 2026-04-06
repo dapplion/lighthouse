@@ -1,0 +1,37 @@
+# Local ePBS devnet - mainnet preset but with 4s slots for speed
+# 32 slots/epoch * 4s/slot = 128s/epoch. Gloas at epoch 2 = ~4.3min. Finalized ~8.5min.
+
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:epbs-devnet-1
+    cl_type: prysm
+    cl_image: ethpandaops/prysm-beacon-chain:epbs-devnet-1
+    vc_type: prysm
+    vc_image: ethpandaops/prysm-validator:epbs-devnet-1
+    count: 2
+    supernode: true
+
+network_params:
+  deneb_fork_epoch: 0
+  electra_fork_epoch: 0
+  fulu_fork_epoch: 0
+  gloas_fork_epoch: 2
+  genesis_delay: 20
+  seconds_per_slot: 4
+  num_validator_keys_per_node: 32
+
+additional_services:
+  - checkpointz
+
+checkpointz_params:
+  image: "ethpandaops/checkpointz:0.0.15-gloas-debian"
+
+port_publisher:
+  cl:
+    enabled: true
+  el:
+    enabled: true
+  additional_services:
+    enabled: true
+
+disable_peer_scoring: true

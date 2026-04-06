@@ -1,6 +1,6 @@
 use beacon_chain::{
     BeaconChainTypes,
-    block_verification_types::{AvailableBlockData, RangeSyncBlock},
+    block_verification_types::{AsBlock, AvailableBlockData, RangeSyncBlock},
     data_availability_checker::DataAvailabilityChecker,
     data_column_verification::CustodyDataColumn,
     get_block_root,
@@ -9,6 +9,7 @@ use lighthouse_network::{
     PeerId,
     service::api_types::{
         BlobsByRangeRequestId, BlocksByRangeRequestId, DataColumnsByRangeRequestId,
+        PayloadEnvelopesByRangeRequestId,
     },
 };
 use ssz_types::RuntimeVariableList;
@@ -16,7 +17,7 @@ use std::{collections::HashMap, sync::Arc};
 use tracing::{Span, debug};
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, EthSpec,
-    Hash256, SignedBeaconBlock,
+    Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope,
 };
 
 use crate::sync::network_context::MAX_COLUMN_RETRIES;
@@ -37,6 +38,13 @@ pub struct RangeBlockComponentsRequest<E: EthSpec> {
     blocks_request: ByRangeRequest<BlocksByRangeRequestId, Vec<Arc<SignedBeaconBlock<E>>>>,
     /// Sidecars we have received awaiting for their corresponding block.
     block_data_request: RangeBlockDataRequest<E>,
+    /// Optional payload envelopes request (post-Gloas).
+    envelopes_request: Option<
+        ByRangeRequest<
+            PayloadEnvelopesByRangeRequestId,
+            Vec<Arc<SignedExecutionPayloadEnvelope<E>>>,
+        >,
+    >,
     /// Span to track the range request and all children range requests.
     pub(crate) request_span: Span,
 }
@@ -88,6 +96,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
             Vec<(DataColumnsByRangeRequestId, Vec<ColumnIndex>)>,
             Vec<ColumnIndex>,
         )>,
+        envelopes_req_id: Option<PayloadEnvelopesByRangeRequestId>,
         request_span: Span,
     ) -> Self {
         let block_data_request = if let Some(blobs_req_id) = blobs_req_id {
@@ -110,6 +119,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         Self {
             blocks_request: ByRangeRequest::Active(blocks_req_id),
             block_data_request,
+            envelopes_request: envelopes_req_id.map(ByRangeRequest::Active),
             request_span,
         }
     }
@@ -166,6 +176,21 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         }
     }
 
+    /// Adds received payload envelopes to the request.
+    ///
+    /// Returns an error if this request doesn't expect envelopes,
+    /// or if the request ID doesn't match.
+    pub fn add_payload_envelopes(
+        &mut self,
+        req_id: PayloadEnvelopesByRangeRequestId,
+        envelopes: Vec<Arc<SignedExecutionPayloadEnvelope<E>>>,
+    ) -> Result<(), String> {
+        match &mut self.envelopes_request {
+            None => Err("received envelopes but none were expected".to_owned()),
+            Some(req) => req.finish(req_id, envelopes),
+        }
+    }
+
     /// Adds received custody columns to the request.
     ///
     /// Returns an error if this request expects blobs instead of data columns,
@@ -208,8 +233,19 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
             return None;
         };
 
+        // If envelopes are expected, wait for them to complete before coupling
+        let envelopes = match &self.envelopes_request {
+            Some(req) => {
+                let Some(envelopes) = req.to_finished() else {
+                    return None;
+                };
+                Some(envelopes.clone())
+            }
+            None => None,
+        };
+
         // Increment the attempt once this function returns the response or errors
-        match &mut self.block_data_request {
+        let result = match &mut self.block_data_request {
             RangeBlockDataRequest::NoData => Some(Self::responses_with_blobs(
                 blocks.to_vec(),
                 vec![],
@@ -280,7 +316,26 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
 
                 Some(resp)
             }
-        }
+        };
+
+        // Attach envelopes to the coupled blocks by matching on slot
+        result.map(|res| {
+            res.map(|mut range_blocks| {
+                if let Some(envelopes) = envelopes {
+                    let mut envelopes_by_slot: HashMap<_, _> = envelopes
+                        .into_iter()
+                        .map(|env| (env.message.slot, env))
+                        .collect();
+                    for block in &mut range_blocks {
+                        let slot = block.as_block().slot();
+                        if let Some(envelope) = envelopes_by_slot.remove(&slot) {
+                            *block = block.clone().with_envelope(Some(envelope));
+                        }
+                    }
+                }
+                range_blocks
+            })
+        })
     }
 
     fn responses_with_blobs<T>(
@@ -560,7 +615,7 @@ mod tests {
 
         let blocks_req_id = blocks_id(components_id());
         let mut info =
-            RangeBlockComponentsRequest::<E>::new(blocks_req_id, None, None, Span::none());
+            RangeBlockComponentsRequest::<E>::new(blocks_req_id, None, None, None, Span::none());
 
         // Send blocks and complete terminate response
         info.add_blocks(blocks_req_id, blocks).unwrap();
@@ -590,6 +645,7 @@ mod tests {
         let mut info = RangeBlockComponentsRequest::<E>::new(
             blocks_req_id,
             Some(blobs_req_id),
+            None,
             None,
             Span::none(),
         );
@@ -650,6 +706,7 @@ mod tests {
             blocks_req_id,
             None,
             Some((columns_req_id.clone(), expects_custody_columns.clone())),
+            None,
             Span::none(),
         );
         // Send blocks and complete terminate response
@@ -726,6 +783,7 @@ mod tests {
             blocks_req_id,
             None,
             Some((columns_req_id.clone(), expected_sampling_columns.clone())),
+            None,
             Span::none(),
         );
 
@@ -818,6 +876,7 @@ mod tests {
             blocks_req_id,
             None,
             Some((columns_req_id.clone(), expected_sampling_columns.clone())),
+            None,
             Span::none(),
         );
 
@@ -915,6 +974,7 @@ mod tests {
             blocks_req_id,
             None,
             Some((columns_req_id.clone(), expected_sampling_columns.clone())),
+            None,
             Span::none(),
         );
 
@@ -1030,6 +1090,7 @@ mod tests {
             blocks_req_id,
             None,
             Some((columns_req_id.clone(), expected_sampling_columns.clone())),
+            None,
             Span::none(),
         );
 
