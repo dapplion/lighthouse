@@ -566,7 +566,7 @@ pub fn process_ptc_window<E: EthSpec>(
         let slot = start_slot.safe_add(i as u64)?;
         let ptc = state.compute_ptc_with_cache(slot, &committee_cache, spec)?;
         let ptc_u64: Vec<u64> = ptc.into_iter().map(|v| v as u64).collect();
-        let entry = types::PtcWindowEntry::new(ptc_u64)
+        let entry = ssz_types::FixedVector::new(ptc_u64)
             .map_err(|e| Error::BeaconStateError(BeaconStateError::SszTypesError(e)))?;
         window
             .push(entry)

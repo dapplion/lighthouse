@@ -67,30 +67,6 @@ pub fn sum_approx_owned_bytes<'a>(states: impl Iterator<Item = &'a ApproxOwnedBy
     total
 }
 
-/// Snapshot of a `BeaconState` before a transition.
-///
-/// Captures a cheap clone (Arc bumps only) of the state. After the transition,
-/// call `cow_bytes` to measure the new tree nodes in the post-state.
-pub struct TreeSnapshot<E: EthSpec> {
-    pre: BeaconState<E>,
-}
-
-impl<E: EthSpec> TreeSnapshot<E> {
-    /// Capture tree root pointers from the pre-transition state.
-    ///
-    /// This is a cheap clone — milhouse trees are Arc-shared, caches are Arc-shared.
-    pub fn new(state: &BeaconState<E>) -> Self {
-        TreeSnapshot { pre: state.clone() }
-    }
-
-    /// Measure the bytes of new tree nodes produced since the snapshot was taken.
-    ///
-    /// Calls `cow_bytes` on each tree-backed field, summing the results.
-    pub fn cow_bytes(self, post: &BeaconState<E>) -> usize {
-        cow_bytes_between(&self.pre, post)
-    }
-}
-
 /// Compute the COW bytes between two states across all tree-backed fields and caches.
 ///
 /// IMPORTANT: this list must be kept in sync with `BeaconState::rebase_on` which uses

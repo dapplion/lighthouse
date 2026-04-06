@@ -15,8 +15,8 @@ mod slashings_cache;
 
 pub use activation_queue::ActivationQueue;
 pub use approx_owned_bytes::{
-    ApproxOwnedBytes, ApproxOwnedBytesList, TreeSnapshot, cow_bytes_between,
-    sum_approx_owned_bytes, total_state_tree_bytes,
+    ApproxOwnedBytes, ApproxOwnedBytesList, cow_bytes_between, sum_approx_owned_bytes,
+    total_state_tree_bytes,
 };
 pub use balance::Balance;
 pub use beacon_state::{

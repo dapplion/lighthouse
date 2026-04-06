@@ -27,7 +27,7 @@ use crate::{
     Address, ExecutionBlockHash, ExecutionPayloadBid, Withdrawal,
     attestation::{
         AttestationData, AttestationDuty, BeaconCommittee, Checkpoint, CommitteeIndex, PTC,
-        ParticipationFlags, PendingAttestation, PtcWindowEntry,
+        ParticipationFlags, PendingAttestation,
     },
     block::{BeaconBlock, BeaconBlockHeader, SignedBeaconBlockHash},
     builder::{Builder, BuilderIndex, BuilderPendingPayment, BuilderPendingWithdrawal},
@@ -670,7 +670,7 @@ where
     #[compare_fields(as_iter)]
     #[test_random(default)]
     #[superstruct(only(Gloas))]
-    pub ptc_window: Vector<PtcWindowEntry<E::PTCSize>, E::PtcWindowLength>,
+    pub ptc_window: Vector<FixedVector<u64, E::PTCSize>, E::PtcWindowLength>,
 
     // Caching (not in the spec)
     #[serde(skip_serializing, skip_deserializing)]
@@ -3150,7 +3150,7 @@ impl<E: EthSpec> BeaconState<E> {
             .get(index)
             .ok_or(BeaconStateError::SlotOutOfBounds)?;
 
-        // Convert from PtcWindowEntry (FixedVector<u64, PTCSize>) to PTC<E> (FixedVector<usize, PTCSize>)
+        // Convert from FixedVector<u64, PTCSize> to PTC<E> (FixedVector<usize, PTCSize>)
         let indices: Vec<usize> = entry.iter().map(|&v| v as usize).collect();
         Ok(PTC(FixedVector::new(indices)?))
     }

@@ -4,13 +4,13 @@ use crate::per_block_processing::{
 use milhouse::{List, Vector};
 use safe_arith::SafeArith;
 use ssz_types::BitVector;
+use ssz_types::FixedVector;
 use std::collections::HashSet;
 use std::mem;
 use typenum::Unsigned;
 use types::{
     BeaconState, BeaconStateError as Error, BeaconStateGloas, BuilderPendingPayment, ChainSpec,
-    DepositData, EthSpec, ExecutionPayloadBid, Fork, PtcWindowEntry,
-    is_builder_withdrawal_credential,
+    DepositData, EthSpec, ExecutionPayloadBid, Fork, is_builder_withdrawal_credential,
 };
 
 /// Transform a `Fulu` state into a `Gloas` state.
@@ -108,7 +108,7 @@ pub fn upgrade_state_to_gloas<E: EthSpec>(
         builder_pending_withdrawals: List::default(), // Empty list initially,
         latest_block_hash: pre.latest_execution_payload_header.block_hash,
         payload_expected_withdrawals: List::default(),
-        ptc_window: Vector::from_elem(PtcWindowEntry::from_elem(0))?, // placeholder, will be initialized below
+        ptc_window: Vector::from_elem(FixedVector::from_elem(0))?, // placeholder, will be initialized below
         // Caches
         total_active_balance: pre.total_active_balance,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),
@@ -137,7 +137,7 @@ fn initialize_ptc_window<E: EthSpec>(
 ) -> Result<(), Error> {
     let slots_per_epoch = E::slots_per_epoch() as usize;
 
-    let empty_previous_epoch = vec![PtcWindowEntry::<E::PTCSize>::from_elem(0); slots_per_epoch];
+    let empty_previous_epoch = vec![FixedVector::<u64, E::PTCSize>::from_elem(0); slots_per_epoch];
     let mut ptcs = empty_previous_epoch;
 
     // Compute PTC for current epoch + lookahead epochs
@@ -150,7 +150,7 @@ fn initialize_ptc_window<E: EthSpec>(
             let slot = start_slot.safe_add(i as u64)?;
             let ptc = state.compute_ptc_with_cache(slot, &committee_cache, spec)?;
             let ptc_u64: Vec<u64> = ptc.into_iter().map(|v| v as u64).collect();
-            let entry = PtcWindowEntry::new(ptc_u64)?;
+            let entry = FixedVector::new(ptc_u64)?;
             ptcs.push(entry);
         }
     }
