@@ -45,7 +45,9 @@ use std::time::Duration;
 use store::Hash256;
 use tracing::{debug, error, warn};
 use types::data::FixedBlobSidecarList;
-use types::{BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock};
+use types::{
+    BlobSidecar, DataColumnSidecar, EthSpec, SignedBeaconBlock, SignedExecutionPayloadEnvelope,
+};
 
 pub mod parent_chain;
 mod single_block_lookup;
@@ -82,6 +84,8 @@ type BlobDownloadResponse<E> =
     Result<(FixedBlobSidecarList<E>, PeerGroup, Duration), RpcResponseError>;
 type CustodyDownloadResponse<E> =
     Result<(types::DataColumnSidecarList<E>, PeerGroup, Duration), RpcResponseError>;
+type PayloadDownloadResponse<E> =
+    Result<(Arc<SignedExecutionPayloadEnvelope<E>>, PeerGroup, Duration), RpcResponseError>;
 
 pub enum BlockComponent<E: EthSpec> {
     Block(DownloadResult<Arc<SignedBeaconBlock<E>>>),
@@ -577,6 +581,25 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
 
         let result = lookup.on_custody_download_response(id.req_id, response.map_err(|_| ()), cx);
         self.on_lookup_result(id.lookup_id, result, "custody_download_response", cx);
+    }
+
+    pub fn on_payload_download_response(
+        &mut self,
+        id: SingleLookupReqId,
+        response: PayloadDownloadResponse<T::EthSpec>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
+            debug!(
+                ?id,
+                "Payload envelope returned for single block lookup not present"
+            );
+            return;
+        };
+        debug!(block_root = ?lookup.block_root(), ?id, is_ok = response.is_ok(), "Payload download response");
+
+        let result = lookup.on_payload_download_response(id.req_id, response.map_err(|_| ()), cx);
+        self.on_lookup_result(id.lookup_id, result, "payload_download_response", cx);
     }
 
     /* Error responses */

@@ -1012,6 +1012,30 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         self.continue_requests(cx)
     }
 
+    /// Handle a payload envelope download response. Updates download state and advances the lookup.
+    #[allow(clippy::type_complexity)]
+    pub fn on_payload_download_response(
+        &mut self,
+        req_id: ReqId,
+        result: Result<
+            (
+                Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>,
+                PeerGroup,
+                Duration,
+            ),
+            (),
+        >,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        let PayloadRequest::Downloading { state, .. } = &mut self.payload_request else {
+            return Err(LookupRequestError::BadState(
+                "payload envelope response but not downloading payload".to_owned(),
+            ));
+        };
+        state.on_download_response(req_id, self.block_root, result)?;
+        self.continue_requests(cx)
+    }
+
     /// Get all unique peers that claim to have imported this set of block components
     pub fn all_peers(&self) -> Vec<PeerId> {
         self.peers.read().iter().copied().collect()
