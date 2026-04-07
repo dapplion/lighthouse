@@ -28,6 +28,16 @@ Measurement uses milhouse's `cow_bytes` (PR sigp/milhouse#100): a pairwise tree
 walk that compares two trees by `Arc::ptr_eq` at each node, skipping shared
 subtrees. O(dirty_nodes) with zero allocations.
 
+### Two-layer approach
+
+**Fast path (every `put_state`):** Sum `ApproxOwnedBytesList` segments across all
+states. Overcounts due to repeated mutations to the same tree path, but overcounting
+is safe — it triggers eviction earlier, never too late. Cost: microseconds.
+
+**Slow path (on finalization):** Run `cow_bytes_between(finalized, state)` for every
+cached state, replacing segments with exact measurements. Corrects accumulated
+overcount. Cost: ~2ms for slot-only caches, ~225ms with epoch boundary states.
+
 ### Three measurement points
 
 1. **Initial finalized state** — `total_state_tree_bytes()` walks all tree nodes

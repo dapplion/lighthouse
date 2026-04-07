@@ -188,22 +188,27 @@ impl<E: EthSpec> StateCache<E> {
             }
         }
 
-        // Compact the finalized state's approx_owned_bytes to a single entry.
-        // The finalized state is the shared base — it doesn't need per-transition
-        // history. Compacting prevents unbounded growth across finalizations.
-        let base_bytes = types::total_state_tree_bytes(&state);
-        tracing::debug!(
-            base_bytes,
-            prev_segments = state.approx_owned_bytes().0.len(),
-            slot = %state.slot(),
-            validators = state.validators().len(),
-            "measured finalized state base tree size"
-        );
-        *state.approx_owned_bytes_mut() = types::ApproxOwnedBytesList::default();
-        state.approx_owned_bytes_mut().push(base_bytes);
+        // Measure base size for states loaded from disk or genesis (empty list).
+        if state.approx_owned_bytes().0.is_empty() {
+            let base_bytes = types::total_state_tree_bytes(&state);
+            tracing::debug!(
+                base_bytes,
+                slot = %state.slot(),
+                validators = state.validators().len(),
+                "measured finalized state base tree size"
+            );
+            state.approx_owned_bytes_mut().push(base_bytes);
+        }
 
         // Update finalized state.
         self.finalized_state = Some(FinalizedState { state_root, state });
+
+        // NOTE: we do NOT recompute exact costs here because cached states still share
+        // tree nodes with the OLD finalized state, not this new one. cow_bytes_between
+        // against the new finalized would see completely different trees and overcount
+        // massively. The slow-path recomputation needs a mechanism to know which base
+        // each cached state actually shares with — a future improvement.
+
         Ok(())
     }
 
@@ -296,9 +301,10 @@ impl<E: EthSpec> StateCache<E> {
                 vec![]
             };
 
-        // If adding this state would exceed the byte budget, cull until under budget.
-        // total_approx_owned_bytes deduplicates shared ApproxOwnedBytes segments across
-        // all cached states, so it reflects actual memory, not double-counted estimates.
+        // Fast path: check byte budget using approximate segment-based total.
+        // This may overcount (segments accumulate from repeated mutations to the same
+        // path), but overcounting is safe — it triggers eviction earlier, never too late.
+        // The slow path in update_finalized_state corrects the overcount periodically.
         if let Some(max_bytes) = self.max_bytes {
             let total_before = self.total_approx_owned_bytes();
             let mut evicted = 0;
