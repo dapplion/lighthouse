@@ -2894,6 +2894,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             }
         }
 
+        // Pre-store payload envelopes in the DB before block processing.
+        // Blocks from post-Gloas epochs may carry an envelope that must be
+        // available in the store when the block is imported.
+        for block in &chain_segment {
+            if let Some(envelope) = block.envelope() {
+                let block_root = block.block_root();
+                if let Err(e) = self
+                    .store
+                    .put_payload_envelope(&block_root, envelope.as_ref().clone())
+                {
+                    return ChainSegmentResult::Failed {
+                        imported_blocks: vec![],
+                        error: BlockError::BeaconChainError(Box::new(Error::DBError(e))),
+                    };
+                }
+            }
+        }
+
         let mut imported_blocks = vec![];
 
         // Filter uninteresting blocks from the chain segment in a blocking task.

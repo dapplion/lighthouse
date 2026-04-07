@@ -10,7 +10,7 @@ use std::sync::Arc;
 use types::data::BlobIdentifier;
 use types::{
     BeaconBlockRef, BeaconState, BlindedPayload, ChainSpec, Epoch, EthSpec, Hash256,
-    SignedBeaconBlock, SignedBeaconBlockHeader, Slot,
+    SignedBeaconBlock, SignedBeaconBlockHeader, SignedExecutionPayloadEnvelope, Slot,
 };
 
 /// A wrapper around a `SignedBeaconBlock`. This varaint is constructed
@@ -49,6 +49,9 @@ impl<E: EthSpec> LookupBlock<E> {
 #[educe(Hash(bound(E: EthSpec)))]
 pub struct RangeSyncBlock<E: EthSpec> {
     block: AvailableBlock<E>,
+    /// Optional payload envelope for post-Gloas blocks, to be stored in DB before processing.
+    #[educe(Hash(ignore))]
+    envelope: Option<Arc<SignedExecutionPayloadEnvelope<E>>>,
 }
 
 impl<E: EthSpec> Debug for RangeSyncBlock<E> {
@@ -96,12 +99,34 @@ impl<E: EthSpec> RangeSyncBlock<E> {
         let available_block = AvailableBlock::new(block, block_data, da_checker, spec)?;
         Ok(Self {
             block: available_block,
+            envelope: None,
         })
     }
 
+    pub fn with_envelope(
+        mut self,
+        envelope: Option<Arc<SignedExecutionPayloadEnvelope<E>>>,
+    ) -> Self {
+        self.envelope = envelope;
+        self
+    }
+
+    pub fn envelope(&self) -> Option<&Arc<SignedExecutionPayloadEnvelope<E>>> {
+        self.envelope.as_ref()
+    }
+
     #[allow(clippy::type_complexity)]
-    pub fn deconstruct(self) -> (Hash256, Arc<SignedBeaconBlock<E>>, AvailableBlockData<E>) {
-        self.block.deconstruct()
+    pub fn deconstruct(
+        self,
+    ) -> (
+        Hash256,
+        Arc<SignedBeaconBlock<E>>,
+        AvailableBlockData<E>,
+        Option<Arc<SignedExecutionPayloadEnvelope<E>>>,
+    ) {
+        let envelope = self.envelope;
+        let (root, block, data) = self.block.deconstruct();
+        (root, block, data, envelope)
     }
 
     pub fn n_blobs(&self) -> usize {

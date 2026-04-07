@@ -45,7 +45,7 @@ use tree_hash::TreeHash;
 use types::data::CustodyIndex;
 use types::{
     BeaconBlock, BeaconState, BlobSidecarList, ChainSpec, ColumnIndex, DataColumnSidecarList,
-    Epoch, EthSpec, Hash256, SignedBeaconBlock, Slot,
+    Epoch, EthSpec, Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
 };
 
 /// An empty struct used to "witness" all the `BeaconChainTypes` traits. It has no user-facing
@@ -426,6 +426,7 @@ where
         mut weak_subj_state: BeaconState<E>,
         weak_subj_block: SignedBeaconBlock<E>,
         weak_subj_blobs: Option<BlobSidecarList<E>>,
+        weak_subj_envelope: Option<SignedExecutionPayloadEnvelope<E>>,
         genesis_state: BeaconState<E>,
     ) -> Result<Self, String> {
         let store = self
@@ -617,7 +618,25 @@ where
                 .map_err(|e| format!("Failed to initialize data column info: {:?}", e))?,
         );
 
-        // TODO(gloas): add check that checkpoint state is Pending
+        // Store execution payload envelope if provided (Gloas checkpoint sync).
+        // Also apply the envelope's key state mutation: update `latest_block_hash`
+        // so that child blocks can pass bid validation (ParentBlockHashMismatch).
+        if let Some(ref envelope) = weak_subj_envelope {
+            debug!(
+                block_root = ?weak_subj_block_root,
+                envelope_slot = %envelope.message.slot,
+                "Storing checkpoint sync execution payload envelope"
+            );
+            store
+                .put_payload_envelope(&weak_subj_block_root, envelope.clone())
+                .map_err(|e| {
+                    format!("Failed to store weak subjectivity payload envelope: {e:?}")
+                })?;
+        }
+
+        // The snapshot uses execution_envelope=None so that fork choice computes the
+        // correct block root (using block.state_root(), not envelope.state_root).
+        // The state has been mutated with the envelope's block_hash for child validation.
         let snapshot = BeaconSnapshot {
             beacon_block_root: weak_subj_block_root,
             execution_envelope: None,
@@ -781,10 +800,20 @@ where
             .map_err(|e| format!("Unable to get fork choice head: {:?}", e))?;
 
         let head_block_root = initial_head_block_root;
+        debug!(
+            ?head_block_root,
+            ?head_payload_status,
+            "Loading head block from store"
+        );
         let head_block = store
             .get_full_block(&initial_head_block_root)
             .map_err(|e| descriptive_db_error("head block", &e))?
-            .ok_or("Head block not found in store")?;
+            .ok_or_else(|| {
+                format!(
+                    "Head block not found in store: root={:?}, payload_status={:?}",
+                    initial_head_block_root, head_payload_status
+                )
+            })?;
 
         let state_payload_status = head_payload_status.as_state_payload_status();
 
@@ -845,12 +874,13 @@ where
                     It is highly recommended to purge your db and checkpoint sync. For more information please \
                     read this blog post: https://blog.ethereum.org/2014/11/25/proof-stake-learned-love-weak-subjectivity"
                 )
-            }
-            return Err(
+            } else {
+                return Err(
                 "The current head state is outside the weak subjectivity period. A node in this state is susceptible to long range attacks. You should purge your db and \
                 checkpoint sync. For more information please read this blog post: https://blog.ethereum.org/2014/11/25/proof-stake-learned-love-weak-subjectivity \
                 If you understand the risks, it is possible to ignore this error with the --ignore-ws-check flag.".to_string()
             );
+            }
         }
 
         let validator_pubkey_cache = self

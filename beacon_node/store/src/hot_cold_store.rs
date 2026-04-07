@@ -1910,9 +1910,13 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         // far in the case of a long skip. We could optimise this in future using the
         // `diff_base_state` (like in `get_ancestor_state_root`), or by doing a proper DB
         // migration.
-        let previous_state_summary = self
-            .load_hot_state_summary(&previous_state_root)?
-            .ok_or(Error::MissingHotStateSummary(previous_state_root))?;
+        let Some(previous_state_summary) = self.load_hot_state_summary(&previous_state_root)?
+        else {
+            // During checkpoint sync we only store a single state, so the previous state
+            // summary may not exist. Default to Pending — checkpoint states are always
+            // at epoch boundaries which are Pending states.
+            return Ok(StatePayloadStatus::Pending);
+        };
 
         if previous_state_summary.slot == summary.slot {
             Ok(StatePayloadStatus::Full)

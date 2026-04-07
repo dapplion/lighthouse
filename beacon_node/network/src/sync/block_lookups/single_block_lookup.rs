@@ -360,6 +360,8 @@ enum PayloadRequest<E: EthSpec> {
         state: SingleLookupRequestState<Arc<SignedExecutionPayloadEnvelope<E>>>,
     },
     Downloaded {
+        envelope: Arc<SignedExecutionPayloadEnvelope<E>>,
+        seen_timestamp: Duration,
         peer_group: PeerGroup,
     },
     Processing {
@@ -756,18 +758,29 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     }
                     if let Some(result) = state.take_download_result() {
                         self.payload_request = PayloadRequest::Downloaded {
+                            envelope: result.value,
+                            seen_timestamp: result.seen_timestamp,
                             peer_group: result.peer_group,
                         };
                     } else {
                         break;
                     }
                 }
-                PayloadRequest::Downloaded { peer_group } => {
+                PayloadRequest::Downloaded {
+                    envelope,
+                    seen_timestamp,
+                    peer_group,
+                } => {
                     if !self.block_request.is_done() {
                         break;
                     }
-                    // TODO(gloas): send payload for processing
-                    // cx.send_payload_for_processing(...)
+                    cx.send_envelope_for_processing(
+                        id,
+                        envelope.clone(),
+                        *seen_timestamp,
+                        self.block_root,
+                    )
+                    .map_err(LookupRequestError::SendFailedProcessor)?;
                     let peer_group = peer_group.clone();
                     self.payload_request = PayloadRequest::Processing { peer_group };
                 }
@@ -1006,6 +1019,30 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         else {
             return Err(LookupRequestError::BadState(
                 "custody response but not downloading columns".to_owned(),
+            ));
+        };
+        state.on_download_response(req_id, self.block_root, result)?;
+        self.continue_requests(cx)
+    }
+
+    /// Handle a payload envelope download response. Updates download state and advances the lookup.
+    #[allow(clippy::type_complexity)]
+    pub fn on_payload_envelope_download_response(
+        &mut self,
+        req_id: ReqId,
+        result: Result<
+            (
+                Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>,
+                PeerGroup,
+                Duration,
+            ),
+            (),
+        >,
+        cx: &mut SyncNetworkContext<T>,
+    ) -> Result<LookupResult, LookupRequestError> {
+        let PayloadRequest::Downloading { state, .. } = &mut self.payload_request else {
+            return Err(LookupRequestError::BadState(
+                "envelope response but not downloading".to_owned(),
             ));
         };
         state.on_download_response(req_id, self.block_root, result)?;
