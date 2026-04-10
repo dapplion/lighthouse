@@ -14,15 +14,48 @@ pub struct DAGStateSummary {
     pub previous_state_root: Hash256,
 }
 
+/// The state(s) at a given `(block_root, slot)`. Since Gloas there can be up to two states per
+/// slot: a pending state and a full state, where `full.previous_state_root == pending.state_root`.
+#[derive(Debug)]
+enum SlotStates {
+    Single(Hash256, DAGStateSummary),
+    PendingAndFull {
+        pending: (Hash256, DAGStateSummary),
+        full: (Hash256, DAGStateSummary),
+    },
+}
+
+impl SlotStates {
+    /// Returns the pending (or only) state root.
+    fn first_state_root(&self) -> Hash256 {
+        match self {
+            SlotStates::Single(state_root, _) => *state_root,
+            SlotStates::PendingAndFull { pending, .. } => pending.0,
+        }
+    }
+
+    fn count(&self) -> usize {
+        match self {
+            SlotStates::Single(..) => 1,
+            SlotStates::PendingAndFull { .. } => 2,
+        }
+    }
+
+    fn state_roots(&self) -> impl Iterator<Item = Hash256> + '_ {
+        match self {
+            SlotStates::Single(state_root, _) => [Some(*state_root), None],
+            SlotStates::PendingAndFull { pending, full } => [Some(pending.0), Some(full.0)],
+        }
+        .into_iter()
+        .flatten()
+    }
+}
+
 pub struct StateSummariesDAG {
     // state_root -> state_summary
     state_summaries_by_state_root: HashMap<Hash256, DAGStateSummary>,
-    // (block_root, payload_status)-> state slot -> [(state_root, state summary)]
-    //
-    // Since Gloas there can be up to two `(state_root, state summary)` pairs for each block root
-    // and slot: the pending and full states.
-    state_summaries_by_block_root:
-        HashMap<Hash256, BTreeMap<Slot, Vec<(Hash256, DAGStateSummary)>>>,
+    // block_root -> state slot -> SlotStates
+    state_summaries_by_block_root: HashMap<Hash256, BTreeMap<Slot, SlotStates>>,
     // parent_state_root -> Vec<children_state_root>
     // cached value to prevent having to recompute in each recursive call into `descendants_of`
     child_state_roots: HashMap<Hash256, Vec<Hash256>>,
@@ -70,42 +103,43 @@ impl StateSummariesDAG {
                 .entry(summary.latest_block_root)
                 .or_default();
 
-            // Sanity check to ensure no duplicate summaries for the tuple (block_root, state_slot)
             match summaries.entry(summary.slot) {
                 Entry::Vacant(entry) => {
-                    entry.insert(vec![(state_root, summary)]);
+                    entry.insert(SlotStates::Single(state_root, summary));
                 }
                 Entry::Occupied(mut existing) => {
-                    let slot_summaries = existing.get_mut();
-                    let (existing_state_root, existing_summary) = if let Some(value) =
-                        slot_summaries.first()
-                        && slot_summaries.len() == 1
-                    {
-                        value
-                    } else {
+                    let SlotStates::Single(existing_state_root, existing_summary) = existing.get()
+                    else {
+                        // Already have a pending+full pair, a third state is invalid.
                         return Err(Error::ConflictingStateSummary {
                             block_root: summary.latest_block_root,
-                            existing_state_summaries: slot_summaries
-                                .iter()
-                                .map(|(state_root, _)| (summary.slot, *state_root))
+                            existing_state_summaries: existing
+                                .get()
+                                .state_roots()
+                                .map(|sr| (summary.slot, sr))
                                 .collect(),
                             new_state_summary: (summary.slot, state_root),
                         });
                     };
+                    let (existing_state_root, existing_summary) =
+                        (*existing_state_root, *existing_summary);
+
                     if existing_summary.previous_state_root == state_root {
-                        // New summary is pending, insert before existing.
-                        slot_summaries.insert(0, (state_root, summary));
-                    } else if summary.previous_state_root == *existing_state_root {
-                        // New summary is full, insert after existing.
-                        slot_summaries.push((state_root, summary));
+                        // Existing is full and points back to new, so new is pending.
+                        existing.insert(SlotStates::PendingAndFull {
+                            pending: (state_root, summary),
+                            full: (existing_state_root, existing_summary),
+                        });
+                    } else if summary.previous_state_root == existing_state_root {
+                        // New is full and points back to existing, so existing is pending.
+                        existing.insert(SlotStates::PendingAndFull {
+                            pending: (existing_state_root, existing_summary),
+                            full: (state_root, summary),
+                        });
                     } else {
-                        // TODO(gloas): different error here to distinguish from above
                         return Err(Error::ConflictingStateSummary {
                             block_root: summary.latest_block_root,
-                            existing_state_summaries: slot_summaries
-                                .iter()
-                                .map(|(state_root, _)| (summary.slot, *state_root))
-                                .collect(),
+                            existing_state_summaries: vec![(summary.slot, existing_state_root)],
                             new_state_summary: (summary.slot, state_root),
                         });
                     }
@@ -174,7 +208,8 @@ impl StateSummariesDAG {
     pub fn summaries_count(&self) -> usize {
         self.state_summaries_by_block_root
             .values()
-            .map(|s| s.len())
+            .flat_map(|slots| slots.values())
+            .map(|s| s.count())
             .sum()
     }
 
@@ -318,11 +353,12 @@ impl StateSummariesDAG {
     /// function will not return the `state_root` of a state with a different `latest_block_root`
     /// even if it lies on the same chain.
     pub fn state_root_at_slot(&self, latest_block_root: Hash256, slot: Slot) -> Option<Hash256> {
-        self.state_summaries_by_block_root
-            .get(&latest_block_root)?
-            .get(&slot)?
-            .first()
-            .map(|(state_root, _)| *state_root)
+        Some(
+            self.state_summaries_by_block_root
+                .get(&latest_block_root)?
+                .get(&slot)?
+                .first_state_root(),
+        )
     }
 }
 
