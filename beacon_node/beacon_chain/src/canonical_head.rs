@@ -266,10 +266,9 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     pub fn new(
         fork_choice: BeaconForkChoice<T>,
         snapshot: Arc<BeaconSnapshot<T::EthSpec>>,
-        head_block_root: Hash256,
         head_payload_status: proto_array::PayloadStatus,
     ) -> Result<Self, Error> {
-        let params = forkchoice_update_parameters::<T>(&fork_choice, head_block_root)?;
+        let params = forkchoice_update_parameters::<T>(&fork_choice, snapshot.beacon_block_root)?;
         let cached_head = CachedHead {
             snapshot,
             justified_checkpoint: fork_choice.justified_checkpoint(),

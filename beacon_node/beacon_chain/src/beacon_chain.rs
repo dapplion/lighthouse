@@ -4876,6 +4876,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(Box::new(DoNotReOrg::HeadNotLate.into()));
         }
 
+        // TODO(gloas): V29 nodes don't carry execution_status, so this returns
+        // a zero hash for post-Gloas re-orgs. Need to source the EL block hash from
+        // the bid's block_hash instead. Re-org is disabled for Gloas for now.
         let parent_head_hash = info
             .parent_node
             .execution_status()

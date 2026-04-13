@@ -2103,6 +2103,10 @@ pub fn serve<T: BeaconChainTypes>(
                                 .ok()
                                 .map(|status| status.to_string());
 
+                            let execution_status_string = node
+                                .execution_status()
+                                .map_or_else(|_| "irrelevant".to_string(), |s| s.to_string());
+
                             ForkChoiceNode {
                                 slot: node.slot(),
                                 block_root: node.root(),
@@ -2137,10 +2141,7 @@ pub fn serve<T: BeaconChainTypes>(
                                     unrealized_finalized_epoch: node
                                         .unrealized_finalized_checkpoint()
                                         .map(|checkpoint| checkpoint.epoch),
-                                    execution_status: node.execution_status().map_or_else(
-                                        |_| "irrelevant".to_string(),
-                                        |s| s.to_string(),
-                                    ),
+                                    execution_status: execution_status_string,
                                     best_child: node
                                         .best_child()
                                         .ok()

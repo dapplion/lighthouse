@@ -922,13 +922,9 @@ where
 
         let genesis_validators_root = head_snapshot.beacon_state.genesis_validators_root();
         let genesis_time = head_snapshot.beacon_state.genesis_time();
-        let canonical_head = CanonicalHead::new(
-            fork_choice,
-            Arc::new(head_snapshot),
-            head_block_root,
-            head_payload_status,
-        )
-        .map_err(|e| format!("Unable to initialize canonical head: {:?}", e))?;
+        let canonical_head =
+            CanonicalHead::new(fork_choice, Arc::new(head_snapshot), head_payload_status)
+                .map_err(|e| format!("Unable to initialize canonical head: {:?}", e))?;
         let shuffling_cache_size = self.chain_config.shuffling_cache_size;
         let complete_blob_backfill = self.chain_config.complete_blob_backfill;
 
