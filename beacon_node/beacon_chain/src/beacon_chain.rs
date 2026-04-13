@@ -4876,14 +4876,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(Box::new(DoNotReOrg::HeadNotLate.into()));
         }
 
-        // TODO(gloas): V29 nodes don't carry execution_status, so this returns
-        // a zero hash for post-Gloas re-orgs. Need to source the EL block hash from
-        // the bid's block_hash instead. Re-org is disabled for Gloas for now.
+        // TODO(gloas): V29 nodes don't carry execution_status. Need to source the
+        // EL block hash from the bid's block_hash instead. Re-org is disabled for
+        // Gloas for now, so this should never be reached for V29 nodes.
         let parent_head_hash = info
             .parent_node
             .execution_status()
-            .map(|s| s.block_hash())
-            .unwrap_or(ExecutionBlockHash::zero());
+            .map_err(|_| Box::new(DoNotReOrg::GloasReOrgsDisabled.into()))?
+            .block_hash();
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: info.parent_node.root(),
             head_hash: parent_head_hash,

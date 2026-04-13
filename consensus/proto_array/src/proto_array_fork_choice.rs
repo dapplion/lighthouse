@@ -371,6 +371,7 @@ pub enum DoNotReOrg {
     HeadNotLate,
     NotProposing,
     ReOrgsDisabled,
+    GloasReOrgsDisabled,
 }
 
 impl std::fmt::Display for DoNotReOrg {
@@ -419,6 +420,9 @@ impl std::fmt::Display for DoNotReOrg {
             }
             Self::ReOrgsDisabled => {
                 write!(f, "re-orgs disabled in config")
+            }
+            Self::GloasReOrgsDisabled => {
+                write!(f, "re-orgs not yet supported for Gloas")
             }
         }
     }
