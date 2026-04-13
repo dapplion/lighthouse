@@ -725,10 +725,7 @@ where
                         .canonical_head
                         .cached_head()
                         .forkchoice_update_parameters();
-                    if params
-                        .head_hash
-                        .is_some_and(|hash| hash != ExecutionBlockHash::zero())
-                    {
+                    if params.head_hash != ExecutionBlockHash::zero() {
                         // Spawn a new task to update the EE without waiting for it to complete.
                         let inner_chain = beacon_chain.clone();
                         runtime_context.executor.spawn(

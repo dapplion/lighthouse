@@ -57,7 +57,7 @@ impl<T: BeaconChainTypes> PayloadNotifier<T> {
     ) -> Result<Self, BlockError> {
         let payload_verification_status = if block.fork_name_unchecked().gloas_enabled() {
             // Gloas blocks don't contain an execution payload.
-            Some(PayloadVerificationStatus::Irrelevant)
+            Some(PayloadVerificationStatus::Verified)
         } else if is_execution_enabled(state, block.message().body()) {
             // Perform the initial stages of payload verification.
             //
@@ -94,7 +94,7 @@ impl<T: BeaconChainTypes> PayloadNotifier<T> {
                 _ => None,
             }
         } else {
-            Some(PayloadVerificationStatus::Irrelevant)
+            Some(PayloadVerificationStatus::Verified)
         };
 
         Ok(Self {
@@ -235,8 +235,6 @@ pub fn validate_execution_payload_for_gossip<T: BeaconChainTypes>(
         let parent_has_execution = match parent_block.execution_status {
             // Parent has valid or optimistic execution status.
             ExecutionStatus::Valid(_) | ExecutionStatus::Optimistic(_) => true,
-            // Pre-merge blocks have irrelevant execution status.
-            ExecutionStatus::Irrelevant(_) => false,
             // If the parent has an invalid payload then it's impossible to build a valid block upon
             // it. Reject the block.
             ExecutionStatus::Invalid(_) => {

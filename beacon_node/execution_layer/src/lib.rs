@@ -1324,12 +1324,8 @@ impl<E: EthSpec> ExecutionLayer<E> {
                     );
                     let fork_choice_state = ForkchoiceState {
                         head_block_hash: parent_hash,
-                        safe_block_hash: forkchoice_update_params
-                            .justified_hash
-                            .unwrap_or_else(ExecutionBlockHash::zero),
-                        finalized_block_hash: forkchoice_update_params
-                            .finalized_hash
-                            .unwrap_or_else(ExecutionBlockHash::zero),
+                        safe_block_hash: forkchoice_update_params.justified_hash,
+                        finalized_block_hash: forkchoice_update_params.finalized_hash,
                     };
 
                     let response = engine

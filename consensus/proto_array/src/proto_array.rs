@@ -826,10 +826,6 @@ impl ProtoArray {
                     // We have reached a node that we already know is valid. No need to iterate further
                     // since we assume an ancestors have already been set to valid.
                     ExecutionStatus::Valid(_) => return Ok(()),
-                    // We have reached an irrelevant node, this node is prior to a terminal execution
-                    // block. There's no need to iterate further, it's impossible for this block to have
-                    // any relevant ancestors.
-                    ExecutionStatus::Irrelevant(_) => return Ok(()),
                     // The block has an unknown status, set it to valid since any ancestor of a valid
                     // payload can be considered valid.
                     ExecutionStatus::Optimistic(payload_block_hash) => {
@@ -931,7 +927,7 @@ impl ProtoArray {
                         break;
                     }
                 }
-                Ok(ExecutionStatus::Irrelevant(_)) => break,
+                // V29 (Gloas) nodes don't have execution_status.
                 Err(_) => break,
             }
 
@@ -961,9 +957,7 @@ impl ProtoArray {
                     // The block is already invalid, but keep going backwards to ensure all ancestors
                     // are updated.
                     Ok(ExecutionStatus::Invalid(_)) => (),
-                    // This block is pre-merge, therefore it has no execution status. Nor do its
-                    // ancestors.
-                    Ok(ExecutionStatus::Irrelevant(_)) => break,
+                    // V29 (Gloas) nodes don't have execution_status.
                     Err(_) => break,
                 }
             }
@@ -1017,11 +1011,7 @@ impl ProtoArray {
                             node.execution_status = ExecutionStatus::Invalid(hash)
                         }
                     }
-                    Ok(ExecutionStatus::Irrelevant(_)) => {
-                        return Err(Error::IrrelevantDescendant {
-                            block_root: node.root(),
-                        });
-                    }
+                    // V29 (Gloas) nodes don't have execution_status.
                     Err(_) => (),
                 }
 
@@ -1705,8 +1695,7 @@ impl ProtoArray {
             .find(|node| {
                 node.execution_status()
                     .ok()
-                    .and_then(|execution_status| execution_status.block_hash())
-                    .is_some_and(|node_block_hash| node_block_hash == *block_hash)
+                    .is_some_and(|execution_status| execution_status.block_hash() == *block_hash)
             })
             .map(|node| node.root())
     }

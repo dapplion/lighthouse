@@ -2098,20 +2098,10 @@ pub fn serve<T: BeaconChainTypes>(
                         .nodes
                         .iter()
                         .map(|node| {
-                            let execution_status = if node
+                            let execution_status = node
                                 .execution_status()
-                                .is_ok_and(|status| status.is_execution_enabled())
-                            {
-                                node.execution_status()
-                                    .ok()
-                                    .map(|status| status.to_string())
-                            } else {
-                                None
-                            };
-
-                            let execution_status_string = node
-                                .execution_status()
-                                .map_or_else(|_| "irrelevant".to_string(), |s| s.to_string());
+                                .ok()
+                                .map(|status| status.to_string());
 
                             ForkChoiceNode {
                                 slot: node.slot(),
@@ -2126,9 +2116,11 @@ pub fn serve<T: BeaconChainTypes>(
                                 validity: execution_status,
                                 execution_block_hash: node
                                     .execution_status()
-                                    .ok()
-                                    .and_then(|status| status.block_hash())
-                                    .map(|block_hash| block_hash.into_root()),
+                                    .map(|s| s.block_hash().into_root())
+                                    .or_else(|_| {
+                                        node.execution_payload_block_hash().map(|h| h.into_root())
+                                    })
+                                    .unwrap_or_default(),
                                 extra_data: ForkChoiceExtraData {
                                     target_root: node.target_root(),
                                     justified_root: node.justified_checkpoint().root,
@@ -2145,7 +2137,10 @@ pub fn serve<T: BeaconChainTypes>(
                                     unrealized_finalized_epoch: node
                                         .unrealized_finalized_checkpoint()
                                         .map(|checkpoint| checkpoint.epoch),
-                                    execution_status: execution_status_string,
+                                    execution_status: node.execution_status().map_or_else(
+                                        |_| "irrelevant".to_string(),
+                                        |s| s.to_string(),
+                                    ),
                                     best_child: node
                                         .best_child()
                                         .ok()

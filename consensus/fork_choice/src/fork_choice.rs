@@ -57,11 +57,6 @@ pub enum Error<T> {
         block_slot: Slot,
         state_slot: Slot,
     },
-    InvalidPayloadStatus {
-        block_slot: Slot,
-        block_root: Hash256,
-        payload_verification_status: PayloadVerificationStatus,
-    },
     MissingJustifiedBlock {
         justified_checkpoint: Checkpoint,
     },
@@ -228,8 +223,6 @@ pub enum PayloadVerificationStatus {
     Verified,
     /// An EL has not yet made a determination about the execution payload.
     Optimistic,
-    /// The block is either pre-merge-fork, or prior to the terminal PoW block.
-    Irrelevant,
 }
 
 impl PayloadVerificationStatus {
@@ -238,7 +231,6 @@ impl PayloadVerificationStatus {
         match self {
             PayloadVerificationStatus::Verified => false,
             PayloadVerificationStatus::Optimistic => true,
-            PayloadVerificationStatus::Irrelevant => false,
         }
     }
 }
@@ -336,9 +328,9 @@ pub enum AttestationFromBlock {
 pub struct ForkchoiceUpdateParameters {
     /// The most recent result of running `ForkChoice::get_head`.
     pub head_root: Hash256,
-    pub head_hash: Option<ExecutionBlockHash>,
-    pub justified_hash: Option<ExecutionBlockHash>,
-    pub finalized_hash: Option<ExecutionBlockHash>,
+    pub head_hash: ExecutionBlockHash,
+    pub justified_hash: ExecutionBlockHash,
+    pub finalized_hash: ExecutionBlockHash,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -365,8 +357,6 @@ pub struct ForkChoice<T, E> {
     proto_array: ProtoArrayForkChoice,
     /// Attestations that arrived at the current slot and must be queued for later processing.
     queued_attestations: Vec<QueuedAttestation>,
-    /// Stores a cache of the values required to be sent to the execution layer.
-    forkchoice_update_parameters: ForkchoiceUpdateParameters,
     _phantom: PhantomData<E>,
 }
 
@@ -415,17 +405,21 @@ where
 
         let (execution_status, execution_payload_parent_hash, execution_payload_block_hash) =
             if let Ok(signed_bid) = anchor_block.message().body().signed_execution_payload_bid() {
-                // Gloas: execution status is irrelevant post-Gloas; payload validation
+                // Gloas: execution status is not used post-Gloas; payload validation
                 // is decoupled from beacon blocks.
                 (
-                    ExecutionStatus::irrelevant(),
+                    ExecutionStatus::Valid(ExecutionBlockHash::zero()),
                     Some(signed_bid.message.parent_block_hash),
                     Some(signed_bid.message.block_hash),
                 )
             } else if let Ok(execution_payload) = anchor_block.message().execution_payload() {
                 // Pre-Gloas forks: do not set payload hashes, they are only used post-Gloas.
                 if execution_payload.is_default_with_empty_roots() {
-                    (ExecutionStatus::irrelevant(), None, None)
+                    (
+                        ExecutionStatus::Valid(ExecutionBlockHash::zero()),
+                        None,
+                        None,
+                    )
                 } else {
                     // Assume that this payload is valid, since the anchor should be a
                     // trusted block and state.
@@ -437,7 +431,11 @@ where
                 }
             } else {
                 // Pre-merge: no execution payload at all.
-                (ExecutionStatus::irrelevant(), None, None)
+                (
+                    ExecutionStatus::Valid(ExecutionBlockHash::zero()),
+                    None,
+                    None,
+                )
             };
 
         // If the current slot is not provided, use the value that was last provided to the store.
@@ -462,29 +460,12 @@ where
             fc_store,
             proto_array,
             queued_attestations: vec![],
-            // This will be updated during the next call to `Self::get_head`.
-            forkchoice_update_parameters: ForkchoiceUpdateParameters {
-                head_hash: None,
-                justified_hash: None,
-                finalized_hash: None,
-                // This will be updated during the next call to `Self::get_head`.
-                head_root: Hash256::zero(),
-            },
             _phantom: PhantomData,
         };
 
-        // Ensure that `fork_choice.forkchoice_update_parameters.head_root` is updated.
         fork_choice.get_head(current_slot, spec)?;
 
         Ok(fork_choice)
-    }
-
-    /// Returns cached information that can be used to issue a `forkchoiceUpdated` message to an
-    /// execution engine.
-    ///
-    /// These values are updated each time `Self::get_head` is called.
-    pub fn get_forkchoice_update_parameters(&self) -> ForkchoiceUpdateParameters {
-        self.forkchoice_update_parameters
     }
 
     /// Returns the block root of an ancestor of `block_root` at the given `slot`. (Note: `slot` refers
@@ -559,25 +540,6 @@ where
             spec,
         )?;
 
-        // Cache some values for the next forkchoiceUpdate call to the execution layer.
-        let head_hash = self
-            .get_block(&head_root)
-            .and_then(|b| b.execution_status.block_hash());
-        let justified_root = self.justified_checkpoint().root;
-        let finalized_root = self.finalized_checkpoint().root;
-        let justified_hash = self
-            .get_block(&justified_root)
-            .and_then(|b| b.execution_status.block_hash());
-        let finalized_hash = self
-            .get_block(&finalized_root)
-            .and_then(|b| b.execution_status.block_hash());
-        self.forkchoice_update_parameters = ForkchoiceUpdateParameters {
-            head_root,
-            head_hash,
-            justified_hash,
-            finalized_hash,
-        };
-
         Ok((head_root, head_payload_status))
     }
 
@@ -651,26 +613,6 @@ where
                 max_epochs_since_finalization,
             )
             .map_err(ProposerHeadError::convert_inner_error)
-    }
-
-    /// Return information about:
-    ///
-    /// - The LMD head of the chain.
-    /// - The FFG checkpoints.
-    ///
-    /// The information is "cached" since the last call to `Self::get_head`.
-    ///
-    /// ## Notes
-    ///
-    /// The finalized/justified checkpoints are determined from the fork choice store. Therefore,
-    /// it's possible that the state corresponding to `get_state(get_block(head_block_root))` will
-    /// have *differing* finalized and justified information.
-    pub fn cached_fork_choice_view(&self) -> ForkChoiceView {
-        ForkChoiceView {
-            head_block_root: self.forkchoice_update_parameters.head_root,
-            justified_checkpoint: self.justified_checkpoint(),
-            finalized_checkpoint: self.finalized_checkpoint(),
-        }
     }
 
     /// Mark a Gloas payload envelope as valid and received.
@@ -935,33 +877,18 @@ where
             .on_verified_block(block, block_root, state)
             .map_err(Error::AfterBlockFailed)?;
 
-        let execution_status = if let Ok(execution_payload) = block.body().execution_payload() {
-            let block_hash = execution_payload.block_hash();
-
-            if block_hash == ExecutionBlockHash::zero() {
-                // The block is post-merge-fork, but pre-terminal-PoW block. We don't need to verify
-                // the payload.
-                ExecutionStatus::irrelevant()
-            } else {
+        let execution_status = match block.body().execution_payload() {
+            Ok(execution_payload) => {
+                let block_hash = execution_payload.block_hash();
                 match payload_verification_status {
                     PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
                     PayloadVerificationStatus::Optimistic => {
                         ExecutionStatus::Optimistic(block_hash)
                     }
-                    // It would be a logic error to declare a block irrelevant if it has an
-                    // execution payload with a non-zero block hash.
-                    PayloadVerificationStatus::Irrelevant => {
-                        return Err(Error::InvalidPayloadStatus {
-                            block_slot: block.slot(),
-                            block_root,
-                            payload_verification_status,
-                        });
-                    }
                 }
             }
-        } else {
-            // There is no payload to verify.
-            ExecutionStatus::irrelevant()
+            // Pre-Bellatrix blocks don't have an execution payload.
+            Err(_) => ExecutionStatus::Valid(ExecutionBlockHash::zero()),
         };
 
         let (execution_payload_parent_hash, execution_payload_block_hash) =
@@ -1493,6 +1420,15 @@ where
         }
     }
 
+    /// Returns the execution block hash for a block, if known.
+    pub fn get_block_execution_block_hash(
+        &self,
+        block_root: &Hash256,
+    ) -> Option<ExecutionBlockHash> {
+        self.get_block(block_root)
+            .map(|b| b.execution_status.block_hash())
+    }
+
     /// Returns an `ExecutionStatus` if the block is known **and** a descendant of the finalized root.
     pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
@@ -1715,14 +1651,6 @@ where
             fc_store,
             proto_array,
             queued_attestations: vec![],
-            // Will be updated in the following call to `Self::get_head`.
-            forkchoice_update_parameters: ForkchoiceUpdateParameters {
-                head_hash: None,
-                justified_hash: None,
-                finalized_hash: None,
-                // Will be updated in the following call to `Self::get_head`.
-                head_root: Hash256::zero(),
-            },
             _phantom: PhantomData,
         };
 

@@ -109,13 +109,12 @@ pub struct CachedHead<E: EthSpec> {
     finalized_checkpoint: Checkpoint,
     /// The payload status of the head block, as determined by fork choice.
     head_payload_status: proto_array::PayloadStatus,
-    /// The `execution_payload.block_hash` of the block at the head of the chain. Set to `None`
-    /// before Bellatrix.
-    head_hash: Option<ExecutionBlockHash>,
-    /// The `execution_payload.block_hash` of the justified block. Set to `None` before Bellatrix.
-    justified_hash: Option<ExecutionBlockHash>,
-    /// The `execution_payload.block_hash` of the finalized block. Set to `None` before Bellatrix.
-    finalized_hash: Option<ExecutionBlockHash>,
+    /// The `execution_payload.block_hash` of the block at the head of the chain.
+    head_hash: ExecutionBlockHash,
+    /// The `execution_payload.block_hash` of the justified block.
+    justified_hash: ExecutionBlockHash,
+    /// The `execution_payload.block_hash` of the finalized block.
+    finalized_hash: ExecutionBlockHash,
 }
 
 impl<E: EthSpec> CachedHead<E> {
@@ -267,25 +266,25 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     pub fn new(
         fork_choice: BeaconForkChoice<T>,
         snapshot: Arc<BeaconSnapshot<T::EthSpec>>,
+        head_block_root: Hash256,
         head_payload_status: proto_array::PayloadStatus,
-    ) -> Self {
-        let fork_choice_view = fork_choice.cached_fork_choice_view();
-        let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
+    ) -> Result<Self, Error> {
+        let params = forkchoice_update_parameters::<T>(&fork_choice, head_block_root)?;
         let cached_head = CachedHead {
             snapshot,
-            justified_checkpoint: fork_choice_view.justified_checkpoint,
-            finalized_checkpoint: fork_choice_view.finalized_checkpoint,
+            justified_checkpoint: fork_choice.justified_checkpoint(),
+            finalized_checkpoint: fork_choice.finalized_checkpoint(),
             head_payload_status,
-            head_hash: forkchoice_update_params.head_hash,
-            justified_hash: forkchoice_update_params.justified_hash,
-            finalized_hash: forkchoice_update_params.finalized_hash,
+            head_hash: params.head_hash,
+            justified_hash: params.justified_hash,
+            finalized_hash: params.finalized_hash,
         };
 
-        Self {
+        Ok(Self {
             fork_choice: CanonicalHeadRwLock::new(fork_choice),
             cached_head: CanonicalHeadRwLock::new(cached_head),
             recompute_head_lock: Mutex::new(()),
-        }
+        })
     }
 
     /// Load a persisted version of `BeaconForkChoice` from the `store` and restore `self` to that
@@ -306,17 +305,14 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let mut fork_choice =
             <BeaconChain<T>>::load_fork_choice(store.clone(), reset_payload_statuses, spec)?
                 .ok_or(Error::MissingPersistedForkChoice)?;
-        let current_slot_for_head = fork_choice.fc_store().get_current_slot();
-        let (_, head_payload_status) = fork_choice.get_head(current_slot_for_head, spec)?;
-        let fork_choice_view = fork_choice.cached_fork_choice_view();
-        let beacon_block_root = fork_choice_view.head_block_root;
+        let current_slot = fork_choice.fc_store().get_current_slot();
+        let (beacon_block_root, head_payload_status) = fork_choice
+            .get_head(current_slot, spec)
+            .map_err(Error::ForkChoiceError)?;
         let beacon_block = store
             .get_full_block(&beacon_block_root)?
             .ok_or(Error::MissingBeaconBlock(beacon_block_root))?;
-        let current_slot = fork_choice.fc_store().get_current_slot();
-
-        // TODO(gloas): pass a better payload status once fork choice is implemented
-        let payload_status = StatePayloadStatus::Pending;
+        let payload_status = head_payload_status.as_state_payload_status();
         let (_, beacon_state) = store
             .get_advanced_hot_state(
                 beacon_block_root,
@@ -333,15 +329,15 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             beacon_state,
         };
 
-        let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
+        let params = forkchoice_update_parameters::<T>(&fork_choice, beacon_block_root)?;
         let cached_head = CachedHead {
             snapshot: Arc::new(snapshot),
-            justified_checkpoint: fork_choice_view.justified_checkpoint,
-            finalized_checkpoint: fork_choice_view.finalized_checkpoint,
+            justified_checkpoint: fork_choice.justified_checkpoint(),
+            finalized_checkpoint: fork_choice.finalized_checkpoint(),
             head_payload_status,
-            head_hash: forkchoice_update_params.head_hash,
-            justified_hash: forkchoice_update_params.justified_hash,
-            finalized_hash: forkchoice_update_params.finalized_hash,
+            head_hash: params.head_hash,
+            justified_hash: params.justified_hash,
+            finalized_hash: params.finalized_hash,
         };
 
         *fork_choice_write_lock = fork_choice;
@@ -617,14 +613,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let mut fork_choice_write_lock = self.canonical_head.fork_choice_write_lock();
 
         // Recompute the current head via the fork choice algorithm.
-        let (_, new_payload_status) = fork_choice_write_lock.get_head(current_slot, &self.spec)?;
+        let (new_head_root, new_payload_status) =
+            fork_choice_write_lock.get_head(current_slot, &self.spec)?;
 
         // Downgrade the fork choice write-lock to a read lock, without allowing access to any
         // other writers.
         let fork_choice_read_lock = RwLockWriteGuard::downgrade(fork_choice_write_lock);
 
         // Read the current head value from the fork choice algorithm.
-        let new_view = fork_choice_read_lock.cached_fork_choice_view();
+        let new_view = ForkChoiceView {
+            head_block_root: new_head_root,
+            justified_checkpoint: fork_choice_read_lock.justified_checkpoint(),
+            finalized_checkpoint: fork_choice_read_lock.finalized_checkpoint(),
+        };
 
         // Check to ensure that the finalized block hasn't been marked as invalid. If it has,
         // shut down Lighthouse.
@@ -674,7 +675,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // Get the parameters to update the execution layer since either the head or some finality
         // parameters have changed.
         let new_forkchoice_update_parameters =
-            fork_choice_read_lock.get_forkchoice_update_parameters();
+            forkchoice_update_parameters::<T>(&*fork_choice_read_lock, new_head_root)?;
 
         perform_debug_logging::<T>(&old_view, &new_view, &fork_choice_read_lock);
 
@@ -1515,4 +1516,37 @@ fn observe_head_block_delays<E: EthSpec, S: SlotClock>(
             );
         }
     }
+}
+
+/// Look up execution block hashes for the head, justified, and finalized blocks from fork choice.
+///
+/// Each lookup can only fail if the block is unknown to fork choice, which should not happen
+/// during normal operation since:
+///
+/// - The head root was just returned by `get_head`, so it must exist.
+/// - The justified and finalized roots are maintained as invariants by fork choice — they always
+///   reference blocks that are ancestors of the head and therefore present in the proto-array.
+///
+/// A missing block indicates a bug (e.g. corruption or a logic error in fork choice pruning).
+/// We return an error rather than panicking so the caller can log the issue and continue.
+fn forkchoice_update_parameters<T: BeaconChainTypes>(
+    fork_choice: &BeaconForkChoice<T>,
+    head_root: Hash256,
+) -> Result<ForkchoiceUpdateParameters, Error> {
+    Ok(ForkchoiceUpdateParameters {
+        head_root,
+        head_hash: fork_choice
+            .get_block_execution_block_hash(&head_root)
+            .ok_or(Error::HeadBlockMissingFromForkChoice(head_root))?,
+        justified_hash: fork_choice
+            .get_block_execution_block_hash(&fork_choice.justified_checkpoint().root)
+            .ok_or(Error::BlockMissingFromForkChoice(
+                fork_choice.justified_checkpoint().root,
+            ))?,
+        finalized_hash: fork_choice
+            .get_block_execution_block_hash(&fork_choice.finalized_checkpoint().root)
+            .ok_or(Error::BlockMissingFromForkChoice(
+                fork_choice.finalized_checkpoint().root,
+            ))?,
+    })
 }
