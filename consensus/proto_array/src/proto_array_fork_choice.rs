@@ -962,9 +962,16 @@ impl ProtoArrayForkChoice {
             next_epoch_shuffling_id: block.next_epoch_shuffling_id().clone(),
             justified_checkpoint: *block.justified_checkpoint(),
             finalized_checkpoint: *block.finalized_checkpoint(),
-            execution_status: block
-                .execution_status()
-                .unwrap_or_else(|_| ExecutionStatus::Valid(ExecutionBlockHash::zero())),
+            // V29 (Gloas) nodes don't have execution_status. Use
+            // execution_payload_block_hash which is always present on V29
+            // (the zero fallback is cosmetic and unreachable).
+            execution_status: block.execution_status().unwrap_or_else(|_| {
+                ExecutionStatus::Valid(
+                    block
+                        .execution_payload_block_hash()
+                        .unwrap_or(ExecutionBlockHash::zero()),
+                )
+            }),
             unrealized_justified_checkpoint: block.unrealized_justified_checkpoint(),
             unrealized_finalized_checkpoint: block.unrealized_finalized_checkpoint(),
             execution_payload_parent_hash: block.execution_payload_parent_hash().ok(),
@@ -974,13 +981,17 @@ impl ProtoArrayForkChoice {
     }
 
     /// Returns the `block.execution_status` field, if the block is present.
+    /// V29 (Gloas) nodes don't have execution_status; uses execution_payload_block_hash
+    /// which is always present on V29 (the zero fallback is cosmetic and unreachable).
     pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
         let block = self.get_proto_node(block_root)?;
-        Some(
-            block
-                .execution_status()
-                .unwrap_or_else(|_| ExecutionStatus::Valid(ExecutionBlockHash::zero())),
-        )
+        Some(block.execution_status().unwrap_or_else(|_| {
+            ExecutionStatus::Valid(
+                block
+                    .execution_payload_block_hash()
+                    .unwrap_or(ExecutionBlockHash::zero()),
+            )
+        }))
     }
 
     /// Returns whether the execution payload for a block has been received.

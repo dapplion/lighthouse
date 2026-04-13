@@ -408,7 +408,7 @@ where
                 // Gloas: execution status is not used post-Gloas; payload validation
                 // is decoupled from beacon blocks.
                 (
-                    ExecutionStatus::Valid(ExecutionBlockHash::zero()),
+                    ExecutionStatus::Valid(signed_bid.message.block_hash),
                     Some(signed_bid.message.parent_block_hash),
                     Some(signed_bid.message.block_hash),
                 )
