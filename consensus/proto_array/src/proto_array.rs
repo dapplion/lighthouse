@@ -628,7 +628,8 @@ impl ProtoArray {
                 } else {
                     BitVector::default()
                 },
-                payload_received: is_genesis,
+                payload_received: is_genesis
+                    && execution_payload_block_hash != ExecutionBlockHash::zero(),
                 proposer_index,
                 // Spec: `record_block_timeliness` + `get_forkchoice_store`.
                 // Anchor gets [True, True]. Others computed from time_into_slot.
