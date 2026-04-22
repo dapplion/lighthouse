@@ -43,9 +43,7 @@ use super::range_sync::{EPOCHS_PER_BATCH, RangeSync, RangeSyncType};
 use crate::network_beacon_processor::{ChainSegmentProcessId, NetworkBeaconProcessor};
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
-use crate::sync::block_lookups::{
-    BlobRequestState, BlockComponent, BlockRequestState, CustodyRequestState, DownloadResult,
-};
+use crate::sync::block_lookups::{BlockComponent, DownloadResult};
 use crate::sync::custody_backfill_sync::CustodyBackFillSync;
 use crate::sync::network_context::{PeerGroup, RpcResponseResult};
 use beacon_chain::block_verification_types::AsBlock;
@@ -1140,14 +1138,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
         if let Some(resp) = self.network.on_single_block_response(id, peer_id, block) {
-            self.block_lookups
-                .on_download_response::<BlockRequestState<T::EthSpec>>(
-                    id,
-                    resp.map(|(value, seen_timestamp)| {
-                        (value, PeerGroup::from_single(peer_id), seen_timestamp)
-                    }),
-                    &mut self.network,
-                )
+            self.block_lookups.on_block_download_response(
+                id,
+                resp.map(|(value, seen_timestamp)| {
+                    (value, PeerGroup::from_single(peer_id), seen_timestamp)
+                }),
+                &mut self.network,
+            )
         }
     }
 
@@ -1210,14 +1207,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         blob: RpcEvent<Arc<BlobSidecar<T::EthSpec>>>,
     ) {
         if let Some(resp) = self.network.on_single_blob_response(id, peer_id, blob) {
-            self.block_lookups
-                .on_download_response::<BlobRequestState<T::EthSpec>>(
-                    id,
-                    resp.map(|(value, seen_timestamp)| {
-                        (value, PeerGroup::from_single(peer_id), seen_timestamp)
-                    }),
-                    &mut self.network,
-                )
+            self.block_lookups.on_blob_download_response(
+                id,
+                resp.map(|(value, seen_timestamp)| {
+                    (value, PeerGroup::from_single(peer_id), seen_timestamp)
+                }),
+                &mut self.network,
+            )
         }
     }
 
@@ -1309,11 +1305,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         response: CustodyByRootResult<T::EthSpec>,
     ) {
         self.block_lookups
-            .on_download_response::<CustodyRequestState<T::EthSpec>>(
-                requester.0,
-                response,
-                &mut self.network,
-            );
+            .on_custody_download_response(requester.0, response, &mut self.network);
     }
 
     /// Handles receiving a response for a range sync request that should have both blocks and
