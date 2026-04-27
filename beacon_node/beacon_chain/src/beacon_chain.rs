@@ -3663,19 +3663,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             );
         }
 
-        // Gloas blocks dont need to be inserted into the DA cache
-        // they are always available.
-        if !unverified_block
-            .block()
-            .fork_name_unchecked()
-            .gloas_enabled()
-        {
-            self.data_availability_checker.put_pre_execution_block(
-                block_root,
-                unverified_block.block_cloned(),
-                block_source,
-            )?;
-        }
+        // Cache the block on every fork. Pre-Gloas this is the join target for blobs/columns.
+        // Gloas blocks insta-import into fork choice (see `block_verification.rs`'s
+        // `MaybeAvailableBlock::Available(NoData)` branch), but we still cache the block here
+        // because its bid carries the kzg commitments that the envelope+columns availability
+        // check needs as the expected-count source.
+        self.data_availability_checker.put_pre_execution_block(
+            block_root,
+            unverified_block.block_cloned(),
+            block_source,
+        )?;
 
         // Start the Prometheus timer.
         let _full_timer = metrics::start_timer(&metrics::BLOCK_PROCESSING_TIMES);
@@ -4029,6 +4026,17 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 publish_fn()?;
                 // Block is fully available, import into fork choice
                 self.import_available_block(block).await
+            }
+            Availability::AvailableEnvelope(envelope) => {
+                publish_fn()?;
+                // Gloas: payload envelope is fully available alongside its columns.
+                self.import_available_execution_payload_envelope(envelope)
+                    .await
+                    .map_err(|e| {
+                        BlockError::InternalError(format!(
+                            "envelope import after column availability: {e:?}"
+                        ))
+                    })
             }
             Availability::MissingComponents(block_root) => Ok(
                 AvailabilityProcessingStatus::MissingComponents(slot, block_root),

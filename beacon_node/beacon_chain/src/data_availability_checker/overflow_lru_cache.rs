@@ -6,6 +6,9 @@ use crate::block_verification_types::{
 };
 use crate::data_availability_checker::{Availability, AvailabilityCheckError};
 use crate::data_column_verification::KzgVerifiedCustodyDataColumn;
+use crate::payload_envelope_verification::{
+    AvailabilityPendingExecutedEnvelope, AvailableEnvelope, AvailableExecutedEnvelope,
+};
 use crate::{BeaconChainTypes, BlockProcessStatus};
 use lru::LruCache;
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -19,6 +22,7 @@ use types::kzg_ext::KzgCommitments;
 use types::{
     BlobSidecar, BlockImportSource, ChainSpec, ColumnIndex, DataColumnSidecar,
     DataColumnSidecarList, Epoch, EthSpec, Hash256, SignedBeaconBlock,
+    SignedExecutionPayloadEnvelope,
 };
 
 pub enum CachedBlock<E: EthSpec> {
@@ -26,9 +30,28 @@ pub enum CachedBlock<E: EthSpec> {
     Executed(Box<AvailabilityPendingExecutedBlock<E>>),
 }
 
+/// Gloas-only: the executed envelope is the analogue of `CachedBlock::Executed`.
+/// In Gloas, the block itself never gets EL-executed (only the envelope does), so the
+/// cached block stays in `CachedBlock::PreExecution` indefinitely and the envelope is
+/// the joinable component that completes data availability.
+pub enum CachedEnvelope<E: EthSpec> {
+    PreExecution(
+        Arc<SignedExecutionPayloadEnvelope<E>>,
+        // Mirrors `CachedBlock::PreExecution`'s source field; reserved for future
+        // `EnvelopeProcessStatus` symmetry with `BlockProcessStatus`.
+        #[allow(dead_code)] BlockImportSource,
+    ),
+    Executed(Box<AvailabilityPendingExecutedEnvelope<E>>),
+}
+
 impl<E: EthSpec> CachedBlock<E> {
+    /// Returns the kzg commitments expected for this block. Pre-Gloas they live on the body;
+    /// post-Gloas they live in the bid (and the body's accessor returns an error).
     pub fn get_commitments(&self) -> KzgCommitments<E> {
         let block = self.as_block();
+        if let Ok(signed_bid) = block.message().body().signed_execution_payload_bid() {
+            return signed_bid.message.blob_kzg_commitments.clone();
+        }
         block
             .message()
             .body()
@@ -45,11 +68,11 @@ impl<E: EthSpec> CachedBlock<E> {
     }
 
     pub fn num_blobs_expected(&self) -> usize {
-        self.as_block()
-            .message()
-            .body()
-            .blob_kzg_commitments()
-            .map_or(0, |commitments| commitments.len())
+        self.get_commitments().len()
+    }
+
+    fn is_gloas(&self) -> bool {
+        self.as_block().fork_name_unchecked().gloas_enabled()
     }
 }
 
@@ -71,6 +94,9 @@ pub struct PendingComponents<E: EthSpec> {
     pub verified_blobs: RuntimeFixedVector<Option<KzgVerifiedBlob<E>>>,
     pub verified_data_columns: Vec<KzgVerifiedCustodyDataColumn<E>>,
     pub block: Option<CachedBlock<E>>,
+    /// Gloas-only: the executed payload envelope that joins with columns to produce availability.
+    /// Pre-Gloas this stays `None` and the `block` field plays this role instead.
+    pub envelope: Option<CachedEnvelope<E>>,
     pub reconstruction_started: bool,
     span: Span,
 }
@@ -131,6 +157,23 @@ impl<E: EthSpec> PendingComponents<E> {
     ) {
         if self.block.is_none() {
             self.block = Some(CachedBlock::PreExecution(block, source))
+        }
+    }
+
+    /// Gloas: inserts an executed payload envelope into the cache.
+    pub fn insert_executed_envelope(&mut self, envelope: AvailabilityPendingExecutedEnvelope<E>) {
+        self.envelope = Some(CachedEnvelope::Executed(Box::new(envelope)));
+    }
+
+    /// Gloas: inserts a pre-execution payload envelope into the cache. Does NOT override an
+    /// existing executed envelope.
+    pub fn insert_pre_execution_envelope(
+        &mut self,
+        envelope: Arc<SignedExecutionPayloadEnvelope<E>>,
+        source: BlockImportSource,
+    ) {
+        if !matches!(self.envelope, Some(CachedEnvelope::Executed(_))) {
+            self.envelope = Some(CachedEnvelope::PreExecution(envelope, source));
         }
     }
 
@@ -198,13 +241,27 @@ impl<E: EthSpec> PendingComponents<E> {
 
     /// Returns Some if the block has received all its required data for import. The return value
     /// must be persisted in the DB along with the block.
+    ///
+    /// Pre-Gloas: requires a `CachedBlock::Executed` plus matching blobs/columns.
+    /// Gloas: requires the cached block (any state, since the block is insta-imported and
+    /// kept around only for its bid commitments) plus a `CachedEnvelope::Executed` plus columns.
     pub fn make_available(
         &self,
         spec: &Arc<ChainSpec>,
         num_expected_columns_opt: Option<usize>,
-    ) -> Result<Option<AvailableExecutedBlock<E>>, AvailabilityCheckError> {
-        let Some(CachedBlock::Executed(block)) = &self.block else {
-            // Block not available yet
+    ) -> Result<Option<MakeAvailable<E>>, AvailabilityCheckError> {
+        let Some(cached_block) = &self.block else {
+            // No bid/commitments source yet.
+            return Ok(None);
+        };
+
+        // Gloas path: requires an executed envelope rather than an executed block.
+        if cached_block.is_gloas() {
+            return self.make_envelope_available(cached_block, spec, num_expected_columns_opt);
+        }
+
+        let CachedBlock::Executed(block) = cached_block else {
+            // Block not available yet (pre-Gloas requires Executed state).
             return Ok(None);
         };
 
@@ -306,10 +363,85 @@ impl<E: EthSpec> PendingComponents<E> {
         self.span.in_scope(|| {
             debug!("Block and all data components are available");
         });
-        Ok(Some(AvailableExecutedBlock::new(
+        Ok(Some(MakeAvailable::Block(AvailableExecutedBlock::new(
             available_block,
             import_data.clone(),
             payload_verification_outcome.clone(),
+        ))))
+    }
+
+    /// Gloas: build an `AvailableExecutedEnvelope` if the cached block (kept around for its
+    /// bid commitments), the executed envelope, and all expected columns are present.
+    fn make_envelope_available(
+        &self,
+        cached_block: &CachedBlock<E>,
+        spec: &Arc<ChainSpec>,
+        num_expected_columns_opt: Option<usize>,
+    ) -> Result<Option<MakeAvailable<E>>, AvailabilityCheckError> {
+        let Some(CachedEnvelope::Executed(pending_envelope)) = &self.envelope else {
+            // Either the envelope hasn't arrived, or it's still pending EL execution.
+            return Ok(None);
+        };
+
+        let num_expected_blobs = cached_block.num_blobs_expected();
+        let columns = if num_expected_blobs == 0 {
+            // Envelope has no blobs: data is trivially available.
+            vec![]
+        } else {
+            // Gloas is post-PeerDAS: column count is always required.
+            let Some(num_expected_columns) = num_expected_columns_opt else {
+                return Err(AvailabilityCheckError::Unexpected(
+                    "Gloas envelope without expected column count".to_string(),
+                ));
+            };
+            let num_received_columns = self.verified_data_columns.len();
+            match num_received_columns.cmp(&num_expected_columns) {
+                Ordering::Greater => {
+                    return Err(AvailabilityCheckError::Unexpected(format!(
+                        "too many columns got {num_received_columns} expected {num_expected_columns}"
+                    )));
+                }
+                Ordering::Less => return Ok(None),
+                Ordering::Equal => self
+                    .verified_data_columns
+                    .iter()
+                    .map(|d| d.clone().into_inner())
+                    .collect::<Vec<_>>(),
+            }
+        };
+
+        let columns_available_timestamp = if columns.is_empty() {
+            None
+        } else {
+            self.verified_data_columns
+                .iter()
+                .map(|c| c.seen_timestamp())
+                .max()
+        };
+
+        let AvailabilityPendingExecutedEnvelope {
+            envelope,
+            import_data,
+            payload_verification_outcome,
+        } = pending_envelope.as_ref();
+
+        let available_envelope = AvailableEnvelope {
+            execution_block_hash: envelope.block_hash(),
+            envelope: envelope.clone(),
+            columns,
+            columns_available_timestamp,
+            spec: spec.clone(),
+        };
+
+        self.span.in_scope(|| {
+            debug!("Payload envelope and all data components are available");
+        });
+        Ok(Some(MakeAvailable::Envelope(
+            AvailableExecutedEnvelope::new(
+                available_envelope,
+                import_data.clone(),
+                payload_verification_outcome.clone(),
+            ),
         )))
     }
 
@@ -322,6 +454,7 @@ impl<E: EthSpec> PendingComponents<E> {
             verified_blobs: RuntimeFixedVector::new(vec![None; max_len]),
             verified_data_columns: vec![],
             block: None,
+            envelope: None,
             reconstruction_started: false,
             span,
         }
@@ -329,6 +462,7 @@ impl<E: EthSpec> PendingComponents<E> {
 
     /// Returns the epoch of:
     /// - The block if it is cached
+    /// - The cached envelope (Gloas)
     /// - The first available blob
     /// - The first data column
     ///   Otherwise, returns None
@@ -336,6 +470,15 @@ impl<E: EthSpec> PendingComponents<E> {
         // Get epoch from cached block
         if let Some(block) = &self.block {
             return Some(block.as_block().epoch());
+        }
+
+        // Get epoch from cached envelope (Gloas case where envelope arrived but block didn't yet).
+        if let Some(envelope) = &self.envelope {
+            let slot = match envelope {
+                CachedEnvelope::PreExecution(e, _) => e.slot(),
+                CachedEnvelope::Executed(e) => e.envelope.slot(),
+            };
+            return Some(slot.epoch(E::slots_per_epoch()));
         }
 
         // Or, get epoch from first available blob
@@ -392,6 +535,14 @@ pub struct DataAvailabilityCheckerInner<T: BeaconChainTypes> {
 pub(crate) enum ReconstructColumnsDecision<E: EthSpec> {
     Yes(Vec<KzgVerifiedCustodyDataColumn<E>>),
     No(&'static str),
+}
+
+/// Internal return type from `make_available`. The wrapping public `Availability` enum is
+/// produced one layer up by `check_availability_and_cache_components`.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum MakeAvailable<E: EthSpec> {
+    Block(AvailableExecutedBlock<E>),
+    Envelope(AvailableExecutedEnvelope<E>),
 }
 
 impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
@@ -557,7 +708,7 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         pending_components: MappedRwLockReadGuard<'_, PendingComponents<T::EthSpec>>,
         num_expected_columns_opt: Option<usize>,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
-        if let Some(available_block) =
+        if let Some(outcome) =
             pending_components.make_available(&self.spec, num_expected_columns_opt)?
         {
             // Explicitly drop read lock before acquiring write lock
@@ -573,7 +724,10 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
             // imported, but re-inserted immediately, causing partial pending components to be
             // stored and served to peers.
             // Components are only removed via LRU eviction as finality advances.
-            Ok(Availability::Available(Box::new(available_block)))
+            Ok(match outcome {
+                MakeAvailable::Block(b) => Availability::Available(Box::new(b)),
+                MakeAvailable::Envelope(e) => Availability::AvailableEnvelope(Box::new(e)),
+            })
         } else {
             Ok(Availability::MissingComponents(block_root))
         }
@@ -727,6 +881,79 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         pending_components.span.in_scope(|| {
             debug!(
                 component = "block",
+                status = pending_components.status_str(num_expected_columns_opt),
+                "Component added to data availability checker"
+            );
+        });
+
+        self.check_availability_and_cache_components(
+            block_root,
+            pending_components,
+            num_expected_columns_opt,
+        )
+    }
+
+    /// Gloas: insert a pre-execution payload envelope. Does NOT trigger the availability check
+    /// (the envelope still needs to be EL-executed).
+    pub fn put_pre_execution_envelope(
+        &self,
+        block_root: Hash256,
+        envelope: Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>,
+        source: BlockImportSource,
+    ) -> Result<(), AvailabilityCheckError> {
+        let epoch = envelope.slot().epoch(T::EthSpec::slots_per_epoch());
+        let pending_components =
+            self.update_or_insert_pending_components(block_root, epoch, |pending_components| {
+                pending_components.insert_pre_execution_envelope(envelope, source);
+                Ok(())
+            })?;
+
+        let num_expected_columns_opt = self.get_num_expected_columns(epoch);
+
+        pending_components.span.in_scope(|| {
+            debug!(
+                component = "pre execution envelope",
+                status = pending_components.status_str(num_expected_columns_opt),
+                "Component added to data availability checker"
+            );
+        });
+
+        Ok(())
+    }
+
+    /// Gloas: removes a pre-execution envelope from the cache (e.g. on EL execution failure).
+    /// Does NOT remove an executed envelope.
+    pub fn remove_pre_execution_envelope(&self, block_root: &Hash256) {
+        let mut write_lock = self.critical.write();
+        if let Some(components) = write_lock.peek_mut(block_root) {
+            if matches!(components.envelope, Some(CachedEnvelope::PreExecution(..))) {
+                components.envelope = None;
+            }
+        }
+    }
+
+    /// Gloas: insert an executed payload envelope and check availability.
+    pub fn put_executed_envelope(
+        &self,
+        executed_envelope: AvailabilityPendingExecutedEnvelope<T::EthSpec>,
+    ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
+        let epoch = executed_envelope
+            .envelope
+            .slot()
+            .epoch(T::EthSpec::slots_per_epoch());
+        let block_root = executed_envelope.import_data.block_root;
+
+        let pending_components =
+            self.update_or_insert_pending_components(block_root, epoch, |pending_components| {
+                pending_components.insert_executed_envelope(executed_envelope);
+                Ok(())
+            })?;
+
+        let num_expected_columns_opt = self.get_num_expected_columns(epoch);
+
+        pending_components.span.in_scope(|| {
+            debug!(
+                component = "executed envelope",
                 status = pending_components.status_str(num_expected_columns_opt),
                 "Component added to data availability checker"
             );

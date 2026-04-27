@@ -2,6 +2,9 @@ use crate::blob_verification::{
     GossipVerifiedBlob, KzgVerifiedBlob, KzgVerifiedBlobList, verify_kzg_for_blob_list,
 };
 use crate::block_verification_types::{AvailabilityPendingExecutedBlock, AvailableExecutedBlock};
+use crate::payload_envelope_verification::{
+    AvailabilityPendingExecutedEnvelope, AvailableExecutedEnvelope,
+};
 use crate::data_availability_checker::overflow_lru_cache::{
     DataAvailabilityCheckerInner, ReconstructColumnsDecision,
 };
@@ -102,6 +105,9 @@ pub enum DataColumnReconstructionResult<E: EthSpec> {
 pub enum Availability<E: EthSpec> {
     MissingComponents(Hash256),
     Available(Box<AvailableExecutedBlock<E>>),
+    /// Gloas: the executed payload envelope is fully available alongside its columns.
+    /// `import_available_execution_payload_envelope` should be invoked to import.
+    AvailableEnvelope(Box<AvailableExecutedEnvelope<E>>),
 }
 
 impl<E: EthSpec> Debug for Availability<E> {
@@ -111,6 +117,9 @@ impl<E: EthSpec> Debug for Availability<E> {
                 write!(f, "MissingComponents({})", block_root)
             }
             Self::Available(block) => write!(f, "Available({:?})", block.import_data.block_root),
+            Self::AvailableEnvelope(env) => {
+                write!(f, "AvailableEnvelope({:?})", env.import_data.block_root)
+            }
         }
     }
 }
@@ -478,6 +487,33 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
     pub fn remove_block_on_execution_error(&self, block_root: &Hash256) {
         self.availability_cache
             .remove_pre_execution_block(block_root);
+    }
+
+    /// Gloas: insert a pre-execution payload envelope. Caches the envelope alongside the block
+    /// so that columns arriving via gossip/RPC can complete the availability join.
+    pub fn put_pre_execution_envelope(
+        &self,
+        block_root: Hash256,
+        envelope: Arc<types::SignedExecutionPayloadEnvelope<T::EthSpec>>,
+        source: BlockImportSource,
+    ) -> Result<(), AvailabilityCheckError> {
+        self.availability_cache
+            .put_pre_execution_envelope(block_root, envelope, source)
+    }
+
+    /// Gloas: insert an executed payload envelope. Triggers an availability check.
+    pub fn put_executed_envelope(
+        &self,
+        executed_envelope: AvailabilityPendingExecutedEnvelope<T::EthSpec>,
+    ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
+        self.availability_cache
+            .put_executed_envelope(executed_envelope)
+    }
+
+    /// Gloas: removes a pre-execution envelope from the cache (e.g. on EL execution failure).
+    pub fn remove_envelope_on_execution_error(&self, block_root: &Hash256) {
+        self.availability_cache
+            .remove_pre_execution_envelope(block_root);
     }
 
     /// Verifies kzg commitments for an `AvailableBlock`.

@@ -3873,6 +3873,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     | EnvelopeError::BeaconChainError(_)
                     | EnvelopeError::BeaconStateError(_)
                     | EnvelopeError::BlockProcessingError(_)
+                    | EnvelopeError::AvailabilityCheck(_)
                     | EnvelopeError::InternalError(_) => {
                         self.propagate_validation_result(
                             message_id,
@@ -3987,6 +3988,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 | EnvelopeError::BeaconChainError(_)
                 | EnvelopeError::BeaconStateError(_)
                 | EnvelopeError::BlockProcessingError(_)
+                | EnvelopeError::AvailabilityCheck(_)
                 | EnvelopeError::InternalError(_) => {}
             },
         }

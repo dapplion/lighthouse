@@ -42,7 +42,7 @@ mod payload_notifier;
 pub use execution_pending_envelope::ExecutionPendingEnvelope;
 
 // TODO(gloas): could remove this type completely, or remove the generic
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct EnvelopeImportData<E: EthSpec> {
     pub block_root: Hash256,
     _phantom: PhantomData<E>,
@@ -51,11 +51,11 @@ pub struct EnvelopeImportData<E: EthSpec> {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct AvailableEnvelope<E: EthSpec> {
-    execution_block_hash: ExecutionBlockHash,
-    envelope: Arc<SignedExecutionPayloadEnvelope<E>>,
-    columns: DataColumnSidecarList<E>,
+    pub execution_block_hash: ExecutionBlockHash,
+    pub envelope: Arc<SignedExecutionPayloadEnvelope<E>>,
+    pub columns: DataColumnSidecarList<E>,
     /// Timestamp at which this envelope first became available (UNIX timestamp, time since 1970).
-    columns_available_timestamp: Option<std::time::Duration>,
+    pub columns_available_timestamp: Option<std::time::Duration>,
     pub spec: Arc<ChainSpec>,
 }
 
@@ -106,8 +106,7 @@ pub struct EnvelopeProcessingSnapshot<E: EthSpec> {
 ///    fully available.
 pub enum ExecutedEnvelope<E: EthSpec> {
     Available(AvailableExecutedEnvelope<E>),
-    // TODO(gloas) implement availability pending
-    AvailabilityPending(),
+    AvailabilityPending(AvailabilityPendingExecutedEnvelope<E>),
 }
 
 impl<E: EthSpec> ExecutedEnvelope<E> {
@@ -124,13 +123,25 @@ impl<E: EthSpec> ExecutedEnvelope<E> {
                     payload_verification_outcome,
                 ))
             }
-            // TODO(gloas) implement availability pending
             MaybeAvailableEnvelope::AvailabilityPending {
                 block_hash: _,
-                envelope: _,
-            } => Self::AvailabilityPending(),
+                envelope,
+            } => Self::AvailabilityPending(AvailabilityPendingExecutedEnvelope {
+                envelope,
+                import_data,
+                payload_verification_outcome,
+            }),
         }
     }
+}
+
+/// A payload envelope that has been executed by an EL client, but is still missing
+/// the data columns required to be imported into fork choice.
+#[derive(Clone)]
+pub struct AvailabilityPendingExecutedEnvelope<E: EthSpec> {
+    pub envelope: Arc<SignedExecutionPayloadEnvelope<E>>,
+    pub import_data: EnvelopeImportData<E>,
+    pub payload_verification_outcome: PayloadVerificationOutcome,
 }
 
 /// A payload envelope that has completed all payload processing checks including verification
@@ -197,6 +208,8 @@ pub enum EnvelopeError {
     ExecutionPayloadError(ExecutionPayloadError),
     /// An error from block-level checks reused during envelope import
     BlockError(BlockError),
+    /// Failure inserting into / interacting with the data availability checker.
+    AvailabilityCheck(crate::data_availability_checker::AvailabilityCheckError),
     /// Internal error
     InternalError(String),
 }
@@ -234,6 +247,12 @@ impl From<DBError> for EnvelopeError {
 impl From<BlockError> for EnvelopeError {
     fn from(e: BlockError) -> Self {
         EnvelopeError::BlockError(e)
+    }
+}
+
+impl From<crate::data_availability_checker::AvailabilityCheckError> for EnvelopeError {
+    fn from(e: crate::data_availability_checker::AvailabilityCheckError) -> Self {
+        EnvelopeError::AvailabilityCheck(e)
     }
 }
 

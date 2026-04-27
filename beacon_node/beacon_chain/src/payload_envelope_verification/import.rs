@@ -12,6 +12,7 @@ use super::{
     AvailableEnvelope, AvailableExecutedEnvelope, EnvelopeError, EnvelopeImportData,
     ExecutedEnvelope, gossip_verified_envelope::GossipVerifiedEnvelope,
 };
+use crate::data_availability_checker::Availability;
 use crate::{
     AvailabilityProcessingStatus, BeaconChain, BeaconChainError, BeaconChainTypes,
     NotifyExecutionLayer, block_verification_types::AvailableBlockData, metrics,
@@ -50,7 +51,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             );
         }
 
-        // TODO(gloas) insert the pre-executed envelope into some type of cache.
+        // Insert the pre-executed envelope into the DA cache so columns arriving over
+        // gossip/RPC can join with it. If EL execution fails, this entry is removed below.
+        self.data_availability_checker.put_pre_execution_envelope(
+            block_root,
+            unverified_envelope.signed_envelope.clone(),
+            block_source,
+        )?;
 
         let _full_timer = metrics::start_timer(&metrics::ENVELOPE_PROCESSING_TIMES);
 
@@ -73,6 +80,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
             let envelope_times_cache = chain.envelope_times_cache.clone();
             let slot_clock = chain.slot_clock.clone();
+            let da_checker = chain.data_availability_checker.clone();
 
             // TODO(gloas): rename/refactor these `into_` names to be less similar and more clear
             // about what the function actually does.
@@ -80,11 +88,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .into_executed_payload_envelope(execution_pending)
                 .await
                 .inspect_err(|_| {
-                    // TODO(gloas) If the envelope fails execution for whatever reason (e.g. engine offline),
-                    // and we keep it in the cache, then the node will NOT perform lookup and
-                    // reprocess this block until the block is evicted from DA checker, causing the
-                    // chain to get stuck temporarily if the block is canonical. Therefore we remove
-                    // it from the cache if execution fails.
+                    // If the envelope fails execution for any reason (e.g. engine offline) and we
+                    // leave it in the cache, lookup/reprocess won't re-fetch it until LRU/finality
+                    // pruning evicts it, stalling import of the canonical envelope. Remove it now.
+                    da_checker.remove_envelope_on_execution_error(&block_root);
                 })?;
 
             // Record the time it took to wait for execution layer verification.
@@ -99,9 +106,25 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     self.import_available_execution_payload_envelope(Box::new(envelope))
                         .await
                 }
-                ExecutedEnvelope::AvailabilityPending() => Err(EnvelopeError::InternalError(
-                    "Pending payload envelope not yet implemented".to_owned(),
-                )),
+                ExecutedEnvelope::AvailabilityPending(pending) => {
+                    // Insert the executed envelope into the DA cache. If all required columns
+                    // are already present, this returns `AvailableEnvelope` and we import. Else
+                    // the envelope sits in the cache until columns complete the join.
+                    let availability = self
+                        .data_availability_checker
+                        .put_executed_envelope(pending)?;
+                    match availability {
+                        Availability::AvailableEnvelope(envelope) => {
+                            self.import_available_execution_payload_envelope(envelope).await
+                        }
+                        Availability::MissingComponents(root) => Ok(
+                            AvailabilityProcessingStatus::MissingComponents(block_slot, root),
+                        ),
+                        Availability::Available(_) => Err(EnvelopeError::InternalError(
+                            "Got block availability outcome from envelope insert".to_owned(),
+                        )),
+                    }
+                }
             }
         };
 
