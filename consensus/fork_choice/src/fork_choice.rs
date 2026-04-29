@@ -57,6 +57,11 @@ pub enum Error<T> {
         block_slot: Slot,
         state_slot: Slot,
     },
+    InvalidPayloadStatus {
+        block_slot: Slot,
+        block_root: Hash256,
+        payload_verification_status: PayloadVerificationStatus,
+    },
     MissingJustifiedBlock {
         justified_checkpoint: Checkpoint,
     },
@@ -223,6 +228,8 @@ pub enum PayloadVerificationStatus {
     Verified,
     /// An EL has not yet made a determination about the execution payload.
     Optimistic,
+    /// The block is either pre-merge-fork, or prior to the terminal PoW block.
+    Irrelevant,
 }
 
 impl PayloadVerificationStatus {
@@ -231,6 +238,7 @@ impl PayloadVerificationStatus {
         match self {
             PayloadVerificationStatus::Verified => false,
             PayloadVerificationStatus::Optimistic => true,
+            PayloadVerificationStatus::Irrelevant => false,
         }
     }
 }
@@ -323,14 +331,57 @@ pub enum AttestationFromBlock {
     False,
 }
 
+/// An execution block hash as carried by the canonical head and the cached fork-choice update
+/// parameters.
+///
+/// Pre-merge blocks have no execution payload, so we model their absence explicitly via the
+/// `PreMerge` variant. There is no method on this type that returns a zero hash; call sites
+/// that hit the Engine API wire boundary must pattern-match and decide for themselves whether
+/// sending zero is meaningful for that field (it is the spec sentinel for `safe`/`finalized`
+/// during the merge transition, but never for `head`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FcuHash {
+    /// The block has no execution payload (pre-merge / pre-terminal-PoW).
+    PreMerge,
+    /// The block has a real execution payload with the given block hash.
+    Hash(ExecutionBlockHash),
+}
+
+impl FcuHash {
+    /// Build from an `ExecutionStatus` without going through any zero-as-sentinel encoding:
+    /// `PreMerge` maps to `PreMerge`; `Valid`/`Optimistic`/`Invalid`/`PostGloas` carry their
+    /// real hash.
+    pub fn from_execution_status(status: &ExecutionStatus) -> Self {
+        match status {
+            ExecutionStatus::PreMerge(_) => Self::PreMerge,
+            ExecutionStatus::Valid(hash)
+            | ExecutionStatus::Optimistic(hash)
+            | ExecutionStatus::Invalid(hash)
+            | ExecutionStatus::PostGloas(hash) => Self::Hash(*hash),
+        }
+    }
+
+    pub fn is_pre_merge(self) -> bool {
+        matches!(self, Self::PreMerge)
+    }
+
+    /// Returns the hash if post-merge, else `None`.
+    pub fn hash(self) -> Option<ExecutionBlockHash> {
+        match self {
+            Self::PreMerge => None,
+            Self::Hash(hash) => Some(hash),
+        }
+    }
+}
+
 /// Parameters which are cached between calls to `ForkChoice::get_head`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForkchoiceUpdateParameters {
     /// The most recent result of running `ForkChoice::get_head`.
     pub head_root: Hash256,
-    pub head_hash: ExecutionBlockHash,
-    pub justified_hash: ExecutionBlockHash,
-    pub finalized_hash: ExecutionBlockHash,
+    pub head_hash: FcuHash,
+    pub justified_hash: FcuHash,
+    pub finalized_hash: FcuHash,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -405,21 +456,18 @@ where
 
         let (execution_status, execution_payload_parent_hash, execution_payload_block_hash) =
             if let Ok(signed_bid) = anchor_block.message().body().signed_execution_payload_bid() {
-                // Gloas: execution status is not used post-Gloas; payload validation
-                // is decoupled from beacon blocks.
+                // Gloas: payload model is decoupled from the beacon block; the EL hash flows
+                // through the bid.
                 (
-                    ExecutionStatus::Valid(signed_bid.message.block_hash),
+                    ExecutionStatus::PostGloas(signed_bid.message.block_hash),
                     Some(signed_bid.message.parent_block_hash),
                     Some(signed_bid.message.block_hash),
                 )
             } else if let Ok(execution_payload) = anchor_block.message().execution_payload() {
                 // Pre-Gloas forks: do not set payload hashes, they are only used post-Gloas.
                 if execution_payload.is_default_with_empty_roots() {
-                    (
-                        ExecutionStatus::Valid(ExecutionBlockHash::zero()),
-                        None,
-                        None,
-                    )
+                    // A default payload means the merge transition has not yet happened.
+                    (ExecutionStatus::pre_merge(), None, None)
                 } else {
                     // Assume that this payload is valid, since the anchor should be a
                     // trusted block and state.
@@ -431,11 +479,7 @@ where
                 }
             } else {
                 // Pre-merge: no execution payload at all.
-                (
-                    ExecutionStatus::Valid(ExecutionBlockHash::zero()),
-                    None,
-                    None,
-                )
+                (ExecutionStatus::pre_merge(), None, None)
             };
 
         // If the current slot is not provided, use the value that was last provided to the store.
@@ -880,15 +924,29 @@ where
         let execution_status = match block.body().execution_payload() {
             Ok(execution_payload) => {
                 let block_hash = execution_payload.block_hash();
-                match payload_verification_status {
-                    PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
-                    PayloadVerificationStatus::Optimistic => {
-                        ExecutionStatus::Optimistic(block_hash)
+                if block_hash == ExecutionBlockHash::zero() {
+                    // Post-merge-fork but pre-terminal-PoW block: nothing to verify.
+                    ExecutionStatus::pre_merge()
+                } else {
+                    match payload_verification_status {
+                        PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
+                        PayloadVerificationStatus::Optimistic => {
+                            ExecutionStatus::Optimistic(block_hash)
+                        }
+                        // It would be a logic error to declare a block irrelevant when it has
+                        // an execution payload with a non-zero block hash.
+                        PayloadVerificationStatus::Irrelevant => {
+                            return Err(Error::InvalidPayloadStatus {
+                                block_slot: block.slot(),
+                                block_root,
+                                payload_verification_status,
+                            });
+                        }
                     }
                 }
             }
             // Pre-Bellatrix blocks don't have an execution payload.
-            Err(_) => ExecutionStatus::Valid(ExecutionBlockHash::zero()),
+            Err(_) => ExecutionStatus::pre_merge(),
         };
 
         let (execution_payload_parent_hash, execution_payload_block_hash) =
@@ -1418,15 +1476,6 @@ where
         } else {
             None
         }
-    }
-
-    /// Returns the execution block hash for a block, if known.
-    pub fn get_block_execution_block_hash(
-        &self,
-        block_root: &Hash256,
-    ) -> Option<ExecutionBlockHash> {
-        self.get_block(block_root)
-            .map(|b| b.execution_status.block_hash())
     }
 
     /// Returns an `ExecutionStatus` if the block is known **and** a descendant of the finalized root.

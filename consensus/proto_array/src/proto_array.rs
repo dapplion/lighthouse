@@ -826,6 +826,10 @@ impl ProtoArray {
                     // We have reached a node that we already know is valid. No need to iterate further
                     // since we assume an ancestors have already been set to valid.
                     ExecutionStatus::Valid(_) => return Ok(()),
+                    // We have reached an irrelevant node, this node is prior to a terminal execution
+                    // block. There's no need to iterate further, it's impossible for this block to have
+                    // any relevant ancestors.
+                    ExecutionStatus::PreMerge(_) => return Ok(()),
                     // The block has an unknown status, set it to valid since any ancestor of a valid
                     // payload can be considered valid.
                     ExecutionStatus::Optimistic(payload_block_hash) => {
@@ -845,6 +849,9 @@ impl ProtoArray {
                             ancestor_payload_block_hash,
                         });
                     }
+                    // PostGloas is only synthesized for V29 nodes; it should never appear on a
+                    // V17 node. Treat as a no-op rather than panic.
+                    ExecutionStatus::PostGloas(_) => return Ok(()),
                 },
                 // Gloas nodes should not be marked valid by this function, which exists only
                 // for pre-Gloas fork choice.
@@ -911,7 +918,8 @@ impl ProtoArray {
             match node_execution_status {
                 Ok(ExecutionStatus::Valid(hash))
                 | Ok(ExecutionStatus::Invalid(hash))
-                | Ok(ExecutionStatus::Optimistic(hash)) => {
+                | Ok(ExecutionStatus::Optimistic(hash))
+                | Ok(ExecutionStatus::PostGloas(hash)) => {
                     // If we're no longer processing the `head_block_root` and the last valid
                     // ancestor is unknown, exit this loop and proceed to invalidate and
                     // descendants of `head_block_root`/`latest_valid_ancestor_root`.
@@ -927,7 +935,7 @@ impl ProtoArray {
                         break;
                     }
                 }
-                // V29 (Gloas) nodes don't have execution_status.
+                Ok(ExecutionStatus::PreMerge(_)) => break,
                 Err(_) => break,
             }
 
@@ -957,7 +965,12 @@ impl ProtoArray {
                     // The block is already invalid, but keep going backwards to ensure all ancestors
                     // are updated.
                     Ok(ExecutionStatus::Invalid(_)) => (),
-                    // V29 (Gloas) nodes don't have execution_status.
+                    // This block is pre-merge, therefore it has no execution status. Nor do its
+                    // ancestors.
+                    Ok(ExecutionStatus::PreMerge(_)) => break,
+                    // Post-Gloas verification is decoupled from beacon-block fork choice; this
+                    // pre-Gloas invalidation path doesn't apply.
+                    Ok(ExecutionStatus::PostGloas(_)) => break,
                     Err(_) => break,
                 }
             }
@@ -1011,7 +1024,14 @@ impl ProtoArray {
                             node.execution_status = ExecutionStatus::Invalid(hash)
                         }
                     }
-                    // V29 (Gloas) nodes don't have execution_status.
+                    Ok(ExecutionStatus::PreMerge(_)) => {
+                        return Err(Error::IrrelevantDescendant {
+                            block_root: node.root(),
+                        });
+                    }
+                    // Post-Gloas: payload model is decoupled; pre-Gloas descendant-invalidation
+                    // doesn't apply.
+                    Ok(ExecutionStatus::PostGloas(_)) => (),
                     Err(_) => (),
                 }
 
@@ -1695,7 +1715,8 @@ impl ProtoArray {
             .find(|node| {
                 node.execution_status()
                     .ok()
-                    .is_some_and(|execution_status| execution_status.block_hash() == *block_hash)
+                    .and_then(|execution_status| execution_status.block_hash())
+                    .is_some_and(|node_block_hash| node_block_hash == *block_hash)
             })
             .map(|node| node.root())
     }

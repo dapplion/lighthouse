@@ -85,7 +85,7 @@ use execution_layer::{
 };
 use fixed_bytes::FixedBytesExtended;
 use fork_choice::{
-    AttestationFromBlock, ExecutionStatus, ForkChoice, ForkchoiceUpdateParameters,
+    AttestationFromBlock, ExecutionStatus, FcuHash, ForkChoice, ForkchoiceUpdateParameters,
     InvalidationOperation, PayloadVerificationStatus, ResetPayloadStatuses,
 };
 use futures::channel::mpsc::Sender;
@@ -1833,7 +1833,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // pre-finalization.
             None => Err(Error::CannotAttestToFinalizedBlock { beacon_block_root }),
             // The attestation references a fully valid `beacon_block_root`.
-            Some(execution_status) if execution_status.is_valid() => Ok(attestation),
+            Some(execution_status) if execution_status.is_valid_or_pre_merge() => Ok(attestation),
             // The attestation references a block that has not been verified by an EL (i.e. it
             // is optimistic or invalid). Don't return the block, return an error instead.
             Some(execution_status) => Err(Error::HeadBlockNotFullyVerified {
@@ -1874,7 +1874,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // pre-finalization.
             None => Err(Error::SyncContributionDataReferencesFinalizedBlock { beacon_block_root }),
             // The contribution references a fully valid `beacon_block_root`.
-            Some(execution_status) if execution_status.is_valid() => Ok(contribution),
+            Some(execution_status) if execution_status.is_valid_or_pre_merge() => Ok(contribution),
             // The contribution references a block that has not been verified by an EL (i.e. it
             // is optimistic or invalid). Don't return the block, return an error instead.
             Some(execution_status) => Err(Error::HeadBlockNotFullyVerified {
@@ -2026,7 +2026,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .fork_choice_read_lock()
             .get_block_execution_status(&beacon_block_root)
         {
-            Some(execution_status) if execution_status.is_valid() => (),
+            Some(execution_status) if execution_status.is_valid_or_pre_merge() => (),
             Some(execution_status) => {
                 return Err(Error::HeadBlockNotFullyVerified {
                     beacon_block_root,
@@ -4879,14 +4879,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // TODO(gloas): V29 nodes don't carry execution_status. Need to source the
         // EL block hash from the bid's block_hash instead. Re-org is disabled for
         // Gloas for now, so this should never be reached for V29 nodes.
-        let parent_head_hash = info
+        let parent_execution_status = info
             .parent_node
             .execution_status()
-            .map_err(|_| Box::new(DoNotReOrg::GloasReOrgsDisabled.into()))?
-            .block_hash();
+            .map_err(|_| Box::new(DoNotReOrg::GloasReOrgsDisabled.into()))?;
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: info.parent_node.root(),
-            head_hash: parent_head_hash,
+            head_hash: FcuHash::from_execution_status(&parent_execution_status),
             justified_hash: canonical_forkchoice_params.justified_hash,
             finalized_hash: canonical_forkchoice_params.finalized_hash,
         };
@@ -6004,6 +6003,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         if let Some(event_handler) = &self.event_handler
             && event_handler.has_payload_attributes_subscribers()
             && let Some(parent_block_number) = pre_payload_attributes.parent_block_number
+            && let FcuHash::Hash(parent_block_hash) = forkchoice_update_params.head_hash
         {
             event_handler.register(EventKind::PayloadAttributes(ForkVersionedResponse {
                 data: SseExtendedPayloadAttributes {
@@ -6011,7 +6011,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     proposer_index: proposer,
                     parent_block_root: head_root,
                     parent_block_number,
-                    parent_block_hash: forkchoice_update_params.head_hash,
+                    parent_block_hash,
                     payload_attributes: payload_attributes.into(),
                 },
                 metadata: Default::default(),
@@ -6096,9 +6096,25 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let forkchoice_lock = execution_layer.execution_engine_forkchoice_lock().await;
 
         let head_block_root = params.head_root;
-        let head_hash = params.head_hash;
-        let justified_hash = params.justified_hash;
-        let finalized_hash = params.finalized_hash;
+        let head_hash = match params.head_hash {
+            FcuHash::Hash(h) => h,
+            FcuHash::PreMerge => {
+                // Pre-merge head: the EL has no concept of our head yet, so there is nothing
+                // useful to forkchoiceUpdate. Drop the lock and return.
+                drop(forkchoice_lock);
+                return Ok(());
+            }
+        };
+        // Engine API spec: zero is the documented sentinel for `safeBlockHash` /
+        // `finalizedBlockHash` when no such block is known yet (merge transition window).
+        let justified_hash = match params.justified_hash {
+            FcuHash::Hash(h) => h,
+            FcuHash::PreMerge => ExecutionBlockHash::zero(),
+        };
+        let finalized_hash = match params.finalized_hash {
+            FcuHash::Hash(h) => h,
+            FcuHash::PreMerge => ExecutionBlockHash::zero(),
+        };
 
         let forkchoice_updated_response = execution_layer
             .notify_forkchoice_updated(
@@ -6926,7 +6942,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// account the current slot when accounting for skips.
     pub fn is_healthy(&self, parent_root: &Hash256) -> Result<ChainHealth, Error> {
         let cached_head = self.canonical_head.cached_head();
-        if ExecutionBlockHash::zero() == cached_head.forkchoice_update_parameters().head_hash {
+        if cached_head
+            .forkchoice_update_parameters()
+            .head_hash
+            .is_pre_merge()
+        {
             return Ok(ChainHealth::PreMerge);
         }
 

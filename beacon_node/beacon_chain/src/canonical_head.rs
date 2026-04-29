@@ -43,8 +43,8 @@ use crate::{
 };
 use eth2::types::{EventKind, SseChainReorg, SseFinalizedCheckpoint, SseLateHead};
 use fork_choice::{
-    ExecutionStatus, ForkChoiceStore, ForkChoiceView, ForkchoiceUpdateParameters, ProtoBlock,
-    ResetPayloadStatuses,
+    ExecutionStatus, FcuHash, ForkChoiceStore, ForkChoiceView, ForkchoiceUpdateParameters,
+    ProtoBlock, ResetPayloadStatuses,
 };
 use itertools::process_results;
 
@@ -110,11 +110,11 @@ pub struct CachedHead<E: EthSpec> {
     /// The payload status of the head block, as determined by fork choice.
     head_payload_status: proto_array::PayloadStatus,
     /// The `execution_payload.block_hash` of the block at the head of the chain.
-    head_hash: ExecutionBlockHash,
+    head_hash: FcuHash,
     /// The `execution_payload.block_hash` of the justified block.
-    justified_hash: ExecutionBlockHash,
+    justified_hash: FcuHash,
     /// The `execution_payload.block_hash` of the finalized block.
-    finalized_hash: ExecutionBlockHash,
+    finalized_hash: FcuHash,
 }
 
 impl<E: EthSpec> CachedHead<E> {
@@ -1532,20 +1532,22 @@ fn forkchoice_update_parameters<T: BeaconChainTypes>(
     fork_choice: &BeaconForkChoice<T>,
     head_root: Hash256,
 ) -> Result<ForkchoiceUpdateParameters, Error> {
+    let lookup = |root: Hash256, missing_err: fn(Hash256) -> Error| -> Result<FcuHash, Error> {
+        fork_choice
+            .get_block(&root)
+            .map(|b| FcuHash::from_execution_status(&b.execution_status))
+            .ok_or_else(|| missing_err(root))
+    };
     Ok(ForkchoiceUpdateParameters {
         head_root,
-        head_hash: fork_choice
-            .get_block_execution_block_hash(&head_root)
-            .ok_or(Error::HeadBlockMissingFromForkChoice(head_root))?,
-        justified_hash: fork_choice
-            .get_block_execution_block_hash(&fork_choice.justified_checkpoint().root)
-            .ok_or(Error::BlockMissingFromForkChoice(
-                fork_choice.justified_checkpoint().root,
-            ))?,
-        finalized_hash: fork_choice
-            .get_block_execution_block_hash(&fork_choice.finalized_checkpoint().root)
-            .ok_or(Error::BlockMissingFromForkChoice(
-                fork_choice.finalized_checkpoint().root,
-            ))?,
+        head_hash: lookup(head_root, Error::HeadBlockMissingFromForkChoice)?,
+        justified_hash: lookup(
+            fork_choice.justified_checkpoint().root,
+            Error::BlockMissingFromForkChoice,
+        )?,
+        finalized_hash: lookup(
+            fork_choice.finalized_checkpoint().root,
+            Error::BlockMissingFromForkChoice,
+        )?,
     })
 }

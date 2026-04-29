@@ -3147,9 +3147,14 @@ impl ApiTester {
                     validity: execution_status,
                     execution_block_hash: node
                         .execution_status()
-                        .map(|s| s.block_hash().into_root())
-                        .or_else(|_| node.execution_payload_block_hash().map(|h| h.into_root()))
-                        .unwrap_or_default(),
+                        .ok()
+                        .and_then(|s| s.block_hash())
+                        .map(|h| h.into_root())
+                        .or_else(|| {
+                            node.execution_payload_block_hash()
+                                .ok()
+                                .map(|h| h.into_root())
+                        }),
                     extra_data: ForkChoiceExtraData {
                         target_root: node.target_root(),
                         justified_root: node.justified_checkpoint().root,

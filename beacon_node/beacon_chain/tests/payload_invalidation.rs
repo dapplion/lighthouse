@@ -279,7 +279,7 @@ impl InvalidPayloadRig {
 
                 match forkchoice_response {
                     Payload::Syncing => assert!(execution_status.is_strictly_optimistic()),
-                    Payload::Valid => assert!(execution_status.is_valid()),
+                    Payload::Valid => assert!(execution_status.is_valid_and_post_bellatrix()),
                     Payload::Invalid { .. } | Payload::InvalidBlockHash => unreachable!(),
                 }
 
@@ -556,7 +556,7 @@ async fn pre_finalized_latest_valid_hash() {
         let slot = Slot::new(i);
         let root = rig.block_root_at_slot(slot).unwrap();
         if slot == 1 {
-            assert!(rig.execution_status(root).is_valid());
+            assert!(rig.execution_status(root).is_valid_and_post_bellatrix());
         } else {
             assert!(rig.execution_status(root).is_strictly_optimistic());
         }
@@ -605,8 +605,10 @@ async fn latest_valid_hash_will_not_validate() {
 
         if slot > LATEST_VALID_SLOT {
             assert!(execution_status.is_invalid())
-        } else if slot <= 1 {
-            assert!(execution_status.is_valid())
+        } else if slot == 0 {
+            assert!(execution_status.is_pre_merge())
+        } else if slot == 1 {
+            assert!(execution_status.is_valid_and_post_bellatrix())
         } else {
             assert!(execution_status.is_strictly_optimistic())
         }
@@ -649,7 +651,7 @@ async fn latest_valid_hash_is_junk() {
         let slot = Slot::new(i);
         let root = rig.block_root_at_slot(slot).unwrap();
         if slot == 1 {
-            assert!(rig.execution_status(root).is_valid());
+            assert!(rig.execution_status(root).is_valid_and_post_bellatrix());
         } else {
             assert!(rig.execution_status(root).is_strictly_optimistic());
         }
@@ -743,9 +745,12 @@ async fn invalidates_all_descendants() {
         }
 
         let execution_status = rig.execution_status(root);
-        if slot <= 1 {
-            // Genesis and first slot were imported as valid.
-            assert!(execution_status.is_valid());
+        if slot == 0 {
+            // Genesis block is pre-bellatrix.
+            assert!(execution_status.is_pre_merge());
+        } else if slot == 1 {
+            // First slot was imported as valid.
+            assert!(execution_status.is_valid_and_post_bellatrix());
         } else if slot <= latest_valid_slot {
             // Blocks prior to and included the latest valid hash are not marked as valid.
             assert!(execution_status.is_strictly_optimistic());
@@ -840,9 +845,12 @@ async fn switches_heads() {
         }
 
         let execution_status = rig.execution_status(root);
-        if slot <= 1 {
-            // Genesis and first slot were imported as valid.
-            assert!(execution_status.is_valid());
+        if slot == 0 {
+            // Genesis block is pre-bellatrix.
+            assert!(execution_status.is_pre_merge());
+        } else if slot == 1 {
+            // First slot was imported as valid.
+            assert!(execution_status.is_valid_and_post_bellatrix());
         } else if slot <= latest_valid_slot {
             // Blocks prior to and included the latest valid hash are not marked as valid.
             assert!(execution_status.is_strictly_optimistic());
@@ -943,8 +951,8 @@ async fn manually_validate_child() {
 
     rig.validate_manually(child);
 
-    assert!(rig.execution_status(parent).is_valid());
-    assert!(rig.execution_status(child).is_valid());
+    assert!(rig.execution_status(parent).is_valid_and_post_bellatrix());
+    assert!(rig.execution_status(child).is_valid_and_post_bellatrix());
 }
 
 #[tokio::test]
@@ -963,7 +971,7 @@ async fn manually_validate_parent() {
 
     rig.validate_manually(parent);
 
-    assert!(rig.execution_status(parent).is_valid());
+    assert!(rig.execution_status(parent).is_valid_and_post_bellatrix());
     assert!(rig.execution_status(child).is_strictly_optimistic());
 }
 
@@ -1199,7 +1207,7 @@ async fn attesting_to_optimistic_head() {
 
     rig.validate_manually(root);
     assert!(
-        rig.execution_status(root).is_valid(),
+        rig.execution_status(root).is_valid_and_post_bellatrix(),
         "the head should no longer be optimistic"
     );
 
