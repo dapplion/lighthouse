@@ -14,6 +14,10 @@ pub enum Error {
     SszTypes(ssz_types::Error),
     MissingBlobs,
     MissingCustodyColumns,
+    /// The cache needs the block to extract bid commitments (Gloas) but the block is not yet
+    /// available locally. The caller should re-queue and retry once the block arrives via the
+    /// existing delayed-lookup machinery.
+    BlockUnknown(Hash256),
     BlobIndexInvalid(u64),
     DataColumnIndexInvalid(u64),
     StoreError(store::Error),
@@ -39,6 +43,7 @@ impl Error {
             Error::SszTypes(_)
             | Error::MissingBlobs
             | Error::MissingCustodyColumns
+            | Error::BlockUnknown(_)
             | Error::StoreError(_)
             | Error::DecodeError(_)
             | Error::Unexpected(_)

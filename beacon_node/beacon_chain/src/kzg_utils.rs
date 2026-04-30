@@ -48,12 +48,16 @@ pub fn validate_blob<E: EthSpec>(
     kzg.verify_blob_kzg_proof(kzg_blob, kzg_commitment, kzg_proof)
 }
 
-/// Validate a batch of full `DataColumnSidecar`s.
+/// Validate a batch of full `DataColumnSidecar`s against an external commitment set.
 ///
-/// Full columns have all cells present, so we iterate over all cells directly.
+/// All columns in the batch must belong to the same block. `kzg_commitments` is supplied by the
+/// caller — for Fulu sidecars it can be pulled from any column in the batch (they all share the
+/// same commitments by construction); for Gloas it must come from the block's
+/// `signed_execution_payload_bid` via `SignedBeaconBlock::payload_kzg_commitments`.
 pub fn validate_full_data_columns<'a, E: EthSpec>(
     kzg: &Kzg,
     data_column_iter: impl Iterator<Item = &'a Arc<DataColumnSidecar<E>>>,
+    kzg_commitments: &[KzgCommitment],
 ) -> Result<(), (Option<u64>, KzgError)> {
     let mut cells = Vec::new();
     let mut proofs = Vec::new();
@@ -67,6 +71,17 @@ pub fn validate_full_data_columns<'a, E: EthSpec>(
             return Err((Some(col_index), KzgError::KzgVerificationFailed));
         }
 
+        if data_column.column().len() != kzg_commitments.len() {
+            return Err((
+                Some(col_index),
+                KzgError::InconsistentArrayLength(format!(
+                    "column has {} cells but block has {} commitments",
+                    data_column.column().len(),
+                    kzg_commitments.len(),
+                )),
+            ));
+        }
+
         for cell in data_column.column() {
             cells.push(ssz_cell_to_crypto_cell::<E>(cell).map_err(|e| (Some(col_index), e))?);
             column_indices.push(col_index);
@@ -75,20 +90,6 @@ pub fn validate_full_data_columns<'a, E: EthSpec>(
         for &proof in data_column.kzg_proofs() {
             proofs.push(proof.0);
         }
-
-        // In Gloas, commitments come from the block's ExecutionPayloadBid, not the sidecar.
-        // This function requires Fulu sidecars with embedded commitments.
-        let kzg_commitments = match data_column.as_ref() {
-            DataColumnSidecar::Fulu(dc) => &dc.kzg_commitments,
-            DataColumnSidecar::Gloas(_) => {
-                return Err((
-                    Some(col_index),
-                    KzgError::InconsistentArrayLength(
-                        "Gloas data columns require commitments from block".to_string(),
-                    ),
-                ));
-            }
-        };
 
         for &commitment in kzg_commitments.iter() {
             commitments.push(commitment.0);
@@ -764,6 +765,7 @@ mod test {
     use eth2::types::BlobsBundle;
     use execution_layer::test_utils::generate_blobs;
     use kzg::{Kzg, KzgCommitment, trusted_setup::get_trusted_setup};
+    use types::DataColumnSidecar;
     use types::{
         BeaconBlock, BeaconBlockFulu, BlobsList, ChainSpec, EmptyBlock, EthSpec, ForkName,
         FullPayload, Hash256, KzgProofs, MainnetEthSpec, SignedBeaconBlock, Slot,
@@ -802,7 +804,12 @@ mod test {
             blobs_to_data_column_sidecars(&blob_refs, proofs.to_vec(), &signed_block, kzg, spec)
                 .unwrap();
 
-        let result = validate_full_data_columns(kzg, column_sidecars.iter());
+        let kzg_commitments: Vec<KzgCommitment> = match column_sidecars.first().map(|c| c.as_ref())
+        {
+            Some(DataColumnSidecar::Fulu(c)) => c.kzg_commitments.iter().copied().collect(),
+            _ => panic!("expected Fulu column"),
+        };
+        let result = validate_full_data_columns(kzg, column_sidecars.iter(), &kzg_commitments);
         assert!(result.is_ok());
     }
 

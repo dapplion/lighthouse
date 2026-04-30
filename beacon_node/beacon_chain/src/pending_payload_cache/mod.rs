@@ -241,6 +241,25 @@ impl<T: BeaconChainTypes> PendingPayloadCache<T> {
         write_lock.get_or_insert_mut(block_root, || PendingComponents::empty(block_root, block));
     }
 
+    /// Look up the bid commitments for a block already known to the cache.
+    /// Returns `BlockUnknown` if the block hasn't been registered yet (caller should re-queue).
+    fn payload_kzg_commitments(
+        &self,
+        block_root: &Hash256,
+    ) -> Result<Vec<types::KzgCommitment>, AvailabilityCheckError> {
+        let block = self
+            .peek_pending_components(block_root, |c| c.map(|c| c.block.clone()))
+            .ok_or(AvailabilityCheckError::BlockUnknown(*block_root))?;
+        block
+            .payload_kzg_commitments()
+            .map(|c| c.iter().copied().collect())
+            .map_err(|_| {
+                AvailabilityCheckError::Unexpected(
+                    "block has no kzg commitments (pre-Deneb fork in payload cache?)".to_string(),
+                )
+            })
+    }
+
     /// Perform KZG verification on RPC custody columns and insert them into the cache.
     /// After insertion check if the envelope becomes available.
     #[instrument(skip_all, level = "trace")]
@@ -250,9 +269,14 @@ impl<T: BeaconChainTypes> PendingPayloadCache<T> {
         slot: Slot,
         custody_columns: DataColumnSidecarList<T::EthSpec>,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
-        let kzg_verified_columns =
-            KzgVerifiedDataColumn::from_batch_with_scoring(custody_columns, &self.kzg)
-                .map_err(AvailabilityCheckError::InvalidColumn)?;
+        // Gloas commitments live in the bid, not the column. Resolve from the cached block.
+        let kzg_commitments = self.payload_kzg_commitments(&block_root)?;
+        let kzg_verified_columns = KzgVerifiedDataColumn::from_batch_with_scoring(
+            custody_columns,
+            &kzg_commitments,
+            &self.kzg,
+        )
+        .map_err(AvailabilityCheckError::InvalidColumn)?;
 
         let epoch = slot.epoch(T::EthSpec::slots_per_epoch());
         let sampling_columns = self
@@ -719,8 +743,11 @@ mod data_availability_checker_tests {
         let chain_db_path = tempdir().expect("should get temp dir");
         let harness = get_gloas_chain::<E>(&chain_db_path).await;
         let spec = harness.spec.clone();
+        // Use Supernode for test simplicity so every column index is in the sampling set.
+        // Fullnode would filter out columns by index in `put_rpc_custody_columns`, masking
+        // what the test is trying to assert.
         let custody_context = Arc::new(CustodyContext::<E>::new(
-            NodeCustodyType::Fullnode,
+            NodeCustodyType::Supernode,
             generate_data_column_indices_rand_order::<E>(),
             &spec,
         ));
@@ -1113,9 +1140,10 @@ mod data_availability_checker_tests {
 
         assert_eq!(cache.block_cache_size(), 1);
 
-        // slot=0 → epoch=0 < cutoff=100, should prune
+        // The random block has an arbitrary slot, so use a cutoff guaranteed to be greater than
+        // any epoch the generator could produce.
         cache
-            .do_maintenance(Epoch::new(100))
+            .do_maintenance(Epoch::new(u64::MAX))
             .expect("maintenance should succeed");
 
         assert_eq!(cache.block_cache_size(), 0);

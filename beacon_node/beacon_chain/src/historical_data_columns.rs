@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::{
     BeaconChain, BeaconChainError, BeaconChainTypes,
@@ -117,8 +118,27 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 return Err(HistoricalDataColumnError::IndexOutOfBounds);
             }
         } else {
-            verify_kzg_for_data_column_list(historical_data_column_sidecar_list.iter(), &self.kzg)
-                .map_err(|_| HistoricalDataColumnError::InvalidKzg)?;
+            // Group by block: each block has its own commitments. Verify per-block.
+            let mut by_block: std::collections::HashMap<
+                types::Hash256,
+                Vec<&Arc<types::DataColumnSidecar<T::EthSpec>>>,
+            > = std::collections::HashMap::new();
+            for col in historical_data_column_sidecar_list.iter() {
+                by_block.entry(col.block_root()).or_default().push(col);
+            }
+            for (_, columns) in by_block {
+                let kzg_commitments: Vec<types::KzgCommitment> =
+                    match columns.first().map(|c| c.as_ref()) {
+                        Some(types::DataColumnSidecar::Fulu(c)) => {
+                            c.kzg_commitments.iter().copied().collect()
+                        }
+                        Some(types::DataColumnSidecar::Gloas(_)) | None => {
+                            return Err(HistoricalDataColumnError::InvalidKzg);
+                        }
+                    };
+                verify_kzg_for_data_column_list(columns.into_iter(), &kzg_commitments, &self.kzg)
+                    .map_err(|_| HistoricalDataColumnError::InvalidKzg)?;
+            }
 
             self.store.blobs_db.do_atomically(ops)?;
         }

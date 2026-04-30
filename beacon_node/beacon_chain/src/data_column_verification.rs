@@ -11,7 +11,7 @@ use crate::observed_data_sidecars::{
 use crate::{BeaconChain, BeaconChainError, BeaconChainTypes, metrics};
 use educe::Educe;
 use fork_choice::ProtoBlock;
-use kzg::{Error as KzgError, Kzg};
+use kzg::{Error as KzgError, Kzg, KzgCommitment};
 use proto_array::Block;
 use slot_clock::{SlotClock, timestamp_now};
 use ssz_derive::Encode;
@@ -426,11 +426,16 @@ impl<E: EthSpec> KzgVerifiedDataColumn<E> {
         }
     }
 
+    /// Batch-verify a list of full data columns against `kzg_commitments`.
+    ///
+    /// All columns must belong to the same block, whose commitments the caller has resolved
+    /// (Fulu: from any column; Gloas: from `block.payload_kzg_commitments()`).
     pub fn from_batch_with_scoring(
         data_columns: Vec<Arc<DataColumnSidecar<E>>>,
+        kzg_commitments: &[KzgCommitment],
         kzg: &Kzg,
     ) -> Result<Vec<Self>, (Option<ColumnIndex>, KzgError)> {
-        verify_kzg_for_data_column_list(data_columns.iter(), kzg)?;
+        verify_kzg_for_data_column_list(data_columns.iter(), kzg_commitments, kzg)?;
         Ok(data_columns
             .into_iter()
             .map(|column| Self {
@@ -830,19 +835,19 @@ impl<E: EthSpec> KzgVerifiedCustodyPartialDataColumn<E> {
 ///
 /// Returns an error if the kzg verification check fails.
 #[instrument(skip_all, level = "debug")]
+/// KZG-verify a single data column against caller-supplied commitments.
+///
+/// Callers extract `kzg_commitments` from the right place for the fork:
+/// - Fulu: `data_column.kzg_commitments()` (the field lives on the sidecar).
+/// - Gloas: `block.payload_kzg_commitments()` (commitments live in the bid).
 pub fn verify_kzg_for_data_column<E: EthSpec>(
     data_column: Arc<DataColumnSidecar<E>>,
     cells_to_verify: PartialDataColumnSidecarRef<E>,
+    kzg_commitments: &[KzgCommitment],
     kzg: &Kzg,
     seen_timestamp: Duration,
 ) -> Result<KzgVerifiedDataColumn<E>, (Option<ColumnIndex>, KzgError)> {
     let _timer = metrics::start_timer(&metrics::KZG_VERIFICATION_DATA_COLUMN_SINGLE_TIMES);
-    let Ok(kzg_commitments) = data_column.kzg_commitments() else {
-        return Err((
-            Some(*data_column.index()),
-            KzgError::InconsistentArrayLength("todo(gloas)".to_string()),
-        ));
-    };
     validate_partial_data_columns(
         kzg,
         iter::once((*data_column.index(), cells_to_verify)),
@@ -885,13 +890,14 @@ pub fn verify_kzg_for_partial_data_column<E: EthSpec>(
 /// in a loop since this function kzg verifies a list of data columns more efficiently.
 pub fn verify_kzg_for_data_column_list<'a, E: EthSpec, I>(
     data_column_iter: I,
+    kzg_commitments: &[KzgCommitment],
     kzg: &'a Kzg,
 ) -> Result<(), (Option<ColumnIndex>, KzgError)>
 where
     I: Iterator<Item = &'a Arc<DataColumnSidecar<E>>> + Clone,
 {
     let _timer = metrics::start_timer(&metrics::KZG_VERIFICATION_DATA_COLUMN_BATCH_TIMES);
-    validate_full_data_columns(kzg, data_column_iter)?;
+    validate_full_data_columns(kzg, data_column_iter, kzg_commitments)?;
     Ok(())
 }
 
@@ -952,6 +958,7 @@ pub fn validate_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes, O: Obse
     let kzg_verified_data_column = verify_kzg_for_data_column(
         data_column.clone(),
         cells_to_kzg_verify,
+        &data_column_fulu.kzg_commitments,
         kzg,
         seen_timestamp,
     )

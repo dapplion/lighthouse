@@ -21,8 +21,9 @@ use tracing::{debug, error, instrument};
 use types::data::{BlobIdentifier, FixedBlobSidecarList, PartialDataColumn};
 use types::{
     BlobSidecar, BlobSidecarList, BlockImportSource, ChainSpec, DataColumnSidecar,
-    DataColumnSidecarList, Epoch, EthSpec, ForkName, Hash256, PartialDataColumnSidecarError,
-    PartialDataColumnSidecarRef, SignedBeaconBlock, Slot, new_non_zero_usize,
+    DataColumnSidecarList, Epoch, EthSpec, ForkName, Hash256, KzgCommitment,
+    PartialDataColumnSidecarError, PartialDataColumnSidecarRef, SignedBeaconBlock, Slot,
+    new_non_zero_usize,
 };
 
 mod error;
@@ -340,10 +341,25 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         slot: Slot,
         custody_columns: DataColumnSidecarList<T::EthSpec>,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
+        // Pre-Gloas: the v1 cache only handles Fulu columns, which carry commitments inline.
+        // Pull commitments from any column in the batch (they all share by construction).
+        let kzg_commitments: Vec<KzgCommitment> = match custody_columns.first().map(|c| c.as_ref())
+        {
+            Some(DataColumnSidecar::Fulu(c)) => c.kzg_commitments.iter().copied().collect(),
+            Some(DataColumnSidecar::Gloas(_)) => {
+                return Err(AvailabilityCheckError::Unexpected(
+                    "v1 data availability checker received a Gloas column".to_string(),
+                ));
+            }
+            None => return Ok(Availability::MissingComponents(block_root)),
+        };
         // Attributes fault to the specific peer that sent an invalid column
-        let kzg_verified_columns =
-            KzgVerifiedDataColumn::from_batch_with_scoring(custody_columns, &self.kzg)
-                .map_err(AvailabilityCheckError::InvalidColumn)?;
+        let kzg_verified_columns = KzgVerifiedDataColumn::from_batch_with_scoring(
+            custody_columns,
+            &kzg_commitments,
+            &self.kzg,
+        )
+        .map_err(AvailabilityCheckError::InvalidColumn)?;
 
         // Filter out columns that aren't required for custody for this slot
         // This is required because `data_columns_by_root` requests the **latest** CGC that _may_
@@ -490,7 +506,8 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
             AvailableBlockData::Blobs(blobs) => verify_kzg_for_blob_list(blobs.iter(), &self.kzg)
                 .map_err(AvailabilityCheckError::InvalidBlobs),
             AvailableBlockData::DataColumns(columns) => {
-                verify_kzg_for_data_column_list(columns.iter(), &self.kzg)
+                let kzg_commitments = fulu_commitments_for_batch(columns)?;
+                verify_kzg_for_data_column_list(columns.iter(), &kzg_commitments, &self.kzg)
                     .map_err(AvailabilityCheckError::InvalidColumn)
             }
         }
@@ -504,24 +521,23 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         available_blocks: &[AvailableBlock<T::EthSpec>],
     ) -> Result<(), AvailabilityCheckError> {
         let mut all_blobs = Vec::new();
-        let mut all_data_columns = Vec::new();
 
         for available_block in available_blocks {
-            match available_block.data().to_owned() {
+            match available_block.data() {
                 AvailableBlockData::NoData => {}
-                AvailableBlockData::Blobs(blobs) => all_blobs.extend(blobs),
-                AvailableBlockData::DataColumns(columns) => all_data_columns.extend(columns),
+                AvailableBlockData::Blobs(blobs) => all_blobs.extend(blobs.iter().cloned()),
+                AvailableBlockData::DataColumns(columns) => {
+                    // Per-block: each block has its own commitments. Loop and verify.
+                    let kzg_commitments = fulu_commitments_for_batch(columns)?;
+                    verify_kzg_for_data_column_list(columns.iter(), &kzg_commitments, &self.kzg)
+                        .map_err(AvailabilityCheckError::InvalidColumn)?;
+                }
             }
         }
 
         if !all_blobs.is_empty() {
             verify_kzg_for_blob_list(all_blobs.iter(), &self.kzg)
                 .map_err(AvailabilityCheckError::InvalidBlobs)?;
-        }
-
-        if !all_data_columns.is_empty() {
-            verify_kzg_for_data_column_list(all_data_columns.iter(), &self.kzg)
-                .map_err(AvailabilityCheckError::InvalidColumn)?;
         }
 
         Ok(())
@@ -682,6 +698,22 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
 /// Helper struct to group data availability checker metrics.
 pub struct DataAvailabilityCheckerMetrics {
     pub block_cache_size: usize,
+}
+
+/// Extract KZG commitments from a list of Fulu data column sidecars (all from the same block).
+/// Errors if the batch is empty or contains a non-Fulu variant — the v1 cache only handles Fulu.
+fn fulu_commitments_for_batch<E: EthSpec>(
+    columns: &[Arc<DataColumnSidecar<E>>],
+) -> Result<Vec<KzgCommitment>, AvailabilityCheckError> {
+    let Some(first) = columns.first() else {
+        return Ok(Vec::new());
+    };
+    match first.as_ref() {
+        DataColumnSidecar::Fulu(c) => Ok(c.kzg_commitments.iter().copied().collect()),
+        DataColumnSidecar::Gloas(_) => Err(AvailabilityCheckError::Unexpected(
+            "v1 data availability checker received a Gloas column".to_string(),
+        )),
+    }
 }
 
 pub fn start_availability_cache_maintenance_service<T: BeaconChainTypes>(

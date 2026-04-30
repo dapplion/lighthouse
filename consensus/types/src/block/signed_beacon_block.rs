@@ -31,7 +31,7 @@ use crate::{
         FullPayloadCapella, FullPayloadDeneb, FullPayloadElectra, FullPayloadFulu,
     },
     fork::{Fork, ForkName, ForkVersionDecode, InconsistentFork, map_fork_name},
-    kzg_ext::format_kzg_commitments,
+    kzg_ext::{KzgCommitments, format_kzg_commitments},
     state::BeaconStateError,
     test_utils::TestRandom,
 };
@@ -350,18 +350,22 @@ impl<E: EthSpec, Payload: AbstractExecPayload<E>> SignedBeaconBlock<E, Payload> 
         self.message().tree_hash_root()
     }
 
+    /// KZG commitments used for verifying data columns / blobs against this block.
+    ///
+    /// - Pre-Gloas (Deneb..Fulu): commitments live directly in the block body.
+    /// - Gloas: commitments live in the embedded `signed_execution_payload_bid`.
+    /// - Pre-Deneb: returns `Err` (no DA, no commitments).
+    pub fn payload_kzg_commitments(&self) -> Result<&KzgCommitments<E>, BeaconStateError> {
+        self.message().body().blob_kzg_commitments().or_else(|_| {
+            self.message()
+                .body()
+                .signed_execution_payload_bid()
+                .map(|bid| &bid.message.blob_kzg_commitments)
+        })
+    }
+
     pub fn num_expected_blobs(&self) -> usize {
-        self.message()
-            .body()
-            .blob_kzg_commitments()
-            .or_else(|_| {
-                self.message()
-                    .body()
-                    .signed_execution_payload_bid()
-                    .map(|bid| &bid.message.blob_kzg_commitments)
-            })
-            .map(|c| c.len())
-            .unwrap_or(0)
+        self.payload_kzg_commitments().map(|c| c.len()).unwrap_or(0)
     }
 
     /// Used for displaying commitments in logs.
