@@ -1012,7 +1012,9 @@ pub fn validate_data_column_sidecar_for_gossip_fulu<T: BeaconChainTypes, O: Obse
             MissingCellsError::MismatchesCachedColumn => {
                 GossipDataColumnError::MismatchesCachedColumn
             }
-            MissingCellsError::UnexpectedError(_) => todo!("handle unexpected error"),
+            MissingCellsError::UnexpectedError(e) => GossipDataColumnError::BeaconChainError(
+                Box::new(BeaconChainError::PartialDataColumnSidecarError(e)),
+            ),
         })?
     else {
         // Observe this data column so we don't process it again.
@@ -1228,7 +1230,15 @@ pub fn validate_partial_data_column_sidecar_for_gossip<T: BeaconChainTypes>(
                 header,
             };
         }
-        Err(MissingCellsError::UnexpectedError(e)) => todo!("handle unexpected error {:?}", e),
+        Err(MissingCellsError::UnexpectedError(e)) => {
+            return PartialColumnVerificationResult::ErrWithValidHeader {
+                err: GossipDataColumnError::BeaconChainError(Box::new(
+                    BeaconChainError::PartialDataColumnSidecarError(e),
+                ))
+                .into(),
+                header,
+            };
+        }
     };
 
     // We do not have to check block related data here, as we create the verifiable column from
@@ -1390,7 +1400,9 @@ fn missing_cells_for_column_sidecar<'a, T: BeaconChainTypes>(
 
     result.map_err(|err| match err {
         MissingCellsError::MismatchesCachedColumn => GossipDataColumnError::MismatchesCachedColumn,
-        MissingCellsError::UnexpectedError(_) => todo!("handle unexpected error"),
+        MissingCellsError::UnexpectedError(e) => GossipDataColumnError::BeaconChainError(Box::new(
+            BeaconChainError::PartialDataColumnSidecarError(e),
+        )),
     })
 }
 

@@ -59,6 +59,7 @@ pub enum BeaconChainError {
     EpochCacheError(EpochCacheError),
     DBInconsistent(String),
     DBError(store::Error),
+    PartialDataColumnSidecarError(PartialDataColumnSidecarError),
     ForkChoiceError(ForkChoiceError),
     ForkChoiceStoreError(ForkChoiceStoreError),
     MissingBeaconBlock(Hash256),
