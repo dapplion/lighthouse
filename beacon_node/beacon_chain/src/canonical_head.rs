@@ -588,10 +588,21 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // There was an error recomputing the head.
             Ok(Err(e)) => {
                 metrics::inc_counter(&metrics::FORK_CHOICE_ERRORS);
-                error!(
-                    error = ?e,
-                    "Error whist recomputing head"
-                );
+                // `MissingExecutionPayloadEnvelope` is transient: it means fork choice has
+                // marked the payload as received but `import_execution_payload_envelope` has
+                // not yet committed the envelope to the store. The next recompute_head call
+                // (e.g. on the next slot tick or signal) will succeed.
+                if let Error::MissingExecutionPayloadEnvelope(block_root) = &e {
+                    debug!(
+                        ?block_root,
+                        "Skipping head update: envelope DB write not yet committed"
+                    );
+                } else {
+                    error!(
+                        error = ?e,
+                        "Error whist recomputing head"
+                    );
+                }
             }
             // There was an error spawning the task.
             Err(e) => {
