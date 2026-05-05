@@ -150,6 +150,17 @@ pub async fn publish_block<T: BeaconChainTypes, B: IntoGossipVerifiedBlock<T>>(
     let slot = block.message().slot();
     let sender_clone = network_tx.clone();
 
+    // For Gloas, the column-build path calls `load_gloas_payload_bid(block_root)` which checks
+    // pending_payload_cache → early-attester → store. None of those have the bid yet for a block
+    // we're about to publish (the bid is only inserted later via `process_block` →
+    // `import_block`). Without this seed, the column-build silently swallows
+    // `BlockRootUnknown` and ships an empty column list to the network.
+    if let Ok(bid) = block.message().body().signed_execution_payload_bid() {
+        chain
+            .pending_payload_cache
+            .insert_bid(block_root, Arc::new(bid.clone()));
+    }
+
     let build_sidecar_task_handle =
         spawn_build_data_sidecar_task(chain.clone(), block.clone(), unverified_blobs)?;
 
