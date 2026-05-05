@@ -1354,9 +1354,34 @@ impl<T: BeaconChainTypes> IntoExecutionPendingBlock<T> for LookupBlock<T::EthSpe
         let block_root = check_block_relevancy(self.as_block(), block_root, chain)
             .map_err(|e| BlockSlashInfo::SignatureNotChecked(self.signed_block_header(), e))?;
 
-        let maybe_available_block = MaybeAvailableBlock::AvailabilityPending {
-            block_root,
-            block: self.block_cloned(),
+        let block = self.block_cloned();
+        // Mirror the gossip path: Gloas blocks are themselves immediately available; their
+        // payload availability is tracked by `pending_payload_cache`, not the legacy
+        // `data_availability_checker`. Without this branch a Gloas block fetched via
+        // single-block lookup is wrapped as `AvailabilityPending` and routed to the legacy
+        // DAC, where it stays `MissingComponents` forever (the legacy DAC waits for columns
+        // verified against `block.blob_kzg_commitments`, which Gloas blocks don't have).
+        let maybe_available_block = if chain
+            .spec
+            .fork_name_at_slot::<T::EthSpec>(block.slot())
+            .gloas_enabled()
+        {
+            MaybeAvailableBlock::Available(
+                AvailableBlock::new(
+                    block,
+                    AvailableBlockData::NoData,
+                    &chain.data_availability_checker,
+                    chain.spec.clone(),
+                )
+                .map_err(|e| {
+                    BlockSlashInfo::SignatureNotChecked(
+                        self.signed_block_header(),
+                        BlockError::AvailabilityCheck(e),
+                    )
+                })?,
+            )
+        } else {
+            MaybeAvailableBlock::AvailabilityPending { block_root, block }
         };
 
         SignatureVerifiedBlock::check_slashable(maybe_available_block, block_root, chain)?
