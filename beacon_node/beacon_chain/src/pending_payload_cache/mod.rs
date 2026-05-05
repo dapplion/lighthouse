@@ -425,8 +425,24 @@ impl<T: BeaconChainTypes> PendingPayloadCache<T> {
         let mut write_lock = self.availability_cache.write();
 
         {
-            let pending_components = write_lock
-                .get_or_insert_mut(block_root, || PendingComponents::new(block_root, bid));
+            let pending_components = write_lock.get_or_insert_mut(block_root, || {
+                PendingComponents::new(block_root, bid.clone())
+            });
+            // Defence-in-depth: the bid in the cache should be canonical (only `insert_bid`
+            // creates new entries, called from the consensus-verified block-import path).
+            // If a future code path leaks a non-canonical bid, KZG verification of subsequent
+            // columns/envelopes would silently use the stale commitments. Surface the
+            // mismatch loudly so it doesn't go unnoticed.
+            if pending_components.bid.message.blob_kzg_commitments
+                != bid.message.blob_kzg_commitments
+            {
+                error!(
+                    ?block_root,
+                    cached_commitments = pending_components.bid.message.blob_kzg_commitments.len(),
+                    incoming_commitments = bid.message.blob_kzg_commitments.len(),
+                    "Cached bid commitments differ from incoming bid; using cached"
+                );
+            }
             update_fn(pending_components)
         }
 
