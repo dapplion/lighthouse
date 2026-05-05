@@ -97,11 +97,19 @@ impl<E: EthSpec> PendingComponents<E> {
 
     // TODO(gloas): merge partial columns
 
-    /// Inserts an executed payload envelope into the cache.
+    /// Inserts an executed payload envelope into the cache. First-writer-wins: a second call
+    /// for the same `block_root` is ignored. The duplicate-cache guard upstream
+    /// (gossip path) and the fork-choice `is_payload_received` check (import path) ensure we
+    /// shouldn't get here twice for the same envelope, but defending against silent overwrite
+    /// is cheap and prevents a builder-equivocation attack from swapping the cached
+    /// `payload_verification_outcome`.
     pub fn insert_executed_payload_envelope(
         &mut self,
         envelope: AvailabilityPendingExecutedEnvelope<E>,
     ) {
+        if self.envelope.is_some() {
+            return;
+        }
         self.envelope = Some(envelope);
     }
 

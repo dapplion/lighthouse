@@ -3751,6 +3751,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         message_id: MessageId,
         peer_id: PeerId,
         envelope: Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>,
+        duplicate_cache: DuplicateCache,
         seen_timestamp: Duration,
     ) {
         if let Some(gossip_verified_envelope) = self
@@ -3766,15 +3767,22 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
 
             Span::current().record("beacon_block_root", beacon_block_root.to_string());
 
-            // TODO(gloas) in process_gossip_block here we check_and_insert on the duplicate cache
-            // before calling gossip_verified_block. We need this to ensure we dont try to execute the
-            // payload multiple times.
-
-            self.process_gossip_verified_execution_payload_envelope(
-                peer_id,
-                gossip_verified_envelope,
-            )
-            .await;
+            // Mirror process_gossip_block: gate execution behind the duplicate cache so two
+            // concurrent gossip deliveries of the same envelope can't both call
+            // engine_newPayload on the EL.
+            if let Some(handle) = duplicate_cache.check_and_insert(beacon_block_root) {
+                self.process_gossip_verified_execution_payload_envelope(
+                    peer_id,
+                    gossip_verified_envelope,
+                )
+                .await;
+                drop(handle);
+            } else {
+                debug!(
+                    %beacon_block_root,
+                    "Envelope is already being imported"
+                );
+            }
         }
     }
 

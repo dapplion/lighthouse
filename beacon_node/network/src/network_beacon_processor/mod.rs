@@ -461,11 +461,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     ) -> Result<(), Error<T::EthSpec>> {
         let processor = self.clone();
         let process_fn = async move {
+            let duplicate_cache = processor.duplicate_cache.clone();
             processor
                 .process_gossip_execution_payload_envelope(
                     message_id,
                     peer_id,
                     Arc::new(*execution_payload),
+                    duplicate_cache,
                     seen_timestamp,
                 )
                 .await
