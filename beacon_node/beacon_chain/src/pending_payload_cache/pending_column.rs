@@ -3,25 +3,21 @@ use ssz_types::VariableList;
 use std::sync::Arc;
 use types::{Cell, ColumnIndex, DataColumnSidecar, DataColumnSidecarGloas, EthSpec, Hash256, Slot};
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PendingColumn<E: EthSpec> {
+    /// Cells indexed by their position within the column. Grown on demand by `insert` so the
+    /// caller doesn't have to know the blob count up front.
     cells: Vec<Option<(Cell<E>, KzgProof)>>,
 }
 
 impl<E: EthSpec> PendingColumn<E> {
-    /// Allocate a `PendingColumn` whose `cells` vec has space for `blob_count` entries, all
-    /// initialised to `None`. Required so that `insert(idx, ...)` can write into `cells[idx]`.
-    pub fn new_with_capacity(blob_count: usize) -> Self {
-        Self {
-            cells: vec![None; blob_count],
-        }
-    }
-
     pub fn insert(&mut self, index: usize, cell: &Cell<E>, proof: &KzgProof) {
-        if let Some(existing_cell) = self.cells.get_mut(index)
-            && existing_cell.is_none()
-        {
-            *existing_cell = Some((cell.clone(), *proof));
+        if index >= self.cells.len() {
+            self.cells.resize(index + 1, None);
+        }
+        let slot = &mut self.cells[index];
+        if slot.is_none() {
+            *slot = Some((cell.clone(), *proof));
         }
     }
 
@@ -33,7 +29,7 @@ impl<E: EthSpec> PendingColumn<E> {
     }
 
     pub fn is_complete(&self, blob_count: usize) -> bool {
-        self.cells.len() == blob_count && self.cells.iter().all(|cell| cell.is_some())
+        self.cells.len() >= blob_count && self.cells[..blob_count].iter().all(Option::is_some)
     }
 
     /// Build a `DataColumnSidecar` from the cached cells.
@@ -46,12 +42,17 @@ impl<E: EthSpec> PendingColumn<E> {
         index: ColumnIndex,
         slot: Slot,
         beacon_block_root: Hash256,
+        blob_count: usize,
     ) -> Result<Arc<DataColumnSidecar<E>>, PendingColumnError> {
-        let mut column = Vec::with_capacity(self.cells.len());
-        let mut kzg_proofs = Vec::with_capacity(self.cells.len());
+        let mut column = Vec::with_capacity(blob_count);
+        let mut kzg_proofs = Vec::with_capacity(blob_count);
 
-        for cell in self.cells.iter() {
-            let (cell, proof) = cell.as_ref().ok_or(PendingColumnError::IncompleteColumn)?;
+        for entry in self
+            .cells
+            .get(..blob_count)
+            .ok_or(PendingColumnError::IncompleteColumn)?
+        {
+            let (cell, proof) = entry.as_ref().ok_or(PendingColumnError::IncompleteColumn)?;
             // TODO(gloas): we likely want to go and arc all cells
             column.push(cell.clone());
             kzg_proofs.push(*proof);
