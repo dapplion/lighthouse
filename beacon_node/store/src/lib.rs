@@ -21,7 +21,6 @@ pub mod metadata;
 pub mod metrics;
 pub mod reconstruct;
 pub mod state_cache;
-pub mod static_blobs;
 pub mod static_cold;
 
 pub mod database;
@@ -31,7 +30,6 @@ pub use self::blob_sidecar_list_from_root::BlobSidecarListFromRoot;
 pub use self::config::StoreConfig;
 pub use self::hot_cold_store::{HotColdDB, HotStateSummary, Split};
 pub use self::memory_store::MemoryStore;
-pub use self::static_blobs::StaticBlobStore;
 pub use self::static_cold::StaticColdStore;
 pub use crate::metadata::BlobInfo;
 pub use errors::Error;
@@ -164,13 +162,13 @@ impl DBColumnColdIndex {
 
 pub trait ColdStore<E: EthSpec>: Sync + Send + Sized + 'static {
     // Slot-keyed bulk data.
-    fn get(&self, column: DBColumn, slot: Slot) -> Result<Option<Vec<u8>>, Error>;
+    fn get(&self, column: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, Error>;
 
-    fn put_batch(&self, column: DBColumn, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error>;
+    fn put_batch(&self, column: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error>;
 
-    fn contains(&self, column: DBColumn, slot: Slot) -> Result<bool, Error>;
+    fn contains(&self, column: DBColumnCold, slot: Slot) -> Result<bool, Error>;
 
-    fn iter_from(&self, column: DBColumn, from: Slot) -> SlotIter<'_>;
+    fn iter_from(&self, column: DBColumnCold, from: Slot) -> SlotIter<'_>;
 
     // Root-keyed indices owned by the cold backend.
     fn get_index(&self, column: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error>;

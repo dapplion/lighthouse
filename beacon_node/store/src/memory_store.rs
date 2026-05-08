@@ -1,6 +1,7 @@
 use crate::{
-    ColdStore, ColumnIter, ColumnKeyIter, DBColumn, DBColumnColdIndex, Error, ItemStore, Key,
-    KeyValueStore, KeyValueStoreOp, SlotIter, get_key_for_col, hot_cold_store::BytesKey,
+    ColdStore, ColumnIter, ColumnKeyIter, DBColumn, DBColumnCold, DBColumnColdIndex, Error,
+    ItemStore, Key, KeyValueStore, KeyValueStoreOp, SlotIter, get_key_for_col,
+    hot_cold_store::BytesKey,
 };
 use parking_lot::RwLock;
 use ssz::{Decode, Encode};
@@ -155,34 +156,38 @@ impl<E: EthSpec> KeyValueStore<E> for MemoryStore<E> {
 impl<E: EthSpec> ItemStore<E> for MemoryStore<E> {}
 
 impl<E: EthSpec> ColdStore<E> for MemoryStore<E> {
-    fn get(&self, column: DBColumn, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
-        KeyValueStore::get_bytes(self, column, &slot.as_u64().to_be_bytes())
+    fn get(&self, column: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
+        KeyValueStore::get_bytes(self, column.db_column(), &slot.as_u64().to_be_bytes())
     }
 
-    fn put_batch(&self, column: DBColumn, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error> {
+    fn put_batch(&self, column: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error> {
+        let col = column.db_column();
         let ops = items
             .into_iter()
             .map(|(slot, value)| {
-                KeyValueStoreOp::PutKeyValue(column, slot.as_u64().to_be_bytes().to_vec(), value)
+                KeyValueStoreOp::PutKeyValue(col, slot.as_u64().to_be_bytes().to_vec(), value)
             })
             .collect();
         KeyValueStore::do_atomically(self, ops)
     }
 
-    fn contains(&self, column: DBColumn, slot: Slot) -> Result<bool, Error> {
-        KeyValueStore::key_exists(self, column, &slot.as_u64().to_be_bytes())
+    fn contains(&self, column: DBColumnCold, slot: Slot) -> Result<bool, Error> {
+        KeyValueStore::key_exists(self, column.db_column(), &slot.as_u64().to_be_bytes())
     }
 
-    fn iter_from(&self, column: DBColumn, from: Slot) -> SlotIter<'_> {
+    fn iter_from(&self, column: DBColumnCold, from: Slot) -> SlotIter<'_> {
         Box::new(
-            KeyValueStore::iter_column_from::<Vec<u8>>(self, column, &from.as_u64().to_be_bytes())
-                .map(|res| {
-                    res.and_then(|(key_bytes, value)| {
-                        let bytes: [u8; 8] =
-                            key_bytes.try_into().map_err(|_| Error::InvalidBytes)?;
-                        Ok((Slot::new(u64::from_be_bytes(bytes)), value))
-                    })
-                }),
+            KeyValueStore::iter_column_from::<Vec<u8>>(
+                self,
+                column.db_column(),
+                &from.as_u64().to_be_bytes(),
+            )
+            .map(|res| {
+                res.and_then(|(key_bytes, value)| {
+                    let bytes: [u8; 8] = key_bytes.try_into().map_err(|_| Error::InvalidBytes)?;
+                    Ok((Slot::new(u64::from_be_bytes(bytes)), value))
+                })
+            }),
         )
     }
 

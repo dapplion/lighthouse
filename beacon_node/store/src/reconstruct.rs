@@ -2,7 +2,7 @@
 use crate::forwards_iter::FrozenForwardsIterator;
 use crate::hot_cold_store::{HotColdDB, HotColdDBError};
 use crate::metrics;
-use crate::{ColdStore, DBColumn, DBColumnColdIndex, Error, ItemStore};
+use crate::{ColdStore, DBColumn, DBColumnCold, DBColumnColdIndex, Error, ItemStore};
 use itertools::{Itertools, process_results};
 use state_processing::{
     BlockSignatureStrategy, ConsensusContext, VerifyBlockRoot, per_block_processing,
@@ -129,7 +129,7 @@ where
         state.build_caches(&self.spec)?;
 
         process_results(block_root_iter, |iter| -> Result<(), Error> {
-            let mut cold_items: Vec<(DBColumn, Slot, Vec<u8>)> = vec![];
+            let mut io_batch: Vec<(DBColumnCold, Slot, Vec<u8>)> = vec![];
             let mut summary_index: Vec<(Hash256, Slot)> = vec![];
             let mut prev_state_root = None;
 
@@ -173,7 +173,7 @@ where
                     .or_else(|_| state.update_tree_hash_cache())?;
 
                 // Stage state for storage in freezer DB.
-                self.store_cold_state(&state_root, &state, &mut cold_items, &mut summary_index)?;
+                self.store_cold_state(&state_root, &state, &mut io_batch, &mut summary_index)?;
 
                 let batch_complete = slot + 1 == to_slot;
 
@@ -184,7 +184,7 @@ where
                 if self.hierarchy.should_commit_immediately(slot)? || batch_complete {
                     // Slot-keyed cold bulk first, root index after — a mid-flush crash leaves
                     // cold data with no dangling index entry.
-                    self.commit_cold_items(std::mem::take(&mut cold_items))?;
+                    self.commit_cold_items(std::mem::take(&mut io_batch))?;
                     self.cold_db.put_index_batch(
                         DBColumnColdIndex::ColdStateSummary,
                         std::mem::take(&mut summary_index),

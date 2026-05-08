@@ -1,6 +1,6 @@
 use crate::errors::{Error, Result};
 use crate::iter::{BlockRootsIterator, StateRootsIterator};
-use crate::{ColdStore, DBColumn, HotColdDB, ItemStore, SlotIter};
+use crate::{ColdStore, DBColumn, DBColumnCold, HotColdDB, ItemStore, SlotIter};
 use itertools::process_results;
 use std::marker::PhantomData;
 use types::{BeaconState, EthSpec, Hash256, Slot};
@@ -134,11 +134,13 @@ impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>
         start_slot: Slot,
         end_slot: Slot,
     ) -> Result<Self> {
-        if column != DBColumn::BeaconBlockRoots && column != DBColumn::BeaconStateRoots {
-            return Err(Error::ForwardsIterInvalidColumn(column));
-        }
+        let cold_column = match column {
+            DBColumn::BeaconBlockRoots => DBColumnCold::BlockRoots,
+            DBColumn::BeaconStateRoots => DBColumnCold::StateRoots,
+            _ => return Err(Error::ForwardsIterInvalidColumn(column)),
+        };
         Ok(Self {
-            inner: store.cold_db.iter_from(column, start_slot),
+            inner: store.cold_db.iter_from(cold_column, start_slot),
             column,
             next_slot: start_slot,
             end_slot,

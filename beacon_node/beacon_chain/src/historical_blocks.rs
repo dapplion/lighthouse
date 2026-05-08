@@ -11,7 +11,8 @@ use std::iter;
 use std::time::Duration;
 use store::metadata::DataColumnInfo;
 use store::{
-    AnchorInfo, BlobInfo, ColdStore, DBColumn, Error as StoreError, KeyValueStore, KeyValueStoreOp,
+    AnchorInfo, BlobInfo, ColdStore, DBColumnCold, Error as StoreError, KeyValueStore,
+    KeyValueStoreOp,
 };
 use strum::IntoStaticStr;
 use tracing::{debug, debug_span, instrument};
@@ -257,7 +258,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             let _span = debug_span!("backfill_write_cold_db").entered();
             self.store
                 .cold_db
-                .put_batch(DBColumn::BeaconBlockRoots, cold_batch)?;
+                .put_batch(DBColumnCold::BlockRoots, cold_batch)?;
         }
 
         let mut anchor_and_blob_batch = Vec::with_capacity(3);

@@ -13,8 +13,8 @@ use crate::metadata::{
 };
 use crate::state_cache::{PutStateOutcome, StateCache};
 use crate::{
-    BlobSidecarListFromRoot, ColdStore, DBColumn, DBColumnColdIndex, DatabaseBlock, Error,
-    ItemStore, KeyValueStoreOp, StoreItem, StoreOp, get_data_column_key,
+    BlobSidecarListFromRoot, ColdStore, DBColumn, DBColumnCold, DBColumnColdIndex, DatabaseBlock,
+    Error, ItemStore, KeyValueStoreOp, StoreItem, StoreOp, get_data_column_key,
     metrics::{self, COLD_METRIC, HOT_METRIC},
     parse_data_column_key,
 };
@@ -735,7 +735,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
             .get_bytes(DBColumn::BeaconBlock, block_root.as_slice())?
             .map(|block_bytes| decoder(&block_bytes))
             .transpose()
-            .map_err(Into::into)
+            .map_err(|e| e.into())
     }
 
     pub fn get_payload_envelope(
@@ -2087,9 +2087,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
     /// must be durable before any hot index entry that references it.
     pub fn commit_cold_items(
         &self,
-        cold_items: Vec<(DBColumn, Slot, Vec<u8>)>,
+        cold_items: Vec<(DBColumnCold, Slot, Vec<u8>)>,
     ) -> Result<(), Error> {
-        let mut groups: HashMap<DBColumn, Vec<(Slot, Vec<u8>)>> = HashMap::new();
+        let mut groups: HashMap<DBColumnCold, Vec<(Slot, Vec<u8>)>> = HashMap::new();
         for (col, slot, value) in cold_items {
             groups.entry(col).or_default().push((slot, value));
         }
@@ -2103,7 +2103,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         state_root: &Hash256,
         slot: Slot,
-        cold_items: &mut Vec<(DBColumn, Slot, Vec<u8>)>,
+        cold_items: &mut Vec<(DBColumnCold, Slot, Vec<u8>)>,
         summary_index: &mut Vec<(Hash256, Slot)>,
     ) -> Result<(), Error> {
         // BeaconColdStateSummary is a state_root → slot index owned by the cold backend.
@@ -2111,7 +2111,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         // caller is responsible for the ordering.
         summary_index.push((*state_root, slot));
         cold_items.push((
-            DBColumn::BeaconStateRoots,
+            DBColumnCold::StateRoots,
             slot,
             state_root.as_slice().to_vec(),
         ));
@@ -2123,7 +2123,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         state_root: &Hash256,
         state: &BeaconState<E>,
-        cold_items: &mut Vec<(DBColumn, Slot, Vec<u8>)>,
+        cold_items: &mut Vec<(DBColumnCold, Slot, Vec<u8>)>,
         summary_index: &mut Vec<(Hash256, Slot)>,
     ) -> Result<(), Error> {
         self.store_cold_state_summary(state_root, state.slot(), cold_items, summary_index)?;
@@ -2163,7 +2163,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
     pub fn store_cold_state_as_snapshot(
         &self,
         state: &BeaconState<E>,
-        cold_items: &mut Vec<(DBColumn, Slot, Vec<u8>)>,
+        cold_items: &mut Vec<(DBColumnCold, Slot, Vec<u8>)>,
     ) -> Result<(), Error> {
         let bytes = state.as_ssz_bytes();
         let compressed_value = {
@@ -2176,16 +2176,12 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
             out
         };
 
-        cold_items.push((
-            DBColumn::BeaconStateSnapshot,
-            state.slot(),
-            compressed_value,
-        ));
+        cold_items.push((DBColumnCold::StateSnapshot, state.slot(), compressed_value));
         Ok(())
     }
 
     fn load_cold_state_bytes_as_snapshot(&self, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
-        match self.cold_db.get(DBColumn::BeaconStateSnapshot, slot)? {
+        match self.cold_db.get(DBColumnCold::StateSnapshot, slot)? {
             Some(bytes) => {
                 let _timer =
                     metrics::start_timer(&metrics::STORE_BEACON_STATE_FREEZER_DECOMPRESS_TIME);
@@ -2276,7 +2272,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         state: &BeaconState<E>,
         from_slot: Slot,
-        cold_items: &mut Vec<(DBColumn, Slot, Vec<u8>)>,
+        cold_items: &mut Vec<(DBColumnCold, Slot, Vec<u8>)>,
     ) -> Result<(), Error> {
         // Load diff base state bytes.
         let (_, base_buffer) = {
@@ -2299,7 +2295,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
             diff_bytes.len() as f64,
         );
 
-        cold_items.push((DBColumn::BeaconStateDiff, state.slot(), diff_bytes));
+        cold_items.push((DBColumnCold::StateDiff, state.slot(), diff_bytes));
         Ok(())
     }
 
@@ -2421,7 +2417,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         let bytes = {
             let _t = metrics::start_timer_vec(&metrics::BEACON_HDIFF_READ_TIME, COLD_METRIC);
             self.cold_db
-                .get(DBColumn::BeaconStateDiff, slot)?
+                .get(DBColumnCold::StateDiff, slot)?
                 .ok_or(HotColdDBError::MissingHDiff(slot))?
         };
         let hdiff = {
@@ -3163,11 +3159,11 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         end_slot: Slot,
         block_root: Hash256,
     ) -> Result<Vec<(Slot, Vec<u8>)>, Error> {
-        let mut items = vec![];
+        let mut ops = vec![];
         for slot in start_slot.as_u64()..end_slot.as_u64() {
-            items.push((Slot::new(slot), block_root.as_slice().to_vec()));
+            ops.push((Slot::new(slot), block_root.as_slice().to_vec()));
         }
-        Ok(items)
+        Ok(ops)
     }
 
     /// Return a single block root from the cold DB.
@@ -3176,7 +3172,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
     pub fn get_cold_block_root(&self, slot: Slot) -> Result<Option<Hash256>, Error> {
         Ok(self
             .cold_db
-            .get(DBColumn::BeaconBlockRoots, slot)?
+            .get(DBColumnCold::BlockRoots, slot)?
             .map(|bytes| Hash256::from_ssz_bytes(&bytes))
             .transpose()?)
     }
@@ -3189,7 +3185,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
     pub fn get_cold_state_root(&self, slot: Slot) -> Result<Option<Hash256>, Error> {
         Ok(self
             .cold_db
-            .get(DBColumn::BeaconStateRoots, slot)?
+            .get(DBColumnCold::StateRoots, slot)?
             .map(|bytes| Hash256::from_ssz_bytes(&bytes))
             .transpose()?)
     }
@@ -3545,8 +3541,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         return Err(HotColdDBError::FreezeSlotUnaligned(finalized_state.slot()).into());
     }
 
-    // Block-side cold puts (BeaconBlockRoots), accumulated across all states in this batch.
-    let mut cold_block_root_items: Vec<(Slot, Vec<u8>)> = vec![];
+    let mut cold_db_block_ops: Vec<(Slot, Vec<u8>)> = vec![];
     // Cold-DB root index for state summaries (state_root -> slot).
     // Committed after the slot-keyed cold data so a crash leaves no dangling indices.
     let mut cold_state_summary_index: Vec<(Hash256, Slot)> = vec![];
@@ -3561,7 +3556,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     // Then, iterate states in slot ascending order, as they are stored wrt previous states.
     for (block_root, state_root, slot) in state_roots.iter().rev() {
         // Store the slot to block root mapping.
-        cold_block_root_items.push((*slot, block_root.as_slice().to_vec()));
+        cold_db_block_ops.push((*slot, block_root.as_slice().to_vec()));
 
         // Do not try to store states if a restore point is yet to be stored, or will never be
         // stored (see `STATE_UPPER_LIMIT_NO_RETAIN`). Make an exception for the genesis state
@@ -3570,7 +3565,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
             continue;
         }
 
-        let mut cold_state_items: Vec<(DBColumn, Slot, Vec<u8>)> = vec![];
+        let mut cold_db_state_ops: Vec<(DBColumnCold, Slot, Vec<u8>)> = vec![];
 
         // Only store the cold state if it's on a diff boundary.
         // Calling `store_cold_state_summary` instead of `store_cold_state` for those allows us
@@ -3586,7 +3581,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
             store.store_cold_state_summary(
                 state_root,
                 *slot,
-                &mut cold_state_items,
+                &mut cold_db_state_ops,
                 &mut cold_state_summary_index,
             )?;
         } else {
@@ -3599,7 +3594,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
             store.store_cold_state(
                 state_root,
                 &state,
-                &mut cold_state_items,
+                &mut cold_db_state_ops,
                 &mut cold_state_summary_index,
             )?;
         }
@@ -3607,7 +3602,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         // Cold states are diffed with respect to each other, so we need to finish writing previous
         // slot-keyed cold data before staging new entries. Index commits ride along to the end of
         // the migration so all root indices land after every cold-bulk write is durable.
-        store.commit_cold_items(cold_state_items)?;
+        store.commit_cold_items(cold_db_state_ops)?;
     }
 
     // Warning: Critical section. We have to take care not to put any of the two databases in an
@@ -3623,7 +3618,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     // so a mid-migration crash leaves cold data without dangling indices.
     store
         .cold_db
-        .put_batch(DBColumn::BeaconBlockRoots, cold_block_root_items)?;
+        .put_batch(DBColumnCold::BlockRoots, cold_db_block_ops)?;
     store.cold_db.sync()?;
     store.cold_db.put_index_batch(
         DBColumnColdIndex::ColdStateSummary,
