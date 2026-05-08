@@ -12,6 +12,7 @@ use crate::metadata::{
     SCHEMA_VERSION_KEY, SPLIT_KEY, STATE_UPPER_LIMIT_NO_RETAIN, SchemaVersion,
 };
 use crate::state_cache::{PutStateOutcome, StateCache};
+use crate::static_blocks::StaticBlockStore;
 use crate::{
     BlobSidecarListFromRoot, DBColumn, DatabaseBlock, Error, ItemStore, KeyValueStoreOp, StoreItem,
     StoreOp, get_data_column_key,
@@ -71,6 +72,10 @@ pub struct HotColdDB<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
     ///
     /// The hot database also contains all blocks.
     pub hot_db: Hot,
+    /// Optional append-only file-backed store for finalized blinded blocks. When `Some`,
+    /// reads fall through to it after missing in `hot_db`. When `None` (legacy mode), all
+    /// finalized blinded blocks remain in `hot_db` as today.
+    pub static_blocks: Option<Arc<StaticBlockStore>>,
     /// LRU cache of deserialized blocks and blobs. Updated whenever a block or blob is loaded.
     block_cache: Option<Mutex<BlockCache<E>>>,
     /// Cache of beacon states.
@@ -236,6 +241,7 @@ impl<E: EthSpec> HotColdDB<E, MemoryStore<E>, MemoryStore<E>> {
             cold_db: MemoryStore::open(),
             blobs_db: MemoryStore::open(),
             hot_db: MemoryStore::open(),
+            static_blocks: None,
             block_cache: NonZeroUsize::new(config.block_cache_size)
                 .map(BlockCache::new)
                 .map(Mutex::new),
@@ -290,6 +296,7 @@ impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>> {
             blobs_db: BeaconNodeBackend::open(&config, blobs_db_path)?,
             cold_db: BeaconNodeBackend::open(&config, cold_path)?,
             hot_db,
+            static_blocks: None,
             block_cache: NonZeroUsize::new(config.block_cache_size)
                 .map(BlockCache::new)
                 .map(Mutex::new),
@@ -731,11 +738,38 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         block_root: &Hash256,
         decoder: impl FnOnce(&[u8]) -> Result<SignedBeaconBlock<E, Payload>, ssz::DecodeError>,
     ) -> Result<Option<SignedBeaconBlock<E, Payload>>, Error> {
-        self.hot_db
+        // Hot KV first: covers both unfinalized blocks and (in legacy / pre-migration mode)
+        // all finalized blocks. After migration, finalized blinded bodies are absent here
+        // and we fall through to the static block store via the cold-KV reverse index.
+        if let Some(block_bytes) = self
+            .hot_db
             .get_bytes(DBColumn::BeaconBlock, block_root.as_slice())?
-            .map(|block_bytes| decoder(&block_bytes))
-            .transpose()
-            .map_err(|e| e.into())
+        {
+            return decoder(&block_bytes).map(Some).map_err(Into::into);
+        }
+        if let Some(static_blocks) = &self.static_blocks
+            && let Some(slot) = self.get_finalized_blinded_block_slot(block_root)?
+            && let Some(block_bytes) = static_blocks.get(slot)?
+        {
+            return decoder(&block_bytes).map(Some).map_err(Into::into);
+        }
+        Ok(None)
+    }
+
+    /// Look up the slot of a finalized blinded block by its root, using the cold-KV reverse
+    /// index in [`DBColumn::BeaconBlockSlot`]. Returns `Ok(None)` if the root is unknown to
+    /// the cold KV (i.e. the block has not been sealed into a static file).
+    ///
+    /// Populated by [`Self::seal_era`].
+    fn get_finalized_blinded_block_slot(
+        &self,
+        block_root: &Hash256,
+    ) -> Result<Option<Slot>, Error> {
+        Ok(self
+            .cold_db
+            .get_bytes(DBColumn::BeaconBlockSlot, block_root.as_slice())?
+            .map(|bytes| Slot::from_ssz_bytes(&bytes))
+            .transpose()?)
     }
 
     pub fn get_payload_envelope(
@@ -938,8 +972,16 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 
     /// Determine whether a block exists in the database.
     pub fn block_exists(&self, block_root: &Hash256) -> Result<bool, Error> {
-        self.hot_db
-            .key_exists(DBColumn::BeaconBlock, block_root.as_slice())
+        if self
+            .hot_db
+            .key_exists(DBColumn::BeaconBlock, block_root.as_slice())?
+        {
+            return Ok(true);
+        }
+        if self.static_blocks.is_some() {
+            return Ok(self.get_finalized_blinded_block_slot(block_root)?.is_some());
+        }
+        Ok(false)
     }
 
     /// Delete a block from the store and the block cache.
@@ -3608,6 +3650,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     }
 
     let mut cold_db_block_ops = vec![];
+    let mut hot_db_block_delete_ops = vec![];
 
     // Iterate in descending order until the current split slot
     let state_roots: Vec<_> =
@@ -3617,7 +3660,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         })?;
 
     // Then, iterate states in slot ascending order, as they are stored wrt previous states.
-    for (block_root, state_root, slot) in state_roots.into_iter().rev() {
+    for (block_root, state_root, slot) in state_roots.iter().rev() {
         // Store the slot to block root mapping.
         cold_db_block_ops.push(KeyValueStoreOp::PutKeyValue(
             DBColumn::BeaconBlockRoots,
@@ -3628,7 +3671,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         // Do not try to store states if a restore point is yet to be stored, or will never be
         // stored (see `STATE_UPPER_LIMIT_NO_RETAIN`). Make an exception for the genesis state
         // which always needs to be copied from the hot DB to the freezer and should not be deleted.
-        if slot != 0 && slot < anchor_info.state_upper_limit {
+        if *slot != 0 && *slot < anchor_info.state_upper_limit {
             continue;
         }
 
@@ -3637,7 +3680,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         // Only store the cold state if it's on a diff boundary.
         // Calling `store_cold_state_summary` instead of `store_cold_state` for those allows us
         // to skip loading many hot states.
-        if let StorageStrategy::ReplayFrom(from) = store.cold_storage_strategy(slot)? {
+        if let StorageStrategy::ReplayFrom(from) = store.cold_storage_strategy(*slot)? {
             // Store slot -> state_root and state_root -> slot mappings.
             debug!(
                 strategy = "replay",
@@ -3645,20 +3688,71 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
                 %slot,
                 "Storing cold state"
             );
-            store.store_cold_state_summary(&state_root, slot, &mut cold_db_state_ops)?;
+            store.store_cold_state_summary(state_root, *slot, &mut cold_db_state_ops)?;
         } else {
             // This is some state that we want to migrate to the freezer db.
             // There is no reason to cache this state.
             let state: BeaconState<E> = store
-                .get_hot_state(&state_root, false)?
-                .ok_or(HotColdDBError::MissingStateToFreeze(state_root))?;
+                .get_hot_state(state_root, false)?
+                .ok_or(HotColdDBError::MissingStateToFreeze(*state_root))?;
 
-            store.store_cold_state(&state_root, &state, &mut cold_db_state_ops)?;
+            store.store_cold_state(state_root, &state, &mut cold_db_state_ops)?;
         }
 
         // Cold states are diffed with respect to each other, so we need to finish writing previous
         // states before storing new ones.
         store.cold_db.do_atomically(cold_db_state_ops)?;
+    }
+
+    // Hand newly-finalized blinded blocks to the static archive. `RootsIterator` yields
+    // the same `block_root` for every skipped slot covered by that block, so we dedupe
+    // on the root. The seed handles the boundary case where the migration's first slot
+    // is a skip-slot extension of a block archived in a previous migration: reading
+    // `BeaconBlockRoots[current_split.slot - 1]` gives that block's root, which the
+    // dedup then matches and skips. `Hash256::ZERO` is a safe sentinel for the genesis
+    // case — no real block root collides with it.
+    if let Some(static_blocks) = &store.static_blocks {
+        // The slot in this range of slots might by a skipped slot. Read the previous block_root
+        // from the existing slot -> block_root index.
+        let mut prev_block_root: Hash256 = if current_split.slot > 0 {
+            let prev_slot = current_split.slot - 1;
+            store
+                .get_cold_block_root(prev_slot)?
+                .ok_or(Error::MigrationError(format!(
+                    "missing BeaconBlockRoots entry for slot {prev_slot}",
+                )))?
+        } else {
+            // For the genesis case set the prev_root to zero to trigger a write
+            Hash256::ZERO
+        };
+
+        for (block_root, _, slot) in state_roots.iter().rev() {
+            // Previous slot's root is the same, therefore this slot is a skipped slot
+            if *block_root == prev_block_root {
+                continue;
+            }
+            prev_block_root = *block_root;
+
+            // The new-split block stays in hot KV — it isn't yet finalized below split.
+            if *slot >= finalized_state.slot() {
+                continue;
+            }
+
+            let bytes = store
+                .hot_db
+                .get_bytes(DBColumn::BeaconBlock, block_root.as_slice())?
+                .ok_or(Error::BlockNotFound(*block_root))?;
+            static_blocks.put(*slot, &bytes)?;
+            cold_db_block_ops.push(KeyValueStoreOp::PutKeyValue(
+                DBColumn::BeaconBlockSlot,
+                block_root.as_slice().to_vec(),
+                slot.as_ssz_bytes(),
+            ));
+            hot_db_block_delete_ops.push(KeyValueStoreOp::DeleteKey(
+                DBColumn::BeaconBlock,
+                block_root.as_slice().to_vec(),
+            ));
+        }
     }
 
     // Warning: Critical section. We have to take care not to put any of the two databases in an
@@ -3713,6 +3807,13 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         finalized_block_root,
         finalized_state.clone(),
     )?;
+
+    // Reclaim hot-KV space for blinded bodies now durable in the static archive. Runs
+    // after split commit so a retried migration never tries to fetch a body that was
+    // already deleted. A crash between the split commit and this delete leaves the
+    // bodies in hot KV; reads still succeed via the static archive (the reverse-index
+    // entry, committed atomically with the split's cold-DB ops, points at it).
+    store.hot_db.do_atomically(hot_db_block_delete_ops)?;
 
     debug!(
         slot = %finalized_state.slot(),

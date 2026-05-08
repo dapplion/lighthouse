@@ -21,6 +21,7 @@ pub mod metadata;
 pub mod metrics;
 pub mod reconstruct;
 pub mod state_cache;
+pub mod static_blocks;
 
 pub mod database;
 pub mod iter;
@@ -29,6 +30,7 @@ pub use self::blob_sidecar_list_from_root::BlobSidecarListFromRoot;
 pub use self::config::StoreConfig;
 pub use self::hot_cold_store::{HotColdDB, HotStateSummary, Split};
 pub use self::memory_store::MemoryStore;
+pub use self::static_blocks::StaticBlockStore;
 pub use crate::metadata::BlobInfo;
 pub use errors::Error;
 pub use metadata::AnchorInfo;
@@ -344,6 +346,12 @@ pub enum DBColumn {
     /// necessary to guarantee atomicity of the upgrade migration.
     #[strum(serialize = "bbx")]
     BeaconBlockRoots,
+    /// Mapping from block root to slot for blocks whose blinded bodies have been sealed
+    /// into static block files. Populated by the era-sealer; consulted by
+    /// `HotColdDB::get_finalized_blinded_block_slot` to resolve root-keyed reads against
+    /// the (slot-keyed) `StaticBlockStore`.
+    #[strum(serialize = "bbs")]
+    BeaconBlockSlot,
     /// DEPRECATED. This is the previous column for beacon block roots stored by "chunk index".
     ///
     /// Can be removed once schema v22 is buried by a hard fork.
@@ -404,6 +412,7 @@ impl DBColumn {
             Self::OverflowLRUCache => 33, // DEPRECATED
             Self::BeaconMeta
             | Self::BeaconBlock
+            | Self::BeaconBlockSlot
             | Self::BeaconState
             | Self::BeaconBlob
             | Self::BeaconStateSummary
