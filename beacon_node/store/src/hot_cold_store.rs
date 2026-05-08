@@ -12,6 +12,7 @@ use crate::metadata::{
     SCHEMA_VERSION_KEY, SPLIT_KEY, STATE_UPPER_LIMIT_NO_RETAIN, SchemaVersion,
 };
 use crate::state_cache::{PutStateOutcome, StateCache};
+use crate::static_blobs::StaticBlobStore;
 use crate::static_blocks::StaticBlockStore;
 use crate::{
     BlobSidecarListFromRoot, DBColumn, DatabaseBlock, Error, ItemStore, KeyValueStoreOp, StoreItem,
@@ -76,6 +77,8 @@ pub struct HotColdDB<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
     /// reads fall through to it after missing in `hot_db`. When `None` (legacy mode), all
     /// finalized blinded blocks remain in `hot_db` as today.
     pub static_blocks: Option<Arc<StaticBlockStore>>,
+    /// Optional slot-keyed archive for finalized blob sidecars.
+    pub static_blobs: Option<Arc<StaticBlobStore>>,
     /// LRU cache of deserialized blocks and blobs. Updated whenever a block or blob is loaded.
     block_cache: Option<Mutex<BlockCache<E>>>,
     /// Cache of beacon states.
@@ -242,6 +245,7 @@ impl<E: EthSpec> HotColdDB<E, MemoryStore<E>, MemoryStore<E>> {
             blobs_db: MemoryStore::open(),
             hot_db: MemoryStore::open(),
             static_blocks: None,
+            static_blobs: None,
             block_cache: NonZeroUsize::new(config.block_cache_size)
                 .map(BlockCache::new)
                 .map(Mutex::new),
@@ -297,6 +301,7 @@ impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>> {
             cold_db: BeaconNodeBackend::open(&config, cold_path)?,
             hot_db,
             static_blocks: None,
+            static_blobs: None,
             block_cache: NonZeroUsize::new(config.block_cache_size)
                 .map(BlockCache::new)
                 .map(Mutex::new),
@@ -2700,8 +2705,35 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
                     Ok(BlobSidecarListFromRoot::NoBlobs)
                 }
             }
-            None => Ok(BlobSidecarListFromRoot::NoRoot),
+            None => self.get_static_blobs(block_root),
         }
+    }
+
+    /// Fetch blobs from the slot-keyed static archive after a blob-db miss.
+    fn get_static_blobs(&self, block_root: &Hash256) -> Result<BlobSidecarListFromRoot<E>, Error> {
+        let Some(static_blobs) = &self.static_blobs else {
+            return Ok(BlobSidecarListFromRoot::NoRoot);
+        };
+        let Some(slot) = self.get_finalized_blinded_block_slot(block_root)? else {
+            return Ok(BlobSidecarListFromRoot::NoRoot);
+        };
+        let Some(blobs_bytes) = static_blobs.get(slot)? else {
+            return Ok(BlobSidecarListFromRoot::NoBlobs);
+        };
+
+        let blobs: Vec<Arc<BlobSidecar<E>>> = Vec::<_>::from_ssz_bytes(&blobs_bytes)?;
+        let Some(max_blobs_per_block) = blobs
+            .first()
+            .map(|blob| self.spec.max_blobs_per_block(blob.epoch()))
+        else {
+            return Ok(BlobSidecarListFromRoot::NoBlobs);
+        };
+
+        let blobs = BlobSidecarList::new(blobs, max_blobs_per_block as usize)?;
+        self.block_cache
+            .as_ref()
+            .inspect(|cache| cache.lock().put_blobs(*block_root, blobs.clone()));
+        Ok(BlobSidecarListFromRoot::Blobs(blobs))
     }
 
     /// Fetch all keys in the data_column column with prefix `block_root`
