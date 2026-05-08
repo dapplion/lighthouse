@@ -19,6 +19,10 @@ pub const ANCHOR_INFO_KEY: Hash256 = Hash256::repeat_byte(5);
 pub const BLOB_INFO_KEY: Hash256 = Hash256::repeat_byte(6);
 pub const DATA_COLUMN_INFO_KEY: Hash256 = Hash256::repeat_byte(7);
 pub const DATA_COLUMN_CUSTODY_INFO_KEY: Hash256 = Hash256::repeat_byte(8);
+/// Records which cold backend (`Kv` or `Static`) was used to write this DB.
+/// Set on first open, checked on every subsequent open. Switching backends
+/// in-place is unsupported.
+pub const COLD_BACKEND_KEY: Hash256 = Hash256::repeat_byte(9);
 
 /// State upper limit value used to indicate that a node is not storing historic states.
 pub const STATE_UPPER_LIMIT_NO_RETAIN: Slot = Slot::new(u64::MAX);

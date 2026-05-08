@@ -102,6 +102,7 @@ pub enum StoreConfigError {
     },
     ZeroEpochsPerBlobPrune,
     InvalidVersionByte(Option<u8>),
+    InvalidColdBackendByte(u8),
 }
 
 impl Default for StoreConfig {
@@ -282,7 +283,7 @@ pub enum DatabaseBackend {
 
 /// Cold backend selector.
 #[derive(
-    Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, EnumString, VariantNames,
+    Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, EnumString, VariantNames,
 )]
 #[strum(serialize_all = "lowercase")]
 pub enum ColdBackendKind {
@@ -291,4 +292,40 @@ pub enum ColdBackendKind {
     Kv,
     /// Cold data lives in slot-keyed static files.
     Static,
+}
+
+impl ColdBackendKind {
+    /// One-byte tag persisted under `COLD_BACKEND_KEY` in `BeaconMeta`.
+    /// Stable across builds — never reorder or reuse a value.
+    pub fn as_byte(self) -> u8 {
+        match self {
+            Self::Kv => 0,
+            Self::Static => 1,
+        }
+    }
+
+    pub fn from_byte(byte: u8) -> Result<Self, StoreConfigError> {
+        match byte {
+            0 => Ok(Self::Kv),
+            1 => Ok(Self::Static),
+            other => Err(StoreConfigError::InvalidColdBackendByte(other)),
+        }
+    }
+}
+
+impl StoreItem for ColdBackendKind {
+    fn db_column() -> DBColumn {
+        DBColumn::BeaconMeta
+    }
+
+    fn as_store_bytes(&self) -> Vec<u8> {
+        vec![self.as_byte()]
+    }
+
+    fn from_store_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let &[byte] = bytes else {
+            return Err(StoreConfigError::InvalidColdBackendByte(0).into());
+        };
+        Ok(Self::from_byte(byte)?)
+    }
 }

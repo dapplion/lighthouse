@@ -1,23 +1,50 @@
 //! Slot-keyed durable archive for finalized cold-DB columns.
 //!
-//! `StaticColdStore` is a black box from `HotColdDB`'s perspective: hand it
-//! `(column, slot, bytes)`, ask it for them back by `(column, slot)`. File
-//! mapping, recovery, and rename semantics are internal.
+//! `StaticColdStore` is a black box: `(column, slot, bytes)` in, same back.
+//! See `specs/static-cold-backend.md` for the abstraction-level contract.
 //!
-//! Each column gets its own subdirectory under the store root, so the on-disk
-//! format of a single column is the original single-column layout —
-//! `static_blocks_{file_id:05}` data files, matching `.off` sidecars, and a
-//! `static_blocks.conf` commit marker — just rooted at `<root>/<col-tag>/`.
+//! # Layout
 //!
-//! Per-column behaviour (compression, record-type tag, max value bytes) lives
-//! in `column_config`, keyed by the tight `DBColumnCold` enum.
+//! ```text
+//! <cold-root>/
+//!   {blk,bbr,bsr,bss,bsd}/      # one subdir per DBColumnCold
+//!     data_{file_id:05}         # file_id = slot / 8192
+//!     data_{file_id:05}.off     # 8192 × u64 LE offsets, 0 = no record
+//!     column.conf               # 36-byte commit marker, atomic-renamed
+//!   index/                      # embedded KV for DBColumnColdIndex
+//! ```
 //!
-//! Contract:
-//! - `put(column, slot, bytes)` is durable on return.
-//! - Slots within a column must arrive strictly ascending; columns are
-//!   independent.
+//! # File format
 //!
-//! See `specs/static-blocks.md` for the on-disk format.
+//! Data file: e2store version record (`65 32 00 00 00 00 00 00`), then records
+//! appended as `type[2] | length[4 LE] | reserved[2]=0 | payload` (snappy-
+//! framed if `column.compression`). Per-column tags in `column_config`.
+//!
+//! `column.conf`: `b"LHSTBLK2" | highest_slot u64 LE (u64::MAX = empty) |
+//! current_data_len u64 LE | record_type[2] | compression u8 | reserved | max_value_bytes u64 LE`.
+//! Atomic update: write `.tmp`, fsync, rename, fsync dir.
+//!
+//! # Put contract
+//!
+//! Durable on return. Slots arrive ascending **or** are identical-value
+//! re-puts of an already-committed slot (so `migrate_database` retries after
+//! a mid-loop crash are safe). Previously-skipped slots (offset 0) cannot
+//! be filled — that would break the append-only data file.
+//!
+//! # Recovery on open
+//!
+//! Data file truncated to `current_data_len`; `.off` entries beyond
+//! `highest_slot` cleared. The `column.conf` rename is the commit point.
+//!
+//! # TODO(static): tests
+//!
+//! - happy path `open` / `get` / `put` per `DBColumnCold`
+//! - out-of-order put rejection
+//! - identical-value re-put at any committed slot succeeds; mismatched
+//!   value or skipped-slot fill rejected
+//! - crash windows around data, `.off`, and `column.conf` (heal on open)
+//! - `max_value_bytes` ratchet-up persists on next open
+//! - `COLD_BACKEND_KEY` mismatch refuses to start
 
 use crate::config::StoreConfig;
 use crate::database::interface::BeaconNodeBackend;
@@ -38,8 +65,9 @@ use types::{EthSpec, Slot};
 const SLOTS_PER_FILE: u64 = 8192;
 const OFFSET_SIZE: u64 = 8;
 const OFFSET_FILE_LEN: u64 = SLOTS_PER_FILE * OFFSET_SIZE;
-const CONFIG_FILE: &str = "static_blocks.conf";
-const CONFIG_TMP_FILE: &str = "static_blocks.conf.tmp";
+const CONFIG_FILE: &str = "column.conf";
+const CONFIG_TMP_FILE: &str = "column.conf.tmp";
+const DATA_FILE_PREFIX: &str = "data_";
 const CONFIG_MAGIC: &[u8; 8] = b"LHSTBLK2";
 const CONFIG_LEN: usize = 36;
 /// Empty-store sentinel for `highest_written_slot` in the per-column config.
@@ -215,12 +243,29 @@ impl Column {
         }
 
         let on_disk = read_config(&config_path)?;
+        // record_type and compression are sticky — they're load-bearing for
+        // reading old records, so on-disk wins over build-time defaults.
+        // max_value_bytes is a soft bound used to cap accepted record sizes;
+        // ratchet it up if the build's default is larger so a newer build
+        // can write bigger records than an older one persisted, then
+        // re-persist immediately so future opens see the new bound.
+        let max_value_bytes = on_disk.max_value_bytes.max(defaults.max_value_bytes);
         let config = ColumnConfig {
             subdir: defaults.subdir,
             record_type: on_disk.record_type,
             compression: on_disk.compression,
-            max_value_bytes: on_disk.max_value_bytes,
+            max_value_bytes,
         };
+        if max_value_bytes != on_disk.max_value_bytes {
+            atomic_write_config(
+                &config_path,
+                &tmp_path,
+                &root_dir,
+                on_disk.highest_written_slot,
+                on_disk.current_data_len,
+                &config,
+            )?;
+        }
 
         let handle = Self {
             root_dir,
@@ -273,7 +318,7 @@ impl Column {
         data_file.read_exact(&mut payload)?;
 
         if self.config.compression {
-            decompress_record(&payload, self.config.max_value_bytes)
+            decompress_record(&payload, self.config.max_value_bytes).map(Some)
         } else {
             if (payload.len() as u64) > self.config.max_value_bytes {
                 return Err(StaticColdStoreError::Invalid(
@@ -296,29 +341,27 @@ impl Column {
 
     fn put(&self, slot: Slot, bytes: &[u8]) -> StoreResult<()> {
         let mut highest_written_slot = self.highest_written_slot.lock();
-        if let Some(highest) = *highest_written_slot {
-            if slot < highest {
-                return Err(StaticColdStoreError::Invalid(
-                    "static cold put out of order".into(),
-                ));
+        if let Some(highest) = *highest_written_slot
+            && slot <= highest
+        {
+            // Idempotent re-put: any committed slot can be re-put with the
+            // identical value. Required so a `migrate_database` retry after a
+            // mid-loop crash can re-walk slots that were already committed in
+            // the previous attempt without tripping the strict-ascending
+            // invariant. A previously-skipped slot (offset zero) cannot be
+            // filled in — that would break the append-only data file.
+            let existing = self.read_record(slot)?.ok_or_else(|| {
+                StaticColdStoreError::Invalid(format!(
+                    "static cold re-put at slot {slot} <= highest {highest} \
+                     but no record exists; cannot fill a previously-skipped slot"
+                ))
+            })?;
+            if existing == bytes {
+                return Ok(());
             }
-            if slot == highest {
-                // Idempotent re-put: tolerate a write of the identical value
-                // at the most recently committed slot. Errors on a value
-                // mismatch — that's a real bug, not a duplicate. Read the
-                // existing record without re-locking the writer mutex.
-                let existing = self.read_record(slot)?.ok_or_else(|| {
-                    StaticColdStoreError::Invalid(
-                        "static cold missing record at highest slot".into(),
-                    )
-                })?;
-                if existing == bytes {
-                    return Ok(());
-                }
-                return Err(StaticColdStoreError::Invalid(
-                    "static cold re-put with mismatched value".into(),
-                ));
-            }
+            return Err(StaticColdStoreError::Invalid(format!(
+                "static cold re-put at slot {slot} with mismatched value"
+            )));
         }
 
         let payload = if self.config.compression {
@@ -452,12 +495,13 @@ impl Column {
     }
 
     fn data_path(&self, file_id: u64) -> PathBuf {
-        self.root_dir.join(format!("static_blocks_{file_id:05}"))
+        self.root_dir
+            .join(format!("{DATA_FILE_PREFIX}{file_id:05}"))
     }
 
     fn offset_path(&self, file_id: u64) -> PathBuf {
         self.root_dir
-            .join(format!("static_blocks_{file_id:05}.off"))
+            .join(format!("{DATA_FILE_PREFIX}{file_id:05}.off"))
     }
 }
 
@@ -557,7 +601,7 @@ fn write_record(
     Ok(())
 }
 
-fn decompress_record(bytes: &[u8], max_value_bytes: u64) -> StoreResult<Option<Vec<u8>>> {
+fn decompress_record(bytes: &[u8], max_value_bytes: u64) -> StoreResult<Vec<u8>> {
     let decoder = FrameDecoder::new(bytes);
     let mut limited = decoder.take(max_value_bytes + 1);
     let mut decompressed = Vec::new();
@@ -569,7 +613,7 @@ fn decompress_record(bytes: &[u8], max_value_bytes: u64) -> StoreResult<Option<V
             "static cold record exceeds decompressed size limit".into(),
         ));
     }
-    Ok(Some(decompressed))
+    Ok(decompressed)
 }
 
 fn sync_dir(path: &Path) -> StoreResult<()> {
@@ -597,6 +641,10 @@ impl<E: EthSpec> crate::ColdStore<E> for StaticColdStore<E> {
     }
 
     fn iter_from(&self, c: DBColumnCold, from: Slot) -> crate::SlotIter<'_> {
+        // TODO(static): this is O(highest - from) reads, one File::open per slot,
+        // and most slots in sparse columns (StateSnapshot/StateDiff) yield None.
+        // Acceptable today because iter_from is only used by infrequent paths
+        // (forwards iter, invariants). Improve if it becomes a hotspot.
         let column = &self.columns[&c];
         let Some(highest) = *column.highest_written_slot.lock() else {
             return Box::new(std::iter::empty());

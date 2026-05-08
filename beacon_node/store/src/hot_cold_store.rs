@@ -6,7 +6,7 @@ use crate::historic_state_cache::HistoricStateCache;
 use crate::iter::{BlockRootsIterator, ParentRootBlockIterator, RootsIterator};
 use crate::memory_store::MemoryStore;
 use crate::metadata::{
-    ANCHOR_INFO_KEY, ANCHOR_UNINITIALIZED, AnchorInfo, BLOB_INFO_KEY, BlobInfo,
+    ANCHOR_INFO_KEY, ANCHOR_UNINITIALIZED, AnchorInfo, BLOB_INFO_KEY, BlobInfo, COLD_BACKEND_KEY,
     COMPACTION_TIMESTAMP_KEY, CONFIG_KEY, CURRENT_SCHEMA_VERSION, CompactionTimestamp,
     DATA_COLUMN_CUSTODY_INFO_KEY, DATA_COLUMN_INFO_KEY, DataColumnCustodyInfo, DataColumnInfo,
     SCHEMA_VERSION_KEY, SPLIT_KEY, STATE_UPPER_LIMIT_NO_RETAIN, SchemaVersion,
@@ -296,6 +296,13 @@ impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>> {
 
         let anchor_info = RwLock::new(Self::load_anchor_info(&hot_db)?);
         debug!(?anchor_info, "Loaded anchor info");
+
+        // Pin the cold backend kind to the directory before we touch it.
+        // Static and Kv layouts are incompatible on disk, so refuse to open
+        // a directory written by the other one. If no record exists yet
+        // (fresh DB), persist the configured kind so this check is
+        // load-bearing on every subsequent open.
+        Self::check_or_init_cold_backend_kind(&hot_db, config.cold_backend)?;
 
         let db = HotColdDB {
             split: RwLock::new(Split::default()),
@@ -3082,6 +3089,25 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         self.hot_db.put(&CONFIG_KEY, &self.config.as_disk_config())
     }
 
+    /// Pin the cold backend kind to the DB's hot metadata on first open and
+    /// refuse subsequent opens that disagree. Static and Kv use incompatible
+    /// on-disk layouts in the cold path, so silently switching would leave
+    /// orphaned data behind and quietly corrupt new writes.
+    fn check_or_init_cold_backend_kind(
+        hot_db: &BeaconNodeBackend<E>,
+        configured: crate::config::ColdBackendKind,
+    ) -> Result<(), Error> {
+        use crate::config::ColdBackendKind;
+        match hot_db.get::<ColdBackendKind>(&COLD_BACKEND_KEY)? {
+            Some(on_disk) if on_disk != configured => Err(Error::ColdBackendMismatch {
+                on_disk,
+                configured,
+            }),
+            Some(_) => Ok(()),
+            None => hot_db.put(&COLD_BACKEND_KEY, &configured),
+        }
+    }
+
     /// Load the split point from disk, sans block root.
     fn load_split_partial(&self) -> Result<Option<Split>, Error> {
         self.hot_db
@@ -3570,6 +3596,17 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     // Committed after the slot-keyed cold data so a crash leaves no dangling indices.
     let mut cold_state_summary_index: Vec<(Hash256, Slot)> = vec![];
 
+    // The static cold backend is a self-sufficient archive — it owns the
+    // bulk historic-block bytes, not just the slot index. The KV cold
+    // backend keeps blocks in the hot DB indefinitely, so duplicating them
+    // would only waste space.
+    let move_blocks_to_static_cold = matches!(
+        store.get_config().cold_backend,
+        crate::config::ColdBackendKind::Static
+    );
+    let mut cold_db_block_data: Vec<(Slot, Vec<u8>)> = vec![];
+    let mut last_seen_block_root: Option<Hash256> = None;
+
     // Iterate in descending order until the current split slot
     let state_roots: Vec<_> =
         process_results(RootsIterator::new(&store, finalized_state), |iter| {
@@ -3581,6 +3618,29 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     for (block_root, state_root, slot) in state_roots.iter().rev() {
         // Store the slot to block root mapping.
         cold_db_block_ops.push((*slot, block_root.as_slice().to_vec()));
+
+        // Move the block bytes into static cold at the slot they were
+        // proposed at. `RootsIterator` yields the same `block_root` for
+        // every skip slot until the next block — dedup by tracking the
+        // most recent root, then keep only the first occurrence whose
+        // iteration slot matches `block.slot()` (skip-slot continuations
+        // from the previous finalization window have `block.slot() < slot`
+        // and are already in cold from that earlier migration).
+        if move_blocks_to_static_cold && Some(*block_root) != last_seen_block_root {
+            last_seen_block_root = Some(*block_root);
+            if let Some(block_bytes) = store
+                .hot_db
+                .get_bytes(DBColumn::BeaconBlock, block_root.as_slice())?
+            {
+                let block = SignedBeaconBlock::<E, BlindedPayload<E>>::from_ssz_bytes(
+                    &block_bytes,
+                    &store.spec,
+                )?;
+                if block.slot() == *slot {
+                    cold_db_block_data.push((*slot, block_bytes));
+                }
+            }
+        }
 
         // Do not try to store states if a restore point is yet to be stored, or will never be
         // stored (see `STATE_UPPER_LIMIT_NO_RETAIN`). Make an exception for the genesis state
@@ -3631,9 +3691,23 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     //
     // Slot-keyed cold data lands first; the BeaconColdStateSummary root index is committed after,
     // so a mid-migration crash leaves cold data without dangling indices.
+    //
+    // TODO(static): a crash between `put_batch(BlockRoots, …)` and
+    // `put_index_batch(ColdStateSummary, …)` leaves BlockRoots committed for
+    // the new range but ColdStateSummary missing. The next restart re-runs the
+    // migration, which re-derives the summary, but until then invariant 11
+    // (`check_cold_state_root_indices`) will fire transiently. KV mode has the
+    // same window. Worth reviewing whether the index could move to per-iter
+    // commit alongside the slot-keyed data, or whether the invariant should
+    // be relaxed during the `split.slot < latest finalized` window.
     store
         .cold_db
         .put_batch(DBColumnCold::BlockRoots, cold_db_block_ops)?;
+    if !cold_db_block_data.is_empty() {
+        store
+            .cold_db
+            .put_batch(DBColumnCold::Block, cold_db_block_data)?;
+    }
     store.cold_db.sync()?;
     store.cold_db.put_index_batch(
         DBColumnColdIndex::ColdStateSummary,

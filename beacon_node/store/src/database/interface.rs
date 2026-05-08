@@ -84,6 +84,9 @@ impl<E: EthSpec> ColdStore<E> for ColdBackend<E> {
             Self::Static(db) => ColdStore::<E>::iter_from(db, c, from),
         }
     }
+    // `Slot::as_ssz_bytes()` is byte-identical to the legacy
+    // `ColdStateSummary { slot }` wrapper so existing dbs round-trip without
+    // migration. Pinned by `ssz_compat_with_legacy_summary` in `lib.rs`.
     fn get_index(&self, c: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error> {
         match self {
             Self::Kv(db) => Ok(db

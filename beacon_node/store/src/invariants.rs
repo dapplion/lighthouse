@@ -557,6 +557,13 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         Ok(result)
     }
 
+    // TODO(static): re-walk invariants 10/11/12 under the static cold backend.
+    // The text-form preconditions and the "block in hot_db" check (#10) were
+    // written against the KV-cold world where finalized blocks live in hot DB
+    // forever. Under static cold, archived blocks may live elsewhere (TBD per
+    // TODO-static-block-storage.md item 2), and `cold_db.iter_index` over a
+    // sparse static column is O(highest - from). Confirm or update each.
+
     /// Invariant 10 (Cold DB): Block root indices.
     ///
     /// ```text
