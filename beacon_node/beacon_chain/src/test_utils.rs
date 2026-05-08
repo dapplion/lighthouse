@@ -66,7 +66,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use store::database::interface::BeaconNodeBackend;
-use store::{HotColdDB, ItemStore, MemoryStore, config::StoreConfig};
+use store::{ColdStore, HotColdDB, ItemStore, MemoryStore, config::StoreConfig};
 use task_executor::TaskExecutor;
 use task_executor::{ShutdownReason, test_utils::TestRuntime};
 use tracing::debug;
@@ -400,7 +400,7 @@ impl<E, Hot, Cold> Builder<BaseHarnessType<E, Hot, Cold>>
 where
     E: EthSpec,
     Hot: ItemStore<E>,
-    Cold: ItemStore<E>,
+    Cold: ColdStore<E>,
 {
     pub fn new(eth_spec_instance: E) -> Self {
         let runtime = TestRuntime::default();
@@ -761,7 +761,7 @@ impl<E, Hot, Cold> BeaconChainHarness<BaseHarnessType<E, Hot, Cold>>
 where
     E: EthSpec,
     Hot: ItemStore<E>,
-    Cold: ItemStore<E>,
+    Cold: ColdStore<E>,
 {
     pub fn builder(eth_spec_instance: E) -> Builder<BaseHarnessType<E, Hot, Cold>> {
         create_test_tracing_subscriber();

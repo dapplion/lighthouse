@@ -1,10 +1,12 @@
 use crate::{
-    ColumnIter, ColumnKeyIter, DBColumn, Error, ItemStore, Key, KeyValueStore, KeyValueStoreOp,
-    errors::Error as DBError, get_key_for_col, hot_cold_store::BytesKey,
+    ColdStore, ColumnIter, ColumnKeyIter, DBColumn, DBColumnColdIndex, Error, ItemStore, Key,
+    KeyValueStore, KeyValueStoreOp, SlotIter, get_key_for_col, hot_cold_store::BytesKey,
 };
 use parking_lot::RwLock;
+use ssz::{Decode, Encode};
 use std::collections::{BTreeMap, HashSet};
 use std::marker::PhantomData;
+use types::Hash256;
 use types::*;
 
 type DBMap = BTreeMap<BytesKey, Vec<u8>>;
@@ -93,11 +95,13 @@ impl<E: EthSpec> KeyValueStore<E> for MemoryStore<E> {
             .filter_map(|(k, _)| k.remove_column_variable(column).map(|k| k.to_vec()))
             .collect::<Vec<_>>();
         Box::new(keys.into_iter().filter_map(move |key| {
-            self.get_bytes(column, &key).transpose().map(|res| {
-                let k = K::from_bytes(&key)?;
-                let v = res?;
-                Ok((k, v))
-            })
+            KeyValueStore::get_bytes(self, column, &key)
+                .transpose()
+                .map(|res| {
+                    let k = K::from_bytes(&key)?;
+                    let v = res?;
+                    Ok((k, v))
+                })
         }))
     }
 
@@ -124,7 +128,7 @@ impl<E: EthSpec> KeyValueStore<E> for MemoryStore<E> {
         Box::new(keys.into_iter().map(move |key| K::from_bytes(&key)))
     }
 
-    fn delete_batch(&self, col: DBColumn, ops: HashSet<&[u8]>) -> Result<(), DBError> {
+    fn delete_batch(&self, col: DBColumn, ops: HashSet<&[u8]>) -> Result<(), Error> {
         for op in ops {
             let column_key = get_key_for_col(col, op);
             self.db.write().remove(&BytesKey::from_vec(column_key));
@@ -149,3 +153,63 @@ impl<E: EthSpec> KeyValueStore<E> for MemoryStore<E> {
 }
 
 impl<E: EthSpec> ItemStore<E> for MemoryStore<E> {}
+
+impl<E: EthSpec> ColdStore<E> for MemoryStore<E> {
+    fn get(&self, column: DBColumn, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
+        KeyValueStore::get_bytes(self, column, &slot.as_u64().to_be_bytes())
+    }
+
+    fn put_batch(&self, column: DBColumn, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error> {
+        let ops = items
+            .into_iter()
+            .map(|(slot, value)| {
+                KeyValueStoreOp::PutKeyValue(column, slot.as_u64().to_be_bytes().to_vec(), value)
+            })
+            .collect();
+        KeyValueStore::do_atomically(self, ops)
+    }
+
+    fn exists(&self, column: DBColumn, slot: Slot) -> Result<bool, Error> {
+        KeyValueStore::key_exists(self, column, &slot.as_u64().to_be_bytes())
+    }
+
+    fn iter_from(&self, column: DBColumn, from: Slot) -> SlotIter<'_> {
+        Box::new(
+            KeyValueStore::iter_column_from::<Vec<u8>>(self, column, &from.as_u64().to_be_bytes())
+                .map(|res| {
+                    res.and_then(|(key_bytes, value)| {
+                        let bytes: [u8; 8] =
+                            key_bytes.try_into().map_err(|_| Error::InvalidBytes)?;
+                        Ok((Slot::new(u64::from_be_bytes(bytes)), value))
+                    })
+                }),
+        )
+    }
+
+    fn get_index(&self, column: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error> {
+        Ok(
+            KeyValueStore::get_bytes(self, column.db_column(), root.as_slice())?
+                .map(|bytes| Slot::from_ssz_bytes(&bytes))
+                .transpose()?,
+        )
+    }
+
+    fn put_index_batch(
+        &self,
+        column: DBColumnColdIndex,
+        items: Vec<(Hash256, Slot)>,
+    ) -> Result<(), Error> {
+        let col = column.db_column();
+        let ops = items
+            .into_iter()
+            .map(|(root, slot)| {
+                KeyValueStoreOp::PutKeyValue(col, root.as_slice().to_vec(), slot.as_ssz_bytes())
+            })
+            .collect();
+        KeyValueStore::do_atomically(self, ops)
+    }
+
+    fn sync(&self) -> Result<(), Error> {
+        KeyValueStore::sync(self)
+    }
+}

@@ -2,7 +2,7 @@
 use crate::forwards_iter::FrozenForwardsIterator;
 use crate::hot_cold_store::{HotColdDB, HotColdDBError};
 use crate::metrics;
-use crate::{DBColumn, Error, ItemStore};
+use crate::{ColdStore, DBColumn, DBColumnColdIndex, Error, ItemStore};
 use itertools::{Itertools, process_results};
 use state_processing::{
     BlockSignatureStrategy, ConsensusContext, VerifyBlockRoot, per_block_processing,
@@ -10,13 +10,13 @@ use state_processing::{
 };
 use std::sync::Arc;
 use tracing::{debug, info};
-use types::{EthSpec, Slot};
+use types::{EthSpec, Hash256, Slot};
 
 impl<E, Hot, Cold> HotColdDB<E, Hot, Cold>
 where
     E: EthSpec,
     Hot: ItemStore<E>,
-    Cold: ItemStore<E>,
+    Cold: ColdStore<E>,
 {
     pub fn reconstruct_historic_states(
         self: &Arc<Self>,
@@ -129,7 +129,8 @@ where
         state.build_caches(&self.spec)?;
 
         process_results(block_root_iter, |iter| -> Result<(), Error> {
-            let mut io_batch = vec![];
+            let mut cold_items: Vec<(DBColumn, Slot, Vec<u8>)> = vec![];
+            let mut summary_index: Vec<(Hash256, Slot)> = vec![];
             let mut prev_state_root = None;
 
             for ((prev_block_root, _), (block_root, slot)) in iter.tuple_windows() {
@@ -172,7 +173,7 @@ where
                     .or_else(|_| state.update_tree_hash_cache())?;
 
                 // Stage state for storage in freezer DB.
-                self.store_cold_state(&state_root, &state, &mut io_batch)?;
+                self.store_cold_state(&state_root, &state, &mut cold_items, &mut summary_index)?;
 
                 let batch_complete = slot + 1 == to_slot;
 
@@ -181,7 +182,13 @@ where
                 // - The diff/snapshot for this slot is required for future slots, or
                 // - The reconstruction batch is complete (we are about to return).
                 if self.hierarchy.should_commit_immediately(slot)? || batch_complete {
-                    self.cold_db.do_atomically(std::mem::take(&mut io_batch))?;
+                    // Slot-keyed cold bulk first, root index after — a mid-flush crash leaves
+                    // cold data with no dangling index entry.
+                    self.commit_cold_items(std::mem::take(&mut cold_items))?;
+                    self.cold_db.put_index_batch(
+                        DBColumnColdIndex::ColdStateSummary,
+                        std::mem::take(&mut summary_index),
+                    )?;
 
                     if batch_complete {
                         // Perform one last integrity check on the state reached.

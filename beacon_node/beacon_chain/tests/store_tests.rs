@@ -44,7 +44,7 @@ use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use store::database::interface::BeaconNodeBackend;
-use store::metadata::{CURRENT_SCHEMA_VERSION, STATE_UPPER_LIMIT_NO_RETAIN, SchemaVersion};
+use store::metadata::{CURRENT_SCHEMA_VERSION, SchemaVersion};
 use store::{
     BlobInfo, DBColumn, HotColdDB, StoreConfig,
     hdiff::HierarchyConfig,
@@ -5016,75 +5016,6 @@ fn check_data_column_existence(
     if should_exist {
         assert_ne!(columns_seen, 0, "expected non-zero number of columns");
     }
-}
-
-#[tokio::test]
-async fn prune_historic_states() {
-    let num_blocks_produced = E::slots_per_epoch() * 5;
-    let db_path = tempdir().unwrap();
-    let store = get_store(&db_path);
-    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
-    let genesis_state_root = harness.chain.genesis_state_root;
-
-    let genesis_state = harness
-        .chain
-        .get_state(&genesis_state_root, None, CACHE_STATE_IN_TESTS)
-        .unwrap()
-        .unwrap();
-
-    harness
-        .extend_chain(
-            num_blocks_produced as usize,
-            BlockStrategy::OnCanonicalHead,
-            AttestationStrategy::AllValidators,
-        )
-        .await;
-
-    // Check historical states are present.
-    let first_epoch_state_roots = harness
-        .chain
-        .forwards_iter_state_roots(Slot::new(0))
-        .unwrap()
-        .take(E::slots_per_epoch() as usize)
-        .map(Result::unwrap)
-        .collect::<Vec<_>>();
-    for &(state_root, slot) in &first_epoch_state_roots {
-        assert!(
-            store
-                .get_state(&state_root, Some(slot), CACHE_STATE_IN_TESTS)
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    store
-        .prune_historic_states(genesis_state_root, &genesis_state)
-        .unwrap();
-
-    // Check that anchor info is updated.
-    let anchor_info = store.get_anchor_info();
-    assert_eq!(anchor_info.state_lower_limit, 0);
-    assert_eq!(anchor_info.state_upper_limit, STATE_UPPER_LIMIT_NO_RETAIN);
-
-    // Ensure all epoch 0 states other than the genesis have been pruned.
-    for &(state_root, slot) in &first_epoch_state_roots {
-        assert_eq!(
-            store
-                .get_state(&state_root, Some(slot), CACHE_STATE_IN_TESTS)
-                .unwrap()
-                .is_some(),
-            slot == 0
-        );
-    }
-
-    // Run for another two epochs.
-    let additional_blocks_produced = 2 * E::slots_per_epoch();
-    harness
-        .extend_slots(additional_blocks_produced as usize)
-        .await;
-
-    check_finalization(&harness, num_blocks_produced + additional_blocks_produced);
-    check_split_slot(&harness, store);
 }
 
 // Test the function `get_ancestor_state_root` for slots prior to the split where we only have

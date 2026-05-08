@@ -1,7 +1,6 @@
 pub mod cli;
 use crate::cli::DatabaseManager;
 use crate::cli::Migrate;
-use crate::cli::PruneStates;
 use beacon_chain::{
     builder::Witness, schema_change::migrate_schema, slot_clock::SystemTimeSlotClock,
 };
@@ -22,8 +21,8 @@ use store::{
     metadata::{CURRENT_SCHEMA_VERSION, SchemaVersion},
 };
 use strum::{EnumString, VariantNames};
-use tracing::{info, warn};
-use types::{BeaconState, EthSpec, Slot};
+use tracing::info;
+use types::EthSpec;
 
 fn parse_client_config<E: EthSpec>(
     cli_args: &ArgMatches,
@@ -377,75 +376,6 @@ pub fn prune_blobs<E: EthSpec>(
     db.try_prune_most_blobs(true)
 }
 
-pub struct PruneStatesConfig {
-    confirm: bool,
-}
-fn parse_prune_states_config(
-    prune_states_config: &PruneStates,
-) -> Result<PruneStatesConfig, String> {
-    let confirm = prune_states_config.confirm;
-    Ok(PruneStatesConfig { confirm })
-}
-
-pub fn prune_states<E: EthSpec>(
-    client_config: ClientConfig,
-    prune_config: PruneStatesConfig,
-    mut genesis_state: BeaconState<E>,
-    runtime_context: &RuntimeContext<E>,
-) -> Result<(), String> {
-    let spec = &runtime_context.eth2_config.spec;
-    let hot_path = client_config.get_db_path();
-    let cold_path = client_config.get_freezer_db_path();
-    let blobs_path = client_config.get_blobs_db_path();
-
-    let db = HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
-        &hot_path,
-        &cold_path,
-        &blobs_path,
-        |_, _, _| Ok(()),
-        client_config.store,
-        spec.clone(),
-    )
-    .map_err(|e| format!("Unable to open database: {e:?}"))?;
-
-    // Load the genesis state from the database to ensure we're deleting states for the
-    // correct network, and that we don't end up storing the wrong genesis state.
-    let genesis_from_db = db
-        .load_cold_state_by_slot(Slot::new(0))
-        .map_err(|e| format!("Error reading genesis state: {e:?}"))?;
-
-    if genesis_from_db.genesis_validators_root() != genesis_state.genesis_validators_root() {
-        return Err(format!(
-            "Error: Wrong network. Genesis state in DB does not match {} genesis.",
-            spec.config_name.as_deref().unwrap_or("<unknown network>")
-        ));
-    }
-
-    // Check that the user has confirmed they want to proceed.
-    if !prune_config.confirm {
-        if db.get_anchor_info().full_state_pruning_enabled() {
-            info!("States have already been pruned");
-            return Ok(());
-        }
-
-        info!("Ready to prune states");
-        warn!("Pruning states is irreversible");
-        warn!("Re-run this command with --confirm to commit to state deletion");
-        info!("Nothing has been pruned on this run");
-        return Err("Error: confirmation flag required".into());
-    }
-
-    // Delete all historic state data and *re-store* the genesis state.
-    let genesis_state_root = genesis_state
-        .update_tree_hash_cache()
-        .map_err(|e| format!("Error computing genesis state root: {e:?}"))?;
-    db.prune_historic_states(genesis_state_root, &genesis_state)
-        .map_err(|e| format!("Failed to prune due to error: {e:?}"))?;
-
-    info!("Historic states pruned successfully");
-    Ok(())
-}
-
 /// Run the database manager, returning an error string if the operation did not succeed.
 pub fn run<E: EthSpec>(
     cli_args: &ArgMatches,
@@ -455,26 +385,6 @@ pub fn run<E: EthSpec>(
     let client_config = parse_client_config(cli_args, db_manager_config, &env)?;
     let context = env.core_context();
     let format_err = |e| format!("Fatal error: {:?}", e);
-
-    let get_genesis_state = || {
-        let executor = env.core_context().executor;
-        let network_config = context
-            .eth2_network_config
-            .clone()
-            .ok_or("Missing network config")?;
-
-        executor
-            .block_on_dangerous(
-                network_config.genesis_state::<E>(
-                    client_config.genesis_state_url.as_deref(),
-                    client_config.genesis_state_url_timeout,
-                ),
-                "get_genesis_state",
-            )
-            .ok_or("Shutting down")?
-            .map_err(|e| format!("Error getting genesis state: {e}"))?
-            .ok_or("Genesis state missing".to_string())
-    };
 
     match &db_manager_config.subcommand {
         cli::DatabaseManagerSubcommand::Migrate(migrate_config) => {
@@ -493,11 +403,6 @@ pub fn run<E: EthSpec>(
         }
         cli::DatabaseManagerSubcommand::PruneBlobs(_) => {
             prune_blobs(client_config, &context).map_err(format_err)
-        }
-        cli::DatabaseManagerSubcommand::PruneStates(prune_states_config) => {
-            let prune_config = parse_prune_states_config(prune_states_config)?;
-            let genesis_state = get_genesis_state()?;
-            prune_states(client_config, prune_config, genesis_state, &context)
         }
         cli::DatabaseManagerSubcommand::Compact(compact_config) => {
             let compact_config = parse_compact_config(compact_config)?;

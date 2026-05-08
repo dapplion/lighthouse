@@ -141,11 +141,6 @@ impl AnchorInfo {
         self.state_lower_limit == 0 && self.state_upper_limit >= split_slot
     }
 
-    /// Return true if no historic states other than genesis *will ever be stored*.
-    pub fn full_state_pruning_enabled(&self) -> bool {
-        self.state_lower_limit == 0 && self.state_upper_limit == STATE_UPPER_LIMIT_NO_RETAIN
-    }
-
     /// Compute the correct `AnchorInfo` for an archive node created from the current node.
     ///
     /// This method ensures that the `anchor_slot` which is used for the hot database's diff grid is

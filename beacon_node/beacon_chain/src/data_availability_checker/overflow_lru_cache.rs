@@ -861,7 +861,7 @@ mod test {
     where
         E: EthSpec,
         Hot: ItemStore<E>,
-        Cold: ItemStore<E>,
+        Cold: ColdStore<E>,
     {
         let chain = &harness.chain;
         let head = chain.head_snapshot();

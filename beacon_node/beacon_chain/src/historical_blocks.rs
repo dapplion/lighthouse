@@ -10,7 +10,9 @@ use std::borrow::Cow;
 use std::iter;
 use std::time::Duration;
 use store::metadata::DataColumnInfo;
-use store::{AnchorInfo, BlobInfo, DBColumn, Error as StoreError, KeyValueStore, KeyValueStoreOp};
+use store::{
+    AnchorInfo, BlobInfo, ColdStore, DBColumn, Error as StoreError, KeyValueStore, KeyValueStoreOp,
+};
 use strum::IntoStaticStr;
 use tracing::{debug, debug_span, instrument};
 use types::{Hash256, Slot};
@@ -108,7 +110,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let mut new_oldest_data_column_slot = data_column_info.oldest_data_column_slot;
 
         let mut blob_batch = Vec::<KeyValueStoreOp>::new();
-        let mut cold_batch = Vec::with_capacity(blocks_to_import.len());
+        let mut cold_batch: Vec<(Slot, Vec<u8>)> = Vec::with_capacity(blocks_to_import.len());
         let mut hot_batch = Vec::with_capacity(blocks_to_import.len());
         let mut signed_blocks = Vec::with_capacity(blocks_to_import.len());
 
@@ -174,11 +176,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // Store block roots, including at all skip slots in the freezer DB.
             for slot in (block.slot().as_u64()..prev_block_slot.as_u64()).rev() {
                 debug!(%slot, ?block_root, "Storing frozen block to root mapping");
-                cold_batch.push(KeyValueStoreOp::PutKeyValue(
-                    DBColumn::BeaconBlockRoots,
-                    slot.to_be_bytes().to_vec(),
-                    block_root.as_slice().to_vec(),
-                ));
+                cold_batch.push((Slot::new(slot), block_root.as_slice().to_vec()));
             }
 
             prev_block_slot = block.slot();
@@ -191,11 +189,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             if expected_block_root == self.genesis_block_root {
                 let genesis_slot = self.spec.genesis_slot;
                 for slot in genesis_slot.as_u64()..prev_block_slot.as_u64() {
-                    cold_batch.push(KeyValueStoreOp::PutKeyValue(
-                        DBColumn::BeaconBlockRoots,
-                        slot.to_be_bytes().to_vec(),
-                        self.genesis_block_root.as_slice().to_vec(),
-                    ));
+                    cold_batch.push((Slot::new(slot), self.genesis_block_root.as_slice().to_vec()));
                 }
                 prev_block_slot = genesis_slot;
                 expected_block_root = Hash256::zero();
@@ -261,7 +255,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
         {
             let _span = debug_span!("backfill_write_cold_db").entered();
-            self.store.cold_db.do_atomically(cold_batch)?;
+            self.store
+                .cold_db
+                .put_batch(DBColumn::BeaconBlockRoots, cold_batch)?;
         }
 
         let mut anchor_and_blob_batch = Vec::with_capacity(3);

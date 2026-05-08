@@ -2,11 +2,16 @@
 use crate::database::leveldb_impl;
 #[cfg(feature = "redb")]
 use crate::database::redb_impl;
-use crate::{ColumnIter, ColumnKeyIter, DBColumn, Error, ItemStore, Key, KeyValueStore, metrics};
+use crate::{
+    ColdStore, ColumnIter, ColumnKeyIter, DBColumn, DBColumnColdIndex, Error, ItemStore, Key,
+    KeyValueStore, SlotIter, metrics,
+};
 use crate::{KeyValueStoreOp, StoreConfig, config::DatabaseBackend};
+use ssz::{Decode, Encode};
 use std::collections::HashSet;
 use std::path::Path;
 use types::EthSpec;
+use types::{Hash256, Slot};
 
 pub enum BeaconNodeBackend<E: EthSpec> {
     #[cfg(feature = "leveldb")]
@@ -16,6 +21,74 @@ pub enum BeaconNodeBackend<E: EthSpec> {
 }
 
 impl<E: EthSpec> ItemStore<E> for BeaconNodeBackend<E> {}
+
+impl<E: EthSpec> ColdStore<E> for BeaconNodeBackend<E> {
+    fn get(&self, column: DBColumn, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
+        KeyValueStore::get_bytes(self, column, &slot.as_u64().to_be_bytes())
+    }
+
+    fn put_batch(&self, column: DBColumn, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error> {
+        let ops = items
+            .into_iter()
+            .map(|(slot, value)| {
+                crate::KeyValueStoreOp::PutKeyValue(
+                    column,
+                    slot.as_u64().to_be_bytes().to_vec(),
+                    value,
+                )
+            })
+            .collect();
+        KeyValueStore::do_atomically(self, ops)
+    }
+
+    fn exists(&self, column: DBColumn, slot: Slot) -> Result<bool, Error> {
+        KeyValueStore::key_exists(self, column, &slot.as_u64().to_be_bytes())
+    }
+
+    fn iter_from(&self, column: DBColumn, from: Slot) -> SlotIter<'_> {
+        Box::new(
+            KeyValueStore::iter_column_from::<Vec<u8>>(self, column, &from.as_u64().to_be_bytes())
+                .map(|res| {
+                    res.and_then(|(key_bytes, value)| {
+                        let bytes: [u8; 8] =
+                            key_bytes.try_into().map_err(|_| Error::InvalidBytes)?;
+                        Ok((Slot::new(u64::from_be_bytes(bytes)), value))
+                    })
+                }),
+        )
+    }
+
+    fn get_index(&self, column: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error> {
+        Ok(
+            KeyValueStore::get_bytes(self, column.db_column(), root.as_slice())?
+                .map(|bytes| Slot::from_ssz_bytes(&bytes))
+                .transpose()?,
+        )
+    }
+
+    fn put_index_batch(
+        &self,
+        column: DBColumnColdIndex,
+        items: Vec<(Hash256, Slot)>,
+    ) -> Result<(), Error> {
+        let col = column.db_column();
+        let ops = items
+            .into_iter()
+            .map(|(root, slot)| {
+                crate::KeyValueStoreOp::PutKeyValue(
+                    col,
+                    root.as_slice().to_vec(),
+                    slot.as_ssz_bytes(),
+                )
+            })
+            .collect();
+        KeyValueStore::do_atomically(self, ops)
+    }
+
+    fn sync(&self) -> Result<(), Error> {
+        KeyValueStore::sync(self)
+    }
+}
 
 impl<E: EthSpec> KeyValueStore<E> for BeaconNodeBackend<E> {
     fn get_bytes(&self, column: DBColumn, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {

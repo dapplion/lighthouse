@@ -14,7 +14,7 @@ use ssz_derive::{Decode, Encode};
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use store::{Error as StoreError, HotColdDB, ItemStore};
+use store::{ColdStore, Error as StoreError, HotColdDB, ItemStore};
 use superstruct::superstruct;
 use types::{
     AbstractExecPayload, BeaconBlockRef, BeaconState, BeaconStateError, Checkpoint, Epoch, EthSpec,
@@ -129,8 +129,8 @@ impl BalancesCache {
 /// Implements `fork_choice::ForkChoiceStore` in order to provide a persistent backing to the
 /// `fork_choice::ForkChoice` struct.
 #[derive(Debug, Educe)]
-#[educe(PartialEq(bound(E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>)))]
-pub struct BeaconForkChoiceStore<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
+#[educe(PartialEq(bound(E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>)))]
+pub struct BeaconForkChoiceStore<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> {
     #[educe(PartialEq(ignore))]
     store: Arc<HotColdDB<E, Hot, Cold>>,
     balances_cache: BalancesCache,
@@ -151,7 +151,7 @@ impl<E, Hot, Cold> BeaconForkChoiceStore<E, Hot, Cold>
 where
     E: EthSpec,
     Hot: ItemStore<E>,
-    Cold: ItemStore<E>,
+    Cold: ColdStore<E>,
 {
     /// Initialize `Self` from some `anchor` checkpoint which may or may not be the genesis state.
     ///
@@ -268,7 +268,7 @@ impl<E, Hot, Cold> ForkChoiceStore<E> for BeaconForkChoiceStore<E, Hot, Cold>
 where
     E: EthSpec,
     Hot: ItemStore<E>,
-    Cold: ItemStore<E>,
+    Cold: ColdStore<E>,
 {
     type Error = Error;
 

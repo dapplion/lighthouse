@@ -98,7 +98,7 @@ where
     TSlotClock: SlotClock + Clone + 'static,
     E: EthSpec + 'static,
     THotStore: ItemStore<E> + 'static,
-    TColdStore: ItemStore<E> + 'static,
+    TColdStore: store::ColdStore<E> + 'static,
 {
     /// Instantiates a new, empty builder.
     ///
@@ -811,7 +811,7 @@ where
     TSlotClock: SlotClock + Clone + 'static,
     E: EthSpec + 'static,
     THotStore: ItemStore<E> + 'static,
-    TColdStore: ItemStore<E> + 'static,
+    TColdStore: store::ColdStore<E> + 'static,
 {
     /// Consumes the internal `BeaconChainBuilder`, attaching the resulting `BeaconChain` to self.
     #[instrument(skip_all)]
@@ -885,7 +885,7 @@ impl<E, THotStore, TColdStore> ClientBuilder<Witness<SystemTimeSlotClock, E, THo
 where
     E: EthSpec + 'static,
     THotStore: ItemStore<E> + 'static,
-    TColdStore: ItemStore<E> + 'static,
+    TColdStore: store::ColdStore<E> + 'static,
 {
     /// Specifies that the slot clock should read the time from the computers system clock.
     pub fn system_time_slot_clock(mut self) -> Result<Self, String> {

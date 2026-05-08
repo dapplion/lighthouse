@@ -32,7 +32,7 @@ pub use self::config::StoreConfig;
 pub use self::hot_cold_store::{HotColdDB, HotStateSummary, Split};
 pub use self::memory_store::MemoryStore;
 pub use self::static_blobs::StaticBlobStore;
-pub use self::static_blocks::StaticBlockStore;
+pub use self::static_blocks::StaticColdStore;
 pub use crate::metadata::BlobInfo;
 pub use errors::Error;
 pub use metadata::AnchorInfo;
@@ -107,6 +107,48 @@ pub trait KeyValueStore<E: EthSpec>: Sync + Send + Sized + 'static {
         column: DBColumn,
         f: impl FnMut(&[u8]) -> Result<bool, Error>,
     ) -> Result<(), Error>;
+}
+
+pub type SlotIter<'a> = Box<dyn Iterator<Item = Result<(Slot, Vec<u8>), Error>> + 'a>;
+
+/// Root-keyed indices owned by the cold backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DBColumnColdIndex {
+    /// `block_root -> slot` for finalized blocks.
+    BlockSlot,
+    /// `state_root -> slot` for cold state summaries.
+    ColdStateSummary,
+}
+
+impl DBColumnColdIndex {
+    pub fn db_column(self) -> DBColumn {
+        match self {
+            Self::BlockSlot => DBColumn::BeaconBlockSlot,
+            Self::ColdStateSummary => DBColumn::BeaconColdStateSummary,
+        }
+    }
+}
+
+pub trait ColdStore<E: EthSpec>: Sync + Send + Sized + 'static {
+    // Slot-keyed bulk data.
+    fn get(&self, column: DBColumn, slot: Slot) -> Result<Option<Vec<u8>>, Error>;
+
+    fn put_batch(&self, column: DBColumn, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error>;
+
+    fn exists(&self, column: DBColumn, slot: Slot) -> Result<bool, Error>;
+
+    fn iter_from(&self, column: DBColumn, from: Slot) -> SlotIter<'_>;
+
+    // Root-keyed indices owned by the cold backend.
+    fn get_index(&self, column: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error>;
+
+    fn put_index_batch(
+        &self,
+        column: DBColumnColdIndex,
+        items: Vec<(Hash256, Slot)>,
+    ) -> Result<(), Error>;
+
+    fn sync(&self) -> Result<(), Error>;
 }
 
 pub trait Key: Sized + 'static {
@@ -246,7 +288,7 @@ pub enum StoreOp<'a, E: EthSpec> {
 }
 
 /// A unique column identifier.
-#[derive(Debug, Clone, Copy, PartialEq, IntoStaticStr, EnumString, EnumIter)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoStaticStr, EnumString, EnumIter)]
 pub enum DBColumn {
     /// For data related to the database itself.
     #[strum(serialize = "bma")]

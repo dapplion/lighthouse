@@ -1,7 +1,7 @@
 use crate::custody_context::CustodyContextSsz;
 use ssz::{Decode, Encode};
 use std::sync::Arc;
-use store::{DBColumn, Error as StoreError, HotColdDB, ItemStore, StoreItem};
+use store::{ColdStore, DBColumn, Error as StoreError, HotColdDB, ItemStore, StoreItem};
 use types::{EthSpec, Hash256};
 
 /// 32-byte key for accessing the `CustodyContext`. All zero because `CustodyContext` has its own column.
@@ -9,7 +9,7 @@ pub const CUSTODY_DB_KEY: Hash256 = Hash256::ZERO;
 
 pub struct PersistedCustody(pub CustodyContextSsz);
 
-pub fn load_custody_context<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+pub fn load_custody_context<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     store: Arc<HotColdDB<E, Hot, Cold>>,
 ) -> Option<CustodyContextSsz> {
     let res: Result<Option<PersistedCustody>, _> =
@@ -22,7 +22,7 @@ pub fn load_custody_context<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
 }
 
 /// Attempt to persist the custody context object to `self.store`.
-pub fn persist_custody_context<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+pub fn persist_custody_context<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     store: Arc<HotColdDB<E, Hot, Cold>>,
     custody_context: CustodyContextSsz,
 ) -> Result<(), store::Error> {

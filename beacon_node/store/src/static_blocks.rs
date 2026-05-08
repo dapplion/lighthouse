@@ -1,21 +1,34 @@
-//! Slot-keyed durable archive for finalized blinded blocks.
+//! Slot-keyed durable archive for finalized cold-DB columns.
 //!
-//! `StaticBlockStore` is a black box from `HotColdDB`'s perspective: hand it block bytes,
-//! ask it for them back by slot. File mapping, recovery, and rename semantics are internal.
+//! `StaticColdStore` is a black box from `HotColdDB`'s perspective: hand it
+//! `(column, slot, bytes)`, ask it for them back by `(column, slot)`. File
+//! mapping, recovery, and rename semantics are internal.
+//!
+//! Each column gets its own subdirectory under the store root, so the on-disk
+//! format of a single column is the original single-column layout —
+//! `static_blocks_{file_id:05}` data files, matching `.off` sidecars, and a
+//! `static_blocks.conf` commit marker — just rooted at `<root>/<col-tag>/`.
+//!
+//! Per-column behaviour (compression, record-type tag, max decompressed size)
+//! lives in `column_config`. Columns absent from that table are rejected.
 //!
 //! Contract:
-//! - `put(slot, bytes)` is durable on return. The caller is allowed to rely on this for
-//!   source-of-truth flips (e.g. writing a reverse-index entry, deleting from hot KV).
+//! - `put(column, slot, bytes)` is durable on return.
+//! - Slots within a column must arrive strictly ascending; columns are
+//!   independent.
 //!
 //! See `specs/static-blocks.md` for the on-disk format.
 
+use crate::DBColumn;
+use parking_lot::Mutex;
 use snap::{read::FrameDecoder, write::FrameEncoder};
 use std::{
+    collections::HashMap,
     fmt,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::Arc,
 };
 use types::Slot;
 
@@ -24,78 +37,195 @@ const OFFSET_SIZE: u64 = 8;
 const OFFSET_FILE_LEN: u64 = SLOTS_PER_FILE * OFFSET_SIZE;
 const CONFIG_FILE: &str = "static_blocks.conf";
 const CONFIG_TMP_FILE: &str = "static_blocks.conf.tmp";
-const CONFIG_MAGIC: &[u8; 8] = b"LHSTBLK1";
-const CONFIG_LEN: usize = 24;
-// Empty-store sentinel for `highest_written_slot` in `static_blocks.conf`.
+const CONFIG_MAGIC: &[u8; 8] = b"LHSTBLK2";
+const CONFIG_LEN: usize = 36;
+/// Empty-store sentinel for `highest_written_slot` in the per-column config.
 const EMPTY_SLOT: u64 = u64::MAX;
-// e2store version record.
+/// e2store version record, written once at the start of each data file.
 const VERSION_RECORD: [u8; 8] = [0x65, 0x32, 0, 0, 0, 0, 0, 0];
-// CompressedSignedBeaconBlock e2store record type.
-const BLOCK_RECORD_TYPE: [u8; 2] = [0x01, 0x00];
-const MAX_DECOMPRESSED_BLOCK_BYTES: u64 = 10 * 1024 * 1024;
+
+const COMPRESSION_NONE: u8 = 0;
+const COMPRESSION_SNAPPY: u8 = 1;
+
+/// Per-column configuration. On first creation of a column the values come
+/// from `column_config`; thereafter they are persisted in the column file-set
+/// `static_blocks.conf` and the on-disk values win over current-build defaults.
+#[derive(Debug, Clone, Copy)]
+struct ColumnConfig {
+    /// On-disk subdirectory name under the store root. Stable across builds.
+    subdir: &'static str,
+    /// e2store record type tag for this column.
+    record_type: [u8; 2],
+    /// Whether values are snappy-framed before write.
+    compression: bool,
+    /// Upper bound on a single decoded record's size in bytes.
+    max_decompressed: u64,
+}
+
+/// Static-cold backing for a single cold column. Returns `None` for columns
+/// that don't live in the static archive.
+fn column_config(column: DBColumn) -> Option<ColumnConfig> {
+    match column {
+        DBColumn::BeaconBlock => Some(ColumnConfig {
+            subdir: "blk",
+            record_type: [0x01, 0x00],
+            compression: true,
+            max_decompressed: 10 * 1024 * 1024,
+        }),
+        DBColumn::BeaconBlockRoots => Some(ColumnConfig {
+            subdir: "bbr",
+            record_type: [0x02, 0x00],
+            compression: false,
+            max_decompressed: 64,
+        }),
+        DBColumn::BeaconStateRoots => Some(ColumnConfig {
+            subdir: "bsr",
+            record_type: [0x03, 0x00],
+            compression: false,
+            max_decompressed: 64,
+        }),
+        DBColumn::BeaconStateSnapshot => Some(ColumnConfig {
+            subdir: "bss",
+            record_type: [0x04, 0x00],
+            compression: false,
+            max_decompressed: 1024 * 1024 * 1024,
+        }),
+        DBColumn::BeaconStateDiff => Some(ColumnConfig {
+            subdir: "bsd",
+            record_type: [0x05, 0x00],
+            compression: true,
+            max_decompressed: 1024 * 1024 * 1024,
+        }),
+        _ => None,
+    }
+}
 
 #[derive(Debug)]
-pub struct StaticBlockStore {
+pub struct StaticColdStore {
     root_dir: PathBuf,
-    highest_written_slot: Mutex<Option<Slot>>,
+    /// Lazily-opened per-column file sets. The outer mutex guards creation;
+    /// reads/writes within a column take that column's own lock.
+    columns: Mutex<HashMap<DBColumn, Arc<Column>>>,
 }
 
-struct Config {
-    highest_written_slot: Option<Slot>,
-    current_data_len: u64,
-}
-
-type StoreResult<T> = std::result::Result<T, StaticBlockStoreError>;
+type StoreResult<T> = std::result::Result<T, StaticColdStoreError>;
 
 #[derive(Debug)]
-pub enum StaticBlockStoreError {
+pub enum StaticColdStoreError {
     Io(io::Error),
     Compression(io::Error),
     Invalid(String),
+    UnsupportedColumn(DBColumn),
 }
 
-impl fmt::Display for StaticBlockStoreError {
+impl fmt::Display for StaticColdStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(e) => write!(f, "static block store io error: {e}"),
-            Self::Compression(e) => write!(f, "static block store compression error: {e}"),
-            Self::Invalid(message) => write!(f, "static block store invalid data: {message}"),
+            Self::Io(e) => write!(f, "static cold store io error: {e}"),
+            Self::Compression(e) => write!(f, "static cold store compression error: {e}"),
+            Self::Invalid(message) => write!(f, "static cold store invalid data: {message}"),
+            Self::UnsupportedColumn(c) => {
+                write!(f, "static cold store does not back column {c:?}")
+            }
         }
     }
 }
 
-impl From<io::Error> for StaticBlockStoreError {
+impl From<io::Error> for StaticColdStoreError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
     }
 }
 
-impl StaticBlockStore {
-    /// Open the archive rooted at `path`.
+impl StaticColdStore {
+    /// Open the archive rooted at `path`. Per-column subdirectories are
+    /// created lazily on first access.
     pub fn open(path: &Path) -> StoreResult<Self> {
         fs::create_dir_all(path)?;
-
-        let store = Self {
+        Ok(Self {
             root_dir: path.to_path_buf(),
+            columns: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Read the value at `(column, slot)`, if present.
+    pub fn get(&self, column: DBColumn, slot: Slot) -> StoreResult<Option<Vec<u8>>> {
+        self.open_column(column)?.get(slot)
+    }
+
+    /// Durably store `bytes` at `(column, slot)`. Slots within a column must
+    /// arrive strictly ascending.
+    pub fn put(&self, column: DBColumn, slot: Slot, bytes: &[u8]) -> StoreResult<()> {
+        self.open_column(column)?.put(slot, bytes)
+    }
+
+    /// Resolve (and lazily create) the file set for `column`.
+    fn open_column(&self, column: DBColumn) -> StoreResult<Arc<Column>> {
+        let mut columns = self.columns.lock();
+        if let Some(handle) = columns.get(&column) {
+            return Ok(handle.clone());
+        }
+        let cfg = column_config(column).ok_or(StaticColdStoreError::UnsupportedColumn(column))?;
+        let handle = Arc::new(Column::open(self.root_dir.join(cfg.subdir), cfg)?);
+        columns.insert(column, handle.clone());
+        Ok(handle)
+    }
+}
+
+/// Single-column slot-keyed file set. Owns one subdirectory of data + `.off` +
+/// config files.
+#[derive(Debug)]
+struct Column {
+    root_dir: PathBuf,
+    config: ColumnConfig,
+    highest_written_slot: Mutex<Option<Slot>>,
+}
+
+struct ColumnConfigOnDisk {
+    highest_written_slot: Option<Slot>,
+    current_data_len: u64,
+    record_type: [u8; 2],
+    compression: bool,
+    max_decompressed: u64,
+}
+
+impl Column {
+    fn open(root_dir: PathBuf, defaults: ColumnConfig) -> StoreResult<Self> {
+        fs::create_dir_all(&root_dir)?;
+
+        // First-open: persist current-build defaults. Re-open: persisted
+        // settings win over `defaults`, which preserves on-disk readability
+        // even if the build's defaults change later.
+        let config_path = root_dir.join(CONFIG_FILE);
+        let tmp_path = root_dir.join(CONFIG_TMP_FILE);
+        if !config_path.exists() {
+            atomic_write_config(&config_path, &tmp_path, &root_dir, None, 0, &defaults)?;
+        }
+
+        let on_disk = read_config(&config_path)?;
+        let config = ColumnConfig {
+            subdir: defaults.subdir,
+            record_type: on_disk.record_type,
+            compression: on_disk.compression,
+            max_decompressed: on_disk.max_decompressed,
+        };
+
+        let handle = Self {
+            root_dir,
+            config,
             highest_written_slot: Mutex::new(None),
         };
 
-        if !store.config_path().exists() {
-            store.write_config(None, 0)?;
+        if let Some(slot) = on_disk.highest_written_slot {
+            handle.heal_current_file(slot, on_disk.current_data_len)?;
         }
+        *handle.highest_written_slot.lock() = on_disk.highest_written_slot;
 
-        let config = store.read_config()?;
-        if let Some(slot) = config.highest_written_slot {
-            store.heal_current_file(slot, config.current_data_len)?;
-        }
-        *store.lock_highest()? = config.highest_written_slot;
-
-        Ok(store)
+        Ok(handle)
     }
 
-    /// Read the block at `slot`, if present.
-    pub fn get(&self, slot: Slot) -> StoreResult<Option<Vec<u8>>> {
-        let Some(highest_written_slot) = *self.lock_highest()? else {
+    fn get(&self, slot: Slot) -> StoreResult<Option<Vec<u8>>> {
+        let Some(highest_written_slot) = *self.highest_written_slot.lock() else {
             return Ok(None);
         };
         if slot > highest_written_slot {
@@ -114,33 +244,43 @@ impl StaticBlockStore {
 
         let mut header = [0; 8];
         data_file.read_exact(&mut header)?;
-        if header[0..2] != BLOCK_RECORD_TYPE || header[6..8] != [0, 0] {
-            return Err(StaticBlockStoreError::Invalid(
-                "invalid static block record header".into(),
+        if header[0..2] != self.config.record_type || header[6..8] != [0, 0] {
+            return Err(StaticColdStoreError::Invalid(
+                "invalid static cold record header".into(),
             ));
         }
 
         let len = u32::from_le_bytes([header[2], header[3], header[4], header[5]]) as usize;
-        let mut compressed = vec![0; len];
-        data_file.read_exact(&mut compressed)?;
+        let mut payload = vec![0; len];
+        data_file.read_exact(&mut payload)?;
 
-        decompress_block(&compressed)
+        if self.config.compression {
+            decompress_record(&payload, self.config.max_decompressed)
+        } else {
+            if (payload.len() as u64) > self.config.max_decompressed {
+                return Err(StaticColdStoreError::Invalid(
+                    "static cold record exceeds size limit".into(),
+                ));
+            }
+            Ok(Some(payload))
+        }
     }
 
-    /// Durably store `bytes` at `slot`. Must not return `Ok` until the bytes are recoverable
-    /// after a crash.
-    pub fn put(&self, slot: Slot, bytes: &[u8]) -> StoreResult<()> {
-        let mut highest_written_slot = self.lock_highest()?;
+    fn put(&self, slot: Slot, bytes: &[u8]) -> StoreResult<()> {
+        let mut highest_written_slot = self.highest_written_slot.lock();
         if highest_written_slot.is_some_and(|highest| slot <= highest) {
-            return Err(StaticBlockStoreError::Invalid(
-                "static block put out of order".into(),
+            return Err(StaticColdStoreError::Invalid(
+                "static cold put out of order".into(),
             ));
         }
 
-        let compressed = compress_block(bytes)?;
-        let compressed_len = u32::try_from(compressed.len()).map_err(|_| {
-            StaticBlockStoreError::Invalid("compressed static block too large".into())
-        })?;
+        let payload = if self.config.compression {
+            compress_record(bytes)?
+        } else {
+            bytes.to_vec()
+        };
+        let payload_len = u32::try_from(payload.len())
+            .map_err(|_| StaticColdStoreError::Invalid("static cold record too large".into()))?;
 
         let target_file_id = file_id(slot);
         // Discard an uncommitted next-file tail after a crash.
@@ -163,7 +303,12 @@ impl StaticBlockStore {
         }
 
         let offset = data_file.seek(SeekFrom::End(0))?;
-        write_block_record(&mut data_file, compressed_len, &compressed)?;
+        write_record(
+            &mut data_file,
+            self.config.record_type,
+            payload_len,
+            &payload,
+        )?;
         let data_len = data_file.seek(SeekFrom::End(0))?;
         // Data and offset files must hit disk before the config commit marker.
         data_file.sync_all()?;
@@ -191,15 +336,14 @@ impl StaticBlockStore {
         Ok(())
     }
 
-    /// Truncate uncommitted data and clear uncommitted offsets after restart.
     fn heal_current_file(&self, slot: Slot, current_data_len: u64) -> StoreResult<()> {
         let file_id = file_id(slot);
         let data_path = self.data_path(file_id);
         let data_file = OpenOptions::new().read(true).write(true).open(&data_path)?;
         let data_len = data_file.metadata()?.len();
         if data_len < current_data_len {
-            return Err(StaticBlockStoreError::Invalid(
-                "static block data file shorter than committed length".into(),
+            return Err(StaticColdStoreError::Invalid(
+                "static cold data file shorter than committed length".into(),
             ));
         }
         if data_len != current_data_len {
@@ -212,8 +356,8 @@ impl StaticBlockStore {
         let required_len = offset_position(slot) + OFFSET_SIZE;
         let off_len = off_file.metadata()?.len();
         if off_len < required_len {
-            return Err(StaticBlockStoreError::Invalid(
-                "static block offset file shorter than committed slot".into(),
+            return Err(StaticColdStoreError::Invalid(
+                "static cold offset file shorter than committed slot".into(),
             ));
         }
         if off_len < OFFSET_FILE_LEN {
@@ -232,54 +376,21 @@ impl StaticBlockStore {
         Ok(())
     }
 
-    /// Read the global commit marker.
-    fn read_config(&self) -> StoreResult<Config> {
-        let path = self.config_path();
-        let bytes = fs::read(&path)?;
-        if bytes.len() != CONFIG_LEN || &bytes[0..8] != CONFIG_MAGIC {
-            return Err(StaticBlockStoreError::Invalid(
-                "invalid static block config".into(),
-            ));
-        }
-
-        let highest = u64::from_le_bytes(bytes[8..16].try_into().expect("slice length checked"));
-        let current_data_len =
-            u64::from_le_bytes(bytes[16..24].try_into().expect("slice length checked"));
-
-        Ok(Config {
-            highest_written_slot: (highest != EMPTY_SLOT).then(|| Slot::new(highest)),
-            current_data_len,
-        })
-    }
-
-    /// Atomically write the global commit marker.
     fn write_config(
         &self,
         highest_written_slot: Option<Slot>,
         current_data_len: u64,
     ) -> StoreResult<()> {
-        let path = self.config_path();
-        let tmp_path = self.root_dir.join(CONFIG_TMP_FILE);
-        let mut bytes = [0; CONFIG_LEN];
-        bytes[0..8].copy_from_slice(CONFIG_MAGIC);
-        bytes[8..16].copy_from_slice(
-            &highest_written_slot
-                .map_or(EMPTY_SLOT, |slot| slot.as_u64())
-                .to_le_bytes(),
-        );
-        bytes[16..24].copy_from_slice(&current_data_len.to_le_bytes());
-
-        {
-            let mut tmp = File::create(&tmp_path)?;
-            tmp.write_all(&bytes)?;
-            tmp.sync_all()?;
-        }
-
-        fs::rename(&tmp_path, &path)?;
-        sync_dir(&self.root_dir)
+        atomic_write_config(
+            &self.config_path(),
+            &self.root_dir.join(CONFIG_TMP_FILE),
+            &self.root_dir,
+            highest_written_slot,
+            current_data_len,
+            &self.config,
+        )
     }
 
-    /// Read the slot's absolute data-file offset.
     fn read_offset(&self, file_id: u64, slot: Slot) -> StoreResult<u64> {
         let off_path = self.offset_path(file_id);
         let mut off_file = File::open(&off_path)?;
@@ -289,78 +400,131 @@ impl StaticBlockStore {
         Ok(u64::from_le_bytes(bytes))
     }
 
-    /// Lock writer state.
-    fn lock_highest(&self) -> StoreResult<std::sync::MutexGuard<'_, Option<Slot>>> {
-        self.highest_written_slot
-            .lock()
-            .map_err(|_| StaticBlockStoreError::Invalid("static block mutex poisoned".into()))
-    }
-
-    /// Path to the global config file.
     fn config_path(&self) -> PathBuf {
         self.root_dir.join(CONFIG_FILE)
     }
 
-    /// Path to a data file.
     fn data_path(&self, file_id: u64) -> PathBuf {
         self.root_dir.join(format!("static_blocks_{file_id:05}"))
     }
 
-    /// Path to a sidecar offset file.
     fn offset_path(&self, file_id: u64) -> PathBuf {
         self.root_dir
             .join(format!("static_blocks_{file_id:05}.off"))
     }
 }
 
-/// File id containing `slot`.
+fn read_config(path: &Path) -> StoreResult<ColumnConfigOnDisk> {
+    let bytes = fs::read(path)?;
+    if bytes.len() != CONFIG_LEN || &bytes[0..8] != CONFIG_MAGIC {
+        return Err(StaticColdStoreError::Invalid(
+            "invalid static cold config".into(),
+        ));
+    }
+    let highest = u64::from_le_bytes(bytes[8..16].try_into().expect("slice length checked"));
+    let current_data_len =
+        u64::from_le_bytes(bytes[16..24].try_into().expect("slice length checked"));
+    let record_type = [bytes[24], bytes[25]];
+    let compression = match bytes[26] {
+        COMPRESSION_NONE => false,
+        COMPRESSION_SNAPPY => true,
+        other => {
+            return Err(StaticColdStoreError::Invalid(format!(
+                "unknown compression flag {other}"
+            )));
+        }
+    };
+    let max_decompressed =
+        u64::from_le_bytes(bytes[28..36].try_into().expect("slice length checked"));
+    Ok(ColumnConfigOnDisk {
+        highest_written_slot: (highest != EMPTY_SLOT).then(|| Slot::new(highest)),
+        current_data_len,
+        record_type,
+        compression,
+        max_decompressed,
+    })
+}
+
+fn atomic_write_config(
+    config_path: &Path,
+    tmp_path: &Path,
+    root_dir: &Path,
+    highest_written_slot: Option<Slot>,
+    current_data_len: u64,
+    config: &ColumnConfig,
+) -> StoreResult<()> {
+    let mut bytes = [0u8; CONFIG_LEN];
+    bytes[0..8].copy_from_slice(CONFIG_MAGIC);
+    bytes[8..16].copy_from_slice(
+        &highest_written_slot
+            .map_or(EMPTY_SLOT, |slot| slot.as_u64())
+            .to_le_bytes(),
+    );
+    bytes[16..24].copy_from_slice(&current_data_len.to_le_bytes());
+    bytes[24..26].copy_from_slice(&config.record_type);
+    bytes[26] = if config.compression {
+        COMPRESSION_SNAPPY
+    } else {
+        COMPRESSION_NONE
+    };
+    bytes[27] = 0;
+    bytes[28..36].copy_from_slice(&config.max_decompressed.to_le_bytes());
+
+    {
+        let mut tmp = File::create(tmp_path)?;
+        tmp.write_all(&bytes)?;
+        tmp.sync_all()?;
+    }
+
+    fs::rename(tmp_path, config_path)?;
+    sync_dir(root_dir)
+}
+
 fn file_id(slot: Slot) -> u64 {
     slot.as_u64() / SLOTS_PER_FILE
 }
 
-/// Byte position of `slot` in its `.off` file.
 fn offset_position(slot: Slot) -> u64 {
     (slot.as_u64() % SLOTS_PER_FILE) * OFFSET_SIZE
 }
 
-/// Snappy-frame SSZ block bytes.
-fn compress_block(bytes: &[u8]) -> StoreResult<Vec<u8>> {
+fn compress_record(bytes: &[u8]) -> StoreResult<Vec<u8>> {
     let mut encoder = FrameEncoder::new(Vec::new());
     encoder
         .write_all(bytes)
-        .map_err(StaticBlockStoreError::Compression)?;
-    encoder
-        .flush()
-        .map_err(StaticBlockStoreError::Compression)?;
+        .map_err(StaticColdStoreError::Compression)?;
+    encoder.flush().map_err(StaticColdStoreError::Compression)?;
     Ok(encoder.get_ref().clone())
 }
 
-/// Append one compressed block record.
-fn write_block_record(file: &mut File, compressed_len: u32, compressed: &[u8]) -> StoreResult<()> {
-    file.write_all(&BLOCK_RECORD_TYPE)?;
-    file.write_all(&compressed_len.to_le_bytes())?;
+fn write_record(
+    file: &mut File,
+    record_type: [u8; 2],
+    payload_len: u32,
+    payload: &[u8],
+) -> StoreResult<()> {
+    file.write_all(&record_type)?;
+    file.write_all(&payload_len.to_le_bytes())?;
     file.write_all(&0u16.to_le_bytes())?;
-    file.write_all(compressed)?;
+    file.write_all(payload)?;
     Ok(())
 }
 
-/// Decode one compressed block record payload.
-fn decompress_block(bytes: &[u8]) -> StoreResult<Option<Vec<u8>>> {
+fn decompress_record(bytes: &[u8], max_decompressed: u64) -> StoreResult<Option<Vec<u8>>> {
     let decoder = FrameDecoder::new(bytes);
-    let mut limited = decoder.take(MAX_DECOMPRESSED_BLOCK_BYTES + 1);
+    let mut limited = decoder.take(max_decompressed + 1);
     let mut decompressed = Vec::new();
     limited
         .read_to_end(&mut decompressed)
-        .map_err(StaticBlockStoreError::Compression)?;
-    if decompressed.len() as u64 > MAX_DECOMPRESSED_BLOCK_BYTES {
-        return Err(StaticBlockStoreError::Invalid(
-            "static block exceeds decompressed size limit".into(),
+        .map_err(StaticColdStoreError::Compression)?;
+    if decompressed.len() as u64 > max_decompressed {
+        return Err(StaticColdStoreError::Invalid(
+            "static cold record exceeds decompressed size limit".into(),
         ));
     }
     Ok(Some(decompressed))
 }
 
-/// Fsync directory entries after rename/create.
 fn sync_dir(path: &Path) -> StoreResult<()> {
     let dir = File::open(path)?;
     dir.sync_all()?;

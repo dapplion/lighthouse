@@ -40,7 +40,7 @@ use state_processing::per_slot_processing;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
-use store::{Error as StoreError, HotColdDB, ItemStore, KeyValueStoreOp};
+use store::{ColdStore, DBColumn, Error as StoreError, HotColdDB, ItemStore, KeyValueStoreOp};
 use task_executor::{ShutdownReason, TaskExecutor};
 use tracing::{debug, error, info, warn};
 use tree_hash::TreeHash;
@@ -60,7 +60,7 @@ impl<TSlotClock, E, THotStore, TColdStore> BeaconChainTypes
     for Witness<TSlotClock, E, THotStore, TColdStore>
 where
     THotStore: ItemStore<E> + 'static,
-    TColdStore: ItemStore<E> + 'static,
+    TColdStore: ColdStore<E> + 'static,
     TSlotClock: SlotClock + 'static,
     E: EthSpec + 'static,
 {
@@ -115,7 +115,7 @@ impl<TSlotClock, E, THotStore, TColdStore>
     BeaconChainBuilder<Witness<TSlotClock, E, THotStore, TColdStore>>
 where
     THotStore: ItemStore<E> + 'static,
-    TColdStore: ItemStore<E> + 'static,
+    TColdStore: ColdStore<E> + 'static,
     TSlotClock: SlotClock + 'static,
     E: EthSpec + 'static,
 {
@@ -340,7 +340,7 @@ where
             .map_err(|e| format!("Failed to store genesis block: {:?}", e))?;
         store
             .store_frozen_block_root_at_skip_slots(Slot::new(0), Slot::new(1), beacon_block_root)
-            .and_then(|ops| store.cold_db.do_atomically(ops))
+            .and_then(|items| store.cold_db.put_batch(DBColumn::BeaconBlockRoots, items))
             .map_err(|e| format!("Failed to store genesis block root: {e:?}"))?;
 
         // Store the genesis block under the `ZERO_HASH` key.
@@ -558,7 +558,7 @@ where
             .map_err(|e| format!("Error writing frozen block roots: {e:?}"))?;
         store
             .cold_db
-            .do_atomically(block_root_batch)
+            .put_batch(DBColumn::BeaconBlockRoots, block_root_batch)
             .map_err(|e| format!("Error writing frozen block roots: {e:?}"))?;
         debug!(
             from = %weak_subj_block.slot(),
@@ -1152,7 +1152,7 @@ impl<E, THotStore, TColdStore>
     BeaconChainBuilder<Witness<TestingSlotClock, E, THotStore, TColdStore>>
 where
     THotStore: ItemStore<E> + 'static,
-    TColdStore: ItemStore<E> + 'static,
+    TColdStore: ColdStore<E> + 'static,
     E: EthSpec + 'static,
 {
     /// Sets the `BeaconChain` slot clock to `TestingSlotClock`.
