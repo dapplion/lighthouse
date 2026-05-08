@@ -607,10 +607,11 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
             }
 
             let block_root = Hash256::from_slice(&root_bytes);
-            let block_exists = self
-                .hot_db
-                .key_exists(DBColumn::BeaconBlock, block_root.as_slice())?;
-            if !block_exists {
+            // Check both hot and (for Static cold) the cold archive via the
+            // BlockSlot index — under Static cold, finalized canonical
+            // blocks are deleted from hot once they're durable in cold, so a
+            // hot-only check would flag every migrated slot as an orphan.
+            if !self.block_exists(&block_root)? {
                 result.add_violation(InvariantViolation::ColdBlockRootOrphan { slot, block_root });
             }
         }

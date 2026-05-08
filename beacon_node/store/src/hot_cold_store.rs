@@ -755,16 +755,34 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
     ///
     /// This is useful for e.g. ignoring the slot-indicated fork to forcefully load a block as if it
     /// were for a different fork.
+    ///
+    /// Reads hot first, then falls back to the cold archive via the
+    /// `BlockSlot` index. Under KV cold the index is empty so the fallback
+    /// always returns None — behaviour is identical to a hot-only read.
+    /// Under Static cold (genesis-archive or era-import), blocks at slot <
+    /// split.slot live in cold only, and the fallback is the read path.
     pub fn get_block_with<Payload: AbstractExecPayload<E>>(
         &self,
         block_root: &Hash256,
         decoder: impl FnOnce(&[u8]) -> Result<SignedBeaconBlock<E, Payload>, ssz::DecodeError>,
     ) -> Result<Option<SignedBeaconBlock<E, Payload>>, Error> {
-        self.hot_db
+        if let Some(bytes) = self
+            .hot_db
             .get_bytes(DBColumn::BeaconBlock, block_root.as_slice())?
-            .map(|block_bytes| decoder(&block_bytes))
-            .transpose()
-            .map_err(|e| e.into())
+        {
+            return decoder(&bytes).map(Some).map_err(Into::into);
+        }
+        let Some(slot) = self
+            .cold_db
+            .get_index(DBColumnColdIndex::BlockSlot, *block_root)?
+        else {
+            return Ok(None);
+        };
+        let bytes = self
+            .cold_db
+            .get(DBColumnCold::Block, slot)?
+            .ok_or(HotColdDBError::MissingFrozenBlock(slot))?;
+        decoder(&bytes).map(Some).map_err(Into::into)
     }
 
     pub fn get_payload_envelope(
@@ -966,9 +984,23 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
     }
 
     /// Determine whether a block exists in the database.
+    ///
+    /// Mirrors `get_block_with`: hot first, then cold via the `BlockSlot`
+    /// index.
     pub fn block_exists(&self, block_root: &Hash256) -> Result<bool, Error> {
-        self.hot_db
-            .key_exists(DBColumn::BeaconBlock, block_root.as_slice())
+        if self
+            .hot_db
+            .key_exists(DBColumn::BeaconBlock, block_root.as_slice())?
+        {
+            return Ok(true);
+        }
+        let Some(slot) = self
+            .cold_db
+            .get_index(DBColumnColdIndex::BlockSlot, *block_root)?
+        else {
+            return Ok(false);
+        };
+        self.cold_db.contains(DBColumnCold::Block, slot)
     }
 
     /// Delete a block from the store and the block cache.
@@ -3605,6 +3637,14 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         crate::config::ColdBackendKind::Static
     );
     let mut cold_db_block_data: Vec<(Slot, Vec<u8>)> = vec![];
+    // `block_root -> slot` index for blocks moved into the cold archive,
+    // committed after the slot-keyed bulk so a crash leaves no dangling index
+    // entry. Reads on hot miss go index -> bulk.
+    let mut cold_block_slot_index: Vec<(Hash256, Slot)> = vec![];
+    // Hot block roots whose bytes are now durably in cold; deleted from hot
+    // after the cold index is committed. Hot keeps blocks at slot >=
+    // split.slot; cold owns slot < split.slot under Static.
+    let mut hot_block_delete_roots: Vec<Hash256> = vec![];
     let mut last_seen_block_root: Option<Hash256> = None;
 
     // Iterate in descending order until the current split slot
@@ -3638,6 +3678,8 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
                 )?;
                 if block.slot() == *slot {
                     cold_db_block_data.push((*slot, block_bytes));
+                    cold_block_slot_index.push((*block_root, *slot));
+                    hot_block_delete_roots.push(*block_root);
                 }
             }
         }
@@ -3713,6 +3755,11 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         DBColumnColdIndex::ColdStateSummary,
         cold_state_summary_index,
     )?;
+    if !cold_block_slot_index.is_empty() {
+        store
+            .cold_db
+            .put_index_batch(DBColumnColdIndex::BlockSlot, cold_block_slot_index)?;
+    }
     let new_split = {
         let mut split_guard = store.split.write();
         let latest_split = *split_guard;
@@ -3748,6 +3795,20 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         *split_guard = new_split;
         new_split
     };
+
+    // Reclaim hot-DB space for blocks that are now durably in cold. Run AFTER
+    // the split commit: if we crash here, the next `get_block_with` for one
+    // of these roots will hit the cold fallback (BlockSlot index then Block
+    // bulk) and find them. A crash *before* this point is also safe — hot
+    // still has the bytes, and the next migration's idempotent re-puts cover
+    // any partial cold state.
+    if !hot_block_delete_roots.is_empty() {
+        let hot_delete_ops: Vec<KeyValueStoreOp> = hot_block_delete_roots
+            .into_iter()
+            .map(|root| KeyValueStoreOp::DeleteKey(DBColumn::BeaconBlock, root.as_slice().to_vec()))
+            .collect();
+        store.hot_db.do_atomically(hot_delete_ops)?;
+    }
 
     // Update the cache's view of the finalized state.
     store.update_finalized_state(

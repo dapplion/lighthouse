@@ -146,6 +146,11 @@ impl DBColumnCold {
 /// Root-keyed indices owned by the cold backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DBColumnColdIndex {
+    /// `block_root -> slot` for blocks moved into the cold archive. Populated
+    /// by `migrate_database` (Static cold) and era-file import. Empty under
+    /// KV cold. Consulted by `HotColdDB::get_block_with` to resolve root-keyed
+    /// reads against the slot-keyed cold archive.
+    BlockSlot,
     /// `state_root -> slot` for cold state summaries.
     ColdStateSummary,
 }
@@ -153,6 +158,7 @@ pub enum DBColumnColdIndex {
 impl DBColumnColdIndex {
     pub fn db_column(self) -> DBColumn {
         match self {
+            Self::BlockSlot => DBColumn::BeaconBlockSlot,
             Self::ColdStateSummary => DBColumn::BeaconColdStateSummary,
         }
     }
@@ -431,6 +437,12 @@ pub enum DBColumn {
     /// Can be removed once schema v22 is buried by a hard fork.
     #[strum(serialize = "bbr")]
     BeaconBlockRootsChunked,
+    /// `block_root -> slot` index for blocks moved into the cold archive.
+    /// Populated by `migrate_database` (Static cold) and era-file import.
+    /// Empty under KV cold. Consulted by `HotColdDB::get_block_with` to
+    /// resolve root-keyed reads against the slot-keyed cold archive.
+    #[strum(serialize = "bbs")]
+    BeaconBlockSlot,
     /// DEPRECATED. Can be removed once schema v22 is buried by a hard fork.
     #[strum(serialize = "bhr")]
     BeaconHistoricalRoots,
@@ -486,6 +498,7 @@ impl DBColumn {
             Self::OverflowLRUCache => 33, // DEPRECATED
             Self::BeaconMeta
             | Self::BeaconBlock
+            | Self::BeaconBlockSlot
             | Self::BeaconState
             | Self::BeaconBlob
             | Self::BeaconStateSummary
