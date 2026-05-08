@@ -35,6 +35,7 @@ pub use crate::metadata::BlobInfo;
 pub use errors::Error;
 pub use metadata::AnchorInfo;
 pub use metrics::scrape_for_metrics;
+use ssz::{Decode, Encode};
 use std::collections::HashSet;
 use std::sync::Arc;
 use strum::{EnumIter, EnumString, IntoStaticStr};
@@ -177,6 +178,72 @@ pub trait ColdStore<E: EthSpec>: Sync + Send + Sized + 'static {
     ) -> Result<(), Error>;
 
     fn sync(&self) -> Result<(), Error>;
+}
+
+/// Every `KeyValueStore` is a `ColdStore`: the slot/root keys round-trip through
+/// the underlying byte-keyed columns.
+impl<E: EthSpec, T: KeyValueStore<E>> ColdStore<E> for T {
+    fn get(&self, column: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
+        KeyValueStore::get_bytes(self, column.db_column(), &slot.as_u64().to_be_bytes())
+    }
+
+    fn put_batch(&self, column: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error> {
+        let col = column.db_column();
+        let ops = items
+            .into_iter()
+            .map(|(slot, value)| {
+                KeyValueStoreOp::PutKeyValue(col, slot.as_u64().to_be_bytes().to_vec(), value)
+            })
+            .collect();
+        KeyValueStore::do_atomically(self, ops)
+    }
+
+    fn contains(&self, column: DBColumnCold, slot: Slot) -> Result<bool, Error> {
+        KeyValueStore::key_exists(self, column.db_column(), &slot.as_u64().to_be_bytes())
+    }
+
+    fn iter_from(&self, column: DBColumnCold, from: Slot) -> SlotIter<'_> {
+        Box::new(
+            KeyValueStore::iter_column_from::<Vec<u8>>(
+                self,
+                column.db_column(),
+                &from.as_u64().to_be_bytes(),
+            )
+            .map(|res| {
+                res.and_then(|(key_bytes, value)| {
+                    let bytes: [u8; 8] = key_bytes.try_into().map_err(|_| Error::InvalidBytes)?;
+                    Ok((Slot::new(u64::from_be_bytes(bytes)), value))
+                })
+            }),
+        )
+    }
+
+    fn get_index(&self, column: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error> {
+        Ok(
+            KeyValueStore::get_bytes(self, column.db_column(), root.as_slice())?
+                .map(|bytes| Slot::from_ssz_bytes(&bytes))
+                .transpose()?,
+        )
+    }
+
+    fn put_index_batch(
+        &self,
+        column: DBColumnColdIndex,
+        items: Vec<(Hash256, Slot)>,
+    ) -> Result<(), Error> {
+        let col = column.db_column();
+        let ops = items
+            .into_iter()
+            .map(|(root, slot)| {
+                KeyValueStoreOp::PutKeyValue(col, root.as_slice().to_vec(), slot.as_ssz_bytes())
+            })
+            .collect();
+        KeyValueStore::do_atomically(self, ops)
+    }
+
+    fn sync(&self) -> Result<(), Error> {
+        KeyValueStore::sync(self)
+    }
 }
 
 pub trait Key: Sized + 'static {
