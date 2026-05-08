@@ -109,6 +109,7 @@ pub trait KeyValueStore<E: EthSpec>: Sync + Send + Sized + 'static {
 }
 
 pub type SlotIter<'a> = Box<dyn Iterator<Item = Result<(Slot, Vec<u8>), Error>> + 'a>;
+pub type IndexIter<'a> = Box<dyn Iterator<Item = Result<(Hash256, Slot), Error>> + 'a>;
 
 /// Slot-keyed cold columns served by the static archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
@@ -177,6 +178,8 @@ pub trait ColdStore<E: EthSpec>: Sync + Send + Sized + 'static {
         items: Vec<(Hash256, Slot)>,
     ) -> Result<(), Error>;
 
+    fn iter_index(&self, column: DBColumnColdIndex) -> IndexIter<'_>;
+
     fn sync(&self) -> Result<(), Error>;
 }
 
@@ -243,6 +246,13 @@ impl<E: EthSpec, T: KeyValueStore<E>> ColdStore<E> for T {
             })
             .collect();
         KeyValueStore::do_atomically(self, ops)
+    }
+
+    fn iter_index(&self, column: DBColumnColdIndex) -> IndexIter<'_> {
+        Box::new(
+            KeyValueStore::iter_column::<Hash256>(self, column.db_column())
+                .map(|res| res.and_then(|(root, value)| Ok((root, Slot::from_ssz_bytes(&value)?)))),
+        )
     }
 
     fn sync(&self) -> Result<(), Error> {

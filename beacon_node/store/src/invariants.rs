@@ -7,7 +7,7 @@
 
 use crate::hdiff::StorageStrategy;
 use crate::hot_cold_store::HotStateSummary;
-use crate::{ColdStore, DBColumn, DBColumnCold, Error, ItemStore};
+use crate::{ColdStore, DBColumn, DBColumnCold, DBColumnColdIndex, Error, ItemStore};
 use crate::{HotColdDB, Split};
 use serde::Serialize;
 use ssz::Decode;
@@ -653,7 +653,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
 
                 match self
                     .cold_db
-                    .get_index(crate::DBColumnColdIndex::ColdStateSummary, state_root)?
+                    .get_index(DBColumnColdIndex::ColdStateSummary, state_root)?
                 {
                     None => {
                         result.add_violation(InvariantViolation::ColdStateRootMissingSummary {
@@ -690,56 +690,43 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
     fn check_cold_state_diff_consistency(&self) -> Result<InvariantCheckResult, Error> {
         let mut result = InvariantCheckResult::new();
 
-        // Iterate cold states by slot via the slot-keyed BeaconStateRoots index. The
-        // root-keyed `BeaconColdStateSummary` index is owned by the cold backend and is
-        // not directly iterable through `ColdStore`, so the pivot point is the slot.
-        let split = self.get_split_info();
-        let anchor_info = self.get_anchor_info();
         let mut summary_slots = HashSet::new();
         let mut base_slot_refs = Vec::new();
 
-        for slot_val in 0..split.slot.as_u64() {
-            let slot = Slot::new(slot_val);
-            if !(slot <= anchor_info.state_lower_limit
-                || slot >= cmp::min(split.slot, anchor_info.state_upper_limit))
+        for res in self.cold_db.iter_index(DBColumnColdIndex::ColdStateSummary) {
+            let (state_root, summary_slot) = res?;
+
+            summary_slots.insert(summary_slot);
+
+            match self
+                .hierarchy
+                .storage_strategy(summary_slot, Slot::new(0))?
             {
-                continue;
-            }
-
-            let Some(root_bytes) = self.cold_db.get(DBColumnCold::StateRoots, slot)? else {
-                continue;
-            };
-            if root_bytes.len() != 32 {
-                continue;
-            }
-            let state_root = Hash256::from_slice(&root_bytes);
-
-            // Summary presence is already checked by invariant 11; here we just need the
-            // hierarchy classification, which is a pure function of the slot.
-            summary_slots.insert(slot);
-
-            match self.hierarchy.storage_strategy(slot, Slot::new(0))? {
                 StorageStrategy::Snapshot => {
-                    let has_snapshot = self.cold_db.contains(DBColumnCold::StateSnapshot, slot)?;
+                    let has_snapshot = self
+                        .cold_db
+                        .contains(DBColumnCold::StateSnapshot, summary_slot)?;
                     if !has_snapshot {
                         result.add_violation(InvariantViolation::ColdStateMissingSnapshot {
                             state_root,
-                            slot,
+                            slot: summary_slot,
                         });
                     }
                 }
                 StorageStrategy::DiffFrom(base_slot) => {
-                    let has_diff = self.cold_db.contains(DBColumnCold::StateDiff, slot)?;
+                    let has_diff = self
+                        .cold_db
+                        .contains(DBColumnCold::StateDiff, summary_slot)?;
                     if !has_diff {
                         result.add_violation(InvariantViolation::ColdStateMissingDiff {
                             state_root,
-                            slot,
+                            slot: summary_slot,
                         });
                     }
-                    base_slot_refs.push((slot, base_slot));
+                    base_slot_refs.push((summary_slot, base_slot));
                 }
                 StorageStrategy::ReplayFrom(base_slot) => {
-                    base_slot_refs.push((slot, base_slot));
+                    base_slot_refs.push((summary_slot, base_slot));
                 }
             }
         }
