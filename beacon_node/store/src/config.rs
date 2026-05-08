@@ -281,20 +281,7 @@ pub enum DatabaseBackend {
 }
 
 /// Cold backend selector.
-#[derive(
-    Debug,
-    Default,
-    Clone,
-    Copy,
-    Eq,
-    PartialEq,
-    Serialize,
-    Deserialize,
-    Display,
-    EnumString,
-    VariantNames,
-)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColdBackendKind {
     /// Cold data lives in the same KV backend as the hot DB. Default.
     #[default]
