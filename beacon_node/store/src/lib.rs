@@ -397,7 +397,7 @@ pub enum StoreOp<'a, E: EthSpec> {
 }
 
 /// A unique column identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoStaticStr, EnumString, EnumIter)]
+#[derive(Debug, Clone, Copy, PartialEq, IntoStaticStr, EnumString, EnumIter)]
 pub enum DBColumn {
     /// For data related to the database itself.
     #[strum(serialize = "bma")]

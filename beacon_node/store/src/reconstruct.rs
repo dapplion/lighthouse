@@ -1,8 +1,8 @@
 //! Implementation of historic state reconstruction (given complete block history).
 use crate::forwards_iter::FrozenForwardsIterator;
-use crate::hot_cold_store::{HotColdDB, HotColdDBError};
+use crate::hot_cold_store::{ColdBatch, HotColdDB, HotColdDBError};
 use crate::metrics;
-use crate::{ColdStore, DBColumn, DBColumnCold, DBColumnColdIndex, Error, ItemStore};
+use crate::{ColdStore, DBColumn, Error, ItemStore};
 use itertools::{Itertools, process_results};
 use state_processing::{
     BlockSignatureStrategy, ConsensusContext, VerifyBlockRoot, per_block_processing,
@@ -10,7 +10,7 @@ use state_processing::{
 };
 use std::sync::Arc;
 use tracing::{debug, info};
-use types::{EthSpec, Hash256, Slot};
+use types::{EthSpec, Slot};
 
 impl<E, Hot, Cold> HotColdDB<E, Hot, Cold>
 where
@@ -129,8 +129,7 @@ where
         state.build_caches(&self.spec)?;
 
         process_results(block_root_iter, |iter| -> Result<(), Error> {
-            let mut io_batch: Vec<(DBColumnCold, Slot, Vec<u8>)> = vec![];
-            let mut summary_index: Vec<(Hash256, Slot)> = vec![];
+            let mut batch = ColdBatch::default();
             let mut prev_state_root = None;
 
             for ((prev_block_root, _), (block_root, slot)) in iter.tuple_windows() {
@@ -173,7 +172,7 @@ where
                     .or_else(|_| state.update_tree_hash_cache())?;
 
                 // Stage state for storage in freezer DB.
-                self.store_cold_state(&state_root, &state, &mut io_batch, &mut summary_index)?;
+                self.store_cold_state(&state_root, &state, &mut batch)?;
 
                 let batch_complete = slot + 1 == to_slot;
 
@@ -182,13 +181,7 @@ where
                 // - The diff/snapshot for this slot is required for future slots, or
                 // - The reconstruction batch is complete (we are about to return).
                 if self.hierarchy.should_commit_immediately(slot)? || batch_complete {
-                    // Slot-keyed cold bulk first, root index after — a mid-flush crash leaves
-                    // cold data with no dangling index entry.
-                    self.commit_cold_items(std::mem::take(&mut io_batch))?;
-                    self.cold_db.put_index_batch(
-                        DBColumnColdIndex::ColdStateSummary,
-                        std::mem::take(&mut summary_index),
-                    )?;
+                    self.commit_cold_batch(std::mem::take(&mut batch))?;
 
                     if batch_complete {
                         // Perform one last integrity check on the state reached.

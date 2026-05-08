@@ -88,6 +88,21 @@ pub struct HotColdDB<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> {
     _phantom: PhantomData<E>,
 }
 
+/// Pending cold-DB writes for a single commit unit (one state, one reconstruct
+/// batch, etc.).
+///
+/// Slot-keyed bulk data goes in `data`; the matching `BeaconColdStateSummary`
+/// root index goes in `state_summary_index`. `commit_cold_batch` flushes them
+/// in the correct order (data, sync, then index).
+///
+/// Slots within `data` for any single column must arrive strictly ascending —
+/// the static cold backend rejects out-of-order puts.
+#[derive(Default)]
+pub struct ColdBatch {
+    pub data: Vec<(DBColumnCold, Slot, Vec<u8>)>,
+    pub state_summary_index: Vec<(Hash256, Slot)>,
+}
+
 #[derive(Debug)]
 struct BlockCache<E: EthSpec> {
     block_cache: LruCache<Hash256, SignedBeaconBlock<E>>,
@@ -1075,13 +1090,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
     /// Store a state in the store.
     pub fn put_state(&self, state_root: &Hash256, state: &BeaconState<E>) -> Result<(), Error> {
         if state.slot() < self.get_split_slot() {
-            let mut cold_items = Vec::new();
-            let mut summary_index: Vec<(Hash256, Slot)> = Vec::new();
-            self.store_cold_state(state_root, state, &mut cold_items, &mut summary_index)?;
-            // Cold bulk first; the index entry trails so a crash leaves no dangling pointer.
-            self.commit_cold_items(cold_items)?;
-            self.cold_db
-                .put_index_batch(DBColumnColdIndex::ColdStateSummary, summary_index)
+            let mut batch = ColdBatch::default();
+            self.store_cold_state(state_root, state, &mut batch)?;
+            self.commit_cold_batch(batch)
         } else {
             let mut ops: Vec<KeyValueStoreOp> = Vec::new();
             self.store_hot_state(state_root, state, &mut ops)?;
@@ -2079,21 +2090,28 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         )
     }
 
-    /// Group `cold_items` by column and write each column to the cold backend.
-    ///
-    /// Used to commit pre-finalization slot-keyed cold writes ahead of the matching
-    /// `BeaconColdStateSummary` root-index put. Order matters for crash safety: slot-keyed
-    /// cold data must be durable before the index entry that references it.
-    pub fn commit_cold_items(
-        &self,
-        cold_items: Vec<(DBColumnCold, Slot, Vec<u8>)>,
-    ) -> Result<(), Error> {
+    /// Commit `batch` to the cold backend. Slot-keyed bulk data goes first, the
+    /// `BeaconColdStateSummary` root index lands after a sync, so a crash leaves
+    /// no dangling index entry.
+    pub fn commit_cold_batch(&self, batch: ColdBatch) -> Result<(), Error> {
+        self.commit_cold_data(batch.data)?;
+        self.cold_db.sync()?;
+        self.cold_db.put_index_batch(
+            DBColumnColdIndex::ColdStateSummary,
+            batch.state_summary_index,
+        )
+    }
+
+    /// Group slot-keyed `data` by column and write each column to the cold backend.
+    /// Used by callers (e.g. migration) that want to commit data per-iteration but
+    /// defer the matching index entries to end-of-batch.
+    pub fn commit_cold_data(&self, data: Vec<(DBColumnCold, Slot, Vec<u8>)>) -> Result<(), Error> {
         let mut groups: HashMap<DBColumnCold, Vec<(Slot, Vec<u8>)>> = HashMap::new();
-        for (col, slot, value) in cold_items {
+        for (col, slot, value) in data {
             groups.entry(col).or_default().push((slot, value));
         }
-        for (col, batch) in groups {
-            self.cold_db.put_batch(col, batch)?;
+        for (col, items) in groups {
+            self.cold_db.put_batch(col, items)?;
         }
         Ok(())
     }
@@ -2102,14 +2120,10 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         state_root: &Hash256,
         slot: Slot,
-        cold_items: &mut Vec<(DBColumnCold, Slot, Vec<u8>)>,
-        summary_index: &mut Vec<(Hash256, Slot)>,
+        batch: &mut ColdBatch,
     ) -> Result<(), Error> {
-        // BeaconColdStateSummary is a state_root → slot index owned by the cold backend.
-        // Slot-keyed bulk data must be durable before we commit the index entry; the
-        // caller is responsible for the ordering.
-        summary_index.push((*state_root, slot));
-        cold_items.push((
+        batch.state_summary_index.push((*state_root, slot));
+        batch.data.push((
             DBColumnCold::StateRoots,
             slot,
             state_root.as_slice().to_vec(),
@@ -2122,10 +2136,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         state_root: &Hash256,
         state: &BeaconState<E>,
-        cold_items: &mut Vec<(DBColumnCold, Slot, Vec<u8>)>,
-        summary_index: &mut Vec<(Hash256, Slot)>,
+        batch: &mut ColdBatch,
     ) -> Result<(), Error> {
-        self.store_cold_state_summary(state_root, state.slot(), cold_items, summary_index)?;
+        self.store_cold_state_summary(state_root, state.slot(), batch)?;
 
         let slot = state.slot();
         match self.cold_storage_strategy(slot)? {
@@ -2144,7 +2157,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
                     %slot,
                     "Storing cold state"
                 );
-                self.store_cold_state_as_snapshot(state, cold_items)?;
+                self.store_cold_state_as_snapshot(state, batch)?;
             }
             StorageStrategy::DiffFrom(from) => {
                 debug!(
@@ -2153,7 +2166,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
                     %slot,
                     "Storing cold state"
                 );
-                self.store_cold_state_as_diff(state, from, cold_items)?;
+                self.store_cold_state_as_diff(state, from, batch)?;
             }
         }
         Ok(())
@@ -2162,7 +2175,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
     pub fn store_cold_state_as_snapshot(
         &self,
         state: &BeaconState<E>,
-        cold_items: &mut Vec<(DBColumnCold, Slot, Vec<u8>)>,
+        batch: &mut ColdBatch,
     ) -> Result<(), Error> {
         let bytes = state.as_ssz_bytes();
         let compressed_value = {
@@ -2175,7 +2188,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
             out
         };
 
-        cold_items.push((DBColumnCold::StateSnapshot, state.slot(), compressed_value));
+        batch
+            .data
+            .push((DBColumnCold::StateSnapshot, state.slot(), compressed_value));
         Ok(())
     }
 
@@ -2271,7 +2286,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         state: &BeaconState<E>,
         from_slot: Slot,
-        cold_items: &mut Vec<(DBColumnCold, Slot, Vec<u8>)>,
+        batch: &mut ColdBatch,
     ) -> Result<(), Error> {
         // Load diff base state bytes.
         let (_, base_buffer) = {
@@ -2294,7 +2309,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
             diff_bytes.len() as f64,
         );
 
-        cold_items.push((DBColumnCold::StateDiff, state.slot(), diff_bytes));
+        batch
+            .data
+            .push((DBColumnCold::StateDiff, state.slot(), diff_bytes));
         Ok(())
     }
 
@@ -3564,7 +3581,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
             continue;
         }
 
-        let mut cold_db_state_ops: Vec<(DBColumnCold, Slot, Vec<u8>)> = vec![];
+        let mut batch = ColdBatch::default();
 
         // Only store the cold state if it's on a diff boundary.
         // Calling `store_cold_state_summary` instead of `store_cold_state` for those allows us
@@ -3577,12 +3594,7 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
                 %slot,
                 "Storing cold state"
             );
-            store.store_cold_state_summary(
-                state_root,
-                *slot,
-                &mut cold_db_state_ops,
-                &mut cold_state_summary_index,
-            )?;
+            store.store_cold_state_summary(state_root, *slot, &mut batch)?;
         } else {
             // This is some state that we want to migrate to the freezer db.
             // There is no reason to cache this state.
@@ -3590,18 +3602,14 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
                 .get_hot_state(state_root, false)?
                 .ok_or(HotColdDBError::MissingStateToFreeze(*state_root))?;
 
-            store.store_cold_state(
-                state_root,
-                &state,
-                &mut cold_db_state_ops,
-                &mut cold_state_summary_index,
-            )?;
+            store.store_cold_state(state_root, &state, &mut batch)?;
         }
 
         // Cold states are diffed with respect to each other, so we need to finish writing previous
-        // slot-keyed cold data before staging new entries. Index commits ride along to the end of
+        // slot-keyed cold data before staging new entries. Index entries accumulate to the end of
         // the migration so all root indices land after every cold-bulk write is durable.
-        store.commit_cold_items(cold_db_state_ops)?;
+        store.commit_cold_data(batch.data)?;
+        cold_state_summary_index.append(&mut batch.state_summary_index);
     }
 
     // Warning: Critical section. We have to take care not to put any of the two databases in an
