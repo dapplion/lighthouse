@@ -3014,6 +3014,12 @@ async fn weak_subjectivity_sync_test(
     backfill_batch_size: Option<usize>,
     provide_blobs: bool,
 ) {
+    // Static cold backend rejects checkpoint+backfill at construction; nothing
+    // here would exercise it usefully under that mode.
+    if cold_backend_from_env() == ColdBackendKind::Static {
+        return;
+    }
+
     // Build an initial chain on one harness, representing a synced node with full history.
     let num_final_blocks = E::slots_per_epoch() * 2;
 

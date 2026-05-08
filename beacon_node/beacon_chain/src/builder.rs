@@ -435,6 +435,21 @@ where
             .clone()
             .ok_or("weak_subjectivity_state requires a store")?;
 
+        // The static cold backend is append-only in ascending slot order. A
+        // checkpoint / weak-subjectivity start writes the anchor state in the
+        // middle of the chain and then backfills earlier slots, which the
+        // static format can't represent. Refuse the combination at startup
+        // rather than failing later with an out-of-order put.
+        if matches!(
+            store.get_config().cold_backend,
+            store::config::ColdBackendKind::Static
+        ) {
+            return Err("static cold backend only supports starting from genesis; \
+                 checkpoint sync and weak subjectivity sync require the kv \
+                 cold backend"
+                .to_string());
+        }
+
         // Ensure the state is advanced to an epoch boundary.
         let slots_per_epoch = E::slots_per_epoch();
         if weak_subj_state.slot() % slots_per_epoch != 0 {

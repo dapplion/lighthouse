@@ -1623,6 +1623,18 @@ pub fn cli_app() -> Command {
                 .display_order(0)
         )
         .arg(
+            Arg::new("cold-backend")
+                .long("cold-backend")
+                .value_name("BACKEND")
+                .value_parser(store::config::ColdBackendKind::VARIANTS.to_vec())
+                .help("Cold (freezer) DB backend. \"kv\" stores cold data in the \
+                       same KV as the hot DB. \"static\" stores cold data in \
+                       slot-keyed static files; only supported when starting \
+                       from genesis.")
+                .action(ArgAction::Set)
+                .display_order(0)
+        )
+        .arg(
             Arg::new("delay-block-publishing")
                 .long("delay-block-publishing")
                 .value_name("SECONDS")
