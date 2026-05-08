@@ -144,8 +144,7 @@ impl StaticBlockStore {
 
         let target_file_id = file_id(slot);
         // Discard an uncommitted next-file tail after a crash.
-        let reset_file =
-            (*highest_written_slot).map(|highest| file_id(highest)) != Some(target_file_id);
+        let reset_file = (*highest_written_slot).map(file_id) != Some(target_file_id);
         let off_pos = offset_position(slot);
         let data_path = self.data_path(target_file_id);
         let off_path = self.offset_path(target_file_id);
@@ -173,6 +172,7 @@ impl StaticBlockStore {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&off_path)?;
         if reset_file {
             off_file.set_len(0)?;
