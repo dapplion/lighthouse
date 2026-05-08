@@ -1,5 +1,7 @@
 use crate::config::StoreConfigError;
 use crate::hot_cold_store::{HotColdDBError, StateSummaryIteratorError};
+use crate::static_blobs::StaticBlobStoreError;
+use crate::static_blocks::StaticBlockStoreError;
 use crate::{DBColumn, hdiff};
 #[cfg(feature = "leveldb")]
 use leveldb::error::Error as LevelDBError;
@@ -14,6 +16,8 @@ pub enum Error {
     SszDecodeError(DecodeError),
     BeaconStateError(BeaconStateError),
     HotColdDBError(HotColdDBError),
+    StaticBlockStoreError(StaticBlockStoreError),
+    StaticBlobStoreError(StaticBlobStoreError),
     DBError {
         message: String,
     },
@@ -126,6 +130,18 @@ impl From<DecodeError> for Error {
 impl From<HotColdDBError> for Error {
     fn from(e: HotColdDBError) -> Error {
         Error::HotColdDBError(e)
+    }
+}
+
+impl From<StaticBlockStoreError> for Error {
+    fn from(e: StaticBlockStoreError) -> Error {
+        Error::StaticBlockStoreError(e)
+    }
+}
+
+impl From<StaticBlobStoreError> for Error {
+    fn from(e: StaticBlobStoreError) -> Error {
+        Error::StaticBlobStoreError(e)
     }
 }
 
