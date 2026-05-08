@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use store::database::interface::BeaconNodeBackend;
+use store::database::interface::{BeaconNodeBackend, ColdBackend};
 use timer::spawn_timer;
 use tracing::{debug, info, instrument, warn};
 use types::data::compute_ordered_custody_column_indices;
@@ -842,8 +842,7 @@ where
     }
 }
 
-impl<TSlotClock, E>
-    ClientBuilder<Witness<TSlotClock, E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>
+impl<TSlotClock, E> ClientBuilder<Witness<TSlotClock, E, BeaconNodeBackend<E>, ColdBackend<E>>>
 where
     TSlotClock: SlotClock + 'static,
     E: EthSpec + 'static,

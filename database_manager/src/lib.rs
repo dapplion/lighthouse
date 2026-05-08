@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use store::KeyValueStore;
 use store::{
     DBColumn, HotColdDB,
-    database::interface::BeaconNodeBackend,
+    database::interface::{BeaconNodeBackend, ColdBackend},
     errors::Error,
     metadata::{CURRENT_SCHEMA_VERSION, SchemaVersion},
 };
@@ -54,7 +54,7 @@ pub fn display_db_version<E: EthSpec>(
     let blobs_path = client_config.get_blobs_db_path();
 
     let mut version = CURRENT_SCHEMA_VERSION;
-    HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
+    HotColdDB::<E, BeaconNodeBackend<E>, ColdBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,
@@ -308,7 +308,7 @@ pub fn migrate_db<E: EthSpec>(
 
     let mut from = CURRENT_SCHEMA_VERSION;
     let to = migrate_config.to;
-    let db = HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
+    let db = HotColdDB::<E, BeaconNodeBackend<E>, ColdBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,
@@ -338,7 +338,7 @@ pub fn prune_payloads<E: EthSpec>(
     let cold_path = client_config.get_freezer_db_path();
     let blobs_path = client_config.get_blobs_db_path();
 
-    let db = HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
+    let db = HotColdDB::<E, BeaconNodeBackend<E>, ColdBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,
@@ -362,7 +362,7 @@ pub fn prune_blobs<E: EthSpec>(
     let cold_path = client_config.get_freezer_db_path();
     let blobs_path = client_config.get_blobs_db_path();
 
-    let db = HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
+    let db = HotColdDB::<E, BeaconNodeBackend<E>, ColdBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,

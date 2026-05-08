@@ -1,6 +1,7 @@
 use crate::{
-    ColumnIter, ColumnKeyIter, DBColumn, Error, ItemStore, Key, KeyValueStore, KeyValueStoreOp,
-    get_key_for_col, hot_cold_store::BytesKey,
+    ColdStore, ColumnIter, ColumnKeyIter, DBColumn, DBColumnCold, DBColumnColdIndex, Error,
+    IndexIter, ItemStore, Key, KeyValueStore, KeyValueStoreOp, SlotIter, get_key_for_col,
+    hot_cold_store::BytesKey, kv_cold_store,
 };
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashSet};
@@ -151,3 +152,34 @@ impl<E: EthSpec> KeyValueStore<E> for MemoryStore<E> {
 }
 
 impl<E: EthSpec> ItemStore<E> for MemoryStore<E> {}
+
+impl<E: EthSpec> ColdStore<E> for MemoryStore<E> {
+    fn get(&self, c: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
+        kv_cold_store::get(self, c, slot)
+    }
+    fn put_batch(&self, c: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error> {
+        kv_cold_store::put_batch(self, c, items)
+    }
+    fn contains(&self, c: DBColumnCold, slot: Slot) -> Result<bool, Error> {
+        kv_cold_store::contains(self, c, slot)
+    }
+    fn iter_from(&self, c: DBColumnCold, from: Slot) -> SlotIter<'_> {
+        kv_cold_store::iter_from(self, c, from)
+    }
+    fn get_index(&self, c: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error> {
+        kv_cold_store::get_index(self, c, root)
+    }
+    fn put_index_batch(
+        &self,
+        c: DBColumnColdIndex,
+        items: Vec<(Hash256, Slot)>,
+    ) -> Result<(), Error> {
+        kv_cold_store::put_index_batch(self, c, items)
+    }
+    fn iter_index(&self, c: DBColumnColdIndex) -> IndexIter<'_> {
+        kv_cold_store::iter_index(self, c)
+    }
+    fn sync(&self) -> Result<(), Error> {
+        KeyValueStore::sync(self)
+    }
+}

@@ -1,5 +1,5 @@
 use crate::config::{OnDiskStoreConfig, StoreConfig};
-use crate::database::interface::BeaconNodeBackend;
+use crate::database::interface::{BeaconNodeBackend, ColdBackend};
 use crate::forwards_iter::{HybridForwardsBlockRootsIterator, HybridForwardsStateRootsIterator};
 use crate::hdiff::{HDiff, HDiffBuffer, HierarchyConfig, HierarchyModuli, StorageStrategy};
 use crate::historic_state_cache::HistoricStateCache;
@@ -12,6 +12,7 @@ use crate::metadata::{
     SCHEMA_VERSION_KEY, SPLIT_KEY, STATE_UPPER_LIMIT_NO_RETAIN, SchemaVersion,
 };
 use crate::state_cache::{PutStateOutcome, StateCache};
+use crate::static_cold::StaticColdStore;
 use crate::{
     BlobSidecarListFromRoot, ColdStore, DBColumn, DBColumnCold, DBColumnColdIndex, DatabaseBlock,
     Error, ItemStore, KeyValueStoreOp, StoreItem, StoreOp, get_data_column_key,
@@ -272,7 +273,7 @@ impl<E: EthSpec> HotColdDB<E, MemoryStore<E>, MemoryStore<E>> {
     }
 }
 
-impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>> {
+impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>> {
     /// Open a new or existing database, with the given paths to the hot and cold DBs.
     ///
     /// The `migrate_schema` function is passed in so that the parent `BeaconChain` can provide
@@ -302,7 +303,14 @@ impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>> {
             blob_info: RwLock::new(BlobInfo::default()),
             data_column_info: RwLock::new(DataColumnInfo::default()),
             blobs_db: BeaconNodeBackend::open(&config, blobs_db_path)?,
-            cold_db: BeaconNodeBackend::open(&config, cold_path)?,
+            cold_db: match config.cold_backend {
+                crate::config::ColdBackendKind::Kv => {
+                    ColdBackend::Kv(BeaconNodeBackend::open(&config, cold_path)?)
+                }
+                crate::config::ColdBackendKind::Static => {
+                    ColdBackend::Static(StaticColdStore::open(cold_path)?)
+                }
+            },
             hot_db,
             block_cache: NonZeroUsize::new(config.block_cache_size)
                 .map(BlockCache::new)

@@ -11,7 +11,7 @@ use ssz::Encode;
 use std::sync::{Arc, LazyLock};
 use store::{
     DBColumn, HotColdDB, StoreConfig, StoreItem,
-    database::interface::BeaconNodeBackend,
+    database::interface::{BeaconNodeBackend, ColdBackend},
     hot_cold_store::Split,
     metadata::{DataColumnCustodyInfo, DataColumnInfo},
 };
@@ -20,7 +20,7 @@ use tempfile::{TempDir, tempdir};
 use types::{ChainSpec, Hash256, MainnetEthSpec, Slot};
 
 type E = MainnetEthSpec;
-type Store<E> = Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>;
+type Store<E> = Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>>;
 type TestHarness = BeaconChainHarness<DiskHarnessType<E>>;
 
 const VALIDATOR_COUNT: usize = 32;

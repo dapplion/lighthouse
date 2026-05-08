@@ -792,7 +792,8 @@ mod test {
     use logging::create_test_tracing_subscriber;
     use state_processing::ConsensusContext;
     use store::{
-        ColdStore, HotColdDB, ItemStore, StoreConfig, database::interface::BeaconNodeBackend,
+        ColdStore, HotColdDB, ItemStore, StoreConfig,
+        database::interface::{BeaconNodeBackend, ColdBackend},
     };
     use tempfile::{TempDir, tempdir};
     use tracing::info;
@@ -804,7 +805,7 @@ mod test {
     fn get_store_with_spec<E: EthSpec>(
         db_path: &TempDir,
         spec: Arc<ChainSpec>,
-    ) -> Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>> {
+    ) -> Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>> {
         let hot_path = db_path.path().join("hot_db");
         let cold_path = db_path.path().join("cold_db");
         let blobs_path = db_path.path().join("blobs_db");
@@ -949,7 +950,7 @@ mod test {
         E: EthSpec,
         T: BeaconChainTypes<
                 HotStore = BeaconNodeBackend<E>,
-                ColdStore = BeaconNodeBackend<E>,
+                ColdStore = ColdBackend<E>,
                 EthSpec = E,
             >,
     {

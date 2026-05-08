@@ -55,6 +55,8 @@ pub struct StoreConfig {
     pub prune_payloads: bool,
     /// Database backend to use.
     pub backend: DatabaseBackend,
+    /// Which cold backend to use for the freezer DB.
+    pub cold_backend: ColdBackendKind,
     /// State diff hierarchy.
     pub hierarchy_config: HierarchyConfig,
     /// Whether to prune blobs older than the blob data availability boundary.
@@ -116,6 +118,7 @@ impl Default for StoreConfig {
             compact_on_prune: true,
             prune_payloads: true,
             backend: DEFAULT_BACKEND,
+            cold_backend: ColdBackendKind::default(),
             hierarchy_config: HierarchyConfig::default(),
             prune_blobs: true,
             epochs_per_blob_prune: DEFAULT_EPOCHS_PER_BLOB_PRUNE,
@@ -275,4 +278,27 @@ pub enum DatabaseBackend {
     LevelDb,
     #[cfg(feature = "redb")]
     Redb,
+}
+
+/// Cold backend selector.
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Display,
+    EnumString,
+    VariantNames,
+)]
+#[strum(serialize_all = "lowercase")]
+pub enum ColdBackendKind {
+    /// Cold data lives in the same KV backend as the hot DB. Default.
+    #[default]
+    Kv,
+    /// Cold data lives in slot-keyed static files.
+    Static,
 }

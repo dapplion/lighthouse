@@ -14,13 +14,13 @@ use network_utils::enr_ext::peer_id_to_node_id;
 use slasher::{DatabaseBackendOverride, Slasher};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use store::database::interface::BeaconNodeBackend;
+use store::database::interface::{BeaconNodeBackend, ColdBackend};
 use tracing::{info, warn};
 use types::{ChainSpec, Epoch, EthSpec, ForkName};
 
 /// A type-alias to the tighten the definition of a production-intended `Client`.
 pub type ProductionClient<E> =
-    Client<Witness<SystemTimeSlotClock, E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>;
+    Client<Witness<SystemTimeSlotClock, E, BeaconNodeBackend<E>, ColdBackend<E>>>;
 
 /// The beacon node `Client` that is used in production.
 ///

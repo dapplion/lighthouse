@@ -116,6 +116,7 @@ pub enum StaticColdStoreError {
     Io(io::Error),
     Compression(io::Error),
     Invalid(String),
+    Unsupported(&'static str),
 }
 
 impl fmt::Display for StaticColdStoreError {
@@ -124,6 +125,7 @@ impl fmt::Display for StaticColdStoreError {
             Self::Io(e) => write!(f, "static cold store io error: {e}"),
             Self::Compression(e) => write!(f, "static cold store compression error: {e}"),
             Self::Invalid(message) => write!(f, "static cold store invalid data: {message}"),
+            Self::Unsupported(op) => write!(f, "static cold store does not support {op}"),
         }
     }
 }
@@ -533,4 +535,58 @@ fn sync_dir(path: &Path) -> StoreResult<()> {
     let dir = File::open(path)?;
     dir.sync_all()?;
     Ok(())
+}
+
+// `StaticColdStore` only handles slot-keyed bulk; index methods stub out
+// with `Unsupported` for now. Wiring root indices is the follow-up tracked
+// in `TODO-static-block-storage.md`.
+impl<E: types::EthSpec> crate::ColdStore<E> for StaticColdStore {
+    fn get(&self, c: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, crate::Error> {
+        StaticColdStore::get(self, c, slot).map_err(Into::into)
+    }
+
+    fn put_batch(&self, c: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), crate::Error> {
+        for (slot, value) in items {
+            self.put(c, slot, &value)?;
+        }
+        Ok(())
+    }
+
+    fn contains(&self, c: DBColumnCold, slot: Slot) -> Result<bool, crate::Error> {
+        StaticColdStore::contains(self, c, slot).map_err(Into::into)
+    }
+
+    fn iter_from(&self, _c: DBColumnCold, _from: Slot) -> crate::SlotIter<'_> {
+        Box::new(std::iter::once(Err(StaticColdStoreError::Unsupported(
+            "iter_from",
+        )
+        .into())))
+    }
+
+    fn get_index(
+        &self,
+        _c: crate::DBColumnColdIndex,
+        _root: types::Hash256,
+    ) -> Result<Option<Slot>, crate::Error> {
+        Err(StaticColdStoreError::Unsupported("get_index").into())
+    }
+
+    fn put_index_batch(
+        &self,
+        _c: crate::DBColumnColdIndex,
+        _items: Vec<(types::Hash256, Slot)>,
+    ) -> Result<(), crate::Error> {
+        Err(StaticColdStoreError::Unsupported("put_index_batch").into())
+    }
+
+    fn iter_index(&self, _c: crate::DBColumnColdIndex) -> crate::IndexIter<'_> {
+        Box::new(std::iter::once(Err(StaticColdStoreError::Unsupported(
+            "iter_index",
+        )
+        .into())))
+    }
+
+    fn sync(&self) -> Result<(), crate::Error> {
+        Ok(())
+    }
 }

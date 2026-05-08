@@ -163,6 +163,11 @@ pub trait ColdStore<E: EthSpec>: Sync + Send + Sized + 'static {
     // Slot-keyed bulk data.
     fn get(&self, column: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, Error>;
 
+    /// Append `items` to `column`. Slots within `items` must be strictly
+    /// ascending and strictly greater than every slot already written to the
+    /// column — the static-file backend rejects out-of-order puts. KV
+    /// backends accept any order, so this is enforced by the caller, not the
+    /// trait.
     fn put_batch(&self, column: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error>;
 
     fn contains(&self, column: DBColumnCold, slot: Slot) -> Result<bool, Error>;
@@ -183,14 +188,26 @@ pub trait ColdStore<E: EthSpec>: Sync + Send + Sized + 'static {
     fn sync(&self) -> Result<(), Error>;
 }
 
-/// Every `KeyValueStore` is a `ColdStore`: the slot/root keys round-trip through
-/// the underlying byte-keyed columns.
-impl<E: EthSpec, T: KeyValueStore<E>> ColdStore<E> for T {
-    fn get(&self, column: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
-        KeyValueStore::get_bytes(self, column.db_column(), &slot.as_u64().to_be_bytes())
+/// Helpers used by both KV-backed `ColdStore` impls (`BeaconNodeBackend`,
+/// `MemoryStore`). Translation between `Slot`/`Hash256` keys and the byte-keyed
+/// `KeyValueStore` API is identical regardless of which KV is underneath, so we
+/// extract it here and let each backend's `impl ColdStore` thunk through.
+pub(crate) mod kv_cold_store {
+    use super::*;
+
+    pub fn get<E: EthSpec, T: KeyValueStore<E>>(
+        kv: &T,
+        column: DBColumnCold,
+        slot: Slot,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        kv.get_bytes(column.db_column(), &slot.as_u64().to_be_bytes())
     }
 
-    fn put_batch(&self, column: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error> {
+    pub fn put_batch<E: EthSpec, T: KeyValueStore<E>>(
+        kv: &T,
+        column: DBColumnCold,
+        items: Vec<(Slot, Vec<u8>)>,
+    ) -> Result<(), Error> {
         let col = column.db_column();
         let ops = items
             .into_iter()
@@ -198,43 +215,50 @@ impl<E: EthSpec, T: KeyValueStore<E>> ColdStore<E> for T {
                 KeyValueStoreOp::PutKeyValue(col, slot.as_u64().to_be_bytes().to_vec(), value)
             })
             .collect();
-        KeyValueStore::do_atomically(self, ops)
+        kv.do_atomically(ops)
     }
 
-    fn contains(&self, column: DBColumnCold, slot: Slot) -> Result<bool, Error> {
-        KeyValueStore::key_exists(self, column.db_column(), &slot.as_u64().to_be_bytes())
+    pub fn contains<E: EthSpec, T: KeyValueStore<E>>(
+        kv: &T,
+        column: DBColumnCold,
+        slot: Slot,
+    ) -> Result<bool, Error> {
+        kv.key_exists(column.db_column(), &slot.as_u64().to_be_bytes())
     }
 
-    fn iter_from(&self, column: DBColumnCold, from: Slot) -> SlotIter<'_> {
+    pub fn iter_from<E: EthSpec, T: KeyValueStore<E>>(
+        kv: &T,
+        column: DBColumnCold,
+        from: Slot,
+    ) -> SlotIter<'_> {
         Box::new(
-            KeyValueStore::iter_column_from::<Vec<u8>>(
-                self,
-                column.db_column(),
-                &from.as_u64().to_be_bytes(),
-            )
-            .map(|res| {
-                res.and_then(|(key_bytes, value)| {
-                    let bytes: [u8; 8] = key_bytes.try_into().map_err(|_| Error::InvalidBytes)?;
-                    Ok((Slot::new(u64::from_be_bytes(bytes)), value))
-                })
-            }),
+            kv.iter_column_from::<Vec<u8>>(column.db_column(), &from.as_u64().to_be_bytes())
+                .map(|res| {
+                    res.and_then(|(key_bytes, value)| {
+                        let bytes: [u8; 8] =
+                            key_bytes.try_into().map_err(|_| Error::InvalidBytes)?;
+                        Ok((Slot::new(u64::from_be_bytes(bytes)), value))
+                    })
+                }),
         )
     }
 
     // `Slot::as_ssz_bytes()` is byte-identical to the legacy
     // `ColdStateSummary { slot }` wrapper, so existing dbs round-trip without
     // migration. Pinned by `ssz_compat_with_legacy_summary`.
-
-    fn get_index(&self, column: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error> {
-        Ok(
-            KeyValueStore::get_bytes(self, column.db_column(), root.as_slice())?
-                .map(|bytes| Slot::from_ssz_bytes(&bytes))
-                .transpose()?,
-        )
+    pub fn get_index<E: EthSpec, T: KeyValueStore<E>>(
+        kv: &T,
+        column: DBColumnColdIndex,
+        root: Hash256,
+    ) -> Result<Option<Slot>, Error> {
+        Ok(kv
+            .get_bytes(column.db_column(), root.as_slice())?
+            .map(|bytes| Slot::from_ssz_bytes(&bytes))
+            .transpose()?)
     }
 
-    fn put_index_batch(
-        &self,
+    pub fn put_index_batch<E: EthSpec, T: KeyValueStore<E>>(
+        kv: &T,
         column: DBColumnColdIndex,
         items: Vec<(Hash256, Slot)>,
     ) -> Result<(), Error> {
@@ -245,18 +269,17 @@ impl<E: EthSpec, T: KeyValueStore<E>> ColdStore<E> for T {
                 KeyValueStoreOp::PutKeyValue(col, root.as_slice().to_vec(), slot.as_ssz_bytes())
             })
             .collect();
-        KeyValueStore::do_atomically(self, ops)
+        kv.do_atomically(ops)
     }
 
-    fn iter_index(&self, column: DBColumnColdIndex) -> IndexIter<'_> {
+    pub fn iter_index<E: EthSpec, T: KeyValueStore<E>>(
+        kv: &T,
+        column: DBColumnColdIndex,
+    ) -> IndexIter<'_> {
         Box::new(
-            KeyValueStore::iter_column::<Hash256>(self, column.db_column())
+            kv.iter_column::<Hash256>(column.db_column())
                 .map(|res| res.and_then(|(root, value)| Ok((root, Slot::from_ssz_bytes(&value)?)))),
         )
-    }
-
-    fn sync(&self) -> Result<(), Error> {
-        KeyValueStore::sync(self)
     }
 }
 
