@@ -189,7 +189,6 @@ pub enum HotColdDBError {
     MissingExecutionPayloadEnvelope(Hash256),
     MissingFullBlockExecutionPayloadPruned(Hash256, Slot),
     MissingAnchorInfo,
-    MissingFrozenBlockSlot(Hash256),
     MissingFrozenBlock(Slot),
     MissingPathToBlobsDatabase,
     BlobsPreviouslyInDefaultStore,
@@ -2082,9 +2081,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
 
     /// Group `cold_items` by column and write each column to the cold backend.
     ///
-    /// Used to commit pre-finalization cold writes ahead of the matching hot-DB index puts
-    /// (BeaconColdStateSummary, BeaconBlockSlot). Order matters for crash safety: cold data
-    /// must be durable before any hot index entry that references it.
+    /// Used to commit pre-finalization slot-keyed cold writes ahead of the matching
+    /// `BeaconColdStateSummary` root-index put. Order matters for crash safety: slot-keyed
+    /// cold data must be durable before the index entry that references it.
     pub fn commit_cold_items(
         &self,
         cold_items: Vec<(DBColumnCold, Slot, Vec<u8>)>,

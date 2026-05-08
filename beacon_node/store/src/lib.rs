@@ -145,8 +145,6 @@ impl DBColumnCold {
 /// Root-keyed indices owned by the cold backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DBColumnColdIndex {
-    /// `block_root -> slot` for finalized blocks.
-    BlockSlot,
     /// `state_root -> slot` for cold state summaries.
     ColdStateSummary,
 }
@@ -154,7 +152,6 @@ pub enum DBColumnColdIndex {
 impl DBColumnColdIndex {
     pub fn db_column(self) -> DBColumn {
         match self {
-            Self::BlockSlot => DBColumn::BeaconBlockSlot,
             Self::ColdStateSummary => DBColumn::BeaconColdStateSummary,
         }
     }
@@ -421,12 +418,6 @@ pub enum DBColumn {
     /// necessary to guarantee atomicity of the upgrade migration.
     #[strum(serialize = "bbx")]
     BeaconBlockRoots,
-    /// Mapping from block root to slot for blocks whose blinded bodies have been sealed
-    /// into static block files. Populated by the era-sealer; consulted by
-    /// `HotColdDB::get_finalized_blinded_block_slot` to resolve root-keyed reads against
-    /// the (slot-keyed) `StaticBlockStore`.
-    #[strum(serialize = "bbs")]
-    BeaconBlockSlot,
     /// DEPRECATED. This is the previous column for beacon block roots stored by "chunk index".
     ///
     /// Can be removed once schema v22 is buried by a hard fork.
@@ -487,7 +478,6 @@ impl DBColumn {
             Self::OverflowLRUCache => 33, // DEPRECATED
             Self::BeaconMeta
             | Self::BeaconBlock
-            | Self::BeaconBlockSlot
             | Self::BeaconState
             | Self::BeaconBlob
             | Self::BeaconStateSummary

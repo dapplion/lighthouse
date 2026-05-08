@@ -1,42 +1,47 @@
-# Static Block Storage TODO
+# Static Cold Storage TODO
 
-Current spec: [`specs/static-blocks.md`](./specs/static-blocks.md)
+Current spec: [`specs/static-cold-backend.md`](./specs/static-cold-backend.md)
+(file format inherited from [`specs/static-blocks.md`](./specs/static-blocks.md)
+and generalised per-column).
 
-Implemented:
-- static block file format spec
-- `StaticBlockStore::open/get/put`
-- snappy-framed block records
-- fixed-size `.off` sidecar files
-- global `static_blocks.conf` commit marker
-- startup healing for interrupted writes
+Implemented in this branch:
+- multi-column slot-keyed store: `StaticColdStore` (one type, dispatched on
+  `DBColumnCold`)
+- per-column subdirectory + per-column conf with persisted `record_type`,
+  `compression`, `max_value_bytes` (conf magic `LHSTBLK2`)
+- `ColdStore<E>` trait covering both slot-keyed bulk and root-keyed indices
+  (`DBColumnColdIndex`); KV backends impl by translating slot/root keys into
+  the underlying `KeyValueStore`
+- startup healing for interrupted writes (per-column)
+- `prune_historic_states` removed (mode it produced is not in the spec's
+  startup-path table)
 
 Remaining:
 
-1. Wire startup/config.
-   - add CLI/config path for enabling static block storage
-   - initialize `HotColdDB::static_blocks`
-   - reject checkpoint sync, late activation, and historical backfill init modes
+1. Cold backend selection.
+   - add a CLI/config flag to switch the cold backend between the existing
+     KV implementation and the static-file implementation
+   - reject startup combinations the spec doesn't allow (e.g. checkpoint sync
+     without complete static history into static-archive mode)
 
-2. Bump schema.
-   - `DBColumn::BeaconBlockSlot` was added
-   - update schema version in `beacon_node/store/src/metadata.rs`
+2. Review block read/write paths.
+   - decide where finalized blocks live in the static-cold mode
+     (`DBColumn::BeaconBlock`? a new slot-keyed `DBColumnCold::Block`?)
+   - root → slot resolution: with `BeaconBlockSlot` removed, no on-disk index
+     maps a block_root to its slot. Choose a path: bring the index back
+     (whether in hot or in the cold backend), perform a slot-walk, or reject
+     root-keyed reads in static-cold mode
+   - update `HotColdDB::get_block_with` and `block_exists` accordingly
 
-3. Verify static fallback reads.
-   - after `static_blocks.get(slot)`, decode and verify the block root matches the requested root
-   - treat mismatches as corruption
+3. Review invariants.
+   - it is unclear whether invariants 10/11/12 still hold under static-cold
+     mode. Walk through each and confirm or update — in particular, archived
+     blocks no longer needing hot-DB block bodies, and the consistency of
+     root-to-slot indices once their location is decided in (2)
 
-4. Update invariants.
-   - archived finalized blocks no longer require hot-db block bodies
-   - root/slot indices must remain consistent with static storage
-
-5. Add tests.
-   - archive/read happy path
-   - skip-slot dedup
+4. Tests.
+   - happy path for `StaticColdStore::open/get/put` per cold column
    - out-of-order put rejection
-   - crash windows around data, `.off`, and `.conf`
-   - wrong `BeaconBlockSlot`
-   - unsupported startup modes
-
-6. Decide decompression bound wiring.
-   - current implementation uses a local 10 MiB bound
-   - consider passing consensus `max_payload_size` or another store config value
+   - crash windows around data, `.off`, and per-column `.conf`
+   - cold backend selection via CLI flag
+   - rejected startup-mode combinations
