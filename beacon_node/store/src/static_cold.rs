@@ -19,7 +19,9 @@
 //!
 //! See `specs/static-blocks.md` for the on-disk format.
 
-use crate::DBColumnCold;
+use crate::config::StoreConfig;
+use crate::database::interface::BeaconNodeBackend;
+use crate::{DBColumnCold, KeyValueStore};
 use parking_lot::Mutex;
 use snap::{read::FrameDecoder, write::FrameEncoder};
 use std::{
@@ -27,10 +29,11 @@ use std::{
     fmt,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
+    marker::PhantomData,
     path::{Path, PathBuf},
 };
 use strum::IntoEnumIterator;
-use types::Slot;
+use types::{EthSpec, Slot};
 
 const SLOTS_PER_FILE: u64 = 8192;
 const OFFSET_SIZE: u64 = 8;
@@ -101,12 +104,16 @@ fn column_config(column: DBColumnCold) -> ColumnConfig {
     }
 }
 
-#[derive(Debug)]
-pub struct StaticColdStore {
+pub struct StaticColdStore<E: EthSpec> {
     /// All cold columns the static archive backs, opened eagerly at boot.
     /// Frozen after construction; per-column writer state is locked inside
     /// each `Column`.
     columns: HashMap<DBColumnCold, Column>,
+    /// Embedded KV for root-keyed indices (e.g. `ColdStateSummary`). The
+    /// slot-keyed file backend is the bulk archive; this side-table lets us
+    /// look up `state_root → slot` without scanning the bulk files.
+    index_db: BeaconNodeBackend<E>,
+    _phantom: PhantomData<E>,
 }
 
 type StoreResult<T> = std::result::Result<T, StaticColdStoreError>;
@@ -136,18 +143,24 @@ impl From<io::Error> for StaticColdStoreError {
     }
 }
 
-impl StaticColdStore {
+impl<E: EthSpec> StaticColdStore<E> {
     /// Open the archive rooted at `path`. Every cold column is opened eagerly
     /// so subsequent reads/writes are pure hashmap lookups with no I/O on the
-    /// hot path.
-    pub fn open(path: &Path) -> StoreResult<Self> {
-        fs::create_dir_all(path)?;
+    /// hot path. An embedded KV is opened at `<path>/index/` for the
+    /// root-keyed indices.
+    pub fn open(path: &Path, config: &StoreConfig) -> Result<Self, crate::Error> {
+        fs::create_dir_all(path).map_err(StaticColdStoreError::Io)?;
         let mut columns = HashMap::new();
         for column in DBColumnCold::iter() {
             let cfg = column_config(column);
             columns.insert(column, Column::open(path.join(cfg.subdir), cfg)?);
         }
-        Ok(Self { columns })
+        let index_db = BeaconNodeBackend::open(config, &path.join("index"))?;
+        Ok(Self {
+            columns,
+            index_db,
+            _phantom: PhantomData,
+        })
     }
 
     /// Read the value at `(column, slot)`, if present.
@@ -156,7 +169,10 @@ impl StaticColdStore {
     }
 
     /// Durably store `bytes` at `(column, slot)`. Slots within a column must
-    /// arrive strictly ascending.
+    /// arrive strictly ascending. A re-put of an identical value at the
+    /// current highest slot is treated as a no-op so callers that pre-write
+    /// a slot at startup (e.g. genesis block_root) don't trip the
+    /// out-of-order check on the first migration.
     pub fn put(&self, column: DBColumnCold, slot: Slot, bytes: &[u8]) -> StoreResult<()> {
         self.columns[&column].put(slot, bytes)
     }
@@ -227,7 +243,13 @@ impl Column {
         if slot > highest_written_slot {
             return Ok(None);
         }
+        self.read_record(slot)
+    }
 
+    /// Read a record at `slot` without consulting the writer mutex. Used by
+    /// callers that already hold the lock (`put` for the idempotency check)
+    /// or have another reason to know the slot is committed.
+    fn read_record(&self, slot: Slot) -> StoreResult<Option<Vec<u8>>> {
         let file_id = file_id(slot);
         let offset = self.read_offset(file_id, slot)?;
         if offset == 0 {
@@ -274,10 +296,29 @@ impl Column {
 
     fn put(&self, slot: Slot, bytes: &[u8]) -> StoreResult<()> {
         let mut highest_written_slot = self.highest_written_slot.lock();
-        if highest_written_slot.is_some_and(|highest| slot <= highest) {
-            return Err(StaticColdStoreError::Invalid(
-                "static cold put out of order".into(),
-            ));
+        if let Some(highest) = *highest_written_slot {
+            if slot < highest {
+                return Err(StaticColdStoreError::Invalid(
+                    "static cold put out of order".into(),
+                ));
+            }
+            if slot == highest {
+                // Idempotent re-put: tolerate a write of the identical value
+                // at the most recently committed slot. Errors on a value
+                // mismatch — that's a real bug, not a duplicate. Read the
+                // existing record without re-locking the writer mutex.
+                let existing = self.read_record(slot)?.ok_or_else(|| {
+                    StaticColdStoreError::Invalid(
+                        "static cold missing record at highest slot".into(),
+                    )
+                })?;
+                if existing == bytes {
+                    return Ok(());
+                }
+                return Err(StaticColdStoreError::Invalid(
+                    "static cold re-put with mismatched value".into(),
+                ));
+            }
         }
 
         let payload = if self.config.compression {
@@ -537,10 +578,9 @@ fn sync_dir(path: &Path) -> StoreResult<()> {
     Ok(())
 }
 
-// `StaticColdStore` only handles slot-keyed bulk; index methods stub out
-// with `Unsupported` for now. Wiring root indices is the follow-up tracked
-// in `TODO-static-block-storage.md`.
-impl<E: types::EthSpec> crate::ColdStore<E> for StaticColdStore {
+// Slot-keyed columns are served from the static files; root-keyed index
+// columns are served from the embedded KV at `<root>/index/`.
+impl<E: EthSpec> crate::ColdStore<E> for StaticColdStore<E> {
     fn get(&self, c: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, crate::Error> {
         StaticColdStore::get(self, c, slot).map_err(Into::into)
     }
@@ -556,37 +596,69 @@ impl<E: types::EthSpec> crate::ColdStore<E> for StaticColdStore {
         StaticColdStore::contains(self, c, slot).map_err(Into::into)
     }
 
-    fn iter_from(&self, _c: DBColumnCold, _from: Slot) -> crate::SlotIter<'_> {
-        Box::new(std::iter::once(Err(StaticColdStoreError::Unsupported(
-            "iter_from",
+    fn iter_from(&self, c: DBColumnCold, from: Slot) -> crate::SlotIter<'_> {
+        let column = &self.columns[&c];
+        let Some(highest) = *column.highest_written_slot.lock() else {
+            return Box::new(std::iter::empty());
+        };
+        if from > highest {
+            return Box::new(std::iter::empty());
+        }
+        let column_ref = column;
+        Box::new(
+            (from.as_u64()..=highest.as_u64())
+                .map(Slot::new)
+                .filter_map(move |slot| match column_ref.read_record(slot) {
+                    Ok(Some(value)) => Some(Ok((slot, value))),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e.into())),
+                }),
         )
-        .into())))
     }
 
     fn get_index(
         &self,
-        _c: crate::DBColumnColdIndex,
-        _root: types::Hash256,
+        c: crate::DBColumnColdIndex,
+        root: types::Hash256,
     ) -> Result<Option<Slot>, crate::Error> {
-        Err(StaticColdStoreError::Unsupported("get_index").into())
+        use ssz::Decode;
+        Ok(self
+            .index_db
+            .get_bytes(c.db_column(), root.as_slice())?
+            .map(|bytes| Slot::from_ssz_bytes(&bytes))
+            .transpose()?)
     }
 
     fn put_index_batch(
         &self,
-        _c: crate::DBColumnColdIndex,
-        _items: Vec<(types::Hash256, Slot)>,
+        c: crate::DBColumnColdIndex,
+        items: Vec<(types::Hash256, Slot)>,
     ) -> Result<(), crate::Error> {
-        Err(StaticColdStoreError::Unsupported("put_index_batch").into())
+        use ssz::Encode;
+        let col = c.db_column();
+        let ops = items
+            .into_iter()
+            .map(|(root, slot)| {
+                crate::KeyValueStoreOp::PutKeyValue(
+                    col,
+                    root.as_slice().to_vec(),
+                    slot.as_ssz_bytes(),
+                )
+            })
+            .collect();
+        self.index_db.do_atomically(ops)
     }
 
-    fn iter_index(&self, _c: crate::DBColumnColdIndex) -> crate::IndexIter<'_> {
-        Box::new(std::iter::once(Err(StaticColdStoreError::Unsupported(
-            "iter_index",
+    fn iter_index(&self, c: crate::DBColumnColdIndex) -> crate::IndexIter<'_> {
+        use ssz::Decode;
+        Box::new(
+            self.index_db
+                .iter_column::<types::Hash256>(c.db_column())
+                .map(|res| res.and_then(|(root, value)| Ok((root, Slot::from_ssz_bytes(&value)?)))),
         )
-        .into())))
     }
 
     fn sync(&self) -> Result<(), crate::Error> {
-        Ok(())
+        KeyValueStore::sync(&self.index_db)
     }
 }

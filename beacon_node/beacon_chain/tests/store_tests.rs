@@ -47,6 +47,7 @@ use store::database::interface::{BeaconNodeBackend, ColdBackend};
 use store::metadata::{CURRENT_SCHEMA_VERSION, SchemaVersion};
 use store::{
     BlobInfo, DBColumn, HotColdDB, StoreConfig,
+    config::ColdBackendKind,
     hdiff::HierarchyConfig,
     iter::{BlockRootsIterator, StateRootsIterator},
 };
@@ -6151,4 +6152,52 @@ fn get_blocks(
 
 fn clone_block<E: EthSpec>(block: &AvailableBlock<E>) -> AvailableBlock<E> {
     block.__clone_without_recv().unwrap()
+}
+
+/// Genesis-sync ~1000 blocks against a `HotColdDB` configured with the static
+/// cold backend. Exercises every code path that writes/reads cold state during
+/// migration over many finalizations.
+#[tokio::test]
+async fn genesis_sync_static_cold() {
+    let num_blocks_produced: u64 = 1000;
+    let db_path = tempdir().unwrap();
+    let store_config = StoreConfig {
+        prune_payloads: false,
+        cold_backend: ColdBackendKind::Static,
+        ..StoreConfig::default()
+    };
+    let store = get_store_generic(&db_path, store_config, test_spec::<E>());
+    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
+
+    harness
+        .extend_chain(
+            num_blocks_produced as usize,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+
+    check_finalization(&harness, num_blocks_produced);
+    check_split_slot(&harness, store.clone());
+
+    // Spot-check: load every state in the canonical chain prior to the split
+    // slot from the static cold backend (exercises the root-keyed index +
+    // slot-keyed bulk reads end-to-end).
+    let split_slot = store.get_split_slot();
+    let head_state = harness.get_current_state();
+    let cold_state_roots: Vec<_> = StateRootsIterator::new(&store, &head_state)
+        .filter_map(Result::ok)
+        .filter(|(_, slot)| *slot < split_slot)
+        .collect();
+    assert!(
+        !cold_state_roots.is_empty(),
+        "expected at least one cold state to verify"
+    );
+    for (state_root, slot) in cold_state_roots {
+        let state = store
+            .get_state(&state_root, Some(slot), false)
+            .expect("cold state load should not error")
+            .unwrap_or_else(|| panic!("missing cold state at slot {slot}"));
+        assert_eq!(state.slot(), slot);
+    }
 }

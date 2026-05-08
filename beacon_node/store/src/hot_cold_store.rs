@@ -308,7 +308,7 @@ impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>> {
                     ColdBackend::Kv(BeaconNodeBackend::open(&config, cold_path)?)
                 }
                 crate::config::ColdBackendKind::Static => {
-                    ColdBackend::Static(StaticColdStore::open(cold_path)?)
+                    ColdBackend::Static(StaticColdStore::open(cold_path, &config)?)
                 }
             },
             hot_db,

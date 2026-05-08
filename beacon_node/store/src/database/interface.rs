@@ -34,7 +34,7 @@ impl<E: EthSpec> ItemStore<E> for BeaconNodeBackend<E> {}
 /// indirection isn't earning anything.
 pub enum ColdBackend<E: EthSpec> {
     Kv(BeaconNodeBackend<E>),
-    Static(StaticColdStore),
+    Static(StaticColdStore<E>),
 }
 
 impl<E: EthSpec> ColdStore<E> for ColdBackend<E> {
