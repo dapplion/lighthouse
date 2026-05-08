@@ -218,6 +218,10 @@ impl<E: EthSpec, T: KeyValueStore<E>> ColdStore<E> for T {
         )
     }
 
+    // `Slot::as_ssz_bytes()` is byte-identical to the legacy
+    // `ColdStateSummary { slot }` wrapper, so existing dbs round-trip without
+    // migration. Pinned by `ssz_compat_with_legacy_summary`.
+
     fn get_index(&self, column: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error> {
         Ok(
             KeyValueStore::get_bytes(self, column.db_column(), root.as_slice())?
@@ -632,6 +636,21 @@ mod tests {
         fn from_store_bytes(bytes: &[u8]) -> Result<Self, Error> {
             Self::from_ssz_bytes(bytes).map_err(Into::into)
         }
+    }
+
+    /// Mirrors the wrapper that older releases stored in `BeaconColdStateSummary`.
+    #[derive(Encode, Decode)]
+    struct LegacyColdStateSummary {
+        slot: Slot,
+    }
+
+    #[test]
+    fn ssz_compat_with_legacy_summary() {
+        let slot = Slot::new(42);
+        assert_eq!(
+            slot.as_ssz_bytes(),
+            LegacyColdStateSummary { slot }.as_ssz_bytes(),
+        );
     }
 
     fn test_impl(store: impl ItemStore<MinimalEthSpec>) {
