@@ -7,7 +7,8 @@ use eth2_network_config::Eth2NetworkConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use store::database::interface::BeaconNodeBackend;
+use store::config::ColdBackendKind;
+use store::database::interface::{BeaconNodeBackend, ColdBackend};
 use store::{HotColdDB, StoreConfig};
 use tracing::info;
 use types::{EthSpec, Hash256};
@@ -40,12 +41,15 @@ pub fn run<E: EthSpec>(
         .map_err(|e| format!("Failed to create blobs db dir: {e}"))?;
 
     let db = Arc::new(
-        HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
+        HotColdDB::<E, BeaconNodeBackend<E>, ColdBackend<E>>::open(
             &hot_path,
             &cold_path,
             &blobs_path,
             |_, _, _| Ok(()),
-            StoreConfig::default(),
+            StoreConfig {
+                cold_backend: ColdBackendKind::Static,
+                ..StoreConfig::default()
+            },
             spec.clone(),
         )
         .map_err(|e| format!("Failed to open database: {e:?}"))?,

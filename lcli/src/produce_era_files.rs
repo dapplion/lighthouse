@@ -3,10 +3,11 @@ use clap::ArgMatches;
 use clap_utils::parse_required;
 use environment::Environment;
 use std::path::PathBuf;
-use store::database::interface::BeaconNodeBackend;
+use store::config::ColdBackendKind;
+use store::database::interface::{BeaconNodeBackend, ColdBackend};
 use store::{HotColdDB, StoreConfig};
 use tracing::info;
-use types::EthSpec;
+use types::{EthSpec, Slot};
 
 pub fn run<E: EthSpec>(env: Environment<E>, matches: &ArgMatches) -> Result<(), String> {
     let datadir: PathBuf = parse_required(matches, "datadir")?;
@@ -25,12 +26,15 @@ pub fn run<E: EthSpec>(env: Environment<E>, matches: &ArgMatches) -> Result<(), 
         "Opening database"
     );
 
-    let db = HotColdDB::<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>::open(
+    let db = HotColdDB::<E, BeaconNodeBackend<E>, ColdBackend<E>>::open(
         &hot_path,
         &cold_path,
         &blobs_path,
         |_, _, _| Ok(()),
-        StoreConfig::default(),
+        StoreConfig {
+            cold_backend: ColdBackendKind::Static,
+            ..StoreConfig::default()
+        },
         spec,
     )
     .map_err(|e| format!("Failed to open database: {e:?}"))?;
@@ -58,7 +62,7 @@ pub fn run<E: EthSpec>(env: Environment<E>, matches: &ArgMatches) -> Result<(), 
     }
 
     // Verify block backfill is complete
-    if anchor.oldest_block_slot > 0 {
+    if anchor.oldest_block_slot > Slot::new(0) {
         return Err(format!(
             "Block backfill is not complete. oldest_block_slot={}. \
              Complete backfill sync first.",

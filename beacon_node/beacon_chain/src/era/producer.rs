@@ -15,7 +15,7 @@ use reth_era::era::types::group::{EraGroup, EraId, SlotIndex};
 use ssz::Encode;
 use std::fs::{self, File, OpenOptions};
 use std::path::Path;
-use store::{HotColdDB, ItemStore};
+use store::{ColdStore, HotColdDB, ItemStore};
 use tracing::info;
 use tree_hash::TreeHash;
 use types::{BeaconState, EthSpec, Slot};
@@ -42,7 +42,7 @@ fn era_file_exists_for_number(dir: &Path, network_name: &str, era_number: u64) -
     false
 }
 
-pub fn create_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+pub fn create_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     db: &HotColdDB<E, Hot, Cold>,
     era_number: u64,
     output_dir: &Path,
@@ -92,7 +92,7 @@ pub fn create_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     Ok(())
 }
 
-pub(super) fn build_era_group<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+pub(super) fn build_era_group<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     db: &HotColdDB<E, Hot, Cold>,
     state: &mut BeaconState<E>,
     era_number: u64,

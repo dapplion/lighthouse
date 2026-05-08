@@ -131,11 +131,7 @@ fn store_with_genesis(spec: &ChainSpec) -> TestStore {
         HotColdDB::open_ephemeral(StoreConfig::default(), Arc::new(spec.clone())).expect("store");
     let mut genesis = load_genesis_state(spec);
     let root = genesis.canonical_root().expect("hash");
-    let mut ops = vec![];
-    store
-        .store_cold_state(&root, &genesis, &mut ops)
-        .expect("ops");
-    store.cold_db.do_atomically(ops).expect("write");
+    store.put_cold_state(&root, &genesis).expect("put");
     store
 }
 

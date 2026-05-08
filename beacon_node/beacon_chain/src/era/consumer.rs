@@ -32,11 +32,13 @@ use rayon::prelude::*;
 use reth_era::common::file_ops::StreamReader;
 use reth_era::era::file::EraReader;
 use reth_era::era::types::consensus::{CompressedBeaconState, CompressedSignedBeaconBlock};
+use ssz::Encode;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use store::{DBColumn, HotColdDB, ItemStore, KeyValueStoreOp};
+use store::hot_cold_store::ColdBatch;
+use store::{ColdStore, DBColumnCold, HotColdDB, ItemStore};
 use tracing::{debug, debug_span, info, instrument, warn};
 use tree_hash::TreeHash;
 use types::{
@@ -202,7 +204,7 @@ impl EraFileDir {
     /// The caller must have initialized the store from genesis first via [`init_genesis_store`].
     /// After importing all ERA files, the split, fork choice, and anchor are advanced to the
     /// latest ERA boundary slot so the store is ready for `resume_from_db`.
-    pub fn import_all<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    pub fn import_all<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         &self,
         store: &Arc<HotColdDB<E, Hot, Cold>>,
         spec: &ChainSpec,
@@ -277,7 +279,7 @@ impl EraFileDir {
     /// Each ERA's states are reconstructed independently by replaying blocks from the
     /// ERA boundary state. Progress is tracked per-ERA so reconstruction can resume
     /// after a crash.
-    fn reconstruct_states_parallel<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    fn reconstruct_states_parallel<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         &self,
         store: &Arc<HotColdDB<E, Hot, Cold>>,
         max_era: u64,
@@ -326,7 +328,7 @@ impl EraFileDir {
     }
 
     /// Advance split, fork choice, and anchor from genesis to the latest ERA boundary slot.
-    fn advance_store_to_era<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    fn advance_store_to_era<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         &self,
         store: &Arc<HotColdDB<E, Hot, Cold>>,
         spec: &ChainSpec,
@@ -473,7 +475,7 @@ impl EraFileDir {
     }
 
     #[instrument(level = "debug", skip_all, fields(era_number = %era_number))]
-    pub fn import_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    pub fn import_era_file<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         &self,
         store: &HotColdDB<E, Hot, Cold>,
         era_number: u64,
@@ -607,32 +609,39 @@ impl EraFileDir {
                 .collect::<Vec<_>>()
         };
 
-        let mut block_ops = vec![];
-        {
+        // Static cold archive holds blinded SignedBeaconBlocks slot-keyed; payloads, blobs,
+        // and the hash-keyed BeaconBlock column are out of scope (specs/static-blocks.md).
+        // Per-slot SSZ encode of the blinded block, then a single ascending-slot put_batch.
+        let mut block_ops: Vec<(Slot, Vec<u8>)> = {
             let _ = debug_span!("era_import_db_ops_blocks").entered();
-            for (block_root, block) in blocks_with_roots {
-                let slot = block.slot();
-                // Check consistency that this block is expected w.r.t. the state in the era file.
-                // Since we check that the state block roots match the historical summary, we know that
-                // this block root is the expected one.
-                let expected_block_root = state
-                    .get_block_root(slot)
-                    .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
-                if *expected_block_root != block_root {
-                    return Err(format!(
-                        "block root mismatch at slot {slot}: expected {expected_block_root:?}, got {block_root:?}"
-                    ));
-                }
-                store
-                    .block_as_kv_store_ops(&block_root, block, &mut block_ops)
-                    .map_err(|error| format!("failed to store block: {error:?}"))?;
-            }
-        }
+            blocks_with_roots
+                .into_par_iter()
+                .map(|(block_root, block)| {
+                    let slot = block.slot();
+                    // Validate against the era state's block_roots ring. We accept this block
+                    // root because the historical summary covering this state was already
+                    // verified earlier in the import.
+                    let expected_block_root = state
+                        .get_block_root(slot)
+                        .map_err(|e| format!("failed to read block root {slot}: {e:?}"))?;
+                    if *expected_block_root != block_root {
+                        return Err(format!(
+                            "block root mismatch at slot {slot}: expected {expected_block_root:?}, got {block_root:?}"
+                        ));
+                    }
+                    let blinded = block.clone_as_blinded();
+                    Ok((slot, blinded.as_ssz_bytes()))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        };
+        // Static archive requires strictly-ascending slots within a column. ERA group blocks
+        // are slot-ordered by spec; sorting here is cheap insurance.
+        block_ops.sort_unstable_by_key(|(slot, _)| *slot);
         {
             let _ = debug_span!("era_import_write_blocks").entered();
             store
-                .hot_db
-                .do_atomically(block_ops)
+                .cold_db
+                .put_batch(DBColumnCold::Block, block_ops)
                 .map_err(|error| format!("failed to store blocks: {error:?}"))?;
         }
 
@@ -732,7 +741,7 @@ fn era_root_from_state<E: EthSpec>(
     Err(format!("missing historical root for era {era_number}"))
 }
 
-fn write_block_root_index_for_era<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+fn write_block_root_index_for_era<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     store: &HotColdDB<E, Hot, Cold>,
     state: &BeaconState<E>,
     era_number: u64,
@@ -755,23 +764,19 @@ fn write_block_root_index_for_era<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore
                 .get_block_root(slot)
                 .map_err(|error| format!("failed to read block root {slot}: {error:?}"))?;
             // TODO(era): Should we write BeaconBlockRoots for missed slots?
-            Ok(KeyValueStoreOp::PutKeyValue(
-                DBColumn::BeaconBlockRoots,
-                slot_u64.to_be_bytes().to_vec(),
-                block_root.as_slice().to_vec(),
-            ))
+            Ok((slot, block_root.as_slice().to_vec()))
         })
         .collect::<Result<Vec<_>, String>>()?;
 
     store
         .cold_db
-        .do_atomically(ops)
+        .put_batch(DBColumnCold::BlockRoots, ops)
         .map_err(|error| format!("failed to store block root index: {error:?}"))?;
 
     Ok(())
 }
 
-fn write_state_root_index_for_era<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+fn write_state_root_index_for_era<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     store: &HotColdDB<E, Hot, Cold>,
     state: &BeaconState<E>,
 ) -> Result<(), String> {
@@ -779,20 +784,19 @@ fn write_state_root_index_for_era<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore
     let slots_per_historical_root = E::slots_per_historical_root() as u64;
     let start_slot = end_slot.saturating_sub(slots_per_historical_root);
 
-    let mut ops = Vec::with_capacity((end_slot.as_u64() - start_slot.as_u64()) as usize * 2);
+    let mut batch = ColdBatch::default();
     for slot_u64 in start_slot.as_u64()..end_slot.as_u64() {
         let slot = Slot::new(slot_u64);
         let state_root = state
             .get_state_root(slot)
             .map_err(|error| format!("failed to read state root {slot}: {error:?}"))?;
         store
-            .store_cold_state_summary(state_root, slot, &mut ops)
+            .store_cold_state_summary(state_root, slot, &mut batch)
             .map_err(|error| format!("failed to build state root index op: {error:?}"))?;
     }
 
     store
-        .cold_db
-        .do_atomically(ops)
+        .commit_cold_batch(batch)
         .map_err(|error| format!("failed to store state root index: {error:?}"))?;
 
     Ok(())

@@ -2155,9 +2155,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         state_root: &Hash256,
         state: &BeaconState<E>,
     ) -> Result<(), Error> {
-        let mut ops: Vec<KeyValueStoreOp> = Vec::new();
-        self.store_cold_state(state_root, state, &mut ops)?;
-        self.cold_db.do_atomically(ops)
+        let mut batch = ColdBatch::default();
+        self.store_cold_state(state_root, state, &mut batch)?;
+        self.commit_cold_batch(batch)
     }
 
     /// Store a pre-finalization state in the freezer database.

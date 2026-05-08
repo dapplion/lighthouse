@@ -8,19 +8,19 @@ use crate::beacon_chain::{BEACON_CHAIN_DB_KEY, FORK_CHOICE_DB_KEY};
 use crate::persisted_beacon_chain::PersistedBeaconChain;
 use crate::persisted_fork_choice::PersistedForkChoice;
 use crate::{BeaconForkChoiceStore, BeaconSnapshot};
-use bls::FixedBytesExtended;
 use fork_choice::ForkChoice;
+use ssz::Encode;
 use std::sync::Arc;
-use store::{HotColdDB, ItemStore, StoreItem};
+use store::{ColdStore, DBColumnCold, HotColdDB, ItemStore, StoreItem};
 use tracing::info;
-use types::{BeaconBlock, BeaconState, ChainSpec, EthSpec, Hash256, SignedBeaconBlock, Slot};
+use types::{BeaconBlock, BeaconState, ChainSpec, EthSpec, SignedBeaconBlock, Slot};
 
 /// Initialize a store from genesis for ERA import.
 ///
 /// Creates the genesis block, stores genesis state and block, and sets up initial store
 /// metadata (split at genesis, anchor, fork choice, `PersistedBeaconChain`).
 /// Call this before [`super::consumer::EraFileDir::import_all`].
-pub fn init_genesis_store<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+pub fn init_genesis_store<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     store: &Arc<HotColdDB<E, Hot, Cold>>,
     genesis_state: &mut BeaconState<E>,
     spec: &ChainSpec,
@@ -37,16 +37,18 @@ pub fn init_genesis_store<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     store
         .put_cold_state(&state_root, genesis_state)
         .map_err(|e| format!("failed to store genesis state: {e:?}"))?;
+    // Genesis blinded block lands in the static cold archive at slot 0; no hot-DB write.
+    let genesis_blinded_bytes = signed_block.clone_as_blinded().as_ssz_bytes();
     store
-        .put_block(&block_root, signed_block.clone())
+        .cold_db
+        .put_batch(
+            DBColumnCold::Block,
+            vec![(Slot::new(0), genesis_blinded_bytes)],
+        )
         .map_err(|e| format!("failed to store genesis block: {e:?}"))?;
-    // Also store under ZERO_HASH alias (used by resume_from_db for genesis lookup)
-    store
-        .put_block(&Hash256::zero(), signed_block.clone())
-        .map_err(|e| format!("failed to store genesis block alias: {e:?}"))?;
     store
         .store_frozen_block_root_at_skip_slots(Slot::new(0), Slot::new(1), block_root)
-        .and_then(|ops| store.cold_db.do_atomically(ops))
+        .and_then(|ops| store.cold_db.put_batch(DBColumnCold::BlockRoots, ops))
         .map_err(|e| format!("failed to store genesis block root: {e:?}"))?;
 
     // Set split at genesis
