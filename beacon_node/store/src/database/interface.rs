@@ -41,7 +41,7 @@ impl<E: EthSpec> ColdStore<E> for BeaconNodeBackend<E> {
         KeyValueStore::do_atomically(self, ops)
     }
 
-    fn exists(&self, column: DBColumn, slot: Slot) -> Result<bool, Error> {
+    fn contains(&self, column: DBColumn, slot: Slot) -> Result<bool, Error> {
         KeyValueStore::key_exists(self, column, &slot.as_u64().to_be_bytes())
     }
 

@@ -9,8 +9,8 @@
 //! `static_blocks_{file_id:05}` data files, matching `.off` sidecars, and a
 //! `static_blocks.conf` commit marker — just rooted at `<root>/<col-tag>/`.
 //!
-//! Per-column behaviour (compression, record-type tag, max decompressed size)
-//! lives in `column_config`. Columns absent from that table are rejected.
+//! Per-column behaviour (compression, record-type tag, max value bytes) lives
+//! in `column_config`, keyed by the tight `DBColumnCold` enum.
 //!
 //! Contract:
 //! - `put(column, slot, bytes)` is durable on return.
@@ -19,7 +19,7 @@
 //!
 //! See `specs/static-blocks.md` for the on-disk format.
 
-use crate::DBColumn;
+use crate::DBColumnCold;
 use parking_lot::Mutex;
 use snap::{read::FrameDecoder, write::FrameEncoder};
 use std::{
@@ -28,8 +28,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
 };
+use strum::IntoEnumIterator;
 use types::Slot;
 
 const SLOTS_PER_FILE: u64 = 8192;
@@ -59,53 +59,54 @@ struct ColumnConfig {
     /// Whether values are snappy-framed before write.
     compression: bool,
     /// Upper bound on a single decoded record's size in bytes.
-    max_decompressed: u64,
+    max_value_bytes: u64,
 }
 
-/// Static-cold backing for a single cold column. Returns `None` for columns
-/// that don't live in the static archive.
-fn column_config(column: DBColumn) -> Option<ColumnConfig> {
+/// Per-column file format defaults.
+fn column_config(column: DBColumnCold) -> ColumnConfig {
     match column {
-        DBColumn::BeaconBlock => Some(ColumnConfig {
+        DBColumnCold::Block => ColumnConfig {
             subdir: "blk",
             record_type: [0x01, 0x00],
             compression: true,
-            max_decompressed: 10 * 1024 * 1024,
-        }),
-        DBColumn::BeaconBlockRoots => Some(ColumnConfig {
+            max_value_bytes: 10 * 1024 * 1024,
+        },
+        DBColumnCold::BlockRoots => ColumnConfig {
             subdir: "bbr",
             record_type: [0x02, 0x00],
             compression: false,
-            max_decompressed: 64,
-        }),
-        DBColumn::BeaconStateRoots => Some(ColumnConfig {
+            max_value_bytes: 64,
+        },
+        DBColumnCold::StateRoots => ColumnConfig {
             subdir: "bsr",
             record_type: [0x03, 0x00],
             compression: false,
-            max_decompressed: 64,
-        }),
-        DBColumn::BeaconStateSnapshot => Some(ColumnConfig {
+            max_value_bytes: 64,
+        },
+        DBColumnCold::StateSnapshot => ColumnConfig {
             subdir: "bss",
             record_type: [0x04, 0x00],
             compression: false,
-            max_decompressed: 1024 * 1024 * 1024,
-        }),
-        DBColumn::BeaconStateDiff => Some(ColumnConfig {
+            max_value_bytes: 1024 * 1024 * 1024,
+        },
+        DBColumnCold::StateDiff => ColumnConfig {
+            // HDiff is already compressed internally (zstd'd validator and
+            // balance chunks; xdelta3 state diff). No benefit to wrapping it
+            // in snappy here.
             subdir: "bsd",
             record_type: [0x05, 0x00],
-            compression: true,
-            max_decompressed: 1024 * 1024 * 1024,
-        }),
-        _ => None,
+            compression: false,
+            max_value_bytes: 1024 * 1024 * 1024,
+        },
     }
 }
 
 #[derive(Debug)]
 pub struct StaticColdStore {
-    root_dir: PathBuf,
-    /// Lazily-opened per-column file sets. The outer mutex guards creation;
-    /// reads/writes within a column take that column's own lock.
-    columns: Mutex<HashMap<DBColumn, Arc<Column>>>,
+    /// All cold columns the static archive backs, opened eagerly at boot.
+    /// Frozen after construction; per-column writer state is locked inside
+    /// each `Column`.
+    columns: HashMap<DBColumnCold, Column>,
 }
 
 type StoreResult<T> = std::result::Result<T, StaticColdStoreError>;
@@ -115,7 +116,6 @@ pub enum StaticColdStoreError {
     Io(io::Error),
     Compression(io::Error),
     Invalid(String),
-    UnsupportedColumn(DBColumn),
 }
 
 impl fmt::Display for StaticColdStoreError {
@@ -124,9 +124,6 @@ impl fmt::Display for StaticColdStoreError {
             Self::Io(e) => write!(f, "static cold store io error: {e}"),
             Self::Compression(e) => write!(f, "static cold store compression error: {e}"),
             Self::Invalid(message) => write!(f, "static cold store invalid data: {message}"),
-            Self::UnsupportedColumn(c) => {
-                write!(f, "static cold store does not back column {c:?}")
-            }
         }
     }
 }
@@ -138,37 +135,34 @@ impl From<io::Error> for StaticColdStoreError {
 }
 
 impl StaticColdStore {
-    /// Open the archive rooted at `path`. Per-column subdirectories are
-    /// created lazily on first access.
+    /// Open the archive rooted at `path`. Every cold column is opened eagerly
+    /// so subsequent reads/writes are pure hashmap lookups with no I/O on the
+    /// hot path.
     pub fn open(path: &Path) -> StoreResult<Self> {
         fs::create_dir_all(path)?;
-        Ok(Self {
-            root_dir: path.to_path_buf(),
-            columns: Mutex::new(HashMap::new()),
-        })
+        let mut columns = HashMap::new();
+        for column in DBColumnCold::iter() {
+            let cfg = column_config(column);
+            columns.insert(column, Column::open(path.join(cfg.subdir), cfg)?);
+        }
+        Ok(Self { columns })
     }
 
     /// Read the value at `(column, slot)`, if present.
-    pub fn get(&self, column: DBColumn, slot: Slot) -> StoreResult<Option<Vec<u8>>> {
-        self.open_column(column)?.get(slot)
+    pub fn get(&self, column: DBColumnCold, slot: Slot) -> StoreResult<Option<Vec<u8>>> {
+        self.columns[&column].get(slot)
     }
 
     /// Durably store `bytes` at `(column, slot)`. Slots within a column must
     /// arrive strictly ascending.
-    pub fn put(&self, column: DBColumn, slot: Slot, bytes: &[u8]) -> StoreResult<()> {
-        self.open_column(column)?.put(slot, bytes)
+    pub fn put(&self, column: DBColumnCold, slot: Slot, bytes: &[u8]) -> StoreResult<()> {
+        self.columns[&column].put(slot, bytes)
     }
 
-    /// Resolve (and lazily create) the file set for `column`.
-    fn open_column(&self, column: DBColumn) -> StoreResult<Arc<Column>> {
-        let mut columns = self.columns.lock();
-        if let Some(handle) = columns.get(&column) {
-            return Ok(handle.clone());
-        }
-        let cfg = column_config(column).ok_or(StaticColdStoreError::UnsupportedColumn(column))?;
-        let handle = Arc::new(Column::open(self.root_dir.join(cfg.subdir), cfg)?);
-        columns.insert(column, handle.clone());
-        Ok(handle)
+    /// Return `true` if a value exists at `(column, slot)`. Cheaper than `get`
+    /// because only the `.off` sidecar is consulted; the data file is not read.
+    pub fn contains(&self, column: DBColumnCold, slot: Slot) -> StoreResult<bool> {
+        self.columns[&column].contains(slot)
     }
 }
 
@@ -186,7 +180,7 @@ struct ColumnConfigOnDisk {
     current_data_len: u64,
     record_type: [u8; 2],
     compression: bool,
-    max_decompressed: u64,
+    max_value_bytes: u64,
 }
 
 impl Column {
@@ -207,7 +201,7 @@ impl Column {
             subdir: defaults.subdir,
             record_type: on_disk.record_type,
             compression: on_disk.compression,
-            max_decompressed: on_disk.max_decompressed,
+            max_value_bytes: on_disk.max_value_bytes,
         };
 
         let handle = Self {
@@ -255,15 +249,25 @@ impl Column {
         data_file.read_exact(&mut payload)?;
 
         if self.config.compression {
-            decompress_record(&payload, self.config.max_decompressed)
+            decompress_record(&payload, self.config.max_value_bytes)
         } else {
-            if (payload.len() as u64) > self.config.max_decompressed {
+            if (payload.len() as u64) > self.config.max_value_bytes {
                 return Err(StaticColdStoreError::Invalid(
                     "static cold record exceeds size limit".into(),
                 ));
             }
             Ok(Some(payload))
         }
+    }
+
+    fn contains(&self, slot: Slot) -> StoreResult<bool> {
+        let Some(highest_written_slot) = *self.highest_written_slot.lock() else {
+            return Ok(false);
+        };
+        if slot > highest_written_slot {
+            return Ok(false);
+        }
+        Ok(self.read_offset(file_id(slot), slot)? != 0)
     }
 
     fn put(&self, slot: Slot, bytes: &[u8]) -> StoreResult<()> {
@@ -434,14 +438,14 @@ fn read_config(path: &Path) -> StoreResult<ColumnConfigOnDisk> {
             )));
         }
     };
-    let max_decompressed =
+    let max_value_bytes =
         u64::from_le_bytes(bytes[28..36].try_into().expect("slice length checked"));
     Ok(ColumnConfigOnDisk {
         highest_written_slot: (highest != EMPTY_SLOT).then(|| Slot::new(highest)),
         current_data_len,
         record_type,
         compression,
-        max_decompressed,
+        max_value_bytes,
     })
 }
 
@@ -468,7 +472,7 @@ fn atomic_write_config(
         COMPRESSION_NONE
     };
     bytes[27] = 0;
-    bytes[28..36].copy_from_slice(&config.max_decompressed.to_le_bytes());
+    bytes[28..36].copy_from_slice(&config.max_value_bytes.to_le_bytes());
 
     {
         let mut tmp = File::create(tmp_path)?;
@@ -510,14 +514,14 @@ fn write_record(
     Ok(())
 }
 
-fn decompress_record(bytes: &[u8], max_decompressed: u64) -> StoreResult<Option<Vec<u8>>> {
+fn decompress_record(bytes: &[u8], max_value_bytes: u64) -> StoreResult<Option<Vec<u8>>> {
     let decoder = FrameDecoder::new(bytes);
-    let mut limited = decoder.take(max_decompressed + 1);
+    let mut limited = decoder.take(max_value_bytes + 1);
     let mut decompressed = Vec::new();
     limited
         .read_to_end(&mut decompressed)
         .map_err(StaticColdStoreError::Compression)?;
-    if decompressed.len() as u64 > max_decompressed {
+    if decompressed.len() as u64 > max_value_bytes {
         return Err(StaticColdStoreError::Invalid(
             "static cold record exceeds decompressed size limit".into(),
         ));

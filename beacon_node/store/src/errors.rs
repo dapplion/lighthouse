@@ -1,7 +1,7 @@
 use crate::config::StoreConfigError;
 use crate::hot_cold_store::{HotColdDBError, StateSummaryIteratorError};
 use crate::static_blobs::StaticBlobStoreError;
-use crate::static_blocks::StaticColdStoreError;
+use crate::static_cold::StaticColdStoreError;
 use crate::{DBColumn, hdiff};
 #[cfg(feature = "leveldb")]
 use leveldb::error::Error as LevelDBError;

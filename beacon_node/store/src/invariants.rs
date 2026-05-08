@@ -720,7 +720,8 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
 
             match self.hierarchy.storage_strategy(slot, Slot::new(0))? {
                 StorageStrategy::Snapshot => {
-                    let has_snapshot = self.cold_db.exists(DBColumn::BeaconStateSnapshot, slot)?;
+                    let has_snapshot =
+                        self.cold_db.contains(DBColumn::BeaconStateSnapshot, slot)?;
                     if !has_snapshot {
                         result.add_violation(InvariantViolation::ColdStateMissingSnapshot {
                             state_root,
@@ -729,7 +730,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
                     }
                 }
                 StorageStrategy::DiffFrom(base_slot) => {
-                    let has_diff = self.cold_db.exists(DBColumn::BeaconStateDiff, slot)?;
+                    let has_diff = self.cold_db.contains(DBColumn::BeaconStateDiff, slot)?;
                     if !has_diff {
                         result.add_violation(InvariantViolation::ColdStateMissingDiff {
                             state_root,

@@ -22,7 +22,7 @@ pub mod metrics;
 pub mod reconstruct;
 pub mod state_cache;
 pub mod static_blobs;
-pub mod static_blocks;
+pub mod static_cold;
 
 pub mod database;
 pub mod iter;
@@ -32,7 +32,7 @@ pub use self::config::StoreConfig;
 pub use self::hot_cold_store::{HotColdDB, HotStateSummary, Split};
 pub use self::memory_store::MemoryStore;
 pub use self::static_blobs::StaticBlobStore;
-pub use self::static_blocks::StaticColdStore;
+pub use self::static_cold::StaticColdStore;
 pub use crate::metadata::BlobInfo;
 pub use errors::Error;
 pub use metadata::AnchorInfo;
@@ -111,6 +111,39 @@ pub trait KeyValueStore<E: EthSpec>: Sync + Send + Sized + 'static {
 
 pub type SlotIter<'a> = Box<dyn Iterator<Item = Result<(Slot, Vec<u8>), Error>> + 'a>;
 
+/// Slot-keyed cold columns served by the static archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum DBColumnCold {
+    Block,
+    BlockRoots,
+    StateRoots,
+    StateSnapshot,
+    StateDiff,
+}
+
+impl DBColumnCold {
+    pub fn db_column(self) -> DBColumn {
+        match self {
+            Self::Block => DBColumn::BeaconBlock,
+            Self::BlockRoots => DBColumn::BeaconBlockRoots,
+            Self::StateRoots => DBColumn::BeaconStateRoots,
+            Self::StateSnapshot => DBColumn::BeaconStateSnapshot,
+            Self::StateDiff => DBColumn::BeaconStateDiff,
+        }
+    }
+
+    pub fn try_from_db_column(column: DBColumn) -> Option<Self> {
+        match column {
+            DBColumn::BeaconBlock => Some(Self::Block),
+            DBColumn::BeaconBlockRoots => Some(Self::BlockRoots),
+            DBColumn::BeaconStateRoots => Some(Self::StateRoots),
+            DBColumn::BeaconStateSnapshot => Some(Self::StateSnapshot),
+            DBColumn::BeaconStateDiff => Some(Self::StateDiff),
+            _ => None,
+        }
+    }
+}
+
 /// Root-keyed indices owned by the cold backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DBColumnColdIndex {
@@ -135,7 +168,7 @@ pub trait ColdStore<E: EthSpec>: Sync + Send + Sized + 'static {
 
     fn put_batch(&self, column: DBColumn, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error>;
 
-    fn exists(&self, column: DBColumn, slot: Slot) -> Result<bool, Error>;
+    fn contains(&self, column: DBColumn, slot: Slot) -> Result<bool, Error>;
 
     fn iter_from(&self, column: DBColumn, from: Slot) -> SlotIter<'_>;
 

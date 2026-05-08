@@ -791,7 +791,9 @@ mod test {
     use fork_choice::PayloadVerificationStatus;
     use logging::create_test_tracing_subscriber;
     use state_processing::ConsensusContext;
-    use store::{HotColdDB, ItemStore, StoreConfig, database::interface::BeaconNodeBackend};
+    use store::{
+        ColdStore, HotColdDB, ItemStore, StoreConfig, database::interface::BeaconNodeBackend,
+    };
     use tempfile::{TempDir, tempdir};
     use tracing::info;
     use types::MinimalEthSpec;
