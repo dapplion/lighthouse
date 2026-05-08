@@ -21,6 +21,7 @@ pub mod metadata;
 pub mod metrics;
 pub mod reconstruct;
 pub mod state_cache;
+pub mod static_blobs;
 pub mod static_blocks;
 
 pub mod database;
@@ -30,6 +31,7 @@ pub use self::blob_sidecar_list_from_root::BlobSidecarListFromRoot;
 pub use self::config::StoreConfig;
 pub use self::hot_cold_store::{HotColdDB, HotStateSummary, Split};
 pub use self::memory_store::MemoryStore;
+pub use self::static_blobs::StaticBlobStore;
 pub use self::static_blocks::StaticBlockStore;
 pub use crate::metadata::BlobInfo;
 pub use errors::Error;
