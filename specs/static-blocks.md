@@ -11,8 +11,8 @@ at startup.
 ## API
 
 A field on `HotColdDB`. Not a `KeyValueStore`. No `Hash256` in the API; the
-archive is purely slot-keyed. Eras, manifests, file rotation, fsync ordering,
-atomic rename — all internal.
+archive is purely slot-keyed. File rotation, fsync ordering, and crash recovery
+are internal.
 
 ```rust
 fn open(path: &Path) -> Result<Self>;
@@ -22,6 +22,174 @@ fn put(slot: Slot, bytes: &[u8]) -> Result<()>;       // durable on return
 
 `put` durability on return is the only caller-visible contract; the source-
 of-truth flip in `migrate_database` relies on it.
+
+## Static file format
+
+Files live together in one directory:
+
+```
+static_blocks_00000
+static_blocks_00000.off
+static_blocks_00001
+static_blocks_00001.off
+static_blocks.conf
+```
+
+Mapping:
+
+```
+SLOTS_PER_FILE = 8192
+file_id = slot / SLOTS_PER_FILE
+index = slot % SLOTS_PER_FILE
+off_pos = index * 8
+```
+
+The data file name uses `file_id` as a zero-padded decimal number. The slot
+range is derived from the id and is not encoded in the name.
+
+Each data file starts with the e2store version record:
+
+```
+65 32 00 00 00 00 00 00
+```
+
+Block records are appended after it:
+
+```
+type:     [0x01, 0x00]
+length:   compressed_data.len() as u32, little-endian
+reserved: u16 = 0
+data:     snappy-framed(SSZ-encoded blinded SignedBeaconBlock bytes)
+```
+
+The `.off` file is fixed-size: `8192 * 8` bytes. Each entry is a little-endian
+`u64` absolute byte offset into the matching data file. Offset `0` means no
+block is present for that slot. Real block offsets are nonzero because the data
+file starts with the version record.
+
+`static_blocks.conf` is global to the static block store and is fixed-size:
+
+```
+magic:                [u8; 8] = b"LHSTBLK1"
+highest_written_slot: u64 little-endian, u64::MAX means empty
+current_data_len:     u64 little-endian
+```
+
+`current_data_len` applies to the current file, derived from
+`highest_written_slot / SLOTS_PER_FILE`.
+
+Config updates are atomic:
+
+1. Write the full config to `static_blocks.conf.tmp`.
+2. Fsync `static_blocks.conf.tmp`.
+3. Rename it over `static_blocks.conf`.
+4. Fsync the directory.
+
+## `put` contract
+
+`put(slot, bytes)` requires:
+
+```
+highest_written_slot == None || slot > highest_written_slot
+snappy_framed(bytes).len() <= u32::MAX
+```
+
+Skipped slots are allowed. They leave zero offsets in `.off`.
+
+Write sequence:
+
+1. Lock the writer.
+2. Reject `slot <= highest_written_slot`.
+3. Compute `file_id`, `index`, and `off_pos`.
+4. Create or open `static_blocks_{file_id:05}`.
+5. If the data file is new, write the e2store version record.
+6. Create or open `static_blocks_{file_id:05}.off`.
+7. If the `.off` file is new, initialize it to `8192 * 8` zero bytes.
+8. Compress `bytes` with snappy-framed compression.
+9. Append the compressed block record to the data file, remembering the offset
+   of its 8-byte record header.
+10. Fsync the data file.
+11. Write the offset as `u64` little-endian at `off_pos` in the `.off` file.
+12. Fsync the `.off` file.
+13. Atomically update `static_blocks.conf` with:
+    ```
+    highest_written_slot = slot
+    current_data_len = data_file_len
+    ```
+14. Fsync the directory after the rename.
+
+A write is committed only when `static_blocks.conf` reflects it.
+
+On open, the store reads `static_blocks.conf`, truncates the current data file
+to `current_data_len`, and clears offsets after `highest_written_slot` in the
+current `.off` file.
+
+Crash behavior:
+
+| Crash point | Restart behavior |
+| - | - |
+| Before `static_blocks.conf` update | Previous slot remains committed; appended data is truncated and offset tail is cleared. |
+| During `static_blocks.conf.tmp` write | Previous `static_blocks.conf` remains the commit marker. |
+| After `static_blocks.conf` rename | New slot is committed. |
+
+## `get` contract
+
+`get(slot)`:
+
+1. Compute `file_id`, `index`, and `off_pos`.
+2. Open `static_blocks_{file_id:05}.off`.
+3. Read the `u64` little-endian offset at `off_pos`.
+4. If the offset is `0`, return `None`.
+5. Open `static_blocks_{file_id:05}`.
+6. Seek to the offset.
+7. Read and validate the 8-byte block record header:
+   ```
+   type == [0x01, 0x00]
+   reserved == 0
+   ```
+8. Read `length` compressed bytes.
+9. Snappy-decompress the bytes with the consensus maximum
+   `SignedBeaconBlock` SSZ size for the active fork as the output bound.
+10. Return the decompressed SSZ bytes.
+
+If decompression exceeds the bound, return a corruption error.
+
+Missing files are treated as `None` only when the slot is beyond
+`highest_written_slot`. Missing files for committed slots are corruption.
+
+## `open` contract
+
+In-memory state is minimal:
+
+```
+dir
+highest_written_slot
+mutex
+```
+
+Files are opened inside `put` and `get`; the store does not cache current file
+handles in v1.
+
+`static_blocks.conf` uses `u64::MAX` as the empty-store sentinel for
+`highest_written_slot`.
+
+`open(path)`:
+
+1. Create `path` if it does not exist.
+2. If `static_blocks.conf` does not exist, create it with:
+   ```
+   magic = b"LHSTBLK1"
+   highest_written_slot = u64::MAX
+   current_data_len = 0
+   ```
+3. Read and validate `static_blocks.conf`.
+4. If `highest_written_slot == u64::MAX`, initialize in-memory
+   `highest_written_slot = None` and return.
+5. Derive the current file from `highest_written_slot / SLOTS_PER_FILE`.
+6. Truncate the current data file to `current_data_len`.
+7. Clear `.off` entries after `highest_written_slot` in the current `.off`
+   file by writing zeroes.
+8. Initialize in-memory `highest_written_slot = Some(slot)`.
 
 ## Interaction with existing DBs
 
