@@ -426,6 +426,150 @@ impl Column {
         Ok(())
     }
 
+    /// Append `items` to the column with one fsync per file (data + offset),
+    /// not per slot. Whole batch is durable on return — the same caller-visible
+    /// contract as `put` — but with O(1) syncs per underlying file instead of
+    /// O(n) per item.
+    ///
+    /// The implementation walks `items` once, grouping them by `file_id`. For
+    /// each group it opens the data file and offset file once, appends every
+    /// record's bytes (collecting `(slot, offset)` pairs in memory), writes the
+    /// offset table, fsyncs both files, then commits via `write_config`. Idempotent
+    /// re-put of `items[0]` at `highest_written_slot` is honored as in `put`.
+    fn put_batch(&self, items: Vec<(Slot, Vec<u8>)>) -> StoreResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        // Validate ascending order up front (cheap, catches caller bugs).
+        for w in items.windows(2) {
+            if w[1].0 <= w[0].0 {
+                return Err(StaticColdStoreError::Invalid(
+                    "static cold put_batch slots must be strictly ascending".into(),
+                ));
+            }
+        }
+
+        let mut highest_written_slot = self.highest_written_slot.lock();
+        let mut iter = items.into_iter().peekable();
+
+        // Idempotent re-put: if the first item is exactly highest_written_slot
+        // with matching bytes, drop it from the batch.
+        if let (Some(highest), Some((first_slot, _))) = (*highest_written_slot, iter.peek()) {
+            if *first_slot < highest {
+                return Err(StaticColdStoreError::Invalid(
+                    "static cold put_batch out of order vs highest_written_slot".into(),
+                ));
+            }
+            if *first_slot == highest {
+                let (slot, value) = iter.next().expect("peeked");
+                let existing = self.read_record(slot)?.ok_or_else(|| {
+                    StaticColdStoreError::Invalid(
+                        "static cold missing record at highest slot".into(),
+                    )
+                })?;
+                if existing != value {
+                    return Err(StaticColdStoreError::Invalid(
+                        "static cold re-put with mismatched value".into(),
+                    ));
+                }
+            }
+        }
+
+        // Group remaining items by file_id, write each group with a single
+        // fsync per file.
+        let mut last_slot: Option<Slot> = None;
+        let mut last_data_len: u64 = 0;
+        while iter.peek().is_some() {
+            let target_file_id = file_id(iter.peek().expect("peeked").0);
+            let mut group: Vec<(Slot, Vec<u8>)> = Vec::new();
+            while let Some(&(slot, _)) = iter.peek() {
+                if file_id(slot) != target_file_id {
+                    break;
+                }
+                group.push(iter.next().expect("peeked"));
+            }
+
+            let reset_file = (*highest_written_slot).map(file_id) != Some(target_file_id);
+            let data_path = self.data_path(target_file_id);
+            let off_path = self.offset_path(target_file_id);
+
+            // Data file: append all records, then fsync once.
+            let mut data_file = OpenOptions::new()
+                .read(true)
+                .append(true)
+                .create(true)
+                .open(&data_path)?;
+            if reset_file {
+                data_file.set_len(0)?;
+            }
+            if data_file.metadata()?.len() == 0 {
+                data_file.write_all(&VERSION_RECORD)?;
+            }
+            // BufWriter coalesces the small-record header writes (8 bytes) and
+            // the small payloads into larger syscalls.
+            let mut offsets: Vec<(Slot, u64)> = Vec::with_capacity(group.len());
+            {
+                let mut writer = std::io::BufWriter::with_capacity(1 << 20, &mut data_file);
+                let mut cursor = writer.get_ref().metadata()?.len();
+                for (slot, value) in &group {
+                    let payload: std::borrow::Cow<'_, [u8]> = if self.config.compression {
+                        compress_record(value)?.into()
+                    } else {
+                        value.as_slice().into()
+                    };
+                    let payload_len = u32::try_from(payload.len()).map_err(|_| {
+                        StaticColdStoreError::Invalid("static cold record too large".into())
+                    })?;
+                    offsets.push((*slot, cursor));
+                    // Inline `write_record` to avoid the `&mut File` -> BufWriter mismatch.
+                    writer.write_all(&self.config.record_type)?;
+                    writer.write_all(&payload_len.to_le_bytes())?;
+                    writer.write_all(&0u16.to_le_bytes())?;
+                    writer.write_all(&payload)?;
+                    cursor += 8 + payload.len() as u64;
+                }
+                writer.flush()?;
+            }
+            let data_len = data_file.seek(SeekFrom::End(0))?;
+            data_file.sync_all()?;
+
+            // Offset file: open, ensure full size, write all offsets in seek+write
+            // pairs (8 bytes each), then fsync once.
+            let mut off_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&off_path)?;
+            if reset_file {
+                off_file.set_len(0)?;
+            }
+            if off_file.metadata()?.len() < OFFSET_FILE_LEN {
+                off_file.set_len(OFFSET_FILE_LEN)?;
+            }
+            for (slot, offset) in &offsets {
+                off_file.seek(SeekFrom::Start(offset_position(*slot)))?;
+                off_file.write_all(&offset.to_le_bytes())?;
+            }
+            off_file.sync_all()?;
+
+            // Track final slot/data_len for the single config commit at end of batch.
+            if let Some((s, _)) = group.last() {
+                last_slot = Some(*s);
+                last_data_len = data_len;
+            }
+            *highest_written_slot = last_slot;
+        }
+
+        // Single atomic config commit covering the whole batch.
+        if let Some(s) = last_slot {
+            self.write_config(Some(s), last_data_len)?;
+        }
+
+        Ok(())
+    }
+
     fn heal_current_file(&self, slot: Slot, current_data_len: u64) -> StoreResult<()> {
         let file_id = file_id(slot);
         let data_path = self.data_path(file_id);
@@ -630,10 +774,7 @@ impl<E: EthSpec> crate::ColdStore<E> for StaticColdStore<E> {
     }
 
     fn put_batch(&self, c: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), crate::Error> {
-        for (slot, value) in items {
-            self.put(c, slot, &value)?;
-        }
-        Ok(())
+        self.columns[&c].put_batch(items).map_err(Into::into)
     }
 
     fn contains(&self, c: DBColumnCold, slot: Slot) -> Result<bool, crate::Error> {
