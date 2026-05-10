@@ -20,7 +20,10 @@ use parse_ssz::run_parse_ssz;
 use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
-use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    EnvFilter, Layer, filter::LevelFilter, fmt::format::FmtSpan, layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
 use types::{EthSpec, EthSpecId};
 
 fn main() {
@@ -748,8 +751,33 @@ fn run<E: EthSpec>(env_builder: EnvironmentBuilder<E>, matches: &ArgMatches) -> 
     if let Some(stdout) = stdout_logging_layer {
         logging_layers.push(stdout);
     }
+    // Optional span-timing layer. When LCLI_SPAN_LOG is set, emit one JSON line per
+    // span close (with `time.busy` / `time.idle` elapsed) for the ERA consumer spans
+    // (`import_era_file`, `era_import_*`). This uses the existing `#[instrument]` /
+    // `debug_span!` instrumentation already in `beacon_chain::era::consumer` — no
+    // code changes elsewhere; just turning their close events on for benchmarking.
+    let span_layer = std::env::var("LCLI_SPAN_LOG").ok().and_then(|path| {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| eprintln!("failed to open LCLI_SPAN_LOG={path}: {e}"))
+            .ok()?;
+        let writer = std::sync::Mutex::new(file);
+        let filter = EnvFilter::try_new("beacon_chain::era::consumer=debug")
+            .expect("static EnvFilter directive parses");
+        Some(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_span_events(FmtSpan::CLOSE)
+                .with_writer(writer)
+                .with_filter(filter)
+                .boxed(),
+        )
+    });
     let logging_result = tracing_subscriber::registry()
         .with(logging_layers)
+        .with(span_layer)
         .try_init();
 
     if let Err(e) = logging_result {

@@ -138,10 +138,19 @@ where
                 let block = if is_skipped_slot {
                     None
                 } else {
-                    Some(
-                        self.get_blinded_block(&block_root)?
+                    // Reconstruction has the slot from the BlockRoots iterator and our blocks
+                    // live slot-keyed in the cold archive (the ERA importer writes them into
+                    // `DBColumnCold::Block`, not the hot DB). Read by slot to avoid the missing
+                    // root → slot index. Fall back to the legacy hash-keyed lookup for stores
+                    // populated without the ERA flow (where blocks may sit in hot DB).
+                    let by_slot = self.get_cold_blinded_block_by_slot(slot)?;
+                    let block = match by_slot {
+                        Some(b) => b,
+                        None => self
+                            .get_blinded_block(&block_root)?
                             .ok_or(Error::BlockNotFound(block_root))?,
-                    )
+                    };
+                    Some(block)
                 };
 
                 // Advance state to slot.

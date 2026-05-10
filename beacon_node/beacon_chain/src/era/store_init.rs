@@ -11,7 +11,10 @@ use crate::{BeaconForkChoiceStore, BeaconSnapshot};
 use fork_choice::ForkChoice;
 use ssz::Encode;
 use std::sync::Arc;
-use store::{ColdStore, DBColumnCold, HotColdDB, ItemStore, StoreItem};
+use store::{
+    ColdStore, DBColumnCold, HotColdDB, ItemStore, StoreItem,
+    hot_cold_store::{HotStateSummary, OptionalDiffBaseState},
+};
 use tracing::info;
 use types::{BeaconBlock, BeaconState, ChainSpec, EthSpec, SignedBeaconBlock, Slot};
 
@@ -77,6 +80,21 @@ pub fn init_genesis_store<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
             .map_err(|e| format!("failed to init data column info: {e:?}"))?,
     );
     batch.push(store.store_split_in_batch());
+
+    // Genesis HotStateSummary so the next-open path's `load_split` ->
+    // `load_block_root_from_summary(genesis_state_root)` finds the block root.
+    // Built directly (not via `HotStateSummary::new`, which calls
+    // `hot_storage_strategy` and would error here because anchor info is being
+    // initialized in this same batch). Genesis is a snapshot with no diff base
+    // and no previous state.
+    let genesis_summary = HotStateSummary {
+        slot: Slot::new(0),
+        latest_block_root: block_root,
+        latest_block_slot: Slot::new(0),
+        diff_base_state: OptionalDiffBaseState::Snapshot(0),
+        previous_state_root: bls::FixedBytesExtended::zero(),
+    };
+    batch.push(genesis_summary.as_kv_store_op(state_root));
 
     // Fork choice from genesis
     let snapshot = BeaconSnapshot {

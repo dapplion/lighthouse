@@ -754,6 +754,20 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         })
     }
 
+    /// Read a blinded block from the cold archive by slot. Used by the
+    /// reconstruction path where the block's slot is known from the
+    /// `BeaconBlockRoots` iterator and the block is only stored slot-keyed in
+    /// `DBColumnCold::Block`.
+    pub fn get_cold_blinded_block_by_slot(
+        &self,
+        slot: Slot,
+    ) -> Result<Option<SignedBeaconBlock<E, BlindedPayload<E>>>, Error> {
+        let Some(bytes) = self.cold_db.get(DBColumnCold::Block, slot)? else {
+            return Ok(None);
+        };
+        Ok(Some(SignedBeaconBlock::from_ssz_bytes(&bytes, &self.spec)?))
+    }
+
     /// Fetch a block from the store using a custom decode function.
     ///
     /// This is useful for e.g. ignoring the slot-indicated fork to forcefully load a block as if it

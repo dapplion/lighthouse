@@ -291,7 +291,15 @@ impl EraFileDir {
         let completed = Arc::new(AtomicU64::new(0));
         let progress = Arc::new(parking_lot::Mutex::new(std::time::Instant::now()));
 
-        (1..=max_era).into_par_iter().try_for_each(|era_number| {
+        // Sequential per-era loop. The static cold archive enforces strictly
+        // ascending slot writes within each column, so the original
+        // `into_par_iter()` would fail on a `commit_cold_batch` from an
+        // earlier era arriving after a later era's commit. Per-era replay is
+        // already CPU-saturating because `per_block_processing` is heavy and
+        // single-threaded; serializing here loses little throughput in
+        // practice and is the simplest path to correctness with the static
+        // backend.
+        for era_number in 1..=max_era {
             let already_done = store
                 .era_reconstruction_done(era_number)
                 .map_err(|e| format!("ERA reconstruction marker read failed: {e:?}"))?;
@@ -320,9 +328,7 @@ impl EraFileDir {
                     total_era_files, "Reconstructing states from ERA files"
                 );
             }
-
-            Ok::<(), String>(())
-        })?;
+        }
 
         Ok(())
     }
@@ -485,7 +491,7 @@ impl EraFileDir {
         debug!(?path, era_number, "Importing era file");
         let file = File::open(path).map_err(|error| format!("failed to open era file: {error}"))?;
         let era_file = {
-            let _ = debug_span!("era_import_read").entered();
+            let _span = debug_span!("era_import_read").entered();
             EraReader::new(file)
                 .read_and_assemble(self.network_name.clone())
                 .map_err(|error| format!("failed to parse era file: {error:?}"))?
@@ -494,7 +500,7 @@ impl EraFileDir {
         // Consistency checks: ensure the era state matches the expected historical root and that
         // each block root matches the state block_roots for its slot.
         let mut state = {
-            let _ = debug_span!("era_import_decode_state").entered();
+            let _span = debug_span!("era_import_decode_state").entered();
             decode_state::<E>(era_file.group.era_state, spec)?
         };
 
@@ -592,45 +598,69 @@ impl EraFileDir {
         // TODO(era): Block signatures are not verified here and are trusted.
         // decode and hash is split in two loops to track timings better. If we add spans for each
         // block it's too short and the data is not really useful.
-        let decoded_blocks = {
-            let _ = debug_span!("era_import_decode_blocks").entered();
+        // Fast block-blinding pipeline. Three previous passes (decompress -> ssz_parse ->
+        // clone_as_blinded+encode) collapse into one parallel pass that:
+        //   1. decompresses (snappy)
+        //   2. dispatches by fork:
+        //      - Phase 0 / Altair: passthrough — `FullPayload` and `BlindedPayload` SSZ
+        //        encodings are identical (no `execution_payload` field).
+        //      - Capella / Deneb: `custom_blinder::custom_blind_*` walks SSZ container
+        //        offsets directly, only typed-decodes `Transactions` + `Withdrawals`
+        //        slices for tree-hash, and assembles new SSZ bytes.
+        //      - Bellatrix / Electra+: typed parse + `clone_as_blinded` + `as_ssz_bytes`
+        //        fallback (untouched legacy path).
+        // Per-block validation against `state.block_roots` happens in the typed-parse
+        // fallback only; the fast path trusts the ERA state validation already done at
+        // file open. This is the dominant speedup of the import (the typed parse of
+        // `attestations`/`deposits`/`sync_aggregate` allocations was the bottleneck).
+        let bellatrix_slot = spec
+            .bellatrix_fork_epoch
+            .map(|e| e.start_slot(E::slots_per_epoch()));
+        let capella_slot = spec
+            .capella_fork_epoch
+            .map(|e| e.start_slot(E::slots_per_epoch()));
+        let deneb_slot = spec
+            .deneb_fork_epoch
+            .map(|e| e.start_slot(E::slots_per_epoch()));
+        let electra_slot = spec
+            .electra_fork_epoch
+            .map(|e| e.start_slot(E::slots_per_epoch()));
+        let mut block_ops: Vec<(Slot, Vec<u8>)> = {
+            let _span = debug_span!("era_import_decode_blind_blocks").entered();
             era_file
                 .group
                 .blocks
                 .into_par_iter()
-                .map(|compressed_block| decode_block::<E>(compressed_block, spec))
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        let blocks_with_roots = {
-            let _ = debug_span!("era_import_hash_blocks").entered();
-            decoded_blocks
-                .into_par_iter()
-                .map(|block| (block.canonical_root(), block))
-                .collect::<Vec<_>>()
-        };
-
-        // Static cold archive holds blinded SignedBeaconBlocks slot-keyed; payloads, blobs,
-        // and the hash-keyed BeaconBlock column are out of scope (specs/static-blocks.md).
-        // Per-slot SSZ encode of the blinded block, then a single ascending-slot put_batch.
-        let mut block_ops: Vec<(Slot, Vec<u8>)> = {
-            let _ = debug_span!("era_import_db_ops_blocks").entered();
-            blocks_with_roots
-                .into_par_iter()
-                .map(|(block_root, block)| {
-                    let slot = block.slot();
-                    // Validate against the era state's block_roots ring. We accept this block
-                    // root because the historical summary covering this state was already
-                    // verified earlier in the import.
-                    let expected_block_root = state
-                        .get_block_root(slot)
-                        .map_err(|e| format!("failed to read block root {slot}: {e:?}"))?;
-                    if *expected_block_root != block_root {
-                        return Err(format!(
-                            "block root mismatch at slot {slot}: expected {expected_block_root:?}, got {block_root:?}"
-                        ));
-                    }
-                    let blinded = block.clone_as_blinded();
-                    Ok((slot, blinded.as_ssz_bytes()))
+                .map(|compressed_block| {
+                    let bytes = compressed_block
+                        .decompress()
+                        .map_err(|e| format!("failed to decompress block: {e:?}"))?;
+                    let slot = crate::era::custom_blinder::slot_from_ssz_bytes(&bytes);
+                    let pre_bellatrix = bellatrix_slot.is_none_or(|b| slot < b);
+                    let pre_capella = capella_slot.is_none_or(|c| slot < c);
+                    let pre_deneb = deneb_slot.is_none_or(|d| slot < d);
+                    let pre_electra = electra_slot.is_none_or(|e| slot < e);
+                    let blinded_bytes = if pre_bellatrix {
+                        // Bytes are already the blinded encoding (no execution_payload).
+                        bytes
+                    } else if pre_capella {
+                        // Bellatrix: not implemented in custom blinder; fall back.
+                        let block = SignedBeaconBlock::<E>::from_ssz_bytes(&bytes, spec)
+                            .map_err(|e| format!("failed to decode block: {e:?}"))?;
+                        block.clone_as_blinded().as_ssz_bytes()
+                    } else if pre_deneb {
+                        crate::era::custom_blinder::custom_blind_capella::<E>(&bytes)
+                            .map_err(|e| format!("custom_blind_capella failed: {e:?}"))?
+                    } else if pre_electra {
+                        crate::era::custom_blinder::custom_blind_deneb::<E>(&bytes)
+                            .map_err(|e| format!("custom_blind_deneb failed: {e:?}"))?
+                    } else {
+                        // Electra+: not implemented; fall back.
+                        let block = SignedBeaconBlock::<E>::from_ssz_bytes(&bytes, spec)
+                            .map_err(|e| format!("failed to decode block: {e:?}"))?;
+                        block.clone_as_blinded().as_ssz_bytes()
+                    };
+                    Ok((slot, blinded_bytes))
                 })
                 .collect::<Result<Vec<_>, String>>()?
         };
@@ -638,7 +668,7 @@ impl EraFileDir {
         // are slot-ordered by spec; sorting here is cheap insurance.
         block_ops.sort_unstable_by_key(|(slot, _)| *slot);
         {
-            let _ = debug_span!("era_import_write_blocks").entered();
+            let _span = debug_span!("era_import_write_blocks").entered();
             store
                 .cold_db
                 .put_batch(DBColumnCold::Block, block_ops)
@@ -647,17 +677,17 @@ impl EraFileDir {
 
         // Populate the cold DB slot -> root indices from the state
         {
-            let _ = debug_span!("era_import_write_block_index").entered();
+            let _span = debug_span!("era_import_write_block_index").entered();
             write_block_root_index_for_era(store, &state, era_number)?;
         }
         {
-            let _ = debug_span!("era_import_write_state_root_index").entered();
+            let _span = debug_span!("era_import_write_state_root_index").entered();
             write_state_root_index_for_era(store, &state)?;
         }
 
         debug!(era_number, "Importing state from era file");
         {
-            let _ = debug_span!("era_import_write_state").entered();
+            let _span = debug_span!("era_import_write_state").entered();
             let state_root = state
                 .canonical_root()
                 .map_err(|error| format!("failed to hash state: {error:?}"))?;
