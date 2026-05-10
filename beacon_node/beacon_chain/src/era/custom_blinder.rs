@@ -20,8 +20,47 @@
 //! typed `clone_as_blinded` + `as_ssz_bytes` path for those.
 
 use ssz::Decode;
-use tree_hash::TreeHash;
-use types::{EthSpec, Slot, Transactions, Withdrawals};
+use tree_hash::{Hash256, TreeHash, merkle_root, mix_in_length};
+use types::{EthSpec, Slot, Withdrawals};
+
+/// Custom direct-byte tree hash for SSZ `List<Transaction, MaxTransactionsPerPayload>`.
+///
+/// Walks the SSZ offset table to enumerate each transaction's byte slice
+/// without typed allocation, hashes each `ByteList<u8, MaxBytesPerTransaction>`
+/// in place via `tree_hash::merkle_root`, then list-merkleizes the per-tx
+/// roots and mixes in the count. ~2× faster than
+/// `Transactions::from_ssz_bytes(...).tree_hash_root()` on real Capella +
+/// Deneb mainnet blocks (see beacon_chain/examples/hash_bench.rs).
+///
+/// Withdrawals get the typed path (≤16 fixed-size records, the typed
+/// allocation cost is already in the noise; no measurable speedup from a
+/// custom hasher).
+fn transactions_root_from_bytes<E: EthSpec>(bytes: &[u8]) -> Hash256 {
+    let max_tx = E::max_transactions_per_payload();
+    let max_bytes = E::max_bytes_per_transaction();
+    if bytes.is_empty() {
+        let empty = merkle_root(&[], max_tx);
+        return mix_in_length(&empty, 0);
+    }
+    let first_off = u32::from_le_bytes(bytes[0..4].try_into().expect("u32 slice")) as usize;
+    let n = first_off / 4;
+    let mut tx_roots: Vec<u8> = Vec::with_capacity(n * 32);
+    for i in 0..n {
+        let start = u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
+        let end = if i + 1 < n {
+            u32::from_le_bytes(bytes[(i + 1) * 4..(i + 1) * 4 + 4].try_into().unwrap()) as usize
+        } else {
+            bytes.len()
+        };
+        let tx = &bytes[start..end];
+        let min_leaves = max_bytes.div_ceil(32);
+        let root = merkle_root(tx, min_leaves);
+        let with_len = mix_in_length(&root, tx.len());
+        tx_roots.extend_from_slice(with_len.as_slice());
+    }
+    let list_root = merkle_root(&tx_roots, max_tx);
+    mix_in_length(&list_root, n)
+}
 
 // SignedBeaconBlock outer layout: { msg_offset(4), signature(96), msg_bytes }.
 const SBB_HEADER_LEN: usize = 100;
@@ -169,7 +208,7 @@ pub fn custom_blind_capella<E: EthSpec>(signed: &[u8]) -> Result<Vec<u8>, ssz::D
     let txs = &exec_bytes[off_txs..off_with];
     let withs = &exec_bytes[off_with..];
 
-    let transactions_root = Transactions::<E>::from_ssz_bytes(txs)?.tree_hash_root();
+    let transactions_root = transactions_root_from_bytes::<E>(txs);
     let withdrawals_root = Withdrawals::<E>::from_ssz_bytes(withs)?.tree_hash_root();
 
     let header = build_capella_payload_header(
@@ -229,7 +268,7 @@ pub fn custom_blind_deneb<E: EthSpec>(signed: &[u8]) -> Result<Vec<u8>, ssz::Dec
     let txs = &exec_bytes[off_txs..off_with];
     let withs = &exec_bytes[off_with..];
 
-    let transactions_root = Transactions::<E>::from_ssz_bytes(txs)?.tree_hash_root();
+    let transactions_root = transactions_root_from_bytes::<E>(txs);
     let withdrawals_root = Withdrawals::<E>::from_ssz_bytes(withs)?.tree_hash_root();
 
     let header = build_deneb_payload_header(
