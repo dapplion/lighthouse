@@ -19,7 +19,7 @@
 //! Bellatrix and Electra+ are not implemented here; callers fall back to the
 //! typed `clone_as_blinded` + `as_ssz_bytes` path for those.
 
-use ssz::{Decode, Encode};
+use ssz::Decode;
 use tree_hash::TreeHash;
 use types::{EthSpec, Slot, Transactions, Withdrawals};
 
@@ -62,22 +62,29 @@ fn read_u32_le(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().expect("u32 slice"))
 }
 
-fn split_outer(signed: &[u8]) -> (&[u8], &[u8], &[u8], &[u8], &[u8], &[u8]) {
+/// Sliced outer fields of a `SignedBeaconBlock` SSZ encoding, ready to splice
+/// back into a new `SignedBeaconBlock` whose only difference is the body's
+/// execution payload.
+struct OuterFields<'a> {
+    signature: &'a [u8],
+    slot: &'a [u8],
+    proposer_index: &'a [u8],
+    parent_root: &'a [u8],
+    state_root: &'a [u8],
+    body: &'a [u8],
+}
+
+fn split_outer(signed: &[u8]) -> OuterFields<'_> {
     let signature = &signed[4..SBB_HEADER_LEN];
     let bb = &signed[SBB_HEADER_LEN..];
-    let slot = &bb[0..8];
-    let proposer_index = &bb[8..16];
-    let parent_root = &bb[16..48];
-    let state_root = &bb[48..80];
-    let body = &bb[BB_HEADER_LEN..];
-    (
+    OuterFields {
         signature,
-        slot,
-        proposer_index,
-        parent_root,
-        state_root,
-        body,
-    )
+        slot: &bb[0..8],
+        proposer_index: &bb[8..16],
+        parent_root: &bb[16..48],
+        state_root: &bb[48..80],
+        body: &bb[BB_HEADER_LEN..],
+    }
 }
 
 fn assemble_signed_block(
@@ -141,7 +148,14 @@ fn build_deneb_payload_header(
 
 /// Fast direct-byte blinder for Capella `SignedBeaconBlock`.
 pub fn custom_blind_capella<E: EthSpec>(signed: &[u8]) -> Result<Vec<u8>, ssz::DecodeError> {
-    let (signature, slot, proposer_index, parent_root, state_root, body) = split_outer(signed);
+    let OuterFields {
+        signature,
+        slot,
+        proposer_index,
+        parent_root,
+        state_root,
+        body,
+    } = split_outer(signed);
 
     let off_exec = read_u32_le(body, BODY_OFF_EXEC_PAYLOAD) as usize;
     let off_bls = read_u32_le(body, BODY_OFF_BLS_CHANGES) as usize;
@@ -190,7 +204,14 @@ pub fn custom_blind_capella<E: EthSpec>(signed: &[u8]) -> Result<Vec<u8>, ssz::D
 
 /// Fast direct-byte blinder for Deneb `SignedBeaconBlock`.
 pub fn custom_blind_deneb<E: EthSpec>(signed: &[u8]) -> Result<Vec<u8>, ssz::DecodeError> {
-    let (signature, slot, proposer_index, parent_root, state_root, body) = split_outer(signed);
+    let OuterFields {
+        signature,
+        slot,
+        proposer_index,
+        parent_root,
+        state_root,
+        body,
+    } = split_outer(signed);
 
     let off_exec = read_u32_le(body, BODY_OFF_EXEC_PAYLOAD) as usize;
     let off_bls = read_u32_le(body, BODY_OFF_BLS_CHANGES) as usize;

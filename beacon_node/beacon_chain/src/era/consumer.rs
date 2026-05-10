@@ -31,7 +31,7 @@ use fork_choice::ForkChoice;
 use rayon::prelude::*;
 use reth_era::common::file_ops::StreamReader;
 use reth_era::era::file::EraReader;
-use reth_era::era::types::consensus::{CompressedBeaconState, CompressedSignedBeaconBlock};
+use reth_era::era::types::consensus::CompressedBeaconState;
 use ssz::Encode;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -45,17 +45,6 @@ use types::{
     BeaconState, ChainSpec, Checkpoint, EthSpec, Hash256, HistoricalBatch, HistoricalSummary,
     SignedBeaconBlock, Slot,
 };
-
-fn decode_block<E: EthSpec>(
-    compressed: CompressedSignedBeaconBlock,
-    spec: &ChainSpec,
-) -> Result<SignedBeaconBlock<E>, String> {
-    let bytes = compressed
-        .decompress()
-        .map_err(|error| format!("failed to decompress block: {error:?}"))?;
-    SignedBeaconBlock::from_ssz_bytes(&bytes, spec)
-        .map_err(|error| format!("failed to decode block: {error:?}"))
-}
 
 fn decode_state<E: EthSpec>(
     compressed: CompressedBeaconState,
