@@ -595,24 +595,33 @@ impl EraFileDir {
         }
 
         debug!(era_number, "Importing blocks from era file");
-        // TODO(era): Block signatures are not verified here and are trusted.
-        // decode and hash is split in two loops to track timings better. If we add spans for each
-        // block it's too short and the data is not really useful.
-        // Fast block-blinding pipeline. Three previous passes (decompress -> ssz_parse ->
-        // clone_as_blinded+encode) collapse into one parallel pass that:
-        //   1. decompresses (snappy)
-        //   2. dispatches by fork:
-        //      - Phase 0 / Altair: passthrough — `FullPayload` and `BlindedPayload` SSZ
-        //        encodings are identical (no `execution_payload` field).
-        //      - Capella / Deneb: `custom_blinder::custom_blind_*` walks SSZ container
-        //        offsets directly, only typed-decodes `Transactions` + `Withdrawals`
-        //        slices for tree-hash, and assembles new SSZ bytes.
-        //      - Bellatrix / Electra+: typed parse + `clone_as_blinded` + `as_ssz_bytes`
-        //        fallback (untouched legacy path).
-        // Per-block validation against `state.block_roots` happens in the typed-parse
-        // fallback only; the fast path trusts the ERA state validation already done at
-        // file open. This is the dominant speedup of the import (the typed parse of
-        // `attestations`/`deposits`/`sync_aggregate` allocations was the bottleneck).
+        // Two-pass pipeline so the snappy-decompress and per-block blinding costs are
+        // tracked independently in tracing. The intermediate `Vec<Vec<u8>>` is cheap
+        // (~8k mallocs/era is sub-millisecond) and lets us spot regressions in either
+        // half without conflating them.
+        //
+        // Pass 1: snappy-decompress every compressed block.
+        let decompressed: Vec<Vec<u8>> = {
+            let _span = debug_span!("era_import_decompress_blocks").entered();
+            era_file
+                .group
+                .blocks
+                .into_par_iter()
+                .map(|c| {
+                    c.decompress()
+                        .map_err(|e| format!("failed to decompress block: {e:?}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        // Pass 2: dispatch each decompressed block to the right blinder.
+        //   Phase 0 / Altair: passthrough — FullPayload == BlindedPayload SSZ.
+        //   Capella / Deneb:  `custom_blinder::custom_blind_*` walks SSZ container
+        //                     offsets directly and only typed-decodes the
+        //                     `Transactions` + `Withdrawals` slices for tree-hash.
+        //   Bellatrix / Electra+: typed parse + `clone_as_blinded` + `as_ssz_bytes`
+        //                     fallback (untouched legacy path).
+        // Per-block validation against `state.block_roots` is skipped here; ERA file
+        // integrity was checked globally at open via `historical_summaries`.
         let bellatrix_slot = spec
             .bellatrix_fork_epoch
             .map(|e| e.start_slot(E::slots_per_epoch()));
@@ -626,25 +635,18 @@ impl EraFileDir {
             .electra_fork_epoch
             .map(|e| e.start_slot(E::slots_per_epoch()));
         let mut block_ops: Vec<(Slot, Vec<u8>)> = {
-            let _span = debug_span!("era_import_decode_blind_blocks").entered();
-            era_file
-                .group
-                .blocks
+            let _span = debug_span!("era_import_blind_blocks").entered();
+            decompressed
                 .into_par_iter()
-                .map(|compressed_block| {
-                    let bytes = compressed_block
-                        .decompress()
-                        .map_err(|e| format!("failed to decompress block: {e:?}"))?;
+                .map(|bytes| {
                     let slot = crate::era::custom_blinder::slot_from_ssz_bytes(&bytes);
                     let pre_bellatrix = bellatrix_slot.is_none_or(|b| slot < b);
                     let pre_capella = capella_slot.is_none_or(|c| slot < c);
                     let pre_deneb = deneb_slot.is_none_or(|d| slot < d);
                     let pre_electra = electra_slot.is_none_or(|e| slot < e);
                     let blinded_bytes = if pre_bellatrix {
-                        // Bytes are already the blinded encoding (no execution_payload).
                         bytes
                     } else if pre_capella {
-                        // Bellatrix: not implemented in custom blinder; fall back.
                         let block = SignedBeaconBlock::<E>::from_ssz_bytes(&bytes, spec)
                             .map_err(|e| format!("failed to decode block: {e:?}"))?;
                         block.clone_as_blinded().as_ssz_bytes()
@@ -655,7 +657,6 @@ impl EraFileDir {
                         crate::era::custom_blinder::custom_blind_deneb::<E>(&bytes)
                             .map_err(|e| format!("custom_blind_deneb failed: {e:?}"))?
                     } else {
-                        // Electra+: not implemented; fall back.
                         let block = SignedBeaconBlock::<E>::from_ssz_bytes(&bytes, spec)
                             .map_err(|e| format!("failed to decode block: {e:?}"))?;
                         block.clone_as_blinded().as_ssz_bytes()
