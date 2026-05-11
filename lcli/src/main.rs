@@ -1,11 +1,13 @@
 mod block_root;
 mod check_deposit_data;
+mod consume_era_files;
 mod generate_bootnode_enr;
 mod http_sync;
 mod indexed_attestations;
 mod mnemonic_validators;
 mod mock_el;
 mod parse_ssz;
+mod produce_era_files;
 mod skip_slots;
 mod state_root;
 mod transition_blocks;
@@ -18,7 +20,10 @@ use parse_ssz::run_parse_ssz;
 use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
-use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    EnvFilter, Layer, filter::LevelFilter, fmt::format::FmtSpan, layer::SubscriberExt,
+    util::SubscriberInitExt,
+};
 use types::{EthSpec, EthSpecId};
 
 fn main() {
@@ -572,6 +577,58 @@ fn main() {
                 )
         )
         .subcommand(
+            Command::new("consume-era-files")
+                .about("Import ERA files into an empty database, producing a ready-to-use beacon node DB.")
+                .arg(
+                    Arg::new("datadir")
+                        .long("datadir")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .help("Path to the beacon node data directory (will create chain_db, freezer_db, blobs_db inside).")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("era-dir")
+                        .long("era-dir")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .help("Directory containing ERA files to import.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("era-trusted-state")
+                        .long("era-trusted-state")
+                        .value_name("ERA_NUMBER:STATE_ROOT")
+                        .action(ArgAction::Set)
+                        .help("Use the given ERA as the reference state and verify its root. Only imports ERAs 0..=ERA_NUMBER. Example: '758:0xabcd...'")
+                        .display_order(0)
+                )
+        )
+        .subcommand(
+            Command::new("produce-era-files")
+                .about("Produce ERA files from a fully reconstructed beacon node database.")
+                .arg(
+                    Arg::new("datadir")
+                        .long("datadir")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .help("Path to the beacon node data directory (containing chain_db, freezer_db, blobs_db).")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("output-dir")
+                        .long("output-dir")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .help("Directory to write ERA files to. Created if it does not exist.")
+                        .display_order(0)
+                )
+        )
+        .subcommand(
             Command::new("http-sync")
                 .about("Manual sync")
                 .arg(
@@ -694,8 +751,33 @@ fn run<E: EthSpec>(env_builder: EnvironmentBuilder<E>, matches: &ArgMatches) -> 
     if let Some(stdout) = stdout_logging_layer {
         logging_layers.push(stdout);
     }
+    // Optional span-timing layer. When LCLI_SPAN_LOG is set, emit one JSON line per
+    // span close (with `time.busy` / `time.idle` elapsed) for the ERA consumer spans
+    // (`import_era_file`, `era_import_*`). This uses the existing `#[instrument]` /
+    // `debug_span!` instrumentation already in `beacon_chain::era::consumer` — no
+    // code changes elsewhere; just turning their close events on for benchmarking.
+    let span_layer = std::env::var("LCLI_SPAN_LOG").ok().and_then(|path| {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| eprintln!("failed to open LCLI_SPAN_LOG={path}: {e}"))
+            .ok()?;
+        let writer = std::sync::Mutex::new(file);
+        let filter = EnvFilter::try_new("beacon_chain::era::consumer=debug")
+            .expect("static EnvFilter directive parses");
+        Some(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_span_events(FmtSpan::CLOSE)
+                .with_writer(writer)
+                .with_filter(filter)
+                .boxed(),
+        )
+    });
     let logging_result = tracing_subscriber::registry()
         .with(logging_layers)
+        .with(span_layer)
         .try_init();
 
     if let Err(e) = logging_result {
@@ -765,6 +847,13 @@ fn run<E: EthSpec>(env_builder: EnvironmentBuilder<E>, matches: &ArgMatches) -> 
         }
         Some(("mock-el", matches)) => mock_el::run::<E>(env, matches)
             .map_err(|e| format!("Failed to run mock-el command: {}", e)),
+        Some(("consume-era-files", matches)) => {
+            let network_config = get_network_config()?;
+            consume_era_files::run::<E>(env, network_config, matches)
+                .map_err(|e| format!("Failed to consume ERA files: {}", e))
+        }
+        Some(("produce-era-files", matches)) => produce_era_files::run::<E>(env, matches)
+            .map_err(|e| format!("Failed to produce ERA files: {}", e)),
         Some(("http-sync", matches)) => {
             let network_config = get_network_config()?;
             http_sync::run::<E>(env, network_config, matches)

@@ -1,8 +1,10 @@
 use crate::{
-    ColumnIter, ColumnKeyIter, DBColumn, Error, ItemStore, Key, KeyValueStore, KeyValueStoreOp,
-    errors::Error as DBError, get_key_for_col, hot_cold_store::BytesKey,
+    ColdStore, ColumnIter, ColumnKeyIter, DBColumn, DBColumnCold, DBColumnColdIndex, Error,
+    IndexIter, ItemStore, Key, KeyValueStore, KeyValueStoreOp, SlotIter, get_key_for_col,
+    hot_cold_store::BytesKey,
 };
 use parking_lot::RwLock;
+use ssz::{Decode, Encode};
 use std::collections::{BTreeMap, HashSet};
 use std::marker::PhantomData;
 use types::*;
@@ -93,11 +95,13 @@ impl<E: EthSpec> KeyValueStore<E> for MemoryStore<E> {
             .filter_map(|(k, _)| k.remove_column_variable(column).map(|k| k.to_vec()))
             .collect::<Vec<_>>();
         Box::new(keys.into_iter().filter_map(move |key| {
-            self.get_bytes(column, &key).transpose().map(|res| {
-                let k = K::from_bytes(&key)?;
-                let v = res?;
-                Ok((k, v))
-            })
+            KeyValueStore::get_bytes(self, column, &key)
+                .transpose()
+                .map(|res| {
+                    let k = K::from_bytes(&key)?;
+                    let v = res?;
+                    Ok((k, v))
+                })
         }))
     }
 
@@ -124,7 +128,7 @@ impl<E: EthSpec> KeyValueStore<E> for MemoryStore<E> {
         Box::new(keys.into_iter().map(move |key| K::from_bytes(&key)))
     }
 
-    fn delete_batch(&self, col: DBColumn, ops: HashSet<&[u8]>) -> Result<(), DBError> {
+    fn delete_batch(&self, col: DBColumn, ops: HashSet<&[u8]>) -> Result<(), Error> {
         for op in ops {
             let column_key = get_key_for_col(col, op);
             self.db.write().remove(&BytesKey::from_vec(column_key));
@@ -149,3 +153,72 @@ impl<E: EthSpec> KeyValueStore<E> for MemoryStore<E> {
 }
 
 impl<E: EthSpec> ItemStore<E> for MemoryStore<E> {}
+
+// Mirrors `ColdBackend::Kv` in `database/interface.rs` — both translate the
+// slot/root-typed `ColdStore` API into the byte-keyed `KeyValueStore` API in
+// the same way. Kept inline here (and there) rather than behind a shared helper
+// because there are only two impls and the indirection wasn't earning its
+// keep.
+//
+// `Slot::as_ssz_bytes()` is byte-identical to the legacy
+// `ColdStateSummary { slot }` wrapper, so existing dbs round-trip without
+// migration. Pinned by the `ssz_compat_with_legacy_summary` test in `lib.rs`.
+impl<E: EthSpec> ColdStore<E> for MemoryStore<E> {
+    fn get(&self, c: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
+        self.get_bytes(c.db_column(), &slot.as_u64().to_be_bytes())
+    }
+    fn put_batch(&self, c: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error> {
+        let col = c.db_column();
+        let ops = items
+            .into_iter()
+            .map(|(slot, value)| {
+                KeyValueStoreOp::PutKeyValue(col, slot.as_u64().to_be_bytes().to_vec(), value)
+            })
+            .collect();
+        self.do_atomically(ops)
+    }
+    fn contains(&self, c: DBColumnCold, slot: Slot) -> Result<bool, Error> {
+        self.key_exists(c.db_column(), &slot.as_u64().to_be_bytes())
+    }
+    fn iter_from(&self, c: DBColumnCold, from: Slot) -> SlotIter<'_> {
+        Box::new(
+            self.iter_column_from::<Vec<u8>>(c.db_column(), &from.as_u64().to_be_bytes())
+                .map(|res| {
+                    res.and_then(|(key_bytes, value)| {
+                        let bytes: [u8; 8] =
+                            key_bytes.try_into().map_err(|_| Error::InvalidBytes)?;
+                        Ok((Slot::new(u64::from_be_bytes(bytes)), value))
+                    })
+                }),
+        )
+    }
+    fn get_index(&self, c: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error> {
+        Ok(self
+            .get_bytes(c.db_column(), root.as_slice())?
+            .map(|bytes| Slot::from_ssz_bytes(&bytes))
+            .transpose()?)
+    }
+    fn put_index_batch(
+        &self,
+        c: DBColumnColdIndex,
+        items: Vec<(Hash256, Slot)>,
+    ) -> Result<(), Error> {
+        let col = c.db_column();
+        let ops = items
+            .into_iter()
+            .map(|(root, slot)| {
+                KeyValueStoreOp::PutKeyValue(col, root.as_slice().to_vec(), slot.as_ssz_bytes())
+            })
+            .collect();
+        self.do_atomically(ops)
+    }
+    fn iter_index(&self, c: DBColumnColdIndex) -> IndexIter<'_> {
+        Box::new(
+            self.iter_column::<Hash256>(c.db_column())
+                .map(|res| res.and_then(|(root, value)| Ok((root, Slot::from_ssz_bytes(&value)?)))),
+        )
+    }
+    fn sync(&self) -> Result<(), Error> {
+        KeyValueStore::sync(self)
+    }
+}

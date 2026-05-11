@@ -1,20 +1,21 @@
 use crate::config::{OnDiskStoreConfig, StoreConfig};
-use crate::database::interface::BeaconNodeBackend;
+use crate::database::interface::{BeaconNodeBackend, ColdBackend};
 use crate::forwards_iter::{HybridForwardsBlockRootsIterator, HybridForwardsStateRootsIterator};
 use crate::hdiff::{HDiff, HDiffBuffer, HierarchyConfig, HierarchyModuli, StorageStrategy};
 use crate::historic_state_cache::HistoricStateCache;
 use crate::iter::{BlockRootsIterator, ParentRootBlockIterator, RootsIterator};
 use crate::memory_store::MemoryStore;
 use crate::metadata::{
-    ANCHOR_INFO_KEY, ANCHOR_UNINITIALIZED, AnchorInfo, BLOB_INFO_KEY, BlobInfo,
+    ANCHOR_INFO_KEY, ANCHOR_UNINITIALIZED, AnchorInfo, BLOB_INFO_KEY, BlobInfo, COLD_BACKEND_KEY,
     COMPACTION_TIMESTAMP_KEY, CONFIG_KEY, CURRENT_SCHEMA_VERSION, CompactionTimestamp,
     DATA_COLUMN_CUSTODY_INFO_KEY, DATA_COLUMN_INFO_KEY, DataColumnCustodyInfo, DataColumnInfo,
     SCHEMA_VERSION_KEY, SPLIT_KEY, STATE_UPPER_LIMIT_NO_RETAIN, SchemaVersion,
 };
 use crate::state_cache::{PutStateOutcome, StateCache};
+use crate::static_cold::StaticColdStore;
 use crate::{
-    BlobSidecarListFromRoot, DBColumn, DatabaseBlock, Error, ItemStore, KeyValueStoreOp, StoreItem,
-    StoreOp, get_data_column_key,
+    BlobSidecarListFromRoot, ColdStore, DBColumn, DBColumnCold, DBColumnColdIndex, DatabaseBlock,
+    Error, ItemStore, KeyValueStoreOp, StoreItem, StoreOp, get_data_column_key,
     metrics::{self, COLD_METRIC, HOT_METRIC},
     parse_data_column_key,
 };
@@ -44,12 +45,22 @@ use types::data::{ColumnIndex, DataColumnSidecar, DataColumnSidecarList};
 use types::*;
 use zstd::{Decoder, Encoder};
 
+fn era_import_pointer_key() -> &'static [u8] {
+    b"era_import_ptr"
+}
+
+fn era_reconstruction_key(era_number: u64) -> Vec<u8> {
+    let mut key = b"era_recon:".to_vec();
+    key.extend_from_slice(&era_number.to_be_bytes());
+    key
+}
+
 /// On-disk database that stores finalized states efficiently.
 ///
 /// Stores vector fields like the `block_roots` and `state_roots` separately, and only stores
 /// intermittent "restore point" states pre-finalization.
 #[derive(Debug)]
-pub struct HotColdDB<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
+pub struct HotColdDB<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> {
     /// The slot and state root at the point where the database is split between hot and cold.
     ///
     /// States with slots less than `split.slot` are in the cold DB, while states with slots
@@ -66,7 +77,7 @@ pub struct HotColdDB<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
     /// Cold database containing compact historical data.
     pub cold_db: Cold,
     /// Database containing blobs. If None, store falls back to use `cold_db`.
-    pub blobs_db: Cold,
+    pub blobs_db: Hot,
     /// Hot database containing duplicated but quick-to-access recent data.
     ///
     /// The hot database also contains all blocks.
@@ -86,6 +97,21 @@ pub struct HotColdDB<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
     pub spec: Arc<ChainSpec>,
     /// Mere vessel for E.
     _phantom: PhantomData<E>,
+}
+
+/// Pending cold-DB writes for a single commit unit (one state, one reconstruct
+/// batch, etc.).
+///
+/// Slot-keyed bulk data goes in `data`; the matching `BeaconColdStateSummary`
+/// root index goes in `state_summary_index`. `commit_cold_batch` flushes them
+/// in the correct order (data, sync, then index).
+///
+/// Slots within `data` for any single column must arrive strictly ascending —
+/// the static cold backend rejects out-of-order puts.
+#[derive(Default)]
+pub struct ColdBatch {
+    pub data: Vec<(DBColumnCold, Slot, Vec<u8>)>,
+    pub state_summary_index: Vec<(Hash256, Slot)>,
 }
 
 #[derive(Debug)]
@@ -189,7 +215,6 @@ pub enum HotColdDBError {
     MissingExecutionPayloadEnvelope(Hash256),
     MissingFullBlockExecutionPayloadPruned(Hash256, Slot),
     MissingAnchorInfo,
-    MissingFrozenBlockSlot(Hash256),
     MissingFrozenBlock(Slot),
     MissingPathToBlobsDatabase,
     BlobsPreviouslyInDefaultStore,
@@ -258,7 +283,7 @@ impl<E: EthSpec> HotColdDB<E, MemoryStore<E>, MemoryStore<E>> {
     }
 }
 
-impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>> {
+impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>> {
     /// Open a new or existing database, with the given paths to the hot and cold DBs.
     ///
     /// The `migrate_schema` function is passed in so that the parent `BeaconChain` can provide
@@ -282,13 +307,27 @@ impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>> {
         let anchor_info = RwLock::new(Self::load_anchor_info(&hot_db)?);
         debug!(?anchor_info, "Loaded anchor info");
 
+        // Pin the cold backend kind to the directory before we touch it.
+        // Static and Kv layouts are incompatible on disk, so refuse to open
+        // a directory written by the other one. If no record exists yet
+        // (fresh DB), persist the configured kind so this check is
+        // load-bearing on every subsequent open.
+        Self::check_or_init_cold_backend_kind(&hot_db, config.cold_backend)?;
+
         let db = HotColdDB {
             split: RwLock::new(Split::default()),
             anchor_info,
             blob_info: RwLock::new(BlobInfo::default()),
             data_column_info: RwLock::new(DataColumnInfo::default()),
             blobs_db: BeaconNodeBackend::open(&config, blobs_db_path)?,
-            cold_db: BeaconNodeBackend::open(&config, cold_path)?,
+            cold_db: match config.cold_backend {
+                crate::config::ColdBackendKind::Kv => {
+                    ColdBackend::Kv(BeaconNodeBackend::open(&config, cold_path)?)
+                }
+                crate::config::ColdBackendKind::Static => {
+                    ColdBackend::Static(StaticColdStore::open(cold_path, &config)?)
+                }
+            },
             hot_db,
             block_cache: NonZeroUsize::new(config.block_cache_size)
                 .map(BlockCache::new)
@@ -451,7 +490,7 @@ impl<E: EthSpec> HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>> {
     }
 }
 
-impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> {
+impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> {
     fn cold_storage_strategy(&self, slot: Slot) -> Result<StorageStrategy, Error> {
         // The start slot for the freezer HDiff is always 0
         Ok(self.hierarchy.storage_strategy(slot, Slot::new(0))?)
@@ -722,20 +761,52 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         })
     }
 
+    /// Read a blinded block from the cold archive by slot. Used by the
+    /// reconstruction path where the block's slot is known from the
+    /// `BeaconBlockRoots` iterator and the block is only stored slot-keyed in
+    /// `DBColumnCold::Block`.
+    pub fn get_cold_blinded_block_by_slot(
+        &self,
+        slot: Slot,
+    ) -> Result<Option<SignedBeaconBlock<E, BlindedPayload<E>>>, Error> {
+        let Some(bytes) = self.cold_db.get(DBColumnCold::Block, slot)? else {
+            return Ok(None);
+        };
+        Ok(Some(SignedBeaconBlock::from_ssz_bytes(&bytes, &self.spec)?))
+    }
+
     /// Fetch a block from the store using a custom decode function.
     ///
     /// This is useful for e.g. ignoring the slot-indicated fork to forcefully load a block as if it
     /// were for a different fork.
+    ///
+    /// Reads hot first, then falls back to the cold archive via the
+    /// `BlockSlot` index. Under KV cold the index is empty so the fallback
+    /// always returns None — behaviour is identical to a hot-only read.
+    /// Under Static cold (genesis-archive or era-import), blocks at slot <
+    /// split.slot live in cold only, and the fallback is the read path.
     pub fn get_block_with<Payload: AbstractExecPayload<E>>(
         &self,
         block_root: &Hash256,
         decoder: impl FnOnce(&[u8]) -> Result<SignedBeaconBlock<E, Payload>, ssz::DecodeError>,
     ) -> Result<Option<SignedBeaconBlock<E, Payload>>, Error> {
-        self.hot_db
+        if let Some(bytes) = self
+            .hot_db
             .get_bytes(DBColumn::BeaconBlock, block_root.as_slice())?
-            .map(|block_bytes| decoder(&block_bytes))
-            .transpose()
-            .map_err(|e| e.into())
+        {
+            return decoder(&bytes).map(Some).map_err(Into::into);
+        }
+        let Some(slot) = self
+            .cold_db
+            .get_index(DBColumnColdIndex::BlockSlot, *block_root)?
+        else {
+            return Ok(None);
+        };
+        let bytes = self
+            .cold_db
+            .get(DBColumnCold::Block, slot)?
+            .ok_or(HotColdDBError::MissingFrozenBlock(slot))?;
+        decoder(&bytes).map(Some).map_err(Into::into)
     }
 
     pub fn get_payload_envelope(
@@ -937,9 +1008,23 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     }
 
     /// Determine whether a block exists in the database.
+    ///
+    /// Mirrors `get_block_with`: hot first, then cold via the `BlockSlot`
+    /// index.
     pub fn block_exists(&self, block_root: &Hash256) -> Result<bool, Error> {
-        self.hot_db
-            .key_exists(DBColumn::BeaconBlock, block_root.as_slice())
+        if self
+            .hot_db
+            .key_exists(DBColumn::BeaconBlock, block_root.as_slice())?
+        {
+            return Ok(true);
+        }
+        let Some(slot) = self
+            .cold_db
+            .get_index(DBColumnColdIndex::BlockSlot, *block_root)?
+        else {
+            return Ok(false);
+        };
+        self.cold_db.contains(DBColumnCold::Block, slot)
     }
 
     /// Delete a block from the store and the block cache.
@@ -1075,11 +1160,12 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 
     /// Store a state in the store.
     pub fn put_state(&self, state_root: &Hash256, state: &BeaconState<E>) -> Result<(), Error> {
-        let mut ops: Vec<KeyValueStoreOp> = Vec::new();
         if state.slot() < self.get_split_slot() {
-            self.store_cold_state(state_root, state, &mut ops)?;
-            self.cold_db.do_atomically(ops)
+            let mut batch = ColdBatch::default();
+            self.store_cold_state(state_root, state, &mut batch)?;
+            self.commit_cold_batch(batch)
         } else {
+            let mut ops: Vec<KeyValueStoreOp> = Vec::new();
             self.store_hot_state(state_root, state, &mut ops)?;
             self.hot_db.do_atomically(ops)
         }
@@ -2075,19 +2161,56 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         )
     }
 
+    /// Commit `batch` to the cold backend. Slot-keyed bulk data goes first, the
+    /// `BeaconColdStateSummary` root index lands after a sync, so a crash leaves
+    /// no dangling index entry.
+    pub fn commit_cold_batch(&self, batch: ColdBatch) -> Result<(), Error> {
+        self.commit_cold_data(batch.data)?;
+        self.cold_db.sync()?;
+        self.cold_db.put_index_batch(
+            DBColumnColdIndex::ColdStateSummary,
+            batch.state_summary_index,
+        )
+    }
+
+    /// Group slot-keyed `data` by column and write each column to the cold backend.
+    /// Used by callers (e.g. migration) that want to commit data per-iteration but
+    /// defer the matching index entries to end-of-batch.
+    pub fn commit_cold_data(&self, data: Vec<(DBColumnCold, Slot, Vec<u8>)>) -> Result<(), Error> {
+        let mut groups: HashMap<DBColumnCold, Vec<(Slot, Vec<u8>)>> = HashMap::new();
+        for (col, slot, value) in data {
+            groups.entry(col).or_default().push((slot, value));
+        }
+        for (col, items) in groups {
+            self.cold_db.put_batch(col, items)?;
+        }
+        Ok(())
+    }
+
     pub fn store_cold_state_summary(
         &self,
         state_root: &Hash256,
         slot: Slot,
-        ops: &mut Vec<KeyValueStoreOp>,
+        batch: &mut ColdBatch,
     ) -> Result<(), Error> {
-        ops.push(ColdStateSummary { slot }.as_kv_store_op(*state_root));
-        ops.push(KeyValueStoreOp::PutKeyValue(
-            DBColumn::BeaconStateRoots,
-            slot.as_u64().to_be_bytes().to_vec(),
+        batch.state_summary_index.push((*state_root, slot));
+        batch.data.push((
+            DBColumnCold::StateRoots,
+            slot,
             state_root.as_slice().to_vec(),
         ));
         Ok(())
+    }
+
+    /// Store a pre-finalization state in the freezer database, applying ops atomically.
+    pub fn put_cold_state(
+        &self,
+        state_root: &Hash256,
+        state: &BeaconState<E>,
+    ) -> Result<(), Error> {
+        let mut batch = ColdBatch::default();
+        self.store_cold_state(state_root, state, &mut batch)?;
+        self.commit_cold_batch(batch)
     }
 
     /// Store a pre-finalization state in the freezer database.
@@ -2095,9 +2218,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         state_root: &Hash256,
         state: &BeaconState<E>,
-        ops: &mut Vec<KeyValueStoreOp>,
+        batch: &mut ColdBatch,
     ) -> Result<(), Error> {
-        self.store_cold_state_summary(state_root, state.slot(), ops)?;
+        self.store_cold_state_summary(state_root, state.slot(), batch)?;
 
         let slot = state.slot();
         match self.cold_storage_strategy(slot)? {
@@ -2116,7 +2239,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
                     %slot,
                     "Storing cold state"
                 );
-                self.store_cold_state_as_snapshot(state, ops)?;
+                self.store_cold_state_as_snapshot(state, batch)?;
             }
             StorageStrategy::DiffFrom(from) => {
                 debug!(
@@ -2125,7 +2248,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
                     %slot,
                     "Storing cold state"
                 );
-                self.store_cold_state_as_diff(state, from, ops)?;
+                self.store_cold_state_as_diff(state, from, batch)?;
             }
         }
         Ok(())
@@ -2134,7 +2257,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     pub fn store_cold_state_as_snapshot(
         &self,
         state: &BeaconState<E>,
-        ops: &mut Vec<KeyValueStoreOp>,
+        batch: &mut ColdBatch,
     ) -> Result<(), Error> {
         let bytes = state.as_ssz_bytes();
         let compressed_value = {
@@ -2147,19 +2270,14 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             out
         };
 
-        ops.push(KeyValueStoreOp::PutKeyValue(
-            DBColumn::BeaconStateSnapshot,
-            state.slot().as_u64().to_be_bytes().to_vec(),
-            compressed_value,
-        ));
+        batch
+            .data
+            .push((DBColumnCold::StateSnapshot, state.slot(), compressed_value));
         Ok(())
     }
 
     fn load_cold_state_bytes_as_snapshot(&self, slot: Slot) -> Result<Option<Vec<u8>>, Error> {
-        match self
-            .cold_db
-            .get_bytes(DBColumn::BeaconStateSnapshot, &slot.as_u64().to_be_bytes())?
-        {
+        match self.cold_db.get(DBColumnCold::StateSnapshot, slot)? {
             Some(bytes) => {
                 let _timer =
                     metrics::start_timer(&metrics::STORE_BEACON_STATE_FREEZER_DECOMPRESS_TIME);
@@ -2250,7 +2368,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         &self,
         state: &BeaconState<E>,
         from_slot: Slot,
-        ops: &mut Vec<KeyValueStoreOp>,
+        batch: &mut ColdBatch,
     ) -> Result<(), Error> {
         // Load diff base state bytes.
         let (_, base_buffer) = {
@@ -2273,11 +2391,9 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             diff_bytes.len() as f64,
         );
 
-        ops.push(KeyValueStoreOp::PutKeyValue(
-            DBColumn::BeaconStateDiff,
-            state.slot().as_u64().to_be_bytes().to_vec(),
-            diff_bytes,
-        ));
+        batch
+            .data
+            .push((DBColumnCold::StateDiff, state.slot(), diff_bytes));
         Ok(())
     }
 
@@ -2399,7 +2515,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         let bytes = {
             let _t = metrics::start_timer_vec(&metrics::BEACON_HDIFF_READ_TIME, COLD_METRIC);
             self.cold_db
-                .get_bytes(DBColumn::BeaconStateDiff, &slot.as_u64().to_be_bytes())?
+                .get(DBColumnCold::StateDiff, slot)?
                 .ok_or(HotColdDBError::MissingHDiff(slot))?
         };
         let hdiff = {
@@ -3040,6 +3156,25 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         self.hot_db.put(&CONFIG_KEY, &self.config.as_disk_config())
     }
 
+    /// Pin the cold backend kind to the DB's hot metadata on first open and
+    /// refuse subsequent opens that disagree. Static and Kv use incompatible
+    /// on-disk layouts in the cold path, so silently switching would leave
+    /// orphaned data behind and quietly corrupt new writes.
+    fn check_or_init_cold_backend_kind(
+        hot_db: &BeaconNodeBackend<E>,
+        configured: crate::config::ColdBackendKind,
+    ) -> Result<(), Error> {
+        use crate::config::ColdBackendKind;
+        match hot_db.get::<ColdBackendKind>(&COLD_BACKEND_KEY)? {
+            Some(on_disk) if on_disk != configured => Err(Error::ColdBackendMismatch {
+                on_disk,
+                configured,
+            }),
+            Some(_) => Ok(()),
+            None => hot_db.put(&COLD_BACKEND_KEY, &configured),
+        }
+    }
+
     /// Load the split point from disk, sans block root.
     fn load_split_partial(&self) -> Result<Option<Split>, Error> {
         self.hot_db
@@ -3071,10 +3206,8 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 
     /// Load a frozen state's slot, given its root.
     pub fn load_cold_state_slot(&self, state_root: &Hash256) -> Result<Option<Slot>, Error> {
-        Ok(self
-            .cold_db
-            .get(state_root)?
-            .map(|s: ColdStateSummary| s.slot))
+        self.cold_db
+            .get_index(DBColumnColdIndex::ColdStateSummary, *state_root)
     }
 
     /// Load a hot state's summary, given its root.
@@ -3113,26 +3246,44 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         Ok(())
     }
 
-    /// Run a compaction pass on the freezer DB to free up space used by deleted states.
-    pub fn compact_freezer(&self) -> Result<(), Error> {
-        let columns = vec![
-            DBColumn::BeaconColdStateSummary,
-            DBColumn::BeaconStateSnapshot,
-            DBColumn::BeaconStateDiff,
-            DBColumn::BeaconStateRoots,
-        ];
-
-        for column in columns {
-            info!(?column, "Starting compaction");
-            self.cold_db.compact_column(column)?;
-            info!(?column, "Finishing compaction");
-        }
-        Ok(())
-    }
-
     /// Return `true` if compaction on finalization/pruning is enabled.
     pub fn compact_on_prune(&self) -> bool {
         self.config.compact_on_prune
+    }
+
+    pub fn get_era_import_pointer(&self) -> Result<Option<u64>, Error> {
+        let Some(bytes) = self
+            .hot_db
+            .get_bytes(DBColumn::BeaconMeta, era_import_pointer_key())?
+        else {
+            return Ok(None);
+        };
+        let bytes: [u8; 8] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::InvalidBytes)?;
+        Ok(Some(u64::from_be_bytes(bytes)))
+    }
+
+    pub fn set_era_import_pointer(&self, era_number: u64) -> Result<(), Error> {
+        self.hot_db.put_bytes(
+            DBColumn::BeaconMeta,
+            era_import_pointer_key(),
+            &era_number.to_be_bytes(),
+        )
+    }
+
+    pub fn era_reconstruction_done(&self, era_number: u64) -> Result<bool, Error> {
+        self.hot_db
+            .key_exists(DBColumn::BeaconMeta, &era_reconstruction_key(era_number))
+    }
+
+    pub fn set_era_reconstruction_done(&self, era_number: u64) -> Result<(), Error> {
+        self.hot_db.put_bytes(
+            DBColumn::BeaconMeta,
+            &era_reconstruction_key(era_number),
+            &[1u8],
+        )
     }
 
     /// Load the timestamp of the last compaction as a `Duration` since the UNIX epoch.
@@ -3159,14 +3310,10 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         start_slot: Slot,
         end_slot: Slot,
         block_root: Hash256,
-    ) -> Result<Vec<KeyValueStoreOp>, Error> {
+    ) -> Result<Vec<(Slot, Vec<u8>)>, Error> {
         let mut ops = vec![];
         for slot in start_slot.as_u64()..end_slot.as_u64() {
-            ops.push(KeyValueStoreOp::PutKeyValue(
-                DBColumn::BeaconBlockRoots,
-                slot.to_be_bytes().to_vec(),
-                block_root.as_slice().to_vec(),
-            ));
+            ops.push((Slot::new(slot), block_root.as_slice().to_vec()));
         }
         Ok(ops)
     }
@@ -3177,7 +3324,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     pub fn get_cold_block_root(&self, slot: Slot) -> Result<Option<Hash256>, Error> {
         Ok(self
             .cold_db
-            .get_bytes(DBColumn::BeaconBlockRoots, &slot.as_u64().to_be_bytes())?
+            .get(DBColumnCold::BlockRoots, slot)?
             .map(|bytes| Hash256::from_ssz_bytes(&bytes))
             .transpose()?)
     }
@@ -3190,7 +3337,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
     pub fn get_cold_state_root(&self, slot: Slot) -> Result<Option<Hash256>, Error> {
         Ok(self
             .cold_db
-            .get_bytes(DBColumn::BeaconStateRoots, &slot.as_u64().to_be_bytes())?
+            .get(DBColumnCold::StateRoots, slot)?
             .map(|bytes| Hash256::from_ssz_bytes(&bytes))
             .transpose()?)
     }
@@ -3483,67 +3630,6 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         Ok(())
     }
 
-    /// Delete *all* states from the freezer database and update the anchor accordingly.
-    ///
-    /// WARNING: this method deletes the genesis state and replaces it with the provided
-    /// `genesis_state`. This is to support its use in schema migrations where the storage scheme of
-    /// the genesis state may be modified. It is the responsibility of the caller to ensure that the
-    /// genesis state is correct, else a corrupt database will be created.
-    pub fn prune_historic_states(
-        &self,
-        genesis_state_root: Hash256,
-        genesis_state: &BeaconState<E>,
-    ) -> Result<(), Error> {
-        // Update the anchor to use the dummy state upper limit and disable historic state storage.
-        let old_anchor = self.get_anchor_info();
-        let new_anchor = AnchorInfo {
-            state_upper_limit: STATE_UPPER_LIMIT_NO_RETAIN,
-            state_lower_limit: Slot::new(0),
-            ..old_anchor.clone()
-        };
-
-        // Commit the anchor change immediately: if the cold database ops fail they can always be
-        // retried, and we can't do them atomically with this change anyway.
-        self.compare_and_set_anchor_info_with_write(old_anchor, new_anchor)?;
-
-        // Stage freezer data for deletion. Do not bother loading and deserializing values as this
-        // wastes time and is less schema-agnostic. My hope is that this method will be useful for
-        // migrating to the tree-states schema (delete everything in the freezer then start afresh).
-        let mut cold_ops = vec![];
-
-        let columns = vec![
-            DBColumn::BeaconColdStateSummary,
-            DBColumn::BeaconStateSnapshot,
-            DBColumn::BeaconStateDiff,
-            DBColumn::BeaconStateRoots,
-        ];
-
-        for column in columns {
-            for res in self.cold_db.iter_column_keys::<Vec<u8>>(column) {
-                let key = res?;
-                cold_ops.push(KeyValueStoreOp::DeleteKey(column, key));
-            }
-        }
-        let delete_ops = cold_ops.len();
-
-        // If we just deleted the genesis state, re-store it using the current* schema.
-        if self.get_split_slot() > 0 {
-            info!(
-                state_root = ?genesis_state_root,
-                "Re-storing genesis state"
-            );
-            self.store_cold_state(&genesis_state_root, genesis_state, &mut cold_ops)?;
-        }
-
-        info!(delete_ops, "Deleting historic states");
-        self.cold_db.do_atomically(cold_ops)?;
-
-        // In order to reclaim space, we need to compact the freezer DB as well.
-        self.compact_freezer()?;
-
-        Ok(())
-    }
-
     fn update_blob_or_data_column_info(
         &self,
         start_epoch: Epoch,
@@ -3575,7 +3661,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 /// This function previously did a combination of freezer migration alongside pruning. Now it is
 /// *just* responsible for copying relevant data to the freezer, while pruning is implemented
 /// in `prune_hot_db`.
-pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     store: Arc<HotColdDB<E, Hot, Cold>>,
     finalized_state_root: Hash256,
     finalized_block_root: Hash256,
@@ -3607,7 +3693,29 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         return Err(HotColdDBError::FreezeSlotUnaligned(finalized_state.slot()).into());
     }
 
-    let mut cold_db_block_ops = vec![];
+    let mut cold_db_block_ops: Vec<(Slot, Vec<u8>)> = vec![];
+    // Cold-DB root index for state summaries (state_root -> slot).
+    // Committed after the slot-keyed cold data so a crash leaves no dangling indices.
+    let mut cold_state_summary_index: Vec<(Hash256, Slot)> = vec![];
+
+    // The static cold backend is a self-sufficient archive — it owns the
+    // bulk historic-block bytes, not just the slot index. The KV cold
+    // backend keeps blocks in the hot DB indefinitely, so duplicating them
+    // would only waste space.
+    let move_blocks_to_static_cold = matches!(
+        store.get_config().cold_backend,
+        crate::config::ColdBackendKind::Static
+    );
+    let mut cold_db_block_data: Vec<(Slot, Vec<u8>)> = vec![];
+    // `block_root -> slot` index for blocks moved into the cold archive,
+    // committed after the slot-keyed bulk so a crash leaves no dangling index
+    // entry. Reads on hot miss go index -> bulk.
+    let mut cold_block_slot_index: Vec<(Hash256, Slot)> = vec![];
+    // Hot block roots whose bytes are now durably in cold; deleted from hot
+    // after the cold index is committed. Hot keeps blocks at slot >=
+    // split.slot; cold owns slot < split.slot under Static.
+    let mut hot_block_delete_roots: Vec<Hash256> = vec![];
+    let mut last_seen_block_root: Option<Hash256> = None;
 
     // Iterate in descending order until the current split slot
     let state_roots: Vec<_> =
@@ -3617,27 +3725,48 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         })?;
 
     // Then, iterate states in slot ascending order, as they are stored wrt previous states.
-    for (block_root, state_root, slot) in state_roots.into_iter().rev() {
+    for (block_root, state_root, slot) in state_roots.iter().rev() {
         // Store the slot to block root mapping.
-        cold_db_block_ops.push(KeyValueStoreOp::PutKeyValue(
-            DBColumn::BeaconBlockRoots,
-            slot.as_u64().to_be_bytes().to_vec(),
-            block_root.as_slice().to_vec(),
-        ));
+        cold_db_block_ops.push((*slot, block_root.as_slice().to_vec()));
+
+        // Move the block bytes into static cold at the slot they were
+        // proposed at. `RootsIterator` yields the same `block_root` for
+        // every skip slot until the next block — dedup by tracking the
+        // most recent root, then keep only the first occurrence whose
+        // iteration slot matches `block.slot()` (skip-slot continuations
+        // from the previous finalization window have `block.slot() < slot`
+        // and are already in cold from that earlier migration).
+        if move_blocks_to_static_cold && Some(*block_root) != last_seen_block_root {
+            last_seen_block_root = Some(*block_root);
+            if let Some(block_bytes) = store
+                .hot_db
+                .get_bytes(DBColumn::BeaconBlock, block_root.as_slice())?
+            {
+                let block = SignedBeaconBlock::<E, BlindedPayload<E>>::from_ssz_bytes(
+                    &block_bytes,
+                    &store.spec,
+                )?;
+                if block.slot() == *slot {
+                    cold_db_block_data.push((*slot, block_bytes));
+                    cold_block_slot_index.push((*block_root, *slot));
+                    hot_block_delete_roots.push(*block_root);
+                }
+            }
+        }
 
         // Do not try to store states if a restore point is yet to be stored, or will never be
         // stored (see `STATE_UPPER_LIMIT_NO_RETAIN`). Make an exception for the genesis state
         // which always needs to be copied from the hot DB to the freezer and should not be deleted.
-        if slot != 0 && slot < anchor_info.state_upper_limit {
+        if *slot != 0 && *slot < anchor_info.state_upper_limit {
             continue;
         }
 
-        let mut cold_db_state_ops = vec![];
+        let mut batch = ColdBatch::default();
 
         // Only store the cold state if it's on a diff boundary.
         // Calling `store_cold_state_summary` instead of `store_cold_state` for those allows us
         // to skip loading many hot states.
-        if let StorageStrategy::ReplayFrom(from) = store.cold_storage_strategy(slot)? {
+        if let StorageStrategy::ReplayFrom(from) = store.cold_storage_strategy(*slot)? {
             // Store slot -> state_root and state_root -> slot mappings.
             debug!(
                 strategy = "replay",
@@ -3645,20 +3774,22 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
                 %slot,
                 "Storing cold state"
             );
-            store.store_cold_state_summary(&state_root, slot, &mut cold_db_state_ops)?;
+            store.store_cold_state_summary(state_root, *slot, &mut batch)?;
         } else {
             // This is some state that we want to migrate to the freezer db.
             // There is no reason to cache this state.
             let state: BeaconState<E> = store
-                .get_hot_state(&state_root, false)?
-                .ok_or(HotColdDBError::MissingStateToFreeze(state_root))?;
+                .get_hot_state(state_root, false)?
+                .ok_or(HotColdDBError::MissingStateToFreeze(*state_root))?;
 
-            store.store_cold_state(&state_root, &state, &mut cold_db_state_ops)?;
+            store.store_cold_state(state_root, &state, &mut batch)?;
         }
 
         // Cold states are diffed with respect to each other, so we need to finish writing previous
-        // states before storing new ones.
-        store.cold_db.do_atomically(cold_db_state_ops)?;
+        // slot-keyed cold data before staging new entries. Index entries accumulate to the end of
+        // the migration so all root indices land after every cold-bulk write is durable.
+        store.commit_cold_data(batch.data)?;
+        cold_state_summary_index.append(&mut batch.state_summary_index);
     }
 
     // Warning: Critical section. We have to take care not to put any of the two databases in an
@@ -3669,8 +3800,36 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
     // potentially re-doing the migration to copy data to the freezer, for consistency. If we crash
     // after writing all new block & state data to the freezer but before updating the split, then
     // in the worst case we will restart with the old split and re-run the migration.
-    store.cold_db.do_atomically(cold_db_block_ops)?;
+    //
+    // Slot-keyed cold data lands first; the BeaconColdStateSummary root index is committed after,
+    // so a mid-migration crash leaves cold data without dangling indices.
+    //
+    // TODO(static): a crash between `put_batch(BlockRoots, …)` and
+    // `put_index_batch(ColdStateSummary, …)` leaves BlockRoots committed for
+    // the new range but ColdStateSummary missing. The next restart re-runs the
+    // migration, which re-derives the summary, but until then invariant 11
+    // (`check_cold_state_root_indices`) will fire transiently. KV mode has the
+    // same window. Worth reviewing whether the index could move to per-iter
+    // commit alongside the slot-keyed data, or whether the invariant should
+    // be relaxed during the `split.slot < latest finalized` window.
+    store
+        .cold_db
+        .put_batch(DBColumnCold::BlockRoots, cold_db_block_ops)?;
+    if !cold_db_block_data.is_empty() {
+        store
+            .cold_db
+            .put_batch(DBColumnCold::Block, cold_db_block_data)?;
+    }
     store.cold_db.sync()?;
+    store.cold_db.put_index_batch(
+        DBColumnColdIndex::ColdStateSummary,
+        cold_state_summary_index,
+    )?;
+    if !cold_block_slot_index.is_empty() {
+        store
+            .cold_db
+            .put_index_batch(DBColumnColdIndex::BlockSlot, cold_block_slot_index)?;
+    }
     let new_split = {
         let mut split_guard = store.split.write();
         let latest_split = *split_guard;
@@ -3706,6 +3865,20 @@ pub fn migrate_database<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
         *split_guard = new_split;
         new_split
     };
+
+    // Reclaim hot-DB space for blocks that are now durably in cold. Run AFTER
+    // the split commit: if we crash here, the next `get_block_with` for one
+    // of these roots will hit the cold fallback (BlockSlot index then Block
+    // bulk) and find them. A crash *before* this point is also safe — hot
+    // still has the bytes, and the next migration's idempotent re-puts cover
+    // any partial cold state.
+    if !hot_block_delete_roots.is_empty() {
+        let hot_delete_ops: Vec<KeyValueStoreOp> = hot_block_delete_roots
+            .into_iter()
+            .map(|root| KeyValueStoreOp::DeleteKey(DBColumn::BeaconBlock, root.as_slice().to_vec()))
+            .collect();
+        store.hot_db.do_atomically(hot_delete_ops)?;
+    }
 
     // Update the cache's view of the finalized state.
     store.update_finalized_state(
@@ -3786,7 +3959,7 @@ pub enum StateSummaryIteratorError {
 
 /// Return the ancestor state root of a state beyond SlotsPerHistoricalRoot using the roots iterator
 /// and the store
-pub fn get_ancestor_state_root<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+pub fn get_ancestor_state_root<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
     store: &'a HotColdDB<E, Hot, Cold>,
     from_state: &'a BeaconState<E>,
     target_slot: Slot,
@@ -3993,7 +4166,7 @@ impl StoreItem for HotStateSummary {
 
 impl HotStateSummary {
     /// Construct a new summary of the given state.
-    pub fn new<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    pub fn new<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>(
         store: &HotColdDB<E, Hot, Cold>,
         state_root: Hash256,
         state: &BeaconState<E>,
@@ -4038,26 +4211,6 @@ impl HotStateSummary {
             diff_base_state,
             previous_state_root,
         })
-    }
-}
-
-/// Struct for summarising a state in the freezer database.
-#[derive(Debug, Clone, Copy, Default, Encode, Decode)]
-pub(crate) struct ColdStateSummary {
-    pub slot: Slot,
-}
-
-impl StoreItem for ColdStateSummary {
-    fn db_column() -> DBColumn {
-        DBColumn::BeaconColdStateSummary
-    }
-
-    fn as_store_bytes(&self) -> Vec<u8> {
-        self.as_ssz_bytes()
-    }
-
-    fn from_store_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        Ok(Self::from_ssz_bytes(bytes)?)
     }
 }
 

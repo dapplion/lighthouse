@@ -148,6 +148,31 @@ jobs:
           cache-provider: warpbuild
     - name: Run beacon_chain tests for all known forks
       run: make test-beacon-chain
+  beacon-chain-store-tests-static-cold:
+    name: beacon-chain-store-tests-static-cold
+    needs: [check-labels]
+    if: needs.check-labels.outputs.skip_ci != 'true'
+    runs-on: ${{ github.repository == 'sigp/lighthouse' && 'warp-ubuntu-latest-x64-8x;snapshot.key=lighthouse-ubuntu-latest-v1' || 'ubuntu-latest' }}
+    env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+    - uses: actions/checkout@v5
+    - if: github.repository != 'sigp/lighthouse'
+      name: Get latest version of stable Rust
+      uses: moonrepo/setup-rust@v1
+      with:
+          channel: stable
+          cache-target: release
+          bins: cargo-nextest
+    - if: github.repository == 'sigp/lighthouse'
+      uses: Swatinem/rust-cache@v2
+      with:
+          cache-provider: warpbuild
+    - name: Run beacon_chain store_tests against the static cold backend
+      env:
+        COLD_BACKEND: static
+        FORK_NAME: fulu
+      run: cargo nextest run --release --features "fork_from_env,slasher/lmdb,$TEST_FEATURES" -p beacon_chain --test beacon_chain_tests -E 'test(/^store_tests::/)' --no-fail-fast
   http-api-tests:
     name: http-api-tests
     needs: [check-labels]
@@ -493,6 +518,7 @@ jobs:
       'forbidden-files-check',
       'release-tests-ubuntu',
       'beacon-chain-tests',
+      'beacon-chain-store-tests-static-cold',
       'op-pool-tests',
       'network-tests',
       'slasher-tests',

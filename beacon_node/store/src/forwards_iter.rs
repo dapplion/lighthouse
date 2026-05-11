@@ -1,6 +1,6 @@
 use crate::errors::{Error, Result};
 use crate::iter::{BlockRootsIterator, StateRootsIterator};
-use crate::{ColumnIter, DBColumn, HotColdDB, ItemStore};
+use crate::{ColdStore, DBColumn, DBColumnCold, HotColdDB, ItemStore, SlotIter};
 use itertools::process_results;
 use std::marker::PhantomData;
 use types::{BeaconState, EthSpec, Hash256, Slot};
@@ -9,7 +9,7 @@ pub type HybridForwardsBlockRootsIterator<'a, E, Hot, Cold> =
 pub type HybridForwardsStateRootsIterator<'a, E, Hot, Cold> =
     HybridForwardsIterator<'a, E, Hot, Cold>;
 
-impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> {
+impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> {
     fn simple_forwards_iterator(
         &self,
         column: DBColumn,
@@ -116,15 +116,15 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 }
 
 /// Forwards root iterator that makes use of a slot -> root mapping in the freezer DB.
-pub struct FrozenForwardsIterator<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
-    inner: ColumnIter<'a, Vec<u8>>,
+pub struct FrozenForwardsIterator<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> {
+    inner: SlotIter<'a>,
     column: DBColumn,
     next_slot: Slot,
     end_slot: Slot,
     _phantom: PhantomData<(E, Hot, Cold)>,
 }
 
-impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
+impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>
     FrozenForwardsIterator<'a, E, Hot, Cold>
 {
     /// `end_slot` is EXCLUSIVE here.
@@ -134,12 +134,13 @@ impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
         start_slot: Slot,
         end_slot: Slot,
     ) -> Result<Self> {
-        if column != DBColumn::BeaconBlockRoots && column != DBColumn::BeaconStateRoots {
-            return Err(Error::ForwardsIterInvalidColumn(column));
-        }
-        let start = start_slot.as_u64().to_be_bytes();
+        let cold_column = match column {
+            DBColumn::BeaconBlockRoots => DBColumnCold::BlockRoots,
+            DBColumn::BeaconStateRoots => DBColumnCold::StateRoots,
+            _ => return Err(Error::ForwardsIterInvalidColumn(column)),
+        };
         Ok(Self {
-            inner: store.cold_db.iter_column_from(column, &start),
+            inner: store.cold_db.iter_from(cold_column, start_slot),
             column,
             next_slot: start_slot,
             end_slot,
@@ -148,7 +149,7 @@ impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
     }
 }
 
-impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> Iterator
+impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> Iterator
     for FrozenForwardsIterator<'_, E, Hot, Cold>
 {
     type Item = Result<(Hash256, Slot)>;
@@ -160,13 +161,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> Iterator
         self.inner
             .as_mut()
             .next()?
-            .and_then(|(slot_bytes, root_bytes)| {
-                let slot = slot_bytes
-                    .clone()
-                    .try_into()
-                    .map(u64::from_be_bytes)
-                    .map(Slot::new)
-                    .map_err(|_| Error::InvalidBytes)?;
+            .and_then(|(slot, root_bytes)| {
                 if root_bytes.len() != std::mem::size_of::<Hash256>() {
                     return Err(Error::InvalidBytes);
                 }
@@ -199,7 +194,7 @@ impl Iterator for SimpleForwardsIterator {
 }
 
 /// Fusion of the above two approaches to forwards iteration. Fast and efficient.
-pub enum HybridForwardsIterator<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> {
+pub enum HybridForwardsIterator<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> {
     PreFinalization {
         iter: Box<FrozenForwardsIterator<'a, E, Hot, Cold>>,
         store: &'a HotColdDB<E, Hot, Cold>,
@@ -220,7 +215,7 @@ pub enum HybridForwardsIterator<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemSto
     Finished,
 }
 
-impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
+impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>>
     HybridForwardsIterator<'a, E, Hot, Cold>
 {
     /// Construct a new hybrid iterator.
@@ -349,7 +344,7 @@ impl<'a, E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>
     }
 }
 
-impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> Iterator
+impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> Iterator
     for HybridForwardsIterator<'_, E, Hot, Cold>
 {
     type Item = Result<(Hash256, Slot)>;

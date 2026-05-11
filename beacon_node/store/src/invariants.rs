@@ -6,8 +6,8 @@
 //! See the `check_invariants` and `check_database_invariants` methods for the full list.
 
 use crate::hdiff::StorageStrategy;
-use crate::hot_cold_store::{ColdStateSummary, HotStateSummary};
-use crate::{DBColumn, Error, ItemStore};
+use crate::hot_cold_store::HotStateSummary;
+use crate::{ColdStore, DBColumn, DBColumnCold, DBColumnColdIndex, Error, ItemStore};
 use crate::{HotColdDB, Split};
 use serde::Serialize;
 use ssz::Decode;
@@ -242,7 +242,7 @@ pub enum InvariantViolation {
     ColdStateBaseSummaryMissing { slot: Slot, base_slot: Slot },
 }
 
-impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> {
+impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> {
     /// Run all database invariant checks.
     ///
     /// The `ctx` parameter provides data from the beacon chain layer (fork choice, state cache,
@@ -557,6 +557,13 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         Ok(result)
     }
 
+    // TODO(static): re-walk invariants 10/11/12 under the static cold backend.
+    // The text-form preconditions and the "block in hot_db" check (#10) were
+    // written against the KV-cold world where finalized blocks live in hot DB
+    // forever. Under static cold, archived blocks may live elsewhere (TBD per
+    // TODO-static-block-storage.md item 2), and `cold_db.iter_index` over a
+    // sparse static column is O(highest - from). Confirm or update each.
+
     /// Invariant 10 (Cold DB): Block root indices.
     ///
     /// ```text
@@ -581,10 +588,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         for slot_val in anchor_info.oldest_block_slot.as_u64()..split.slot.as_u64() {
             let slot = Slot::new(slot_val);
 
-            let slot_bytes = slot_val.to_be_bytes();
-            let block_root_bytes = self
-                .cold_db
-                .get_bytes(DBColumn::BeaconBlockRoots, &slot_bytes)?;
+            let block_root_bytes = self.cold_db.get(DBColumnCold::BlockRoots, slot)?;
 
             let Some(root_bytes) = block_root_bytes else {
                 result.add_violation(InvariantViolation::ColdBlockRootMissing {
@@ -603,10 +607,11 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             }
 
             let block_root = Hash256::from_slice(&root_bytes);
-            let block_exists = self
-                .hot_db
-                .key_exists(DBColumn::BeaconBlock, block_root.as_slice())?;
-            if !block_exists {
+            // Check both hot and (for Static cold) the cold archive via the
+            // BlockSlot index — under Static cold, finalized canonical
+            // blocks are deleted from hot once they're durable in cold, so a
+            // hot-only check would flag every migrated slot as an orphan.
+            if !self.block_exists(&block_root)? {
                 result.add_violation(InvariantViolation::ColdBlockRootOrphan { slot, block_root });
             }
         }
@@ -635,11 +640,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
             if slot <= anchor_info.state_lower_limit
                 || slot >= cmp::min(split.slot, anchor_info.state_upper_limit)
             {
-                let slot_bytes = slot_val.to_be_bytes();
-                let Some(root_bytes) = self
-                    .cold_db
-                    .get_bytes(DBColumn::BeaconStateRoots, &slot_bytes)?
-                else {
+                let Some(root_bytes) = self.cold_db.get(DBColumnCold::StateRoots, slot)? else {
                     result.add_violation(InvariantViolation::ColdStateRootMissing {
                         slot,
                         state_lower_limit: anchor_info.state_lower_limit,
@@ -660,7 +661,7 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
 
                 match self
                     .cold_db
-                    .get_bytes(DBColumn::BeaconColdStateSummary, state_root.as_slice())?
+                    .get_index(DBColumnColdIndex::ColdStateSummary, state_root)?
                 {
                     None => {
                         result.add_violation(InvariantViolation::ColdStateRootMissingSummary {
@@ -668,13 +669,12 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
                             state_root,
                         });
                     }
-                    Some(summary_bytes) => {
-                        let summary = ColdStateSummary::from_ssz_bytes(&summary_bytes)?;
-                        if summary.slot != slot {
+                    Some(summary_slot) => {
+                        if summary_slot != slot {
                             result.add_violation(InvariantViolation::ColdStateRootSlotMismatch {
                                 slot,
                                 state_root,
-                                summary_slot: summary.slot,
+                                summary_slot,
                             });
                         }
                     }
@@ -701,46 +701,40 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         let mut summary_slots = HashSet::new();
         let mut base_slot_refs = Vec::new();
 
-        for res in self
-            .cold_db
-            .iter_column::<Hash256>(DBColumn::BeaconColdStateSummary)
-        {
-            let (state_root, value) = res?;
-            let summary = ColdStateSummary::from_ssz_bytes(&value)?;
+        for res in self.cold_db.iter_index(DBColumnColdIndex::ColdStateSummary) {
+            let (state_root, summary_slot) = res?;
 
-            summary_slots.insert(summary.slot);
-
-            let slot_bytes = summary.slot.as_u64().to_be_bytes();
+            summary_slots.insert(summary_slot);
 
             match self
                 .hierarchy
-                .storage_strategy(summary.slot, Slot::new(0))?
+                .storage_strategy(summary_slot, Slot::new(0))?
             {
                 StorageStrategy::Snapshot => {
                     let has_snapshot = self
                         .cold_db
-                        .key_exists(DBColumn::BeaconStateSnapshot, &slot_bytes)?;
+                        .contains(DBColumnCold::StateSnapshot, summary_slot)?;
                     if !has_snapshot {
                         result.add_violation(InvariantViolation::ColdStateMissingSnapshot {
                             state_root,
-                            slot: summary.slot,
+                            slot: summary_slot,
                         });
                     }
                 }
                 StorageStrategy::DiffFrom(base_slot) => {
                     let has_diff = self
                         .cold_db
-                        .key_exists(DBColumn::BeaconStateDiff, &slot_bytes)?;
+                        .contains(DBColumnCold::StateDiff, summary_slot)?;
                     if !has_diff {
                         result.add_violation(InvariantViolation::ColdStateMissingDiff {
                             state_root,
-                            slot: summary.slot,
+                            slot: summary_slot,
                         });
                     }
-                    base_slot_refs.push((summary.slot, base_slot));
+                    base_slot_refs.push((summary_slot, base_slot));
                 }
                 StorageStrategy::ReplayFrom(base_slot) => {
-                    base_slot_refs.push((summary.slot, base_slot));
+                    base_slot_refs.push((summary_slot, base_slot));
                 }
             }
         }
