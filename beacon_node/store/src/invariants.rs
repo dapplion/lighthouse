@@ -557,6 +557,13 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
         Ok(result)
     }
 
+    // TODO(static): re-walk invariants 10/11/12 under the static cold backend.
+    // The text-form preconditions and the "block in hot_db" check (#10) were
+    // written against the KV-cold world where finalized blocks live in hot DB
+    // forever. Under static cold, archived blocks may live elsewhere (TBD per
+    // TODO-static-block-storage.md item 2), and `cold_db.iter_index` over a
+    // sparse static column is O(highest - from). Confirm or update each.
+
     /// Invariant 10 (Cold DB): Block root indices.
     ///
     /// ```text
@@ -600,10 +607,11 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ColdStore<E>> HotColdDB<E, Hot, Cold> 
             }
 
             let block_root = Hash256::from_slice(&root_bytes);
-            let block_exists = self
-                .hot_db
-                .key_exists(DBColumn::BeaconBlock, block_root.as_slice())?;
-            if !block_exists {
+            // Check both hot and (for Static cold) the cold archive via the
+            // BlockSlot index — under Static cold, finalized canonical
+            // blocks are deleted from hot once they're durable in cold, so a
+            // hot-only check would flag every migrated slot as an orphan.
+            if !self.block_exists(&block_root)? {
                 result.add_violation(InvariantViolation::ColdBlockRootOrphan { slot, block_root });
             }
         }

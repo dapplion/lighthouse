@@ -53,6 +53,17 @@ the same KV implementation Lighthouse uses for the main DB at `<root>/index/` to
 serve these. Crash-safety rule: slot-keyed bulk data is committed before the
 matching root index entry, so a crash leaves cold data without a dangling index.
 
+### `put_batch` durability and fsync semantics
+
+`put_batch(items)` is durable on return for the batch as a whole — the same
+caller-visible contract as N×`put` — but it performs O(1) fsyncs per
+underlying file regardless of batch size, instead of the 4 fsyncs per slot
+that the per-item path issues (data file, offset file, config tmp, config
+dir). Within a column, slots in `items` must be strictly ascending; items
+that span multiple `file_id` boundaries are handled by grouping internally,
+with one data fsync and one offset fsync per touched file plus a single
+atomic config commit at the end of the batch.
+
 ## Removed
 
 - `lighthouse db prune-states` and `HotColdDB::prune_historic_states`. They

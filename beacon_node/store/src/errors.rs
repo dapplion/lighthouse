@@ -40,6 +40,21 @@ pub enum Error {
     MissingHistoricBlocks {
         oldest_block_slot: Slot,
     },
+    /// State reconstruction is not supported with the static cold backend.
+    ///
+    /// The static-file backend is strict-ascending append-only, but online
+    /// reconstruction writes states at slots already below the high-water
+    /// mark. Per `specs/static-cold-backend.md`, a full node never becomes
+    /// archive by online reconstruction.
+    ReconstructionUnsupportedOnStaticCold,
+    /// The configured cold backend differs from the one persisted on disk.
+    ///
+    /// Switching cold backends in-place is unsupported because the on-disk
+    /// formats are incompatible.
+    ColdBackendMismatch {
+        on_disk: crate::config::ColdBackendKind,
+        configured: crate::config::ColdBackendKind,
+    },
     /// State reconstruction failed because it didn't reach the upper limit slot.
     ///
     /// This should never happen (it's a logic error).

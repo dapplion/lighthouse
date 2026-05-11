@@ -1,4 +1,5 @@
 //! Implementation of historic state reconstruction (given complete block history).
+use crate::config::ColdBackendKind;
 use crate::forwards_iter::FrozenForwardsIterator;
 use crate::hot_cold_store::{ColdBatch, HotColdDB, HotColdDBError};
 use crate::metrics;
@@ -22,6 +23,15 @@ where
         self: &Arc<Self>,
         num_blocks: Option<usize>,
     ) -> Result<(), Error> {
+        // Online reconstruction writes historic states into the cold backend
+        // at slots that are already below the static-cold high-water mark for
+        // each column. The static backend is strict-ascending and would reject
+        // those puts as out-of-order. Per `specs/static-cold-backend.md`, a
+        // full node never becomes archive by online reconstruction — refuse.
+        if matches!(self.config.cold_backend, ColdBackendKind::Static) {
+            return Err(Error::ReconstructionUnsupportedOnStaticCold);
+        }
+
         let mut anchor = self.get_anchor_info();
 
         // Nothing to do, history is complete.

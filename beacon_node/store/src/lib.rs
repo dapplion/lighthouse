@@ -35,7 +35,6 @@ pub use crate::metadata::BlobInfo;
 pub use errors::Error;
 pub use metadata::AnchorInfo;
 pub use metrics::scrape_for_metrics;
-use ssz::{Decode, Encode};
 use std::collections::HashSet;
 use std::sync::Arc;
 use strum::{EnumIter, EnumString, IntoStaticStr};
@@ -147,6 +146,11 @@ impl DBColumnCold {
 /// Root-keyed indices owned by the cold backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DBColumnColdIndex {
+    /// `block_root -> slot` for blocks moved into the cold archive. Populated
+    /// by `migrate_database` (Static cold) and era-file import. Empty under
+    /// KV cold. Consulted by `HotColdDB::get_block_with` to resolve root-keyed
+    /// reads against the slot-keyed cold archive.
+    BlockSlot,
     /// `state_root -> slot` for cold state summaries.
     ColdStateSummary,
 }
@@ -154,6 +158,7 @@ pub enum DBColumnColdIndex {
 impl DBColumnColdIndex {
     pub fn db_column(self) -> DBColumn {
         match self {
+            Self::BlockSlot => DBColumn::BeaconBlockSlot,
             Self::ColdStateSummary => DBColumn::BeaconColdStateSummary,
         }
     }
@@ -186,101 +191,6 @@ pub trait ColdStore<E: EthSpec>: Sync + Send + Sized + 'static {
     fn iter_index(&self, column: DBColumnColdIndex) -> IndexIter<'_>;
 
     fn sync(&self) -> Result<(), Error>;
-}
-
-/// Helpers used by both KV-backed `ColdStore` impls (`BeaconNodeBackend`,
-/// `MemoryStore`). Translation between `Slot`/`Hash256` keys and the byte-keyed
-/// `KeyValueStore` API is identical regardless of which KV is underneath, so we
-/// extract it here and let each backend's `impl ColdStore` thunk through.
-pub(crate) mod kv_cold_store {
-    use super::*;
-
-    pub fn get<E: EthSpec, T: KeyValueStore<E>>(
-        kv: &T,
-        column: DBColumnCold,
-        slot: Slot,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        kv.get_bytes(column.db_column(), &slot.as_u64().to_be_bytes())
-    }
-
-    pub fn put_batch<E: EthSpec, T: KeyValueStore<E>>(
-        kv: &T,
-        column: DBColumnCold,
-        items: Vec<(Slot, Vec<u8>)>,
-    ) -> Result<(), Error> {
-        let col = column.db_column();
-        let ops = items
-            .into_iter()
-            .map(|(slot, value)| {
-                KeyValueStoreOp::PutKeyValue(col, slot.as_u64().to_be_bytes().to_vec(), value)
-            })
-            .collect();
-        kv.do_atomically(ops)
-    }
-
-    pub fn contains<E: EthSpec, T: KeyValueStore<E>>(
-        kv: &T,
-        column: DBColumnCold,
-        slot: Slot,
-    ) -> Result<bool, Error> {
-        kv.key_exists(column.db_column(), &slot.as_u64().to_be_bytes())
-    }
-
-    pub fn iter_from<E: EthSpec, T: KeyValueStore<E>>(
-        kv: &T,
-        column: DBColumnCold,
-        from: Slot,
-    ) -> SlotIter<'_> {
-        Box::new(
-            kv.iter_column_from::<Vec<u8>>(column.db_column(), &from.as_u64().to_be_bytes())
-                .map(|res| {
-                    res.and_then(|(key_bytes, value)| {
-                        let bytes: [u8; 8] =
-                            key_bytes.try_into().map_err(|_| Error::InvalidBytes)?;
-                        Ok((Slot::new(u64::from_be_bytes(bytes)), value))
-                    })
-                }),
-        )
-    }
-
-    // `Slot::as_ssz_bytes()` is byte-identical to the legacy
-    // `ColdStateSummary { slot }` wrapper, so existing dbs round-trip without
-    // migration. Pinned by `ssz_compat_with_legacy_summary`.
-    pub fn get_index<E: EthSpec, T: KeyValueStore<E>>(
-        kv: &T,
-        column: DBColumnColdIndex,
-        root: Hash256,
-    ) -> Result<Option<Slot>, Error> {
-        Ok(kv
-            .get_bytes(column.db_column(), root.as_slice())?
-            .map(|bytes| Slot::from_ssz_bytes(&bytes))
-            .transpose()?)
-    }
-
-    pub fn put_index_batch<E: EthSpec, T: KeyValueStore<E>>(
-        kv: &T,
-        column: DBColumnColdIndex,
-        items: Vec<(Hash256, Slot)>,
-    ) -> Result<(), Error> {
-        let col = column.db_column();
-        let ops = items
-            .into_iter()
-            .map(|(root, slot)| {
-                KeyValueStoreOp::PutKeyValue(col, root.as_slice().to_vec(), slot.as_ssz_bytes())
-            })
-            .collect();
-        kv.do_atomically(ops)
-    }
-
-    pub fn iter_index<E: EthSpec, T: KeyValueStore<E>>(
-        kv: &T,
-        column: DBColumnColdIndex,
-    ) -> IndexIter<'_> {
-        Box::new(
-            kv.iter_column::<Hash256>(column.db_column())
-                .map(|res| res.and_then(|(root, value)| Ok((root, Slot::from_ssz_bytes(&value)?)))),
-        )
-    }
 }
 
 pub trait Key: Sized + 'static {
@@ -527,6 +437,12 @@ pub enum DBColumn {
     /// Can be removed once schema v22 is buried by a hard fork.
     #[strum(serialize = "bbr")]
     BeaconBlockRootsChunked,
+    /// `block_root -> slot` index for blocks moved into the cold archive.
+    /// Populated by `migrate_database` (Static cold) and era-file import.
+    /// Empty under KV cold. Consulted by `HotColdDB::get_block_with` to
+    /// resolve root-keyed reads against the slot-keyed cold archive.
+    #[strum(serialize = "bbs")]
+    BeaconBlockSlot,
     /// DEPRECATED. Can be removed once schema v22 is buried by a hard fork.
     #[strum(serialize = "bhr")]
     BeaconHistoricalRoots,
@@ -582,6 +498,7 @@ impl DBColumn {
             Self::OverflowLRUCache => 33, // DEPRECATED
             Self::BeaconMeta
             | Self::BeaconBlock
+            | Self::BeaconBlockSlot
             | Self::BeaconState
             | Self::BeaconBlob
             | Self::BeaconStateSummary
