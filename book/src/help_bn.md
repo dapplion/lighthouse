@@ -71,6 +71,10 @@ Options:
       --checkpoint-sync-url-timeout <SECONDS>
           Set the timeout for checkpoint sync calls to remote beacon node HTTP
           endpoint. [default: 180]
+      --cold-backend <BACKEND>
+          Cold (freezer) DB backend. "kv" stores cold data in the same KV as the
+          hot DB. "static" stores cold data in slot-keyed static files; only
+          supported when starting from genesis. [possible values: kv, static]
   -d, --datadir <DIR>
           Used to specify a custom root data directory for lighthouse keys and
           databases. Defaults to $HOME/.lighthouse/{network} where network is

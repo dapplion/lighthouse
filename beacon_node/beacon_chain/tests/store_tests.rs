@@ -43,10 +43,11 @@ use std::convert::TryInto;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use store::database::interface::BeaconNodeBackend;
-use store::metadata::{CURRENT_SCHEMA_VERSION, STATE_UPPER_LIMIT_NO_RETAIN, SchemaVersion};
+use store::database::interface::{BeaconNodeBackend, ColdBackend};
+use store::metadata::{CURRENT_SCHEMA_VERSION, SchemaVersion};
 use store::{
     BlobInfo, DBColumn, HotColdDB, StoreConfig,
+    config::ColdBackendKind,
     hdiff::HierarchyConfig,
     iter::{BlockRootsIterator, StateRootsIterator},
 };
@@ -68,19 +69,30 @@ static KEYPAIRS: LazyLock<Vec<Keypair>> =
 type E = MinimalEthSpec;
 type TestHarness = BeaconChainHarness<DiskHarnessType<E>>;
 
-fn get_store(db_path: &TempDir) -> Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>> {
+fn get_store(db_path: &TempDir) -> Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>> {
     let store_config = StoreConfig {
         prune_payloads: false,
+        cold_backend: cold_backend_from_env(),
         ..StoreConfig::default()
     };
     get_store_generic(db_path, store_config, test_spec::<E>())
+}
+
+/// Pick the cold backend from `COLD_BACKEND=static|kv` so the same test suite
+/// can be run against both backends without duplicating tests. Default is the
+/// historical KV backend.
+fn cold_backend_from_env() -> ColdBackendKind {
+    match std::env::var("COLD_BACKEND").as_deref() {
+        Ok("static") => ColdBackendKind::Static,
+        _ => ColdBackendKind::Kv,
+    }
 }
 
 fn get_store_generic(
     db_path: &TempDir,
     config: StoreConfig,
     spec: ChainSpec,
-) -> Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>> {
+) -> Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>> {
     create_test_tracing_subscriber();
     let hot_path = db_path.path().join("chain_db");
     let cold_path = db_path.path().join("freezer_db");
@@ -98,7 +110,7 @@ fn get_store_generic(
 }
 
 fn get_harness(
-    store: Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>,
+    store: Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>>,
     validator_count: usize,
 ) -> TestHarness {
     // Most tests expect to retain historic states, so we use this as the default.
@@ -115,7 +127,7 @@ fn get_harness(
 }
 
 fn get_harness_import_all_data_columns(
-    store: Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>,
+    store: Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>>,
     validator_count: usize,
 ) -> TestHarness {
     // Most tests expect to retain historic states, so we use this as the default.
@@ -133,7 +145,7 @@ fn get_harness_import_all_data_columns(
 }
 
 fn get_harness_generic(
-    store: Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>,
+    store: Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>>,
     validator_count: usize,
     chain_config: ChainConfig,
     node_custody_type: NodeCustodyType,
@@ -167,7 +179,7 @@ fn check_db_invariants(harness: &TestHarness) {
 }
 
 fn get_states_descendant_of_block(
-    store: &HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>,
+    store: &HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>,
     block_root: Hash256,
 ) -> Vec<(Hash256, Slot)> {
     let summaries = store.load_hot_state_summaries().unwrap();
@@ -3002,6 +3014,12 @@ async fn weak_subjectivity_sync_test(
     backfill_batch_size: Option<usize>,
     provide_blobs: bool,
 ) {
+    // Static cold backend rejects checkpoint+backfill at construction; nothing
+    // here would exercise it usefully under that mode.
+    if cold_backend_from_env() == ColdBackendKind::Static {
+        return;
+    }
+
     // Build an initial chain on one harness, representing a synced node with full history.
     let num_final_blocks = E::slots_per_epoch() * 2;
 
@@ -5018,75 +5036,6 @@ fn check_data_column_existence(
     }
 }
 
-#[tokio::test]
-async fn prune_historic_states() {
-    let num_blocks_produced = E::slots_per_epoch() * 5;
-    let db_path = tempdir().unwrap();
-    let store = get_store(&db_path);
-    let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
-    let genesis_state_root = harness.chain.genesis_state_root;
-
-    let genesis_state = harness
-        .chain
-        .get_state(&genesis_state_root, None, CACHE_STATE_IN_TESTS)
-        .unwrap()
-        .unwrap();
-
-    harness
-        .extend_chain(
-            num_blocks_produced as usize,
-            BlockStrategy::OnCanonicalHead,
-            AttestationStrategy::AllValidators,
-        )
-        .await;
-
-    // Check historical states are present.
-    let first_epoch_state_roots = harness
-        .chain
-        .forwards_iter_state_roots(Slot::new(0))
-        .unwrap()
-        .take(E::slots_per_epoch() as usize)
-        .map(Result::unwrap)
-        .collect::<Vec<_>>();
-    for &(state_root, slot) in &first_epoch_state_roots {
-        assert!(
-            store
-                .get_state(&state_root, Some(slot), CACHE_STATE_IN_TESTS)
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    store
-        .prune_historic_states(genesis_state_root, &genesis_state)
-        .unwrap();
-
-    // Check that anchor info is updated.
-    let anchor_info = store.get_anchor_info();
-    assert_eq!(anchor_info.state_lower_limit, 0);
-    assert_eq!(anchor_info.state_upper_limit, STATE_UPPER_LIMIT_NO_RETAIN);
-
-    // Ensure all epoch 0 states other than the genesis have been pruned.
-    for &(state_root, slot) in &first_epoch_state_roots {
-        assert_eq!(
-            store
-                .get_state(&state_root, Some(slot), CACHE_STATE_IN_TESTS)
-                .unwrap()
-                .is_some(),
-            slot == 0
-        );
-    }
-
-    // Run for another two epochs.
-    let additional_blocks_produced = 2 * E::slots_per_epoch();
-    harness
-        .extend_slots(additional_blocks_produced as usize)
-        .await;
-
-    check_finalization(&harness, num_blocks_produced + additional_blocks_produced);
-    check_split_slot(&harness, store);
-}
-
 // Test the function `get_ancestor_state_root` for slots prior to the split where we only have
 // sparse summaries stored.
 #[tokio::test]
@@ -5851,7 +5800,7 @@ async fn test_gloas_hot_state_hierarchy() {
 /// Check that the HotColdDB's split_slot is equal to the start slot of the last finalized epoch.
 fn check_split_slot(
     harness: &TestHarness,
-    store: Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>,
+    store: Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>>,
 ) {
     let split_slot = store.get_split_slot();
     assert_eq!(

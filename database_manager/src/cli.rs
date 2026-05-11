@@ -78,7 +78,6 @@ pub enum DatabaseManagerSubcommand {
     Version(Version),
     PrunePayloads(PrunePayloads),
     PruneBlobs(PruneBlobs),
-    PruneStates(PruneStates),
     Compact(Compact),
 }
 
@@ -175,21 +174,6 @@ pub struct PrunePayloads {}
     alias = "prune_blobs"
 )]
 pub struct PruneBlobs {}
-
-#[derive(Parser, Clone, Deserialize, Serialize, Debug)]
-#[clap(
-    about = "Prune all beacon states from the freezer database.",
-    alias = "prune_states"
-)]
-pub struct PruneStates {
-    #[clap(
-        long,
-        help = "Commit to pruning states irreversably. Without this flag the command will \
-                just check that the database is capable of being pruned.",
-                help_heading = FLAG_HEADER,
-    )]
-    pub confirm: bool,
-}
 
 #[derive(Parser, Clone, Deserialize, Serialize, Debug)]
 #[clap(about = "Compact database manually.")]

@@ -791,7 +791,10 @@ mod test {
     use fork_choice::PayloadVerificationStatus;
     use logging::create_test_tracing_subscriber;
     use state_processing::ConsensusContext;
-    use store::{HotColdDB, ItemStore, StoreConfig, database::interface::BeaconNodeBackend};
+    use store::{
+        ColdStore, HotColdDB, ItemStore, StoreConfig,
+        database::interface::{BeaconNodeBackend, ColdBackend},
+    };
     use tempfile::{TempDir, tempdir};
     use tracing::info;
     use types::MinimalEthSpec;
@@ -802,7 +805,7 @@ mod test {
     fn get_store_with_spec<E: EthSpec>(
         db_path: &TempDir,
         spec: Arc<ChainSpec>,
-    ) -> Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>> {
+    ) -> Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>> {
         let hot_path = db_path.path().join("hot_db");
         let cold_path = db_path.path().join("cold_db");
         let blobs_path = db_path.path().join("blobs_db");
@@ -861,7 +864,7 @@ mod test {
     where
         E: EthSpec,
         Hot: ItemStore<E>,
-        Cold: ItemStore<E>,
+        Cold: ColdStore<E>,
     {
         let chain = &harness.chain;
         let head = chain.head_snapshot();
@@ -947,7 +950,7 @@ mod test {
         E: EthSpec,
         T: BeaconChainTypes<
                 HotStore = BeaconNodeBackend<E>,
-                ColdStore = BeaconNodeBackend<E>,
+                ColdStore = ColdBackend<E>,
                 EthSpec = E,
             >,
     {

@@ -1,5 +1,6 @@
 use crate::config::StoreConfigError;
 use crate::hot_cold_store::{HotColdDBError, StateSummaryIteratorError};
+use crate::static_cold::StaticColdStoreError;
 use crate::{DBColumn, hdiff};
 #[cfg(feature = "leveldb")]
 use leveldb::error::Error as LevelDBError;
@@ -14,6 +15,7 @@ pub enum Error {
     SszDecodeError(DecodeError),
     BeaconStateError(BeaconStateError),
     HotColdDBError(HotColdDBError),
+    StaticColdStoreError(StaticColdStoreError),
     DBError {
         message: String,
     },
@@ -37,6 +39,21 @@ pub enum Error {
     /// State reconstruction cannot commence because not all historic blocks are known.
     MissingHistoricBlocks {
         oldest_block_slot: Slot,
+    },
+    /// State reconstruction is not supported with the static cold backend.
+    ///
+    /// The static-file backend is strict-ascending append-only, but online
+    /// reconstruction writes states at slots already below the high-water
+    /// mark. Per `specs/static-cold-backend.md`, a full node never becomes
+    /// archive by online reconstruction.
+    ReconstructionUnsupportedOnStaticCold,
+    /// The configured cold backend differs from the one persisted on disk.
+    ///
+    /// Switching cold backends in-place is unsupported because the on-disk
+    /// formats are incompatible.
+    ColdBackendMismatch {
+        on_disk: crate::config::ColdBackendKind,
+        configured: crate::config::ColdBackendKind,
     },
     /// State reconstruction failed because it didn't reach the upper limit slot.
     ///
@@ -126,6 +143,12 @@ impl From<DecodeError> for Error {
 impl From<HotColdDBError> for Error {
     fn from(e: HotColdDBError) -> Error {
         Error::HotColdDBError(e)
+    }
+}
+
+impl From<StaticColdStoreError> for Error {
+    fn from(e: StaticColdStoreError) -> Error {
+        Error::StaticColdStoreError(e)
     }
 }
 

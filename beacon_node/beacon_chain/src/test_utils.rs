@@ -65,8 +65,8 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use store::database::interface::BeaconNodeBackend;
-use store::{HotColdDB, ItemStore, MemoryStore, config::StoreConfig};
+use store::database::interface::{BeaconNodeBackend, ColdBackend};
+use store::{ColdStore, HotColdDB, ItemStore, MemoryStore, config::StoreConfig};
 use task_executor::TaskExecutor;
 use task_executor::{ShutdownReason, test_utils::TestRuntime};
 use tracing::debug;
@@ -124,7 +124,7 @@ pub fn get_kzg(spec: &ChainSpec) -> Arc<Kzg> {
 pub type BaseHarnessType<E, THotStore, TColdStore> =
     Witness<TestingSlotClock, E, THotStore, TColdStore>;
 
-pub type DiskHarnessType<E> = BaseHarnessType<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>;
+pub type DiskHarnessType<E> = BaseHarnessType<E, BeaconNodeBackend<E>, ColdBackend<E>>;
 pub type EphemeralHarnessType<E> = BaseHarnessType<E, MemoryStore<E>, MemoryStore<E>>;
 
 pub type BoxedMutator<E, Hot, Cold> = Box<
@@ -350,7 +350,7 @@ impl<E: EthSpec> Builder<DiskHarnessType<E>> {
     /// Disk store, start from genesis.
     pub fn fresh_disk_store(
         mut self,
-        store: Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>,
+        store: Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>>,
     ) -> Self {
         let validator_keypairs = self
             .validator_keypairs
@@ -384,7 +384,7 @@ impl<E: EthSpec> Builder<DiskHarnessType<E>> {
     /// Disk store, resume.
     pub fn resumed_disk_store(
         mut self,
-        store: Arc<HotColdDB<E, BeaconNodeBackend<E>, BeaconNodeBackend<E>>>,
+        store: Arc<HotColdDB<E, BeaconNodeBackend<E>, ColdBackend<E>>>,
     ) -> Self {
         let mutator = move |builder: BeaconChainBuilder<_>| {
             builder
@@ -400,7 +400,7 @@ impl<E, Hot, Cold> Builder<BaseHarnessType<E, Hot, Cold>>
 where
     E: EthSpec,
     Hot: ItemStore<E>,
-    Cold: ItemStore<E>,
+    Cold: ColdStore<E>,
 {
     pub fn new(eth_spec_instance: E) -> Self {
         let runtime = TestRuntime::default();
@@ -761,7 +761,7 @@ impl<E, Hot, Cold> BeaconChainHarness<BaseHarnessType<E, Hot, Cold>>
 where
     E: EthSpec,
     Hot: ItemStore<E>,
-    Cold: ItemStore<E>,
+    Cold: ColdStore<E>,
 {
     pub fn builder(eth_spec_instance: E) -> Builder<BaseHarnessType<E, Hot, Cold>> {
         create_test_tracing_subscriber();

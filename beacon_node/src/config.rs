@@ -418,6 +418,10 @@ pub fn get_config<E: EthSpec>(
         client_config.store.backend = backend;
     }
 
+    if let Some(cold_backend) = clap_utils::parse_optional(cli_args, "cold-backend")? {
+        client_config.store.cold_backend = cold_backend;
+    }
+
     if let Some(hierarchy_config) = clap_utils::parse_optional(cli_args, "hierarchy-exponents")? {
         client_config.store.hierarchy_config = hierarchy_config;
     }

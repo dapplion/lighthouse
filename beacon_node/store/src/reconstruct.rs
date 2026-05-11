@@ -1,8 +1,9 @@
 //! Implementation of historic state reconstruction (given complete block history).
+use crate::config::ColdBackendKind;
 use crate::forwards_iter::FrozenForwardsIterator;
-use crate::hot_cold_store::{HotColdDB, HotColdDBError};
+use crate::hot_cold_store::{ColdBatch, HotColdDB, HotColdDBError};
 use crate::metrics;
-use crate::{DBColumn, Error, ItemStore};
+use crate::{ColdStore, DBColumn, Error, ItemStore};
 use itertools::{Itertools, process_results};
 use state_processing::{
     BlockSignatureStrategy, ConsensusContext, VerifyBlockRoot, per_block_processing,
@@ -16,12 +17,21 @@ impl<E, Hot, Cold> HotColdDB<E, Hot, Cold>
 where
     E: EthSpec,
     Hot: ItemStore<E>,
-    Cold: ItemStore<E>,
+    Cold: ColdStore<E>,
 {
     pub fn reconstruct_historic_states(
         self: &Arc<Self>,
         num_blocks: Option<usize>,
     ) -> Result<(), Error> {
+        // Online reconstruction writes historic states into the cold backend
+        // at slots that are already below the static-cold high-water mark for
+        // each column. The static backend is strict-ascending and would reject
+        // those puts as out-of-order. Per `specs/static-cold-backend.md`, a
+        // full node never becomes archive by online reconstruction — refuse.
+        if matches!(self.config.cold_backend, ColdBackendKind::Static) {
+            return Err(Error::ReconstructionUnsupportedOnStaticCold);
+        }
+
         let mut anchor = self.get_anchor_info();
 
         // Nothing to do, history is complete.
@@ -129,7 +139,7 @@ where
         state.build_caches(&self.spec)?;
 
         process_results(block_root_iter, |iter| -> Result<(), Error> {
-            let mut io_batch = vec![];
+            let mut batch = ColdBatch::default();
             let mut prev_state_root = None;
 
             for ((prev_block_root, _), (block_root, slot)) in iter.tuple_windows() {
@@ -172,7 +182,7 @@ where
                     .or_else(|_| state.update_tree_hash_cache())?;
 
                 // Stage state for storage in freezer DB.
-                self.store_cold_state(&state_root, &state, &mut io_batch)?;
+                self.store_cold_state(&state_root, &state, &mut batch)?;
 
                 let batch_complete = slot + 1 == to_slot;
 
@@ -181,7 +191,7 @@ where
                 // - The diff/snapshot for this slot is required for future slots, or
                 // - The reconstruction batch is complete (we are about to return).
                 if self.hierarchy.should_commit_immediately(slot)? || batch_complete {
-                    self.cold_db.do_atomically(std::mem::take(&mut io_batch))?;
+                    self.commit_cold_batch(std::mem::take(&mut batch))?;
 
                     if batch_complete {
                         // Perform one last integrity check on the state reached.

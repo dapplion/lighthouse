@@ -21,6 +21,7 @@ pub mod metadata;
 pub mod metrics;
 pub mod reconstruct;
 pub mod state_cache;
+pub mod static_cold;
 
 pub mod database;
 pub mod iter;
@@ -29,6 +30,7 @@ pub use self::blob_sidecar_list_from_root::BlobSidecarListFromRoot;
 pub use self::config::StoreConfig;
 pub use self::hot_cold_store::{HotColdDB, HotStateSummary, Split};
 pub use self::memory_store::MemoryStore;
+pub use self::static_cold::StaticColdStore;
 pub use crate::metadata::BlobInfo;
 pub use errors::Error;
 pub use metadata::AnchorInfo;
@@ -103,6 +105,92 @@ pub trait KeyValueStore<E: EthSpec>: Sync + Send + Sized + 'static {
         column: DBColumn,
         f: impl FnMut(&[u8]) -> Result<bool, Error>,
     ) -> Result<(), Error>;
+}
+
+pub type SlotIter<'a> = Box<dyn Iterator<Item = Result<(Slot, Vec<u8>), Error>> + 'a>;
+pub type IndexIter<'a> = Box<dyn Iterator<Item = Result<(Hash256, Slot), Error>> + 'a>;
+
+/// Slot-keyed cold columns served by the static archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum DBColumnCold {
+    Block,
+    BlockRoots,
+    StateRoots,
+    StateSnapshot,
+    StateDiff,
+}
+
+impl DBColumnCold {
+    pub fn db_column(self) -> DBColumn {
+        match self {
+            Self::Block => DBColumn::BeaconBlock,
+            Self::BlockRoots => DBColumn::BeaconBlockRoots,
+            Self::StateRoots => DBColumn::BeaconStateRoots,
+            Self::StateSnapshot => DBColumn::BeaconStateSnapshot,
+            Self::StateDiff => DBColumn::BeaconStateDiff,
+        }
+    }
+
+    pub fn try_from_db_column(column: DBColumn) -> Option<Self> {
+        match column {
+            DBColumn::BeaconBlock => Some(Self::Block),
+            DBColumn::BeaconBlockRoots => Some(Self::BlockRoots),
+            DBColumn::BeaconStateRoots => Some(Self::StateRoots),
+            DBColumn::BeaconStateSnapshot => Some(Self::StateSnapshot),
+            DBColumn::BeaconStateDiff => Some(Self::StateDiff),
+            _ => None,
+        }
+    }
+}
+
+/// Root-keyed indices owned by the cold backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DBColumnColdIndex {
+    /// `block_root -> slot` for blocks moved into the cold archive. Populated
+    /// by `migrate_database` (Static cold) and era-file import. Empty under
+    /// KV cold. Consulted by `HotColdDB::get_block_with` to resolve root-keyed
+    /// reads against the slot-keyed cold archive.
+    BlockSlot,
+    /// `state_root -> slot` for cold state summaries.
+    ColdStateSummary,
+}
+
+impl DBColumnColdIndex {
+    pub fn db_column(self) -> DBColumn {
+        match self {
+            Self::BlockSlot => DBColumn::BeaconBlockSlot,
+            Self::ColdStateSummary => DBColumn::BeaconColdStateSummary,
+        }
+    }
+}
+
+pub trait ColdStore<E: EthSpec>: Sync + Send + Sized + 'static {
+    // Slot-keyed bulk data.
+    fn get(&self, column: DBColumnCold, slot: Slot) -> Result<Option<Vec<u8>>, Error>;
+
+    /// Append `items` to `column`. Slots within `items` must be strictly
+    /// ascending and strictly greater than every slot already written to the
+    /// column — the static-file backend rejects out-of-order puts. KV
+    /// backends accept any order, so this is enforced by the caller, not the
+    /// trait.
+    fn put_batch(&self, column: DBColumnCold, items: Vec<(Slot, Vec<u8>)>) -> Result<(), Error>;
+
+    fn contains(&self, column: DBColumnCold, slot: Slot) -> Result<bool, Error>;
+
+    fn iter_from(&self, column: DBColumnCold, from: Slot) -> SlotIter<'_>;
+
+    // Root-keyed indices owned by the cold backend.
+    fn get_index(&self, column: DBColumnColdIndex, root: Hash256) -> Result<Option<Slot>, Error>;
+
+    fn put_index_batch(
+        &self,
+        column: DBColumnColdIndex,
+        items: Vec<(Hash256, Slot)>,
+    ) -> Result<(), Error>;
+
+    fn iter_index(&self, column: DBColumnColdIndex) -> IndexIter<'_>;
+
+    fn sync(&self) -> Result<(), Error>;
 }
 
 pub trait Key: Sized + 'static {
@@ -349,6 +437,12 @@ pub enum DBColumn {
     /// Can be removed once schema v22 is buried by a hard fork.
     #[strum(serialize = "bbr")]
     BeaconBlockRootsChunked,
+    /// `block_root -> slot` index for blocks moved into the cold archive.
+    /// Populated by `migrate_database` (Static cold) and era-file import.
+    /// Empty under KV cold. Consulted by `HotColdDB::get_block_with` to
+    /// resolve root-keyed reads against the slot-keyed cold archive.
+    #[strum(serialize = "bbs")]
+    BeaconBlockSlot,
     /// DEPRECATED. Can be removed once schema v22 is buried by a hard fork.
     #[strum(serialize = "bhr")]
     BeaconHistoricalRoots,
@@ -404,6 +498,7 @@ impl DBColumn {
             Self::OverflowLRUCache => 33, // DEPRECATED
             Self::BeaconMeta
             | Self::BeaconBlock
+            | Self::BeaconBlockSlot
             | Self::BeaconState
             | Self::BeaconBlob
             | Self::BeaconStateSummary
@@ -491,6 +586,21 @@ mod tests {
         fn from_store_bytes(bytes: &[u8]) -> Result<Self, Error> {
             Self::from_ssz_bytes(bytes).map_err(Into::into)
         }
+    }
+
+    /// Mirrors the wrapper that older releases stored in `BeaconColdStateSummary`.
+    #[derive(Encode, Decode)]
+    struct LegacyColdStateSummary {
+        slot: Slot,
+    }
+
+    #[test]
+    fn ssz_compat_with_legacy_summary() {
+        let slot = Slot::new(42);
+        assert_eq!(
+            slot.as_ssz_bytes(),
+            LegacyColdStateSummary { slot }.as_ssz_bytes(),
+        );
     }
 
     fn test_impl(store: impl ItemStore<MinimalEthSpec>) {
