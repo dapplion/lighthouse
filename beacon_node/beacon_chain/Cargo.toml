@@ -92,6 +92,14 @@ yaml_serde = { workspace = true }
 name = "benches"
 harness = false
 
+[[bench]]
+name = "blinder"
+harness = false
+
+[[bench]]
+name = "hash"
+harness = false
+
 [[test]]
 name = "beacon_chain_tests"
 path = "tests/main.rs"
