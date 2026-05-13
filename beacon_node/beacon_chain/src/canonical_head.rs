@@ -45,7 +45,9 @@ use crate::{
     metrics,
     validator_monitor::get_slot_delay_ms,
 };
-use eth2::types::{EventKind, SseChainReorg, SseFinalizedCheckpoint, SseLateHead};
+use eth2::types::{
+    EventKind, SseChainReorg, SseFastConfirmation, SseFinalizedCheckpoint, SseLateHead,
+};
 use fork_choice::{
     ExecutionStatus, ForkChoiceStore, ForkChoiceView, ForkchoiceUpdateParameters, PayloadStatus,
     ProtoBlock, ResetPayloadStatuses,
@@ -741,15 +743,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 let label: &'static str = (&e).into();
                 metrics::inc_counter_vec(&metrics::FCR_ERRORS, &[label]);
             } else {
-                if fcr.confirmed_root != old_confirmed {
+                let confirmed_root_changed = fcr.confirmed_root != old_confirmed;
+                if confirmed_root_changed {
                     metrics::inc_counter(&metrics::FCR_CONFIRMED_ROOT_CHANGES);
                 }
-                if let Some(confirmed_slot) = proto_array
+                let confirmed_slot_opt = proto_array
                     .indices
                     .get(&fcr.confirmed_root)
                     .and_then(|&idx| proto_array.nodes.get(idx))
-                    .map(|n| n.slot())
-                {
+                    .map(|n| n.slot());
+                if let Some(confirmed_slot) = confirmed_slot_opt {
                     metrics::set_gauge(
                         &metrics::FCR_CONFIRMED_ROOT_SLOT,
                         confirmed_slot.as_u64() as i64,
@@ -758,6 +761,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         .as_u64()
                         .saturating_sub(confirmed_slot.as_u64());
                     metrics::set_gauge(&metrics::FCR_CONFIRMATION_DELAY_SLOTS, delay as i64);
+                }
+                if confirmed_root_changed
+                    && let Some(confirmed_slot) = confirmed_slot_opt
+                    && let Some(event_handler) = self.event_handler.as_ref()
+                    && event_handler.has_fast_confirmation_subscribers()
+                {
+                    event_handler.register(EventKind::FastConfirmation(SseFastConfirmation {
+                        block: fcr.confirmed_root,
+                        slot: confirmed_slot,
+                    }));
                 }
                 let balance_epoch = fcr.current_balance_source.checkpoint.epoch;
                 let current_epoch = current_slot.epoch(T::EthSpec::slots_per_epoch());
