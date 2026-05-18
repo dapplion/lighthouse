@@ -692,7 +692,10 @@ mod test {
         let mut cache = new_shuffling_cache();
         let id_a = shuffling_id(1);
         let committee_cache_a = Arc::new(CommitteeCache::default());
-        cache.insert_committee_cache_with_ptcs(id_a.clone(), cached_shuffling(committee_cache_a.clone()));
+        cache.insert_committee_cache_with_ptcs(
+            id_a.clone(),
+            cached_shuffling(committee_cache_a.clone()),
+        );
         assert!(
             matches!(cache.get(&id_a).unwrap(), CacheItem::Committee(cached_shuffling) if cached_shuffling.committee_cache == committee_cache_a),
             "should insert committee cache"

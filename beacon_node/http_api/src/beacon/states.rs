@@ -388,86 +388,84 @@ pub fn get_beacon_state_committees<T: BeaconChainTypes>(
                                     None
                                 };
 
-                                let committee_cache =
-                                    if let Some(shuffling) = maybe_cached_shuffling {
-                                        shuffling
-                                    } else {
-                                        let possibly_built_cache =
-                                            match RelativeEpoch::from_epoch(current_epoch, epoch) {
-                                                Ok(relative_epoch)
-                                                    if state.committee_cache_is_initialized(
-                                                        relative_epoch,
-                                                    ) =>
-                                                {
-                                                    state.committee_cache(relative_epoch).cloned()
-                                                }
-                                                _ => CommitteeCache::initialized(
-                                                    state,
-                                                    epoch,
-                                                    &chain.spec,
-                                                ),
+                                let committee_cache = if let Some(shuffling) =
+                                    maybe_cached_shuffling
+                                {
+                                    shuffling
+                                } else {
+                                    let possibly_built_cache =
+                                        match RelativeEpoch::from_epoch(current_epoch, epoch) {
+                                            Ok(relative_epoch)
+                                                if state.committee_cache_is_initialized(
+                                                    relative_epoch,
+                                                ) =>
+                                            {
+                                                state.committee_cache(relative_epoch).cloned()
                                             }
-                                            .map_err(
-                                                |e| match e {
-                                                    BeaconStateError::EpochOutOfBounds => {
-                                                        let max_sprp =
-                                                            T::EthSpec::slots_per_historical_root()
-                                                                as u64;
-                                                        let first_subsequent_restore_point_slot =
-                                                            ((epoch.start_slot(
-                                                                T::EthSpec::slots_per_epoch(),
-                                                            ) / max_sprp)
-                                                                + 1)
-                                                                * max_sprp;
-                                                        if epoch < current_epoch {
-                                                            warp_utils::reject::custom_bad_request(
-                                                                format!(
-                                                        "epoch out of bounds, \
-                                                                 try state at slot {}",
-                                                        first_subsequent_restore_point_slot,
-                                                    ),
-                                                            )
-                                                        } else {
-                                                            warp_utils::reject::custom_bad_request(
-                                                                "epoch out of bounds, \
-                                                             too far in future"
-                                                                    .into(),
-                                                            )
-                                                        }
-                                                    }
-                                                    _ => warp_utils::reject::unhandled_error(
-                                                        BeaconChainError::from(e),
-                                                    ),
-                                                },
-                                            )?;
-
-                                        // Attempt to write to the beacon cache (only if the cache
-                                        // size is not the default value). Skip priming if PTCs
-                                        // cannot be derived from this state (e.g., requesting an
-                                        // epoch outside the state's PTC window).
-                                        if chain.config.shuffling_cache_size
-                                            != beacon_chain::shuffling_cache::DEFAULT_CACHE_SIZE
-                                            && let Some(shuffling_id) = shuffling_id
-                                            && let Ok(ptcs) = get_ptcs_for_shuffling_epoch(
+                                            _ => CommitteeCache::initialized(
                                                 state,
                                                 epoch,
                                                 &chain.spec,
-                                            )
-                                            && let Some(mut cache_write) = chain
-                                                .shuffling_cache
-                                                .try_write_for(std::time::Duration::from_secs(1))
-                                        {
-                                            cache_write.insert_committee_cache_with_ptcs(
-                                                shuffling_id.clone(),
-                                                CachedShuffling::new(
-                                                    possibly_built_cache.clone(),
-                                                    ptcs,
-                                                ),
-                                            );
+                                            ),
                                         }
+                                        .map_err(|e| {
+                                            match e {
+                                                BeaconStateError::EpochOutOfBounds => {
+                                                    let max_sprp =
+                                                        T::EthSpec::slots_per_historical_root()
+                                                            as u64;
+                                                    let first_subsequent_restore_point_slot =
+                                                        ((epoch.start_slot(
+                                                            T::EthSpec::slots_per_epoch(),
+                                                        ) / max_sprp)
+                                                            + 1)
+                                                            * max_sprp;
+                                                    if epoch < current_epoch {
+                                                        warp_utils::reject::custom_bad_request(
+                                                            format!(
+                                                                "epoch out of bounds, \
+                                                                 try state at slot {}",
+                                                                first_subsequent_restore_point_slot,
+                                                            ),
+                                                        )
+                                                    } else {
+                                                        warp_utils::reject::custom_bad_request(
+                                                            "epoch out of bounds, \
+                                                             too far in future"
+                                                                .into(),
+                                                        )
+                                                    }
+                                                }
+                                                _ => warp_utils::reject::unhandled_error(
+                                                    BeaconChainError::from(e),
+                                                ),
+                                            }
+                                        })?;
 
-                                        possibly_built_cache
-                                    };
+                                    // Attempt to write to the beacon cache (only if the cache
+                                    // size is not the default value). Skip priming if PTCs
+                                    // cannot be derived from this state (e.g., requesting an
+                                    // epoch outside the state's PTC window).
+                                    if chain.config.shuffling_cache_size
+                                        != beacon_chain::shuffling_cache::DEFAULT_CACHE_SIZE
+                                        && let Some(shuffling_id) = shuffling_id
+                                        && let Ok(ptcs) =
+                                            get_ptcs_for_shuffling_epoch(state, epoch, &chain.spec)
+                                        && let Some(mut cache_write) = chain
+                                            .shuffling_cache
+                                            .try_write_for(std::time::Duration::from_secs(1))
+                                    {
+                                        cache_write.insert_committee_cache_with_ptcs(
+                                            shuffling_id.clone(),
+                                            CachedShuffling::new(
+                                                possibly_built_cache.clone(),
+                                                ptcs,
+                                            ),
+                                        );
+                                    }
+
+                                    possibly_built_cache
+                                };
 
                                 // Use either the supplied slot or all slots in the epoch.
                                 let slots =
