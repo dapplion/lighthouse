@@ -46,8 +46,7 @@ use crate::{
     validator_monitor::get_slot_delay_ms,
 };
 use eth2::types::{
-    EventKind, SseChainReorg, SseFastConfirmation, SseFastConfirmationBlock,
-    SseFinalizedCheckpoint, SseLateHead,
+    EventKind, SseChainReorg, SseFastConfirmation, SseFinalizedCheckpoint, SseLateHead,
 };
 use fork_choice::{
     ExecutionStatus, ForkChoiceStore, ForkChoiceView, ForkchoiceUpdateParameters, PayloadStatus,
@@ -768,29 +767,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     && let Some(event_handler) = self.event_handler.as_ref()
                     && event_handler.has_fast_confirmation_subscribers()
                 {
-                    // Walk back through ancestors of the new confirmed_root, taking blocks
-                    // newer than old_confirmed. The cap bounds the rare case where
-                    // old_confirmed is not in proto_array (e.g., pruned across a restart).
-                    const MAX_CHAIN_DEPTH: usize = 4096;
-                    let old_confirmed_slot = proto_array
-                        .indices
-                        .get(&old_confirmed)
-                        .and_then(|&idx| proto_array.nodes.get(idx))
-                        .map(|n| n.slot());
-                    let mut chain: Vec<SseFastConfirmationBlock> = proto_array
-                        .iter_block_roots(&fcr.confirmed_root)
-                        .take(MAX_CHAIN_DEPTH)
-                        .take_while(|(root, slot)| match old_confirmed_slot {
-                            Some(old_slot) => *slot > old_slot,
-                            None => *root != old_confirmed,
-                        })
-                        .map(|(block, slot)| SseFastConfirmationBlock { block, slot })
-                        .collect();
-                    chain.reverse();
                     event_handler.register(EventKind::FastConfirmation(SseFastConfirmation {
                         block: fcr.confirmed_root,
                         slot: confirmed_slot,
-                        chain,
                     }));
                 }
                 let balance_epoch = fcr.current_balance_source.checkpoint.epoch;

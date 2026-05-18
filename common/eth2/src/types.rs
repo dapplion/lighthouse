@@ -1075,20 +1075,9 @@ pub struct BlockGossip {
 }
 
 #[derive(PartialEq, Debug, Serialize, Deserialize, Clone)]
-pub struct SseFastConfirmationBlock {
-    pub block: Hash256,
-    pub slot: Slot,
-}
-
-#[derive(PartialEq, Debug, Serialize, Deserialize, Clone)]
 pub struct SseFastConfirmation {
     pub block: Hash256,
     pub slot: Slot,
-    /// Blocks newly confirmed by this advancement, ordered oldest-to-newest.
-    /// The last entry equals `{block, slot}`; the first entry's parent is the
-    /// previous confirmed root (or the finalized root on FCR reset).
-    #[serde(default)]
-    pub chain: Vec<SseFastConfirmationBlock>,
 }
 #[derive(PartialEq, Debug, Serialize, Deserialize, Clone)]
 pub struct SseExecutionPayload {
