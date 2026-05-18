@@ -416,11 +416,7 @@ fn advance_head<T: BeaconChainTypes>(beacon_chain: &Arc<BeaconChain<T>>) -> Resu
             beacon_chain
                 .shuffling_cache
                 .write()
-                .insert_committee_cache_with_ptcs(
-                    shuffling_id.clone(),
-                    cached_shuffling,
-                    &beacon_chain.spec,
-                )?;
+                .insert_committee_cache_with_ptcs(shuffling_id.clone(), cached_shuffling);
 
             debug!(
                 ?head_block_root,

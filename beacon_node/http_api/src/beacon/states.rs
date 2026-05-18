@@ -6,6 +6,7 @@ use crate::version::{
     ResponseIncludesVersion, add_consensus_version_header, add_ssz_content_type_header,
     execution_optimistic_finalized_beacon_response,
 };
+use beacon_chain::shuffling_cache::{CachedShuffling, get_ptcs_for_shuffling_epoch};
 use beacon_chain::{BeaconChain, BeaconChainError, BeaconChainTypes, WhenSlotSkipped};
 use eth2::types::{
     self as api_types, ValidatorBalancesRequestBody, ValidatorId, ValidatorIdentitiesRequestBody,
@@ -441,28 +442,28 @@ pub fn get_beacon_state_committees<T: BeaconChainTypes>(
                                             )?;
 
                                         // Attempt to write to the beacon cache (only if the cache
-                                        // size is not the default value).
+                                        // size is not the default value). Skip priming if PTCs
+                                        // cannot be derived from this state (e.g., requesting an
+                                        // epoch outside the state's PTC window).
                                         if chain.config.shuffling_cache_size
                                             != beacon_chain::shuffling_cache::DEFAULT_CACHE_SIZE
                                             && let Some(shuffling_id) = shuffling_id
+                                            && let Ok(ptcs) = get_ptcs_for_shuffling_epoch(
+                                                state,
+                                                epoch,
+                                                &chain.spec,
+                                            )
                                             && let Some(mut cache_write) = chain
                                                 .shuffling_cache
                                                 .try_write_for(std::time::Duration::from_secs(1))
                                         {
-                                            let decision_block_root =
-                                                shuffling_id.shuffling_decision_block;
-                                            if let Err(error) = cache_write.insert_committee_cache(
+                                            cache_write.insert_committee_cache_with_ptcs(
                                                 shuffling_id.clone(),
-                                                &possibly_built_cache,
-                                                &chain.spec,
-                                            ) {
-                                                tracing::warn!(
-                                                    %epoch,
-                                                    ?decision_block_root,
-                                                    ?error,
-                                                    "Priming committee cache failed"
-                                                );
-                                            }
+                                                CachedShuffling::new(
+                                                    possibly_built_cache.clone(),
+                                                    ptcs,
+                                                ),
+                                            );
                                         }
 
                                         possibly_built_cache
