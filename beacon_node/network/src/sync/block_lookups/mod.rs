@@ -89,9 +89,7 @@ pub type SingleLookupId = u32;
 
 #[derive(Debug, Copy, Clone)]
 pub enum NewLookupTrigger {
-    // `ParentUnknown` carries the parent block root for logging/metrics; not consumed
-    // elsewhere yet. Keep the field so the trigger reason stays in debug logs.
-    ParentUnknown(#[allow(dead_code)] Hash256),
+    ParentUnknown,
     NetworkMessage,
 }
 
@@ -728,7 +726,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                     awaiting_parent,
                     block_root,
                     &peers,
-                    NewLookupTrigger::ParentUnknown(awaiting_parent.parent_root()),
+                    NewLookupTrigger::ParentUnknown,
                     cx,
                 ) {
                     true

@@ -207,6 +207,13 @@ pub enum InvalidPayloadAttestation {
     },
 }
 
+#[allow(clippy::large_enum_variant)]
+pub enum ParentImportedStatus {
+    Imported(ProtoBlock),
+    UnknownBlock,
+    UnimportedPayload,
+}
+
 impl<T> From<String> for Error<T> {
     fn from(e: String) -> Self {
         Error::ProtoArrayStringError(e)
@@ -1520,6 +1527,21 @@ where
     pub fn is_payload_received(&self, block_root: &Hash256) -> bool {
         self.proto_array.is_payload_received(block_root)
             && self.is_finalized_checkpoint_or_descendant(*block_root)
+    }
+
+    /// Returns the import status of the parent
+    pub fn is_parent_imported(&self, block: &SignedBeaconBlock<E>) -> ParentImportedStatus {
+        if let Some(proto_block) = self.get_block(&block.parent_root()) {
+            if let Ok(bid) = block.message().body().signed_execution_payload_bid()
+                && proto_block.is_child_full(bid)
+                && !self.is_payload_received(&block.parent_root())
+            {
+                return ParentImportedStatus::UnimportedPayload;
+            }
+            ParentImportedStatus::Imported(proto_block)
+        } else {
+            ParentImportedStatus::UnknownBlock
+        }
     }
 
     /// Returns whether the proposer should extend the execution payload chain of the given block.
