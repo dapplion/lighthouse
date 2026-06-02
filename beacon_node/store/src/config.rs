@@ -66,6 +66,7 @@ pub struct StoreConfig {
     /// The margin for blob pruning in epochs. The oldest blobs are pruned up until
     /// data_availability_boundary - blob_prune_margin_epochs. Default: 0.
     pub blob_prune_margin_epochs: u64,
+    pub allow_backfill: bool,
 }
 
 /// Variant of `StoreConfig` that gets written to disk. Contains immutable configuration params.
@@ -124,6 +125,7 @@ impl Default for StoreConfig {
             prune_blobs: true,
             epochs_per_blob_prune: DEFAULT_EPOCHS_PER_BLOB_PRUNE,
             blob_prune_margin_epochs: DEFAULT_BLOB_PUNE_MARGIN_EPOCHS,
+            allow_backfill: false,
         }
     }
 }
