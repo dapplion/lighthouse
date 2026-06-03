@@ -118,16 +118,16 @@ impl<E: EthSpec> DataRequest<E> {
 enum PayloadRequest<E: EthSpec> {
     /// Block not yet downloaded, can't tell if a payload is needed.
     WaitingForBlock,
-    /// Gloas block: an execution payload envelope must be fetched and processed *if* the block is
-    /// FULL. We can't tell FULL from EMPTY from the block alone: only a FULL child of this block
+    /// Post-Gloas block: an execution payload envelope must be fetched and processed *if* the block
+    /// is FULL. We can't tell FULL from EMPTY from the block alone: only a FULL child of this block
     /// proves a payload was published, which is signalled by `peers` becoming non-empty. While
     /// `peers` is empty the block is assumed EMPTY and this request is considered complete.
     Request {
         peers: PeerSet,
         state: SingleLookupRequestState<Arc<SignedExecutionPayloadEnvelope<E>>>,
     },
-    /// No payload to fetch: pre-Gloas block, or the envelope was already imported.
-    NoPayload,
+    /// Pre-Gloas block: no payload envelope exists, nothing to fetch.
+    PreGloas,
 }
 
 impl<E: EthSpec> PayloadRequest<E> {
@@ -142,7 +142,7 @@ impl<E: EthSpec> PayloadRequest<E> {
                 }
                 state.is_processed()
             }
-            PayloadRequest::NoPayload => true,
+            PayloadRequest::PreGloas => true,
         }
     }
 }
@@ -309,7 +309,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             || match &self.payload_request {
                 PayloadRequest::WaitingForBlock => true,
                 PayloadRequest::Request { state, .. } => state.is_awaiting_event(),
-                PayloadRequest::NoPayload => false,
+                PayloadRequest::PreGloas => false,
             }
     }
 
@@ -420,14 +420,13 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             match &mut self.payload_request {
                 PayloadRequest::WaitingForBlock => {
                     if let Some(block) = self.block_request.state.peek_downloaded_data() {
-                        // A payload envelope is only fetched for FULL Gloas blocks. Pre-Gloas blocks
-                        // carry no bid, so `payload_bid_block_hash` errors and we need no payload.
-                        // For Gloas blocks whose envelope is already known to fork-choice (e.g.
-                        // imported via gossip) there is nothing to fetch.
-                        self.payload_request = if block.payload_bid_block_hash().is_err()
-                            || cx.chain.envelope_is_known_to_fork_choice(&self.block_root)
-                        {
-                            PayloadRequest::NoPayload
+                        // Pre-Gloas blocks carry no bid, so `payload_bid_block_hash` errors and
+                        // there is no payload envelope to fetch. Every post-Gloas block may have a
+                        // payload, so always instantiate the request; whether an envelope is
+                        // actually fetched depends on the block being FULL (i.e. a FULL child
+                        // donated peers into the request's peer set).
+                        self.payload_request = if block.payload_bid_block_hash().is_err() {
+                            PayloadRequest::PreGloas
                         } else {
                             let peers = self.get_data_peers(block);
                             PayloadRequest::Request {
@@ -454,7 +453,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     }
                     break;
                 }
-                PayloadRequest::NoPayload => break,
+                PayloadRequest::PreGloas => break,
             }
         }
 

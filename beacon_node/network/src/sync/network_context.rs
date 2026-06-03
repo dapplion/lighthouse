@@ -947,9 +947,17 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         LookupRequestResult<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>,
         RpcRequestSendError,
     > {
-        // The "envelope already known to fork-choice" skip is handled by the lookup state machine
-        // before this request is issued (see `PayloadRequest::WaitingForBlock` in
-        // `single_block_lookup.rs`), so there is no `NoRequestNeeded` path here.
+        // Skip the download if fork-choice already saw this envelope (e.g. imported via gossip
+        // before the lookup got here). Return the cached envelope so the request completes.
+        if self.chain.envelope_is_known_to_fork_choice(&block_root)
+            && let Ok(Some(envelope)) = self.chain.get_payload_envelope(&block_root)
+        {
+            return Ok(LookupRequestResult::NoRequestNeeded(
+                "envelope already known to fork-choice",
+                Arc::new(envelope),
+            ));
+        }
+
         let active_request_count_by_peer = self.active_request_count_by_peer();
         let Some(peer_id) = lookup_peers
             .read()
