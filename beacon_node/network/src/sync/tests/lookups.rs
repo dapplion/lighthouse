@@ -1,12 +1,14 @@
 use super::*;
 use crate::NetworkMessage;
+use crate::network_beacon_processor::BlockProcessingResult;
+use crate::network_beacon_processor::sync_methods::WhichPeerToPenalize;
 use crate::network_beacon_processor::{
     ChainSegmentProcessId, InvalidBlockStorage, NetworkBeaconProcessor,
 };
 use crate::sync::block_lookups::{BlockLookupSummary, PARENT_DEPTH_TOLERANCE};
 use crate::sync::{
     SyncMessage,
-    manager::{BatchProcessResult, BlockProcessType, BlockProcessingResult, SyncManager},
+    manager::{BatchProcessResult, BlockProcessType, SyncManager},
 };
 use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::custody_context::NodeCustodyType;
@@ -963,7 +965,6 @@ impl TestRig {
 
         // Add genesis block for completeness
         let genesis_block = external_harness.get_head_block();
-        let genesis_block_root = genesis_block.canonical_root();
         self.network_blocks_by_root
             .insert(genesis_block.canonical_root(), genesis_block.clone());
         self.network_blocks_by_slot
@@ -998,7 +999,6 @@ impl TestRig {
         }
 
         // Re-log to have a nice list of block roots at the end
-        self.log(&format!("Build chain (Slot(0), {genesis_block_root})"));
         for block in &blocks {
             self.log(&format!("Build chain {block:?}"));
         }
@@ -1034,17 +1034,10 @@ impl TestRig {
             .data_columns()
             .expect("no columns");
         let first = columns.first_mut().expect("empty columns");
-        match Arc::make_mut(first) {
-            DataColumnSidecar::Fulu(col) => {
-                col.signed_block_header.signature = self.valid_signature();
-            }
-            DataColumnSidecar::Gloas(_) => {
-                // Gloas columns don't carry a per-column proposer signature; the proposer
-                // signature lives in the block's bid. Leave the column unmodified — under
-                // `fake_crypto` the test still asserts a successful lookup with no penalty,
-                // which is the natural outcome when nothing is corrupted.
-            }
-        }
+        Arc::make_mut(first)
+            .signed_block_header_mut()
+            .expect("not fulu")
+            .signature = self.valid_signature();
         self.re_insert_block(block, blobs, Some(columns));
     }
 
@@ -1397,10 +1390,6 @@ impl TestRig {
 
     // Test setup
 
-    fn new_after_deneb() -> Option<Self> {
-        genesis_fork().deneb_enabled().then(Self::default)
-    }
-
     fn new_after_fulu() -> Option<Self> {
         genesis_fork().fulu_enabled().then(Self::default)
     }
@@ -1427,10 +1416,6 @@ impl TestRig {
         info!(msg, "TEST_RIG");
     }
 
-    pub fn is_after_deneb(&self) -> bool {
-        self.fork_name.deneb_enabled()
-    }
-
     pub fn is_after_fulu(&self) -> bool {
         self.fork_name.fulu_enabled()
     }
@@ -1445,21 +1430,17 @@ impl TestRig {
         peer_id: PeerId,
         data_column: Arc<DataColumnSidecar<E>>,
     ) {
-        let DataColumnSidecar::Fulu(col) = data_column.as_ref() else {
-            // Gloas data columns don't carry a parent block root, so the
-            // `UnknownParentSidecarHeader` trigger doesn't apply post-Gloas. The production
-            // path drops these with a `warn!` (see `manager.rs` handler). Mirror that here
-            // so Gloas test paths can call the same helper as Fulu without panicking.
-            self.log(&format!(
-                "trigger_unknown_parent_data_column noop (post-Gloas column has no parent root) peer {peer_id:?}"
-            ));
-            return;
+        let block_root = data_column.block_root();
+        let slot = data_column.slot();
+        let parent_root = match data_column.as_ref() {
+            DataColumnSidecar::Fulu(column) => column.block_parent_root(),
+            DataColumnSidecar::Gloas(_) => panic!("Gloas data column not supported in this test"),
         };
         self.send_sync_message(SyncMessage::UnknownParentSidecarHeader {
             peer_id,
-            block_root: col.block_root(),
-            parent_root: col.block_parent_root(),
-            slot: col.slot(),
+            block_root,
+            parent_root,
+            slot,
         });
     }
 
@@ -1897,18 +1878,14 @@ async fn happy_path_unknown_block_parent(depth: usize) {
     r.build_chain(depth).await;
     r.trigger_with_last_unknown_block_parent();
     r.simulate(SimulateConfig::happy_path()).await;
-    // All lookups should NOT complete on this test, however note the following for the tip lookup,
-    // it's the lookup for the tip block which has 0 peers and a block cached:
+    // Note the following for the tip lookup, it's the lookup for the tip block which has 0 peers
+    // and a block cached:
     // - before deneb the block is cached, so it's sent for processing, and success
-    // - before fulu the block is cached, but we can't fetch blobs so it's stuck
+    // - deneb/electra the block is cached, so it's sent for processing, and success
     // - after fulu the block is cached, we start a custody request and since we use the global pool
     //   of peers we DO have 1 connected synced supernode peer, which gives us the columns and the
     //   lookup succeeds
-    if r.is_after_deneb() && !r.is_after_fulu() {
-        r.assert_successful_lookup_sync_parent_trigger()
-    } else {
-        r.assert_successful_lookup_sync();
-    }
+    r.assert_successful_lookup_sync();
 }
 
 /// Assert that sync completes from an UnknownDataColumnParent
@@ -1941,7 +1918,7 @@ async fn happy_path_multiple_triggers(depth: usize) {
     if r.is_after_gloas() {
         // Gloas data columns reference their own block, not a parent, so there is no
         // unknown-parent-from-data trigger. The block triggers above already exercise dedup.
-    } else if r.is_after_fulu() {
+    } else {
         r.trigger_with_last_unknown_data_column_parent();
     }
     r.simulate(SimulateConfig::happy_path()).await;
@@ -1966,9 +1943,9 @@ async fn bad_peer_empty_block_response(depth: usize) {
     // TODO(tree-sync) Assert that a single lookup is created (no drops)
 }
 
-/// Assert that if peer responds with no blobs / columns, we downscore, and retry the same lookup
+/// Assert that if peer responds with no columns, we downscore, and retry the same lookup.
 async fn bad_peer_empty_data_response(depth: usize) {
-    let Some(mut r) = TestRig::new_after_deneb() else {
+    let Some(mut r) = TestRig::new_after_fulu() else {
         return;
     };
     r.build_chain_and_trigger_last_block(depth).await;
@@ -1976,18 +1953,18 @@ async fn bad_peer_empty_data_response(depth: usize) {
         .await;
     // We register a penalty, retry and complete sync successfully
     if !(r.is_after_gloas() && depth == 1) {
-        // TODO(gloas): This test on gloas 1 depth has an empty peer set so we can't attribute fault to
-        // any peers and no-one is penalized
+        // TODO(gloas): This test on gloas 1 depth has an empty peer set so we can't attribute fault
+        // to any peers and no-one is penalized
         r.assert_penalties(&["NotEnoughResponsesReturned"]);
     }
     r.assert_successful_lookup_sync();
     // TODO(tree-sync) Assert that a single lookup is created (no drops)
 }
 
-/// Assert that if peer responds with not enough blobs / columns, we downscore, and retry the same
-/// lookup
+/// Assert that if peer responds with not enough columns, we downscore, and retry the same
+/// lookup.
 async fn bad_peer_too_few_data_response(depth: usize) {
-    let Some(mut r) = TestRig::new_after_deneb() else {
+    let Some(mut r) = TestRig::new_after_fulu() else {
         return;
     };
     r.build_chain_and_trigger_last_block(depth).await;
@@ -1995,8 +1972,8 @@ async fn bad_peer_too_few_data_response(depth: usize) {
         .await;
     // We register a penalty, retry and complete sync successfully
     if !(r.is_after_gloas() && depth == 1) {
-        // TODO(gloas): This test on gloas 1 depth has an empty peer set so we can't attribute fault to
-        // any peers and no-one is penalized
+        // TODO(gloas): This test on gloas 1 depth has an empty peer set so we can't attribute fault
+        // to any peers and no-one is penalized
         r.assert_penalties(&["NotEnoughResponsesReturned"]);
     }
     r.assert_successful_lookup_sync();
@@ -2015,9 +1992,9 @@ async fn bad_peer_wrong_block_response(depth: usize) {
     // TODO(tree-sync) Assert that a single lookup is created (no drops)
 }
 
-/// Assert that if peer responds with bad blobs / columns, we downscore, and retry the same lookup
+/// Assert that if peer responds with bad columns, we downscore, and retry the same lookup.
 async fn bad_peer_wrong_data_response(depth: usize) {
-    let Some(mut r) = TestRig::new_after_deneb() else {
+    let Some(mut r) = TestRig::new_after_fulu() else {
         return;
     };
     r.build_chain_and_trigger_last_block(depth).await;
@@ -2068,10 +2045,11 @@ async fn too_many_processing_failures(depth: usize) {
     r.simulate(
         SimulateConfig::new().with_process_result(|| BlockProcessingResult::Error {
             penalty: Some((
-                lighthouse_network::PeerAction::MidToleranceError,
-                crate::sync::manager::WhichPeerToPenalize::BlockPeer,
+                PeerAction::MidToleranceError,
+                WhichPeerToPenalize::BlockPeer,
+                "lookup_block_processing_failure",
             )),
-            reason: "lookup_block_processing_failure",
+            reason: "lookup_block_processing_failure".to_string(),
         }),
     )
     .await;
@@ -2123,22 +2101,21 @@ async fn unknown_parent_does_not_add_peers_to_itself() {
 }
 
 #[tokio::test]
-/// Assert that if the beacon processor returns a processor-overloaded error, the lookup retries
-/// without penalizing peers and eventually fails after MAX_ATTEMPTS.
+/// Assert that a non-attributable processing error (e.g. processor overloaded) is retried up to
+/// `SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS`, no peer is penalized, and the lookup is then dropped.
 async fn test_single_block_lookup_ignored_response() {
     let mut r = TestRig::default();
     r.build_chain_and_trigger_last_block(1).await;
-    // Send a "processor overloaded" response repeatedly. Under the new model this is just an
-    // Error with no peer penalty; the lookup retries until MAX_ATTEMPTS, then drops.
     r.simulate(
         SimulateConfig::new().with_process_result(|| BlockProcessingResult::Error {
             penalty: None,
-            reason: "processor_overloaded",
+            reason: "processor_overloaded".to_string(),
         }),
     )
     .await;
     // The block was not actually imported
     r.assert_head_slot(0);
+    r.assert_no_penalties();
     assert_eq!(r.created_lookups(), 1, "no created lookups");
     assert_eq!(r.dropped_lookups(), 1, "no dropped lookups");
     assert_eq!(r.completed_lookups(), 0, "some completed lookups");
@@ -2161,7 +2138,8 @@ async fn test_single_block_lookup_duplicate_response() {
     r.build_chain_and_trigger_last_block(1).await;
     // Send a DuplicateFullyImported response, the lookup should complete successfully
     r.simulate(
-        SimulateConfig::new().with_process_result(|| BlockProcessingResult::Imported("duplicate")),
+        SimulateConfig::new()
+            .with_process_result(|| BlockProcessingResult::Imported(true, "duplicate")),
     )
     .await;
     // The block was not actually imported
@@ -2221,12 +2199,6 @@ async fn lookups_form_chain() {
 /// Assert that if a lookup chain (by appending ancestors) is too long we drop it
 async fn test_parent_lookup_too_deep_grow_ancestor_one() {
     let mut r = TestRig::default();
-    // TODO(gloas): gloas range sync is not yet implemented. It must deliver payload envelopes so
-    // that FULL blocks can satisfy the parent-payload import gate; without it a FULL chain stalls
-    // after the first block and the head can't advance. Skip until range sync handles payloads.
-    if r.is_after_gloas() {
-        return;
-    }
     r.build_chain(PARENT_DEPTH_TOLERANCE + 1).await;
     r.trigger_with_last_block();
     r.simulate(SimulateConfig::happy_path()).await;
@@ -2373,8 +2345,8 @@ async fn test_same_chain_race_condition() {
 #[tokio::test]
 /// Assert that if the lookup's block is in the da_checker we don't download it again
 async fn block_in_da_checker_skips_download() {
-    // Only in Deneb, as the block needs blobs to remain in the da_checker
-    let Some(mut r) = TestRig::new_after_deneb_before_fulu() else {
+    // Only post-Fulu, as the block needs custody columns to remain in the da_checker
+    let Some(mut r) = TestRig::new_after_fulu() else {
         return;
     };
     // Add block to da_checker
@@ -2438,31 +2410,6 @@ async fn block_in_processing_cache_becomes_valid_imported() {
     r.assert_no_active_lookups();
 }
 
-/// Test that lookups complete when the block is already fully imported.
-/// Exercises the `NoRequestNeeded` → `Completed` download state path.
-/// Without the fix, `on_completed_request` left the state as `AwaitingDownload`
-/// causing an infinite re-check loop.
-#[tokio::test]
-async fn lookup_completes_when_block_already_imported() {
-    let mut r = TestRig::default();
-    r.build_chain(1).await;
-
-    // Fully import block 1 (this also imports its blobs/columns if any)
-    let block_root = r.block_root_at_slot(1);
-    r.import_block_by_root(block_root).await;
-
-    // Now trigger a lookup for the SAME block via attestation.
-    // block_lookup_request → ExecutionValidated → NoRequestNeeded
-    // Without the Completed state fix, the lookup would hang.
-    r.trigger_with_block_at_slot(1);
-    assert!(
-        r.created_lookups() > 0,
-        "lookup must be created for this test to be valid"
-    );
-    r.simulate(SimulateConfig::happy_path()).await;
-    r.assert_successful_lookup_sync();
-}
-
 macro_rules! fulu_peer_matrix_tests {
     (
         [$($name:ident => $variant:expr),+ $(,)?]
@@ -2513,11 +2460,7 @@ async fn custody_lookup_some_custody_failures(test_type: FuluTestType) {
     let Some(mut r) = TestRig::new_fulu_peer_test(test_type) else {
         return;
     };
-    // Gloas: a block's columns are only attributable to peers that imported a FULL child (which
-    // donate their peers into the parent's custody peer set). Add one level of depth so the block
-    // under test has such a child, making the withholding peers attributable and penalizable.
-    let depth = if r.is_after_gloas() { 2 } else { 1 };
-    let block_root = r.build_chain(depth).await;
+    let block_root = r.build_chain(1).await;
     // Send the same trigger from all peers, so that the lookup has all peers
     for peer in r.new_connected_peers_for_peerdas() {
         r.trigger_unknown_block_from_attestation(block_root, peer);
@@ -2533,11 +2476,7 @@ async fn custody_lookup_permanent_custody_failures(test_type: FuluTestType) {
     let Some(mut r) = TestRig::new_fulu_peer_test(test_type) else {
         return;
     };
-    // Gloas: a block's columns are only attributable to peers that imported a FULL child (which
-    // donate their peers into the parent's custody peer set). Add one level of depth so the block
-    // under test has such a child, making the withholding peers attributable and penalizable.
-    let depth = if r.is_after_gloas() { 2 } else { 1 };
-    let block_root = r.build_chain(depth).await;
+    let block_root = r.build_chain(1).await;
 
     // Send the same trigger from all peers, so that the lookup has all peers
     for peer in r.new_connected_peers_for_peerdas() {
@@ -2579,7 +2518,7 @@ async fn crypto_on_fail_with_invalid_block_signature() {
         r.assert_no_penalties();
     } else {
         r.assert_failed_lookup_sync();
-        r.assert_penalties_of_type("lookup_block_processing_failure");
+        r.assert_penalties_of_type("InvalidSignature");
     }
 }
 
@@ -2588,11 +2527,6 @@ async fn crypto_on_fail_with_bad_column_proposer_signature() {
     let Some(mut r) = TestRig::new_fulu_peer_test(FuluTestType::WeSupernodeThemSupernode) else {
         return;
     };
-    // Gloas data columns carry no per-column proposer signature (no signed block header), so this
-    // scenario does not exist post-Gloas — column crypto failures are covered by the KZG-proof test.
-    if r.is_after_gloas() {
-        return;
-    }
     r.build_chain(1).await;
     r.corrupt_last_column_proposer_signature();
     r.trigger_with_last_block();
@@ -2602,7 +2536,7 @@ async fn crypto_on_fail_with_bad_column_proposer_signature() {
         r.assert_no_penalties();
     } else {
         r.assert_failed_lookup_sync();
-        r.assert_penalties_of_type("lookup_custody_column_processing_failure");
+        r.assert_penalties_of_type("InvalidSignature");
     }
 }
 
@@ -2620,6 +2554,6 @@ async fn crypto_on_fail_with_bad_column_kzg_proof() {
         r.assert_no_penalties();
     } else {
         r.assert_failed_lookup_sync();
-        r.assert_penalties_of_type("lookup_custody_column_processing_failure");
+        r.assert_penalties_of_type("AvailabilityCheck");
     }
 }
