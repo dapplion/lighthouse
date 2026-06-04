@@ -326,42 +326,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             cx.block_lookup_request(self.id, self.peers.clone(), self.block_root)
         })?;
         if self.awaiting_parent.is_none()
-            && let Some(block) = self.block_request.state.peek_downloaded_data()
+            && let Some(data) = self.block_request.state.maybe_start_processing()
         {
-            // Gloas parent-imported gate: a FULL child must not be processed until its parent's
-            // payload has been imported. `is_parent_imported` returns false when the parent block
-            // is unknown, or it's FULL and the parent's payload envelope has not been imported yet.
-            // Pre-Gloas this only checks that the parent block is known to fork-choice, matching the
-            // `ParentUnknown` the processor would otherwise return.
-            if !cx
-                .chain
-                .canonical_head
-                .fork_choice_read_lock()
-                .is_parent_imported(block)
-            {
-                let parent_root = block.parent_root();
-                let parent_block_hash = block.payload_bid_parent_block_hash().ok();
-                // Park this lookup until the parent (block + payload) resolves. A future call to
-                // `continue_requests` (triggered by `continue_child_lookups`) re-submits for
-                // processing once the parent lookup completes.
-                self.set_awaiting_parent(parent_root, parent_block_hash);
-                return Ok(LookupResult::ParentUnknown {
-                    parent_root,
-                    parent_block_hash,
-                    block_root: self.block_root,
-                    peers: self.all_peers(),
-                });
-            }
-
-            if let Some(data) = self.block_request.state.maybe_start_processing() {
-                cx.send_block_for_processing(
-                    self.id,
-                    self.block_root,
-                    data.value,
-                    data.seen_timestamp,
-                )
+            cx.send_block_for_processing(self.id, self.block_root, data.value, data.seen_timestamp)
                 .map_err(LookupRequestError::SendFailedProcessor)?;
-            }
         }
 
         // === Data request ===
@@ -420,19 +388,13 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             match &mut self.payload_request {
                 PayloadRequest::WaitingForBlock => {
                     if let Some(block) = self.block_request.state.peek_downloaded_data() {
-                        // Pre-Gloas blocks carry no bid, so `payload_bid_block_hash` errors and
-                        // there is no payload envelope to fetch. Every post-Gloas block may have a
-                        // payload, so always instantiate the request; whether an envelope is
-                        // actually fetched depends on the block being FULL (i.e. a FULL child
-                        // donated peers into the request's peer set).
-                        self.payload_request = if block.payload_bid_block_hash().is_err() {
-                            PayloadRequest::PreGloas
-                        } else {
-                            let peers = self.get_data_peers(block);
+                        self.payload_request = if block.fork_name_unchecked().gloas_enabled() {
                             PayloadRequest::Request {
-                                peers,
+                                peers: self.get_data_peers(block),
                                 state: SingleLookupRequestState::new(),
                             }
+                        } else {
+                            PayloadRequest::PreGloas
                         };
                     } else {
                         break;
@@ -499,17 +461,15 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             BlockProcessingResult::Imported(_fully_imported, _info) => {
                 self.block_request.state.on_processing_success()?;
             }
-            BlockProcessingResult::ParentUnknown { parent_root } => {
+            BlockProcessingResult::ParentUnknown {
+                parent_root,
+                parent_block_hash,
+            } => {
                 // `BlockError::ParentUnknown` is only returned when processing blocks. Revert the
                 // block request to `Downloaded` and park this lookup until the parent resolves; a
                 // future call to `continue_requests` will re-submit the block for processing once
                 // the parent lookup completes.
                 self.block_request.state.revert_to_awaiting_processing()?;
-                let parent_block_hash = self
-                    .block_request
-                    .state
-                    .peek_downloaded_data()
-                    .and_then(|block| block.payload_bid_parent_block_hash().ok());
                 self.set_awaiting_parent(parent_root, parent_block_hash);
                 return Ok(LookupResult::ParentUnknown {
                     parent_root,
