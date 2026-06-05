@@ -184,6 +184,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             .await;
         register_process_result_metrics(&result, metrics::BlockSource::Rpc, "block");
 
+        // Drop the handle to remove the entry from the cache
+        drop(handle);
+
         // RPC block imported, regardless of process type
         match result.as_ref() {
             Ok(AvailabilityProcessingStatus::Imported(hash)) => {
@@ -243,9 +246,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             process_type,
             result: result.into(),
         });
-
-        // Drop the handle to remove the entry from the cache
-        drop(handle);
     }
 
     #[instrument(

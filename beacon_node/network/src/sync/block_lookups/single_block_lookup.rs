@@ -3,11 +3,10 @@ use crate::network_beacon_processor::BlockProcessingResult;
 use crate::sync::block_lookups::{BlockDownloadResponse, CustodyDownloadResponse};
 use crate::sync::manager::BlockProcessType;
 use crate::sync::network_context::{
-    LookupRequestResult, PeerGroup, ReqId, RpcRequestSendError, RpcResponseError,
-    SendErrorProcessor, SyncNetworkContext,
+    PeerGroup, ReqId, RpcRequestSendError, RpcResponseError, SendErrorProcessor, SyncNetworkContext,
 };
-use beacon_chain::BeaconChainTypes;
 use beacon_chain::block_verification_types::AsBlock;
+use beacon_chain::{BeaconChainTypes, BlockProcessStatus};
 use educe::Educe;
 use lighthouse_network::service::api_types::Id;
 use parking_lot::RwLock;
@@ -139,12 +138,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         }
     }
 
-    /// Reset the status of all requests (used on block processing failure)
-    pub fn reset_requests(&mut self) {
-        self.block_request = BlockRequest::new();
-        self.data_request = DataRequest::WaitingForBlock;
-    }
-
     /// Return the slot of this lookup's block if it's currently cached
     pub fn peek_downloaded_block_slot(&self) -> Option<Slot> {
         self.block_request
@@ -219,7 +212,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
         // === Block request ===
         self.block_request.state.maybe_start_downloading(|| {
-            cx.block_lookup_request(self.id, self.peers.clone(), self.block_root)
+            send_block_request(self.id, self.peers.clone(), self.block_root, cx)
         })?;
         if self.awaiting_parent.is_none()
             && let Some(data) = self.block_request.state.maybe_start_processing()
@@ -252,11 +245,12 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 }
                 DataRequest::Request { slot, state } => {
                     state.maybe_start_downloading(|| {
-                        cx.custody_lookup_request(
+                        send_custody_request(
                             self.id,
+                            self.peers.clone(),
                             self.block_root,
                             *slot,
-                            self.peers.clone(),
+                            cx,
                         )
                     })?;
                     // Wait for the parent to be imported, data column processing result handle does
@@ -401,6 +395,137 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     }
 }
 
+fn send_block_request<T: BeaconChainTypes>(
+    lookup_id: Id,
+    lookup_peers: PeerSet,
+    block_root: Hash256,
+    cx: &mut SyncNetworkContext<T>,
+) -> Result<LookupRequestResult<Arc<SignedBeaconBlock<T::EthSpec>>>, RpcRequestSendError> {
+    let active_request_count_by_peer = cx.active_request_count_by_peer();
+    let Some(peer_id) = lookup_peers
+        .read()
+        .iter()
+        .map(|peer| {
+            (
+                // Prefer peers with less overall requests
+                active_request_count_by_peer.get(peer).copied().unwrap_or(0),
+                // Random factor to break ties, otherwise the PeerID breaks ties
+                rand::random::<u32>(),
+                peer,
+            )
+        })
+        .min()
+        .map(|(_, _, peer)| *peer)
+    else {
+        // Allow lookup to not have any peers and do nothing. This is an optimization to not
+        // lose progress of lookups created from a block with unknown parent before we receive
+        // attestations for said block.
+        // Lookup sync event safety: If a lookup requires peers to make progress, and does
+        // not receive any new peers for some time it will be dropped. If it receives a new
+        // peer it must attempt to make progress.
+        return Ok(LookupRequestResult::RequestNotSent("no peers"));
+    };
+
+    match cx.chain.get_block_process_status(&block_root) {
+        // Unknown block, continue request to download
+        BlockProcessStatus::Unknown => {}
+        // Block is known but processing. The block may turn out to be invalid, so we want sync to
+        // NOT mark the request as complete yet. The ideal flow would be:
+        // - Wait for processing to complete
+        // - Only if there is an error re-download and re-process
+        // But implementing this introduces complexity and the risk for the lookup to get stuck.
+        // Instead we always re-download the block eagerly and de-duplicate the processing. So in
+        // the happy case we just download the block again if the lookup is created while execution
+        // processing the block.
+        BlockProcessStatus::NotValidated(..) => {}
+        // Block is fully validated. If it's not yet imported it's waiting for missing block
+        // components. Consider this request completed and do nothing.
+        BlockProcessStatus::ExecutionValidated(block) => {
+            return Ok(LookupRequestResult::MarkRequestAsComplete(
+                "block execution validated",
+                block,
+            ));
+        }
+    };
+
+    let id = cx.block_lookup_request(lookup_id, peer_id, block_root)?;
+    Ok(LookupRequestResult::RequestSent(id))
+}
+
+fn send_custody_request<T: BeaconChainTypes>(
+    lookup_id: Id,
+    lookup_peers: PeerSet,
+    block_root: Hash256,
+    block_slot: Slot,
+    cx: &mut SyncNetworkContext<T>,
+) -> Result<LookupRequestResult<DataColumnSidecarList<T::EthSpec>>, RpcRequestSendError> {
+    let custody_indexes_imported = cx
+        .chain
+        .cached_data_column_indexes(&block_root, block_slot)
+        .unwrap_or_default();
+
+    // Include only the blob indexes not yet imported (received through gossip)
+    let mut custody_indexes_to_fetch = cx
+        .chain
+        .sampling_columns_for_epoch(block_slot.epoch(T::EthSpec::slots_per_epoch()))
+        .iter()
+        .copied()
+        .filter(|index| !custody_indexes_imported.contains(index))
+        .collect::<Vec<_>>();
+    custody_indexes_to_fetch.sort_unstable();
+
+    if custody_indexes_to_fetch.is_empty() {
+        // No indexes required, do not issue any request
+        return Ok(LookupRequestResult::MarkRequestAsComplete(
+            "no indices to fetch",
+            vec![],
+        ));
+    }
+    let id = cx.custody_lookup_request(
+        lookup_id,
+        block_root,
+        &custody_indexes_to_fetch,
+        lookup_peers,
+    )?;
+    Ok(LookupRequestResult::RequestSent(id))
+}
+
+#[allow(dead_code)]
+fn send_payload_request<T: BeaconChainTypes>(
+    lookup_id: Id,
+    lookup_peers: PeerSet,
+    block_root: Hash256,
+    cx: &mut SyncNetworkContext<T>,
+) -> Result<LookupRequestResult<()>, RpcRequestSendError> {
+    // Skip the download if fork-choice already saw this envelope (e.g. imported via gossip
+    // before the lookup got here).
+    if cx.chain.envelope_is_known_to_fork_choice(&block_root) {
+        return Ok(LookupRequestResult::MarkRequestAsComplete(
+            "envelope already known to fork-choice",
+            (),
+        ));
+    }
+
+    let active_request_count_by_peer = cx.active_request_count_by_peer();
+    let Some(peer_id) = lookup_peers
+        .read()
+        .iter()
+        .map(|peer| {
+            (
+                active_request_count_by_peer.get(peer).copied().unwrap_or(0),
+                rand::random::<u32>(),
+                peer,
+            )
+        })
+        .min()
+        .map(|(_, _, peer)| *peer)
+    else {
+        return Ok(LookupRequestResult::RequestNotSent("no peers"));
+    };
+    let id = cx.payload_lookup_request(lookup_id, peer_id, block_root)?;
+    Ok(LookupRequestResult::RequestSent(id))
+}
+
 #[derive(Debug, Clone)]
 pub struct DownloadResult<T: Clone> {
     pub value: T,
@@ -416,6 +541,20 @@ impl<T: Clone> DownloadResult<T> {
             peer_group,
         }
     }
+}
+
+pub enum LookupRequestResult<T, I = ReqId> {
+    /// A request is sent. Sync MUST receive an event from the network in the future for either:
+    /// completed response or failed request
+    RequestSent(I),
+    /// No request is sent, and no further action is necessary to consider this request completed.
+    /// Includes a reason why this request is not needed.
+    MarkRequestAsComplete(&'static str, T),
+    /// No request is sent, but the request is not completed. Sync MUST receive some future event
+    /// that makes progress on the request. For example: request is processing from a different
+    /// source (i.e. block received from gossip) and sync MUST receive an event with that processing
+    /// result.
+    RequestNotSent(&'static str),
 }
 
 #[derive(IntoStaticStr)]
@@ -505,10 +644,10 @@ impl<T: Clone> SingleLookupRequestState<T> {
         if self.is_awaiting_download() {
             match request_fn().map_err(LookupRequestError::SendFailedNetwork)? {
                 LookupRequestResult::RequestSent(req_id) => self.on_download_start(req_id)?,
-                LookupRequestResult::NoRequestNeeded(reason, value) => {
+                LookupRequestResult::MarkRequestAsComplete(reason, value) => {
                     self.on_completed_request(reason, value)?
                 }
-                LookupRequestResult::Pending(reason) => {
+                LookupRequestResult::RequestNotSent(reason) => {
                     self.update_awaiting_download_status(reason)
                 }
             }
