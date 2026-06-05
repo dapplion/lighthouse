@@ -21,7 +21,7 @@ use crate::sync::block_sidecar_coupling::CouplingError;
 use crate::sync::range_data_column_batch_request::RangeDataColumnBatchRequest;
 use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::block_verification_types::{AsBlock, RangeSyncBlock};
-use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
+use beacon_chain::{BeaconChain, BeaconChainTypes, EngineState};
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{BlobsByRangeRequest, DataColumnsByRangeRequest};
@@ -53,8 +53,8 @@ use task_executor::TaskExecutor;
 use tokio::sync::mpsc;
 use tracing::{Span, debug, debug_span, error, warn};
 use types::{
-    BlobSidecar, BlockImportSource, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, EthSpec,
-    ForkContext, Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
+    BlobSidecar, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, EthSpec, ForkContext,
+    Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
 };
 
 pub mod custody;
@@ -175,20 +175,6 @@ impl PeerGroup {
 
 /// Sequential ID that uniquely identifies ReqResp outgoing requests
 pub type ReqId = u32;
-
-pub enum LookupRequestResult<T, I = ReqId> {
-    /// A request is sent. Sync MUST receive an event from the network in the future for either:
-    /// completed response or failed request
-    RequestSent(I),
-    /// No request is sent, and no further action is necessary to consider this request completed.
-    /// Includes a reason why this request is not needed.
-    NoRequestNeeded(&'static str, T),
-    /// No request is sent, but the request is not completed. Sync MUST receive some future event
-    /// that makes progress on the request. For example: request is processing from a different
-    /// source (i.e. block received from gossip) and sync MUST receive an event with that processing
-    /// result.
-    Pending(&'static str),
-}
 
 /// Wraps a Network channel to employ various RPC related network functionality for the Sync manager. This includes management of a global RPC request Id.
 pub struct SyncNetworkContext<T: BeaconChainTypes> {
@@ -416,7 +402,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         }
     }
 
-    fn active_request_count_by_peer(&self) -> HashMap<PeerId, usize> {
+    pub fn active_request_count_by_peer(&self) -> HashMap<PeerId, usize> {
         let Self {
             network_send: _,
             request_id: _,
@@ -818,67 +804,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     pub fn block_lookup_request(
         &mut self,
         lookup_id: SingleLookupId,
-        lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
+        peer_id: PeerId,
         block_root: Hash256,
-    ) -> Result<LookupRequestResult<Arc<SignedBeaconBlock<T::EthSpec>>>, RpcRequestSendError> {
-        let active_request_count_by_peer = self.active_request_count_by_peer();
-        let Some(peer_id) = lookup_peers
-            .read()
-            .iter()
-            .map(|peer| {
-                (
-                    // Prefer peers with less overall requests
-                    active_request_count_by_peer.get(peer).copied().unwrap_or(0),
-                    // Random factor to break ties, otherwise the PeerID breaks ties
-                    rand::random::<u32>(),
-                    peer,
-                )
-            })
-            .min()
-            .map(|(_, _, peer)| *peer)
-        else {
-            // Allow lookup to not have any peers and do nothing. This is an optimization to not
-            // lose progress of lookups created from a block with unknown parent before we receive
-            // attestations for said block.
-            // Lookup sync event safety: If a lookup requires peers to make progress, and does
-            // not receive any new peers for some time it will be dropped. If it receives a new
-            // peer it must attempt to make progress.
-            return Ok(LookupRequestResult::Pending("no peers"));
-        };
-
-        match self.chain.get_block_process_status(&block_root) {
-            // Unknown block, continue request to download
-            BlockProcessStatus::Unknown => {}
-            // Block is known and currently processing. Imports from gossip and HTTP API insert the
-            // block in the da_cache. However, HTTP API is unable to notify sync when it completes
-            // block import. Returning `Pending` here will result in stuck lookups if the block is
-            // importing from sync.
-            BlockProcessStatus::NotValidated(_, source) => match source {
-                BlockImportSource::Gossip => {
-                    // Lookup sync event safety: If the block is currently in the processing cache, we
-                    // are guaranteed to receive a `SyncMessage::GossipBlockProcessResult` that will
-                    // make progress on this lookup
-                    return Ok(LookupRequestResult::Pending("block in processing cache"));
-                }
-                BlockImportSource::Lookup
-                | BlockImportSource::RangeSync
-                | BlockImportSource::HttpApi => {
-                    // Lookup, RangeSync or HttpApi block import don't emit the GossipBlockProcessResult
-                    // event. If a lookup happens to be created during block import from one of
-                    // those sources just import the block twice. Otherwise the lookup will get
-                    // stuck. Double imports are fine, they just waste resources.
-                }
-            },
-            // Block is fully validated. If it's not yet imported it's waiting for missing block
-            // components. Consider this request completed and do nothing.
-            BlockProcessStatus::ExecutionValidated(block) => {
-                return Ok(LookupRequestResult::NoRequestNeeded(
-                    "block execution validated",
-                    block,
-                ));
-            }
-        }
-
+    ) -> Result<Id, RpcRequestSendError> {
         let id = SingleLookupReqId {
             lookup_id,
             req_id: self.next_id(),
@@ -928,43 +856,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_span,
         );
 
-        Ok(LookupRequestResult::RequestSent(id.req_id))
+        Ok(id.req_id)
     }
 
     /// Request a payload envelope for a block root via PayloadEnvelopesByRoot RPC.
-    #[allow(dead_code)]
     pub fn payload_lookup_request(
         &mut self,
         lookup_id: SingleLookupId,
-        lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
+        peer_id: PeerId,
         block_root: Hash256,
-    ) -> Result<LookupRequestResult<()>, RpcRequestSendError> {
-        // Skip the download if fork-choice already saw this envelope (e.g. imported via gossip
-        // before the lookup got here).
-        if self.chain.envelope_is_known_to_fork_choice(&block_root) {
-            return Ok(LookupRequestResult::NoRequestNeeded(
-                "envelope already known to fork-choice",
-                (),
-            ));
-        }
-
-        let active_request_count_by_peer = self.active_request_count_by_peer();
-        let Some(peer_id) = lookup_peers
-            .read()
-            .iter()
-            .map(|peer| {
-                (
-                    active_request_count_by_peer.get(peer).copied().unwrap_or(0),
-                    rand::random::<u32>(),
-                    peer,
-                )
-            })
-            .min()
-            .map(|(_, _, peer)| *peer)
-        else {
-            return Ok(LookupRequestResult::Pending("no peers"));
-        };
-
+    ) -> Result<Id, RpcRequestSendError> {
         let id = SingleLookupReqId {
             lookup_id,
             req_id: self.next_id(),
@@ -1004,7 +905,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             Span::none(),
         );
 
-        Ok(LookupRequestResult::RequestSent(id.req_id))
+        Ok(id.req_id)
     }
     /// Request to send a single `data_columns_by_root` request to the network.
     pub fn data_column_lookup_request(
@@ -1013,7 +914,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peer_id: PeerId,
         request: DataColumnsByRootSingleBlockRequest,
         expect_max_responses: bool,
-    ) -> Result<LookupRequestResult<(), DataColumnsByRootRequestId>, &'static str> {
+    ) -> Result<DataColumnsByRootRequestId, &'static str> {
         let id = DataColumnsByRootRequestId {
             id: self.next_id(),
             requester,
@@ -1049,7 +950,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             Span::none(),
         );
 
-        Ok(LookupRequestResult::RequestSent(id))
+        Ok(id)
     }
 
     /// Request to fetch all needed custody columns of a specific block. This function may not send
@@ -1060,32 +961,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         &mut self,
         lookup_id: SingleLookupId,
         block_root: Hash256,
-        block_slot: Slot,
+        column_indices: &[ColumnIndex],
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
-    ) -> Result<LookupRequestResult<DataColumnSidecarList<T::EthSpec>>, RpcRequestSendError> {
-        let custody_indexes_imported = self
-            .chain
-            .cached_data_column_indexes(&block_root, block_slot)
-            .unwrap_or_default();
-
-        // Include only the blob indexes not yet imported (received through gossip)
-        let mut custody_indexes_to_fetch = self
-            .chain
-            .sampling_columns_for_epoch(block_slot.epoch(T::EthSpec::slots_per_epoch()))
-            .iter()
-            .copied()
-            .filter(|index| !custody_indexes_imported.contains(index))
-            .collect::<Vec<_>>();
-        custody_indexes_to_fetch.sort_unstable();
-
-        if custody_indexes_to_fetch.is_empty() {
-            // No indexes required, do not issue any request
-            return Ok(LookupRequestResult::NoRequestNeeded(
-                "no indices to fetch",
-                vec![],
-            ));
-        }
-
+    ) -> Result<Id, RpcRequestSendError> {
         let id = SingleLookupReqId {
             lookup_id,
             req_id: self.next_id(),
@@ -1093,7 +971,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         debug!(
             ?block_root,
-            indices = ?custody_indexes_to_fetch,
+            indices = ?column_indices,
             %id,
             "Starting custody columns request"
         );
@@ -1102,7 +980,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let mut request = ActiveCustodyRequest::new(
             block_root,
             CustodyId { requester },
-            &custody_indexes_to_fetch,
+            &column_indices,
             lookup_peers,
         );
 
@@ -1113,7 +991,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 // created cannot return data immediately, it must send some request to the network
                 // first. And there must exist some request, `custody_indexes_to_fetch` is not empty.
                 self.custody_by_root_requests.insert(requester, request);
-                Ok(LookupRequestResult::RequestSent(id.req_id))
+                Ok(id.req_id)
             }
             Err(e) => Err(match e {
                 CustodyRequestError::NoPeer(column_index) => {
