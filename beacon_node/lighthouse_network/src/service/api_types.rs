@@ -3,7 +3,7 @@ use libp2p::PeerId;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use types::{
-    BlobSidecar, DataColumnSidecar, Epoch, EthSpec, LightClientBootstrap,
+    BlobSidecar, DataColumnSidecar, Epoch, EthSpec, Hash256, LightClientBootstrap,
     LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock,
     SignedExecutionPayloadEnvelope,
 };
@@ -23,6 +23,8 @@ pub enum SyncRequestId {
     SingleBlock { id: SingleLookupReqId },
     /// Request walking the ancestors of a block given its root, via `beacon_blocks_by_head`.
     BlocksByHead { id: SingleLookupReqId },
+    /// Backfill sync request walking the ancestors of a block via `beacon_blocks_by_head`.
+    BackfillBlocksByHead { id: SingleLookupReqId },
     /// Request searching for a payload envelope given a hash.
     SinglePayloadEnvelope { id: SingleLookupReqId },
     /// Request searching for a set of data columns given a hash and list of column indices.
@@ -141,9 +143,17 @@ pub struct CustodyId {
 }
 
 /// Downstream components that perform custody by root requests.
-/// Currently, it's only single block lookups, so not using an enum
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct CustodyRequester(pub SingleLookupReqId);
+pub enum CustodyRequester {
+    SingleLookup(SingleLookupReqId),
+    Backfill(BackfillCustodyId),
+}
+
+/// Identifies a backfill-sync custody-by-root request by the block root whose columns it fetches.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BackfillCustodyId {
+    pub block_root: Hash256,
+}
 
 /// Application level requests sent to the network.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -292,7 +302,10 @@ impl Display for DataColumnsByRootRequester {
 
 impl Display for CustodyRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        match self {
+            Self::SingleLookup(id) => write!(f, "{id}"),
+            Self::Backfill(id) => write!(f, "Backfill/{:?}", id.block_root),
+        }
     }
 }
 
@@ -323,7 +336,7 @@ mod tests {
         let id = DataColumnsByRootRequestId {
             id: 123,
             requester: DataColumnsByRootRequester::Custody(CustodyId {
-                requester: CustodyRequester(SingleLookupReqId {
+                requester: CustodyRequester::SingleLookup(SingleLookupReqId {
                     req_id: 121,
                     lookup_id: 101,
                 }),
