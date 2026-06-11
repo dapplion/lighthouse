@@ -352,15 +352,11 @@ impl<T: BeaconChainTypes> Router<T> {
             Response::PayloadEnvelopesByRoot(envelope) => {
                 self.on_payload_envelopes_by_root_response(peer_id, app_request_id, envelope);
             }
-            // TODO(EIP-7732): implement outgoing payload envelopes by range responses
-            // once sync manager requests them.
-            Response::PayloadEnvelopesByRange(_) => {
-                debug!("Requesting envelopes by range not supported yet");
+            Response::PayloadEnvelopesByRange(envelope) => {
+                self.on_payload_envelopes_by_range_response(peer_id, app_request_id, envelope);
             }
-            // Lighthouse currently only serves BlocksByHead and does not issue it as a client,
-            // so receiving a response is unexpected. Drop it without crashing.
-            Response::BlocksByHead(_) => {
-                debug!("BlocksByHead response received but not requested by lighthouse");
+            Response::BlocksByHead(beacon_block) => {
+                self.on_blocks_by_head_response(peer_id, app_request_id, beacon_block);
             }
             // Light client responses should not be received
             Response::LightClientBootstrap(_)
@@ -722,6 +718,30 @@ impl<T: BeaconChainTypes> Router<T> {
         });
     }
 
+    /// Handle a `BlocksByHead` response from the peer.
+    /// A `beacon_block` behaves as a stream which is terminated on a `None` response.
+    pub fn on_blocks_by_head_response(
+        &mut self,
+        peer_id: PeerId,
+        app_request_id: AppRequestId,
+        beacon_block: Option<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) {
+        let sync_request_id = match app_request_id {
+            AppRequestId::Sync(id @ SyncRequestId::BlocksByHead { .. }) => id,
+            other => {
+                crit!(request = ?other, "BlocksByHead response on incorrect request");
+                return;
+            }
+        };
+
+        self.send_to_sync(SyncMessage::RpcBlock {
+            peer_id,
+            sync_request_id,
+            beacon_block,
+            seen_timestamp: self.chain.slot_clock.now_duration().unwrap_or_default(),
+        });
+    }
+
     /// Handle a `DataColumnsByRoot` response from the peer.
     pub fn on_data_columns_by_root_response(
         &mut self,
@@ -790,6 +810,29 @@ impl<T: BeaconChainTypes> Router<T> {
             AppRequestId::Sync(id @ SyncRequestId::SinglePayloadEnvelope { .. }) => id,
             other => {
                 crit!(request = ?other, %peer_id, "PayloadEnvelopesByRoot response on incorrect request");
+                return;
+            }
+        };
+
+        self.send_to_sync(SyncMessage::RpcPayloadEnvelope {
+            sync_request_id,
+            peer_id,
+            envelope,
+            seen_timestamp: self.chain.slot_clock.now_duration().unwrap_or_default(),
+        });
+    }
+
+    /// Handle a `PayloadEnvelopesByRange` response from the peer.
+    pub fn on_payload_envelopes_by_range_response(
+        &mut self,
+        peer_id: PeerId,
+        app_request_id: AppRequestId,
+        envelope: Option<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>,
+    ) {
+        let sync_request_id = match app_request_id {
+            AppRequestId::Sync(id @ SyncRequestId::PayloadEnvelopesByRange { .. }) => id,
+            other => {
+                crit!(request = ?other, %peer_id, "PayloadEnvelopesByRange response on incorrect request");
                 return;
             }
         };

@@ -32,6 +32,7 @@ use peerdb::score::{PeerAction, ReportSource};
 pub use peerdb::sync_status::{SyncInfo, SyncStatus};
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::net::IpAddr;
+use std::str::FromStr;
 use strum::IntoEnumIterator;
 use types::data::{CustodyIndex, compute_subnets_from_custody_group, get_custody_groups};
 
@@ -487,6 +488,12 @@ impl<E: EthSpec> PeerManager<E> {
             let previous_listening_addresses =
                 peer_info.set_listening_addresses(info.listen_addrs.clone());
             peer_info.set_client(peerdb::client::Client::from_identify_info(info));
+            peer_info.set_supported_protocols(
+                info.protocols
+                    .iter()
+                    .filter_map(|protocol| rpc_protocol_from_id(protocol.as_ref()))
+                    .collect(),
+            );
 
             if previous_kind != peer_info.client().kind
                 || *peer_info.listening_addresses() != previous_listening_addresses
@@ -1706,12 +1713,32 @@ enum ConnectingType {
     },
 }
 
+/// Parses a libp2p protocol id of the form `/eth2/beacon_chain/req/<name>/<version>/<encoding>`
+/// into the corresponding ReqResp [`Protocol`], returning `None` for non-ReqResp protocols.
+fn rpc_protocol_from_id(protocol_id: &str) -> Option<Protocol> {
+    protocol_id
+        .strip_prefix("/eth2/beacon_chain/req/")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|name| Protocol::from_str(name).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::NetworkConfig;
     use crate::rpc::MetaDataV3;
     use types::{ChainSpec, ForkName, MainnetEthSpec as E};
+
+    #[test]
+    fn rpc_protocol_from_id_parses_reqresp_protocols() {
+        // A known ReqResp protocol is parsed from its name segment.
+        assert_eq!(
+            rpc_protocol_from_id("/eth2/beacon_chain/req/beacon_blocks_by_head/1/ssz_snappy"),
+            Some(Protocol::BlocksByHead)
+        );
+        // Non-ReqResp protocols are ignored.
+        assert_eq!(rpc_protocol_from_id("/meshsub/1.1.0"), None);
+    }
 
     async fn build_peer_manager(target_peer_count: usize) -> PeerManager<E> {
         build_peer_manager_with_trusted_peers(vec![], target_peer_count).await
@@ -2040,11 +2067,11 @@ mod tests {
             .peer_info_mut(&peer0)
             .unwrap()
             .set_meta_data(MetaData::V3(metadata));
-        peer_manager
-            .network_globals
-            .peers
-            .write()
-            .add_subscription(&peer0, Subnet::Attestation(1.into()));
+        peer_manager.network_globals.peers.write().add_subscription(
+            &peer0,
+            Subnet::Attestation(1.into()),
+            false,
+        );
 
         let mut attnets = crate::types::EnrAttestationBitfield::<E>::new();
         attnets.set(10, true).unwrap();
@@ -2061,11 +2088,11 @@ mod tests {
             .peer_info_mut(&peer2)
             .unwrap()
             .set_meta_data(MetaData::V3(metadata));
-        peer_manager
-            .network_globals
-            .peers
-            .write()
-            .add_subscription(&peer2, Subnet::Attestation(10.into()));
+        peer_manager.network_globals.peers.write().add_subscription(
+            &peer2,
+            Subnet::Attestation(10.into()),
+            false,
+        );
 
         let mut syncnets = crate::types::EnrSyncCommitteeBitfield::<E>::new();
         syncnets.set(3, true).unwrap();
@@ -2082,11 +2109,11 @@ mod tests {
             .peer_info_mut(&peer4)
             .unwrap()
             .set_meta_data(MetaData::V3(metadata));
-        peer_manager
-            .network_globals
-            .peers
-            .write()
-            .add_subscription(&peer4, Subnet::SyncCommittee(3.into()));
+        peer_manager.network_globals.peers.write().add_subscription(
+            &peer4,
+            Subnet::SyncCommittee(3.into()),
+            false,
+        );
 
         // Perform the heartbeat.
         peer_manager.heartbeat();
@@ -2183,11 +2210,11 @@ mod tests {
                 peer_info.update_sync_status(empty_synced_status());
             }
 
-            peer_manager
-                .network_globals
-                .peers
-                .write()
-                .add_subscription(&peer, Subnet::DataColumn(subnet.into()));
+            peer_manager.network_globals.peers.write().add_subscription(
+                &peer,
+                Subnet::DataColumn(subnet.into()),
+                false,
+            );
             println!("{},{},{}", x, subnet, peer);
             peers.push(peer);
         }
@@ -2304,7 +2331,7 @@ mod tests {
                     .network_globals
                     .peers
                     .write()
-                    .add_subscription(&peer, subnet);
+                    .add_subscription(&peer, subnet, false);
             }
             println!("{},{}", x, peer);
             peers.push(peer);
@@ -2408,7 +2435,7 @@ mod tests {
                     .network_globals
                     .peers
                     .write()
-                    .add_subscription(&peer, subnet);
+                    .add_subscription(&peer, subnet, false);
             }
             peers.push(peer);
         }
@@ -2507,7 +2534,7 @@ mod tests {
                     .network_globals
                     .peers
                     .write()
-                    .add_subscription(&peer, subnet);
+                    .add_subscription(&peer, subnet, false);
             }
             println!("{},{}", peer_idx, peer);
             peers.push(peer);
@@ -2679,7 +2706,7 @@ mod tests {
                     .network_globals
                     .peers
                     .write()
-                    .add_subscription(&peer, subnet);
+                    .add_subscription(&peer, subnet, false);
             }
             peers.push(peer);
         }
@@ -2746,11 +2773,11 @@ mod tests {
                 .unwrap()
                 .set_meta_data(MetaData::V3(metadata));
 
-            peer_manager
-                .network_globals
-                .peers
-                .write()
-                .add_subscription(&peer, Subnet::Attestation((subnet as u64).into()));
+            peer_manager.network_globals.peers.write().add_subscription(
+                &peer,
+                Subnet::Attestation((subnet as u64).into()),
+                false,
+            );
 
             peers.push(peer);
         }
@@ -2851,7 +2878,7 @@ mod tests {
                     .network_globals
                     .peers
                     .write()
-                    .add_subscription(&peer, subnet);
+                    .add_subscription(&peer, subnet, false);
             }
 
             peers.push(peer);
@@ -2937,7 +2964,7 @@ mod tests {
                 }
 
                 for subnet in peer_info.long_lived_subnets() {
-                    peers_db.add_subscription(&peer, subnet);
+                    peers_db.add_subscription(&peer, subnet, false);
                 }
 
                 peers.push(peer);
@@ -3158,7 +3185,7 @@ mod tests {
                         peer_info.set_custody_subnets(condition.custody_subnets.clone());
 
                         for subnet in peer_info.long_lived_subnets() {
-                            peer_db.add_subscription(&condition.peer_id, subnet);
+                            peer_db.add_subscription(&condition.peer_id, subnet, false);
                         }
                     }
 

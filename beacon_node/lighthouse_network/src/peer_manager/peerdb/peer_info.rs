@@ -2,6 +2,7 @@ use super::client::Client;
 use super::score::{PeerAction, Score, ScoreState};
 use super::sync_status::SyncStatus;
 use crate::discovery::Eth2Enr;
+use crate::rpc::Protocol as RpcProtocol;
 use crate::{rpc::MetaData, types::Subnet};
 use PeerConnectionStatus::*;
 use discv5::Enr;
@@ -41,6 +42,8 @@ pub struct PeerInfo<E: EthSpec> {
     meta_data: Option<MetaData<E>>,
     /// Subnets the peer is connected to.
     subnets: HashSet<Subnet>,
+    /// Subnets the peer is connected to, requesting partial messages.
+    partial_message_subnets: HashSet<Subnet>,
     /// This is computed from either metadata or the ENR, and contains the subnets that the peer
     /// is *assigned* to custody, rather than *connected* to (different to `self.subnets`).
     /// Note: Another reason to keep this separate to `self.subnets` is an upcoming change to
@@ -57,6 +60,8 @@ pub struct PeerInfo<E: EthSpec> {
     connection_direction: Option<ConnectionDirection>,
     /// The enr of the peer, if known.
     enr: Option<Enr>,
+    /// The set of ReqResp protocols the peer advertised via `identify`. Empty until identified.
+    supported_protocols: HashSet<RpcProtocol>,
 }
 
 impl<E: EthSpec> Default for PeerInfo<E> {
@@ -68,6 +73,7 @@ impl<E: EthSpec> Default for PeerInfo<E> {
             listening_addresses: Vec::new(),
             seen_multiaddrs: HashSet::new(),
             subnets: HashSet::new(),
+            partial_message_subnets: HashSet::new(),
             custody_subnets: HashSet::new(),
             sync_status: SyncStatus::Unknown,
             meta_data: None,
@@ -75,6 +81,7 @@ impl<E: EthSpec> Default for PeerInfo<E> {
             is_trusted: false,
             connection_direction: None,
             enr: None,
+            supported_protocols: HashSet::new(),
         }
     }
 }
@@ -167,6 +174,11 @@ impl<E: EthSpec> PeerInfo<E> {
     /// The ENR of the peer if it is known.
     pub fn enr(&self) -> Option<&Enr> {
         self.enr.as_ref()
+    }
+
+    /// Returns true if the peer advertised support for `protocol` via `identify`.
+    pub fn supports_protocol(&self, protocol: RpcProtocol) -> bool {
+        self.supported_protocols.contains(&protocol)
     }
 
     /// An iterator over all the subnets this peer is subscribed to.
@@ -389,6 +401,15 @@ impl<E: EthSpec> PeerInfo<E> {
         self.client = client
     }
 
+    /// Replaces the set of ReqResp protocols the peer advertised via `identify`.
+    // VISIBILITY: The peer manager is able to set the supported protocols
+    pub(in crate::peer_manager) fn set_supported_protocols(
+        &mut self,
+        supported_protocols: HashSet<RpcProtocol>,
+    ) {
+        self.supported_protocols = supported_protocols;
+    }
+
     /// Replaces the current listening addresses with those specified, returning the current
     /// listening addresses.
     // VISIBILITY: The peer manager is able to set the listening addresses
@@ -428,18 +449,23 @@ impl<E: EthSpec> PeerInfo<E> {
     }
 
     /// Adds a known subnet for the peer.
-    pub(super) fn insert_subnet(&mut self, subnet: Subnet) {
+    pub(super) fn insert_subnet(&mut self, subnet: Subnet, supports_partials: bool) {
         self.subnets.insert(subnet);
+        if supports_partials {
+            self.partial_message_subnets.insert(subnet);
+        }
     }
 
     /// Removes a subnet from the peer.
     pub(super) fn remove_subnet(&mut self, subnet: &Subnet) {
         self.subnets.remove(subnet);
+        self.partial_message_subnets.remove(subnet);
     }
 
     /// Removes all subnets from the peer.
     pub(super) fn clear_subnets(&mut self) {
-        self.subnets.clear()
+        self.subnets.clear();
+        self.partial_message_subnets.clear()
     }
 
     /// Applies decay rates to a non-trusted peer's score.
