@@ -24,7 +24,7 @@ use self::parent_chain::{NodeChain, compute_parent_chains};
 pub use self::single_block_lookup::DownloadResult;
 use self::single_block_lookup::{LookupRequestError, PeerType, SingleBlockLookup};
 use super::manager::{BlockProcessType, SLOT_IMPORT_TOLERANCE};
-use super::network_context::{RpcResponseError, SyncNetworkContext};
+use super::network_context::{LookupVerifyError, RpcResponseError, SyncNetworkContext};
 use crate::metrics;
 use crate::network_beacon_processor::BlockProcessingResult;
 use crate::sync::SyncMessage;
@@ -77,6 +77,11 @@ const LOOKUP_MAX_DURATION_NO_PEERS_SECS: u64 = 10;
 const MAX_LOOKUPS: usize = 200;
 
 type BlockDownloadResponse<E> = Result<DownloadResult<Arc<SignedBeaconBlock<E>>>, RpcResponseError>;
+/// A block download response as delivered to block lookups. The first block is the requested root
+/// (the only block for `blocks_by_root`, the chain tip for `blocks_by_head`) followed by its
+/// ancestors in descending slot order.
+type BlocksDownloadResponse<E> =
+    Result<DownloadResult<Vec<Arc<SignedBeaconBlock<E>>>>, RpcResponseError>;
 type CustodyDownloadResponse<E> =
     Result<DownloadResult<DataColumnSidecarList<E>>, RpcResponseError>;
 type PayloadDownloadResponse<E> =
@@ -430,14 +435,32 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     pub fn on_block_download_response(
         &mut self,
         id: SingleLookupReqId,
-        response: BlockDownloadResponse<T::EthSpec>,
+        response: BlocksDownloadResponse<T::EthSpec>,
         cx: &mut SyncNetworkContext<T>,
     ) {
         let Some(lookup) = self.single_block_lookups.get_mut(&id.lookup_id) else {
             debug!(?id, "Block returned for single block lookup not present");
             return;
         };
-        let result = lookup.on_block_download_response(id.req_id, response, cx);
+        // The first block is the requested root. The remaining ancestors (from `blocks_by_head`)
+        // are not consumed yet.
+        // TODO(tree-sync): consume the ancestors to seed parent lookups in the header-backfill step.
+        let block_response = response.and_then(|result| {
+            let DownloadResult {
+                value: blocks,
+                seen_timestamp,
+                peer_group,
+            } = result;
+            let block = blocks.into_iter().next().ok_or(RpcResponseError::from(
+                LookupVerifyError::NotEnoughResponsesReturned { actual: 0 },
+            ))?;
+            Ok(DownloadResult {
+                value: block,
+                seen_timestamp,
+                peer_group,
+            })
+        });
+        let result = lookup.on_block_download_response(id.req_id, block_response, cx);
         self.on_lookup_result(id.lookup_id, result, "block_download_response", cx);
     }
 
