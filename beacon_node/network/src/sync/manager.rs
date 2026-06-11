@@ -54,7 +54,7 @@ use futures::StreamExt;
 use lighthouse_network::SyncInfo;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
-    BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
+    BackfillCustodyId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
     CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyRequester,
     DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
     DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
@@ -492,6 +492,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             }
             SyncRequestId::BlocksByHead { id } => {
                 self.on_blocks_by_head_response(id, peer_id, RpcEvent::RPCError(error))
+            }
+            SyncRequestId::BackfillBlocksByHead { id } => {
+                self.on_backfill_blocks_by_head_response(id, peer_id, RpcEvent::RPCError(error))
             }
             SyncRequestId::SinglePayloadEnvelope { id } => {
                 self.on_single_payload_envelope_response(id, peer_id, RpcEvent::RPCError(error))
@@ -1110,6 +1113,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 peer_id,
                 RpcEvent::from_chunk(block, seen_timestamp),
             ),
+            SyncRequestId::BackfillBlocksByHead { id } => self.on_backfill_blocks_by_head_response(
+                id,
+                peer_id,
+                RpcEvent::from_chunk(block, seen_timestamp),
+            ),
             SyncRequestId::BlocksByRange(id) => self.on_blocks_by_range_response(
                 id,
                 peer_id,
@@ -1152,6 +1160,32 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 }),
                 &mut self.network,
             )
+        }
+    }
+
+    fn on_backfill_blocks_by_head_response(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) {
+        if let Some(resp) = self
+            .network
+            .on_blocks_by_head_backfill_response(id, peer_id, block)
+        {
+            match self.backfill_sync.on_blocks_by_head_response(
+                &mut self.network,
+                id,
+                peer_id,
+                resp,
+            ) {
+                Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
+                Ok(ProcessResult::Successful) => {}
+                Err(_error) => {
+                    // The backfill sync has failed, errors are reported within.
+                    self.update_sync_state();
+                }
+            }
         }
     }
 
@@ -1354,8 +1388,26 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         requester: CustodyRequester,
         response: CustodyByRootResult<T::EthSpec>,
     ) {
-        self.block_lookups
-            .on_custody_download_response(requester.0, response, &mut self.network);
+        match requester {
+            CustodyRequester::SingleLookup(id) => {
+                self.block_lookups
+                    .on_custody_download_response(id, response, &mut self.network);
+            }
+            CustodyRequester::Backfill(BackfillCustodyId { block_root }) => {
+                match self.backfill_sync.on_custody_response(
+                    &mut self.network,
+                    block_root,
+                    response,
+                ) {
+                    Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
+                    Ok(ProcessResult::Successful) => {}
+                    Err(_error) => {
+                        // The backfill sync has failed, errors are reported within.
+                        self.update_sync_state();
+                    }
+                }
+            }
+        }
     }
 
     /// Handles receiving a response for a range sync request that should have both blocks and
@@ -1385,21 +1437,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             self.update_sync_state();
                         }
                         RangeRequestId::BackfillSync { batch_id } => {
-                            match self.backfill_sync.on_block_response(
-                                &mut self.network,
-                                batch_id,
-                                &peer_id,
-                                range_request_id.id,
-                                blocks,
-                            ) {
-                                Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
-                                Ok(ProcessResult::Successful) => {}
-                                Err(_error) => {
-                                    // The backfill sync has failed, errors are reported
-                                    // within.
-                                    self.update_sync_state();
-                                }
-                            }
+                            // Backfill sync now fetches blocks via `beacon_blocks_by_head`, not
+                            // blocks_by_range, so a range response for backfill is unexpected.
+                            debug!(
+                                ?batch_id,
+                                "Ignoring unexpected backfill range block response"
+                            );
                         }
                     }
                 }
@@ -1416,16 +1459,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         self.update_sync_state();
                     }
                     RangeRequestId::BackfillSync { batch_id } => {
-                        match self.backfill_sync.inject_error(
-                            &mut self.network,
-                            batch_id,
-                            &peer_id,
-                            range_request_id.id,
-                            e,
-                        ) {
-                            Ok(_) => {}
-                            Err(_) => self.update_sync_state(),
-                        }
+                        // Backfill sync no longer issues blocks_by_range requests.
+                        debug!(?batch_id, error = ?e, "Ignoring unexpected backfill range error");
                     }
                 },
             }
