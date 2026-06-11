@@ -727,10 +727,7 @@ impl<T: BeaconChainTypes> Router<T> {
         beacon_block: Option<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
         let sync_request_id = match app_request_id {
-            AppRequestId::Sync(
-                id @ (SyncRequestId::BlocksByHead { .. }
-                | SyncRequestId::BackfillBlocksByHead { .. }),
-            ) => id,
+            AppRequestId::Sync(id @ SyncRequestId::BlocksByHead { .. }) => id,
             other => {
                 crit!(request = ?other, "BlocksByHead response on incorrect request");
                 return;

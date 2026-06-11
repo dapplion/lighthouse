@@ -54,11 +54,11 @@ use futures::StreamExt;
 use lighthouse_network::SyncInfo;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
-    BackfillCustodyId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
-    SyncRequestId,
+    BackfillCustodyId, BlobsByRangeRequestId, BlocksByHeadRequester, BlocksByRangeRequestId,
+    ComponentsByRangeRequestId, CustodyBackFillBatchRequestId, CustodyBackfillBatchId,
+    CustodyRequester, DataColumnsByRangeRequestId, DataColumnsByRangeRequester,
+    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId,
+    SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::{PeerAction, PeerId};
@@ -493,9 +493,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncRequestId::BlocksByHead { id } => {
                 self.on_blocks_by_head_response(id, peer_id, RpcEvent::RPCError(error))
             }
-            SyncRequestId::BackfillBlocksByHead { id } => {
-                self.on_backfill_blocks_by_head_response(id, peer_id, RpcEvent::RPCError(error))
-            }
             SyncRequestId::SinglePayloadEnvelope { id } => {
                 self.on_single_payload_envelope_response(id, peer_id, RpcEvent::RPCError(error))
             }
@@ -524,7 +521,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     fn peer_disconnect(&mut self, peer_id: &PeerId) {
         // Remove peer from all data structures
         self.range_sync.peer_disconnect(&mut self.network, peer_id);
-        let _ = self.backfill_sync.peer_disconnected(peer_id);
         self.block_lookups.peer_disconnected(peer_id);
 
         // Inject a Disconnected error on all requests associated with the disconnected peer
@@ -583,9 +579,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 );
 
                 // A peer has transitioned its sync state. If the new state is "synced" we
-                // inform the backfill sync that a new synced peer has joined us.
+                // inform the custody backfill sync that a new synced peer has joined us. Block
+                // backfill is infallible and resumes from `Paused` via `start`, so it needs no hook.
                 if new_state.is_synced() {
-                    self.backfill_sync.fully_synced_peer_joined();
                     self.custody_backfill_sync.fully_synced_peer_joined();
                 }
             }
@@ -649,19 +645,16 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     if matches!(sync_state, SyncState::Synced) {
                         // Determine if we need to start/resume/restart a backfill sync.
                         match self.backfill_sync.start(&mut self.network) {
-                            Ok(SyncStart::Syncing {
+                            SyncStart::Syncing {
                                 completed,
                                 remaining,
-                            }) => {
+                            } => {
                                 sync_state = SyncState::BackFillSyncing {
                                     completed,
                                     remaining,
                                 };
                             }
-                            Ok(SyncStart::NotSyncing) => {} // Ignore updating the state if the backfill sync state didn't start.
-                            Err(e) => {
-                                error!(error = ?e, "Backfill sync failed to start");
-                            }
+                            SyncStart::NotSyncing => {} // Ignore updating the state if the backfill sync state didn't start.
                         }
 
                         // If backfill is complete, check if we have a pending custody backfill to complete
@@ -932,13 +925,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         epoch,
                         &result,
                     ) {
-                        Ok(ProcessResult::Successful) => {}
-                        Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
-                        Err(error) => {
-                            error!(error = ?error, "Backfill sync failed");
-                            // Update the global status
-                            self.update_sync_state();
-                        }
+                        ProcessResult::Successful => {}
+                        ProcessResult::SyncCompleted => self.update_sync_state(),
                     }
                 }
             },
@@ -1113,11 +1101,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 peer_id,
                 RpcEvent::from_chunk(block, seen_timestamp),
             ),
-            SyncRequestId::BackfillBlocksByHead { id } => self.on_backfill_blocks_by_head_response(
-                id,
-                peer_id,
-                RpcEvent::from_chunk(block, seen_timestamp),
-            ),
             SyncRequestId::BlocksByRange(id) => self.on_blocks_by_range_response(
                 id,
                 peer_id,
@@ -1148,42 +1131,32 @@ impl<T: BeaconChainTypes> SyncManager<T> {
 
     fn on_blocks_by_head_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: BlocksByHeadRequester,
         peer_id: PeerId,
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
-        if let Some(resp) = self.network.on_blocks_by_head_response(id, peer_id, block) {
-            self.block_lookups.on_block_download_response(
-                id,
-                resp.map(|(value, seen_timestamp)| {
-                    DownloadResult::new(value, PeerGroup::from_single(peer_id), seen_timestamp)
-                }),
-                &mut self.network,
-            )
-        }
-    }
-
-    fn on_backfill_blocks_by_head_response(
-        &mut self,
-        id: SingleLookupReqId,
-        peer_id: PeerId,
-        block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) {
-        if let Some(resp) = self
-            .network
-            .on_blocks_by_head_backfill_response(id, peer_id, block)
-        {
-            match self.backfill_sync.on_blocks_by_head_response(
-                &mut self.network,
-                id,
-                peer_id,
-                resp,
-            ) {
-                Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
-                Ok(ProcessResult::Successful) => {}
-                Err(_error) => {
-                    // The backfill sync has failed, errors are reported within.
-                    self.update_sync_state();
+        let Some(resp) = self.network.on_blocks_by_head_response(id, peer_id, block) else {
+            return;
+        };
+        match id {
+            BlocksByHeadRequester::Lookup(lookup_id) => {
+                self.block_lookups.on_block_download_response(
+                    lookup_id,
+                    resp.map(|(value, seen_timestamp)| {
+                        DownloadResult::new(value, PeerGroup::from_single(peer_id), seen_timestamp)
+                    }),
+                    &mut self.network,
+                )
+            }
+            BlocksByHeadRequester::Backfill(backfill_id) => {
+                match self.backfill_sync.on_blocks_by_head_response(
+                    &mut self.network,
+                    backfill_id,
+                    peer_id,
+                    resp,
+                ) {
+                    ProcessResult::SyncCompleted => self.update_sync_state(),
+                    ProcessResult::Successful => {}
                 }
             }
         }
@@ -1399,12 +1372,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     block_root,
                     response,
                 ) {
-                    Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
-                    Ok(ProcessResult::Successful) => {}
-                    Err(_error) => {
-                        // The backfill sync has failed, errors are reported within.
-                        self.update_sync_state();
-                    }
+                    ProcessResult::SyncCompleted => self.update_sync_state(),
+                    ProcessResult::Successful => {}
                 }
             }
         }
@@ -1423,29 +1392,19 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             .range_block_component_response(range_request_id, range_block_component)
         {
             match resp {
-                Ok(blocks) => {
-                    match range_request_id.requester {
-                        RangeRequestId::RangeSync { chain_id, batch_id } => {
-                            self.range_sync.blocks_by_range_response(
-                                &mut self.network,
-                                peer_id,
-                                chain_id,
-                                batch_id,
-                                range_request_id.id,
-                                blocks,
-                            );
-                            self.update_sync_state();
-                        }
-                        RangeRequestId::BackfillSync { batch_id } => {
-                            // Backfill sync now fetches blocks via `beacon_blocks_by_head`, not
-                            // blocks_by_range, so a range response for backfill is unexpected.
-                            debug!(
-                                ?batch_id,
-                                "Ignoring unexpected backfill range block response"
-                            );
-                        }
+                Ok(blocks) => match range_request_id.requester {
+                    RangeRequestId::RangeSync { chain_id, batch_id } => {
+                        self.range_sync.blocks_by_range_response(
+                            &mut self.network,
+                            peer_id,
+                            chain_id,
+                            batch_id,
+                            range_request_id.id,
+                            blocks,
+                        );
+                        self.update_sync_state();
                     }
-                }
+                },
                 Err(e) => match range_request_id.requester {
                     RangeRequestId::RangeSync { chain_id, batch_id } => {
                         self.range_sync.inject_error(
@@ -1457,10 +1416,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             e,
                         );
                         self.update_sync_state();
-                    }
-                    RangeRequestId::BackfillSync { batch_id } => {
-                        // Backfill sync no longer issues blocks_by_range requests.
-                        debug!(?batch_id, error = ?e, "Ignoring unexpected backfill range error");
                     }
                 },
             }

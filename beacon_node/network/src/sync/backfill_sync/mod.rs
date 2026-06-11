@@ -60,16 +60,6 @@ pub enum ProcessResult {
     SyncCompleted,
 }
 
-/// The ways a backfill sync can fail.
-// The info in the enum variants is displayed in logging, clippy thinks it's dead code.
-#[derive(Debug)]
-pub enum BackFillError {
-    /// A segment of blocks could not be processed.
-    BatchProcessingFailed,
-    /// The sync algorithm entered an invalid state.
-    InvalidSyncState(#[allow(dead_code)] String),
-}
-
 /// The current step of the linear backfill pipeline. Only one segment is in flight at a time.
 enum BackFillStep<E: EthSpec> {
     /// Ready to request the next run of ancestors from the current anchor.
@@ -79,8 +69,13 @@ enum BackFillStep<E: EthSpec> {
     /// Ancestors are downloaded; custody data columns are being fetched by root for the blocks that
     /// require them before the segment can be processed.
     FetchingData(Box<DataFetch<E>>),
-    /// A back-sync segment is being processed by the beacon processor.
-    Processing { epoch: Epoch },
+    /// A back-sync segment is being processed by the beacon processor. `peers` are exactly the peers
+    /// that served this segment (the block peer plus any custody-column peers), so a faulty result
+    /// penalizes only them.
+    Processing {
+        epoch: Epoch,
+        peers: HashSet<PeerId>,
+    },
 }
 
 /// Tracks the per-block custody column fetch for a single discovered segment. `blocks` are in
@@ -91,20 +86,15 @@ struct DataFetch<E: EthSpec> {
     columns: HashMap<Hash256, DataColumnSidecarList<E>>,
     pending: HashSet<Hash256>,
     /// Synced peers used to satisfy the custody requests for this segment.
-    peers: Arc<RwLock<HashSet<PeerId>>>,
+    candidate_peers: Arc<RwLock<HashSet<PeerId>>>,
+    /// Peers that actually served this segment (block peer + custody-column peers), penalized
+    /// together if the segment fails to process.
+    responsible_peers: HashSet<PeerId>,
 }
 
 pub struct BackFillSync<T: BeaconChainTypes> {
     /// Current step of the linear pipeline.
     step: BackFillStep<T::EthSpec>,
-
-    /// Peers that have participated in the backfill sync. Used to penalize only the peers that took
-    /// part if the sync fails, rather than all synced peers.
-    participating_peers: HashSet<PeerId>,
-
-    /// When a backfill sync fails, we keep track of whether a new fully synced peer has joined.
-    /// This signifies that we are able to attempt to restart a failed chain.
-    restart_failed_sync: bool,
 
     /// Number of blocks successfully imported by this backfill (for logging/metrics).
     imported_blocks: u64,
@@ -133,8 +123,6 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
 
         let bfs = BackFillSync {
             step: BackFillStep::Idle,
-            participating_peers: HashSet::new(),
-            restart_failed_sync: false,
             imported_blocks: 0,
             beacon_chain,
             network_globals,
@@ -158,41 +146,23 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     /// Starts or resumes syncing.
     ///
     /// If resuming is successful, reports back the current syncing metrics.
-    #[must_use = "A failure here indicates the backfill sync has failed and the global sync state should be updated"]
-    pub fn start(
-        &mut self,
-        network: &mut SyncNetworkContext<T>,
-    ) -> Result<SyncStart, BackFillError> {
+    ///
+    /// Backfill is infallible: it never enters a terminal failed state. If it cannot make progress
+    /// (no peers, bad data) it pauses and is resumed by a later `start` call.
+    pub fn start(&mut self, network: &mut SyncNetworkContext<T>) -> SyncStart {
         match self.state() {
             BackFillState::Syncing => {} // already syncing, ignore.
-            BackFillState::Paused => {
+            // `Failed` is never set anymore, but resume from it defensively like `Paused`.
+            BackFillState::Paused | BackFillState::Failed => {
                 self.set_state(BackFillState::Syncing);
-                if let Err(e) = self.request_ancestors(network) {
-                    return self.fail_sync(e).map(|_| SyncStart::NotSyncing);
-                }
+                self.request_ancestors(network);
                 // `request_ancestors` may pause again (no eligible peers) or complete (genesis).
                 if !matches!(self.state(), BackFillState::Syncing) {
-                    return Ok(SyncStart::NotSyncing);
-                }
-            }
-            BackFillState::Failed => {
-                // Attempt to recover from a failed sync only if a new synced peer has joined.
-                if !self.restart_failed_sync {
-                    return Ok(SyncStart::NotSyncing);
-                }
-                self.restart_failed_sync = false;
-                self.step = BackFillStep::Idle;
-                self.participating_peers.clear();
-                self.set_state(BackFillState::Syncing);
-                if let Err(e) = self.request_ancestors(network) {
-                    return self.fail_sync(e).map(|_| SyncStart::NotSyncing);
-                }
-                if !matches!(self.state(), BackFillState::Syncing) {
-                    return Ok(SyncStart::NotSyncing);
+                    return SyncStart::NotSyncing;
                 }
             }
             BackFillState::Completed => {
-                return Ok(SyncStart::NotSyncing);
+                return SyncStart::NotSyncing;
             }
         }
 
@@ -205,42 +175,23 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             .oldest_block_slot
             .as_usize()
             .saturating_sub(self.beacon_chain.genesis_backfill_slot.as_usize());
-        Ok(SyncStart::Syncing {
+        SyncStart::Syncing {
             completed,
             remaining,
-        })
-    }
-
-    /// A fully synced peer has joined us.
-    /// If we are in a failed state, indicate we are able to restart the failed sync on the next
-    /// attempt.
-    pub fn fully_synced_peer_joined(&mut self) {
-        if matches!(self.state(), BackFillState::Failed) {
-            self.restart_failed_sync = true;
         }
     }
 
-    /// A peer has disconnected. Remove it from the participation list.
-    #[must_use = "A failure here indicates the backfill sync has failed and the global sync state should be updated"]
-    pub fn peer_disconnected(&mut self, peer_id: &PeerId) -> Result<(), BackFillError> {
-        self.participating_peers.remove(peer_id);
-        Ok(())
-    }
-
     /// Requests the next run of ancestors from the current anchor via `beacon_blocks_by_head`.
-    fn request_ancestors(
-        &mut self,
-        network: &mut SyncNetworkContext<T>,
-    ) -> Result<(), BackFillError> {
+    fn request_ancestors(&mut self, network: &mut SyncNetworkContext<T>) {
         // Only request if syncing and no segment is already in flight.
         if self.state() != BackFillState::Syncing || !matches!(self.step, BackFillStep::Idle) {
-            return Ok(());
+            return;
         }
 
         let anchor_info = self.beacon_chain.store.get_anchor_info();
         if anchor_info.block_backfill_complete(self.beacon_chain.genesis_backfill_slot) {
             self.complete_sync();
-            return Ok(());
+            return;
         }
 
         // backfill can't progress without peers in the required custody subnets post-PeerDAS.
@@ -250,7 +201,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         ) {
             debug!("Waiting for peers on custody column subnets, pausing backfill");
             self.set_state(BackFillState::Paused);
-            return Ok(());
+            return;
         }
 
         let synced_peers = self
@@ -265,7 +216,6 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             .backfill_blocks_by_head_request(anchor_info.oldest_block_parent, &synced_peers)
         {
             Ok((req_id, peer_id)) => {
-                self.participating_peers.insert(peer_id);
                 self.step = BackFillStep::FetchingAncestors { req_id };
                 debug!(
                     anchor_root = ?anchor_info.oldest_block_parent,
@@ -273,39 +223,35 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     %peer_id,
                     "Requesting backfill ancestors"
                 );
-                Ok(())
             }
             Err(RpcRequestSendError::NoPeer(_)) => {
                 // No synced peer advertising `beacon_blocks_by_head`. Pause until a suitable peer
                 // joins; `start` will resume.
                 info!("Backfill sync paused: no peers advertising beacon_blocks_by_head");
                 self.set_state(BackFillState::Paused);
-                Ok(())
             }
             Err(RpcRequestSendError::InternalError(e)) => {
                 warn!(error = ?e, "Could not send backfill ancestors request");
                 self.set_state(BackFillState::Paused);
-                Ok(())
             }
         }
     }
 
     /// A `beacon_blocks_by_head` response has been received for the current segment. The run is the
     /// anchor block followed by its ancestors in descending slot order.
-    #[must_use = "A failure here indicates the backfill sync has failed and the global sync state should be updated"]
     pub fn on_blocks_by_head_response(
         &mut self,
         network: &mut SyncNetworkContext<T>,
         request_id: SingleLookupReqId,
         peer_id: PeerId,
         result: RpcResponseResult<AncestorBlocks<T::EthSpec>>,
-    ) -> Result<ProcessResult, BackFillError> {
+    ) -> ProcessResult {
         // Ignore stale responses that don't match the in-flight request.
         match &self.step {
             BackFillStep::FetchingAncestors { req_id, .. } if *req_id == request_id => {}
             _ => {
                 debug!(?request_id, %peer_id, "Unexpected backfill ancestors response");
-                return Ok(ProcessResult::Successful);
+                return ProcessResult::Successful;
             }
         }
         self.step = BackFillStep::Idle;
@@ -320,8 +266,8 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     "backfill_ancestors_failed",
                 );
                 // Retry from a different peer.
-                self.request_ancestors(network)?;
-                return Ok(ProcessResult::Successful);
+                self.request_ancestors(network);
+                return ProcessResult::Successful;
             }
         };
 
@@ -333,22 +279,17 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         blocks.reverse();
 
         if blocks.is_empty() {
-            self.request_ancestors(network)?;
-            return Ok(ProcessResult::Successful);
+            self.request_ancestors(network);
+            return ProcessResult::Successful;
         }
 
         // Blocks below the data-availability window (or pre-Deneb) need no sidecars and process
         // immediately. If any block requires data columns, fetch them by root first.
         if blocks.iter().any(Self::block_needs_data) {
-            return self.start_data_fetch(network, blocks);
+            return self.start_data_fetch(network, blocks, peer_id);
         }
 
-        match self.couple_blocks(network, &blocks, &HashMap::new()) {
-            Ok(segment) => self.process_segment(network, segment),
-            Err(reason) => self
-                .fail_sync(BackFillError::InvalidSyncState(reason))
-                .map(|_| ProcessResult::Successful),
-        }
+        self.couple_and_process(network, blocks, HashMap::new(), HashSet::from([peer_id]))
     }
 
     /// Returns true if the block requires sidecar data (data columns, or a Gloas envelope) to be
@@ -363,7 +304,8 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         &mut self,
         network: &mut SyncNetworkContext<T>,
         blocks: Vec<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) -> Result<ProcessResult, BackFillError> {
+        block_peer: PeerId,
+    ) -> ProcessResult {
         // Gloas envelope backfill by root is not yet implemented; pause rather than skip data.
         if blocks
             .iter()
@@ -371,14 +313,14 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         {
             warn!("Backfill paused: Gloas envelope backfill by root is not yet implemented");
             self.set_state(BackFillState::Paused);
-            return Ok(ProcessResult::Successful);
+            return ProcessResult::Successful;
         }
 
         let segment_epoch = blocks
             .last()
             .map(|b| b.slot().epoch(slots_per_epoch::<T>()))
             .unwrap_or_else(|| Epoch::new(0));
-        let peers = Arc::new(RwLock::new(
+        let candidate_peers = Arc::new(RwLock::new(
             self.network_globals
                 .peers
                 .read()
@@ -391,7 +333,8 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             blocks,
             columns: HashMap::new(),
             pending: HashSet::new(),
-            peers,
+            candidate_peers,
+            responsible_peers: HashSet::from([block_peer]),
         };
 
         let to_fetch = fetch
@@ -402,7 +345,11 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             .collect::<Vec<_>>();
 
         for (block_root, block_slot) in to_fetch {
-            match network.backfill_custody_request(block_root, block_slot, fetch.peers.clone()) {
+            match network.backfill_custody_request(
+                block_root,
+                block_slot,
+                fetch.candidate_peers.clone(),
+            ) {
                 Ok(LookupRequestResult::RequestSent(_)) => {
                     fetch.pending.insert(block_root);
                 }
@@ -416,12 +363,12 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                         reason, "Backfill custody request pending, pausing"
                     );
                     self.set_state(BackFillState::Paused);
-                    return Ok(ProcessResult::Successful);
+                    return ProcessResult::Successful;
                 }
                 Err(e) => {
                     debug!(?block_root, error = ?e, "Backfill custody request failed, pausing");
                     self.set_state(BackFillState::Paused);
-                    return Ok(ProcessResult::Successful);
+                    return ProcessResult::Successful;
                 }
             }
         }
@@ -432,24 +379,27 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     }
 
     /// A custody (data-columns-by-root) request issued by backfill has completed for `block_root`.
-    #[must_use = "A failure here indicates the backfill sync has failed and the global sync state should be updated"]
     pub fn on_custody_response(
         &mut self,
         network: &mut SyncNetworkContext<T>,
         block_root: Hash256,
         result: CustodyByRootResult<T::EthSpec>,
-    ) -> Result<ProcessResult, BackFillError> {
+    ) -> ProcessResult {
         let BackFillStep::FetchingData(fetch) = &mut self.step else {
             debug!(?block_root, "Unexpected backfill custody response");
-            return Ok(ProcessResult::Successful);
+            return ProcessResult::Successful;
         };
         if !fetch.pending.remove(&block_root) {
             debug!(?block_root, "Backfill custody response for unknown block");
-            return Ok(ProcessResult::Successful);
+            return ProcessResult::Successful;
         }
 
         match result {
             Ok(download) => {
+                // Record the custody-column peers so a faulty segment penalizes them too.
+                fetch
+                    .responsible_peers
+                    .extend(download.peer_group.all().copied());
                 fetch.columns.insert(block_root, download.value);
                 self.try_finish_data_fetch(network)
             }
@@ -458,20 +408,17 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 // Drop the in-flight segment; a restart re-requests it from the store anchor.
                 self.step = BackFillStep::Idle;
                 self.set_state(BackFillState::Paused);
-                Ok(ProcessResult::Successful)
+                ProcessResult::Successful
             }
         }
     }
 
     /// If all custody fetches for the current segment have completed, couple the blocks with their
     /// data and submit the segment for processing.
-    fn try_finish_data_fetch(
-        &mut self,
-        network: &mut SyncNetworkContext<T>,
-    ) -> Result<ProcessResult, BackFillError> {
+    fn try_finish_data_fetch(&mut self, network: &mut SyncNetworkContext<T>) -> ProcessResult {
         match &self.step {
             BackFillStep::FetchingData(fetch) if fetch.pending.is_empty() => {}
-            _ => return Ok(ProcessResult::Successful),
+            _ => return ProcessResult::Successful,
         }
 
         let BackFillStep::FetchingData(fetch) =
@@ -480,14 +427,35 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             unreachable!("step checked to be FetchingData above");
         };
         let DataFetch {
-            blocks, columns, ..
+            blocks,
+            columns,
+            responsible_peers,
+            ..
         } = *fetch;
 
+        self.couple_and_process(network, blocks, columns, responsible_peers)
+    }
+
+    /// Couples a discovered segment with its data and submits it for processing. If coupling fails
+    /// (inconsistent data from a peer) the segment is dropped and a fresh request is made.
+    fn couple_and_process(
+        &mut self,
+        network: &mut SyncNetworkContext<T>,
+        blocks: Vec<Arc<SignedBeaconBlock<T::EthSpec>>>,
+        columns: HashMap<Hash256, DataColumnSidecarList<T::EthSpec>>,
+        peers: HashSet<PeerId>,
+    ) -> ProcessResult {
         match self.couple_blocks(network, &blocks, &columns) {
-            Ok(segment) => self.process_segment(network, segment),
-            Err(reason) => self
-                .fail_sync(BackFillError::InvalidSyncState(reason))
-                .map(|_| ProcessResult::Successful),
+            Ok(segment) => self.process_segment(network, segment, peers),
+            Err(reason) => {
+                warn!(
+                    reason,
+                    "Backfill segment coupling failed, retrying from a new peer"
+                );
+                self.step = BackFillStep::Idle;
+                self.request_ancestors(network);
+                ProcessResult::Successful
+            }
         }
     }
 
@@ -521,15 +489,17 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         Ok(segment)
     }
 
-    /// Submits a coupled segment to the beacon processor for back-sync import.
+    /// Submits a coupled segment to the beacon processor for back-sync import. `peers` are the peers
+    /// that served the segment, penalized together if it fails to process.
     fn process_segment(
         &mut self,
         network: &mut SyncNetworkContext<T>,
         segment: Vec<RangeSyncBlock<T::EthSpec>>,
-    ) -> Result<ProcessResult, BackFillError> {
+        peers: HashSet<PeerId>,
+    ) -> ProcessResult {
         if segment.is_empty() {
-            self.request_ancestors(network)?;
-            return Ok(ProcessResult::Successful);
+            self.request_ancestors(network);
+            return ProcessResult::Successful;
         }
 
         // The epoch is only used for logging/identification of the back-sync batch.
@@ -537,7 +507,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             .first()
             .map(|b| b.as_block().slot().epoch(slots_per_epoch::<T>()))
             .unwrap_or_else(|| Epoch::new(0));
-        self.step = BackFillStep::Processing { epoch };
+        self.step = BackFillStep::Processing { epoch, peers };
 
         if let Err(e) = network
             .beacon_processor()
@@ -546,28 +516,33 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             error!(error = %e, "Failed to send backfill segment to processor");
             self.step = BackFillStep::Idle;
             // Re-request so the segment isn't lost.
-            self.request_ancestors(network)?;
+            self.request_ancestors(network);
         }
 
-        Ok(ProcessResult::Successful)
+        ProcessResult::Successful
     }
 
     /// The beacon processor has completed processing the in-flight segment.
-    #[must_use = "A failure here indicates the backfill sync has failed and the global sync state should be updated"]
     pub fn on_batch_process_result(
         &mut self,
         network: &mut SyncNetworkContext<T>,
         epoch: Epoch,
         result: &BatchProcessResult,
-    ) -> Result<ProcessResult, BackFillError> {
+    ) -> ProcessResult {
         match &self.step {
-            BackFillStep::Processing { epoch: expected } if *expected == epoch => {}
+            BackFillStep::Processing {
+                epoch: expected, ..
+            } if *expected == epoch => {}
             _ => {
                 debug!(%epoch, "Backfill was not expecting a segment result");
-                return Ok(ProcessResult::Successful);
+                return ProcessResult::Successful;
             }
         }
-        self.step = BackFillStep::Idle;
+        let BackFillStep::Processing { peers, .. } =
+            std::mem::replace(&mut self.step, BackFillStep::Idle)
+        else {
+            unreachable!("step checked to be Processing above");
+        };
 
         match result {
             BatchProcessResult::Success {
@@ -584,38 +559,29 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                     .block_backfill_complete(self.beacon_chain.genesis_backfill_slot)
                 {
                     self.complete_sync();
-                    return Ok(ProcessResult::SyncCompleted);
+                    return ProcessResult::SyncCompleted;
                 }
 
                 // Request the next run of ancestors.
-                self.request_ancestors(network)?;
-                Ok(ProcessResult::Successful)
+                self.request_ancestors(network);
+                ProcessResult::Successful
             }
             BatchProcessResult::FaultyFailure { penalty, .. } => {
-                warn!(score_adjustment = %penalty, %epoch, "Backfill segment failed processing. Penalizing peers");
-                for peer in self.participating_peers.drain() {
+                // The segment failed validation (bad signatures/proofs). Penalize exactly the peers
+                // that served it and retry from fresh peers; backfill never fails terminally.
+                warn!(score_adjustment = %penalty, %epoch, "Backfill segment failed processing, penalizing peers and retrying");
+                for peer in peers {
                     network.report_peer(peer, *penalty, "backfill_segment_failed");
                 }
-                self.fail_sync(BackFillError::BatchProcessingFailed)
-                    .map(|_| ProcessResult::Successful)
+                self.request_ancestors(network);
+                ProcessResult::Successful
             }
             BatchProcessResult::NonFaultyFailure => {
                 debug!(%epoch, "Backfill segment non-faulty failure, retrying");
-                self.request_ancestors(network)?;
-                Ok(ProcessResult::Successful)
+                self.request_ancestors(network);
+                ProcessResult::Successful
             }
         }
-    }
-
-    /// The syncing process has failed. Resets state to allow for a fresh start when resuming.
-    fn fail_sync(&mut self, error: BackFillError) -> Result<(), BackFillError> {
-        self.set_state(BackFillState::Failed);
-        self.step = BackFillStep::Idle;
-        self.participating_peers.clear();
-        self.restart_failed_sync = false;
-
-        error!(?error, "Backfill sync failed");
-        Err(error)
     }
 
     /// Marks the backfill as completed and updates the global sync state.
@@ -706,6 +672,6 @@ mod tests {
         // With no peers advertising `beacon_blocks_by_head`, starting must not sync and must not
         // panic.
         let result = backfill.start(&mut network);
-        assert!(matches!(result, Ok(SyncStart::NotSyncing)));
+        assert!(matches!(result, SyncStart::NotSyncing));
     }
 }
