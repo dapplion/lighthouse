@@ -16,15 +16,30 @@ pub struct SingleLookupReqId {
     pub req_id: Id,
 }
 
+/// Downstream components that issue `beacon_blocks_by_head` requests.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum BlocksByHeadRequester {
+    Lookup(SingleLookupReqId),
+    Backfill(SingleLookupReqId),
+}
+
+impl Display for BlocksByHeadRequester {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lookup(id) => write!(f, "Lookup/{id}"),
+            Self::Backfill(id) => write!(f, "Backfill/{id}"),
+        }
+    }
+}
+
 /// Id of rpc requests sent by sync to the network.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum SyncRequestId {
     /// Request searching for a block given a hash.
     SingleBlock { id: SingleLookupReqId },
-    /// Request walking the ancestors of a block given its root, via `beacon_blocks_by_head`.
-    BlocksByHead { id: SingleLookupReqId },
-    /// Backfill sync request walking the ancestors of a block via `beacon_blocks_by_head`.
-    BackfillBlocksByHead { id: SingleLookupReqId },
+    /// Request walking the ancestors of a block via `beacon_blocks_by_head`, for either a block
+    /// lookup or backfill sync (distinguished by [`BlocksByHeadRequester`]).
+    BlocksByHead { id: BlocksByHeadRequester },
     /// Request searching for a payload envelope given a hash.
     SinglePayloadEnvelope { id: SingleLookupReqId },
     /// Request searching for a set of data columns given a hash and list of column indices.
@@ -117,11 +132,10 @@ pub struct CustodyBackfillBatchId {
     pub run_id: u64,
 }
 
-/// Range sync chain or backfill batch
+/// Range sync chain
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum RangeRequestId {
     RangeSync { chain_id: Id, batch_id: Epoch },
-    BackfillSync { batch_id: Epoch },
 }
 
 // TODO(das) refactor in a separate PR. We might be able to remove this and replace
@@ -313,7 +327,6 @@ impl Display for RangeRequestId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RangeSync { chain_id, batch_id } => write!(f, "RangeSync/{batch_id}/{chain_id}"),
-            Self::BackfillSync { batch_id } => write!(f, "BackfillSync/{batch_id}"),
         }
     }
 }

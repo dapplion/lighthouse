@@ -33,11 +33,11 @@ use lighthouse_network::rpc::{
 };
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
-    AppRequestId, BackfillCustodyId, BlobsByRangeRequestId, BlocksByRangeRequestId,
-    ComponentsByRangeRequestId, CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyId,
-    CustodyRequester, DataColumnsByRangeRequestId, DataColumnsByRangeRequester,
-    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId,
-    SingleLookupReqId, SyncRequestId,
+    AppRequestId, BackfillCustodyId, BlobsByRangeRequestId, BlocksByHeadRequester,
+    BlocksByRangeRequestId, ComponentsByRangeRequestId, CustodyBackFillBatchRequestId,
+    CustodyBackfillBatchId, CustodyId, CustodyRequester, DataColumnsByRangeRequestId,
+    DataColumnsByRangeRequester, DataColumnsByRootRequestId, DataColumnsByRootRequester, Id,
+    PayloadEnvelopesByRangeRequestId, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
@@ -268,13 +268,10 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
     blocks_by_root_requests:
         ActiveRequests<SingleLookupReqId, BlocksByRootRequestItems<T::EthSpec>>,
-    /// A mapping of active BlocksByHead requests, used by block lookups to walk a block's ancestors.
+    /// A mapping of active BlocksByHead requests, used by block lookups and backfill sync to walk a
+    /// block's ancestors (distinguished by [`BlocksByHeadRequester`]).
     blocks_by_head_requests:
-        ActiveRequests<SingleLookupReqId, BlocksByHeadRequestItems<T::EthSpec>>,
-    /// A mapping of active BlocksByHead requests issued by backfill sync to walk the parent chain
-    /// of the current anchor back towards genesis.
-    backfill_blocks_by_head_requests:
-        ActiveRequests<SingleLookupReqId, BlocksByHeadRequestItems<T::EthSpec>>,
+        ActiveRequests<BlocksByHeadRequester, BlocksByHeadRequestItems<T::EthSpec>>,
     /// A mapping of active PayloadEnvelopesByRoot requests
     payload_envelopes_by_root_requests:
         ActiveRequests<SingleLookupReqId, PayloadEnvelopesByRootRequestItems<T::EthSpec>>,
@@ -380,7 +377,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_id: 1,
             blocks_by_root_requests: ActiveRequests::new("blocks_by_root"),
             blocks_by_head_requests: ActiveRequests::new("blocks_by_head"),
-            backfill_blocks_by_head_requests: ActiveRequests::new("backfill_blocks_by_head"),
             payload_envelopes_by_root_requests: ActiveRequests::new("payload_envelopes_by_root"),
             data_columns_by_root_requests: ActiveRequests::new("data_columns_by_root"),
             blocks_by_range_requests: ActiveRequests::new("blocks_by_range"),
@@ -415,7 +411,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_id: _,
             blocks_by_root_requests,
             blocks_by_head_requests,
-            backfill_blocks_by_head_requests,
             payload_envelopes_by_root_requests,
             data_columns_by_root_requests,
             blocks_by_range_requests,
@@ -441,10 +436,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .active_requests_of_peer(peer_id)
             .into_iter()
             .map(|id| SyncRequestId::BlocksByHead { id: *id });
-        let backfill_blocks_by_head_ids = backfill_blocks_by_head_requests
-            .active_requests_of_peer(peer_id)
-            .into_iter()
-            .map(|id| SyncRequestId::BackfillBlocksByHead { id: *id });
         let payload_envelopes_by_root_ids = payload_envelopes_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
@@ -471,7 +462,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .map(|req_id| SyncRequestId::PayloadEnvelopesByRange(*req_id));
         blocks_by_root_ids
             .chain(blocks_by_head_ids)
-            .chain(backfill_blocks_by_head_ids)
             .chain(payload_envelopes_by_root_ids)
             .chain(data_column_by_root_ids)
             .chain(blocks_by_range_ids)
@@ -553,7 +543,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_id: _,
             blocks_by_root_requests,
             blocks_by_head_requests,
-            backfill_blocks_by_head_requests,
             payload_envelopes_by_root_requests,
             data_columns_by_root_requests,
             blocks_by_range_requests,
@@ -578,7 +567,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         for peer_id in blocks_by_root_requests
             .iter_request_peers()
             .chain(blocks_by_head_requests.iter_request_peers())
-            .chain(backfill_blocks_by_head_requests.iter_request_peers())
             .chain(payload_envelopes_by_root_requests.iter_request_peers())
             .chain(data_columns_by_root_requests.iter_request_peers())
             .chain(blocks_by_range_requests.iter_request_peers())
@@ -1135,6 +1123,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             lookup_id,
             req_id: self.next_id(),
         };
+        let requester = BlocksByHeadRequester::Lookup(id);
         // Lookup sync event safety: see `send_block_by_root_request`. The same guarantees apply,
         // with the events handled by `Self::on_blocks_by_head_response`.
         let request = BlocksByHeadRequest {
@@ -1145,7 +1134,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .send(NetworkMessage::SendRequest {
                 peer_id,
                 request: RequestType::BlocksByHead(request),
-                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByHead { id }),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByHead { id: requester }),
             })
             .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
 
@@ -1163,7 +1152,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             %block_root,
         );
         self.blocks_by_head_requests.insert(
-            id,
+            requester,
             peer_id,
             // false = the peer may return fewer blocks than requested (e.g. reached genesis or
             // finalization), so the request completes on stream termination.
@@ -1184,7 +1173,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         candidate_peers: &HashSet<PeerId>,
     ) -> Result<(SingleLookupReqId, PeerId), RpcRequestSendError> {
         let active_request_count_by_peer = self.active_request_count_by_peer();
-        let by_head_per_peer = ActiveRequestsPerPeer::new(&self.backfill_blocks_by_head_requests);
+        let by_head_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_head_requests);
         let peer_id = *candidate_peers
             .iter()
             .filter(|peer| self.peer_supports_blocks_by_head(peer))
@@ -1203,6 +1192,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             lookup_id: 0,
             req_id: self.next_id(),
         };
+        let requester = BlocksByHeadRequester::Backfill(id);
         let request = BlocksByHeadRequest {
             beacon_root,
             count: BLOCKS_BY_HEAD_REQUEST_COUNT,
@@ -1211,7 +1201,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .send(NetworkMessage::SendRequest {
                 peer_id,
                 request: RequestType::BlocksByHead(request),
-                app_request_id: AppRequestId::Sync(SyncRequestId::BackfillBlocksByHead { id }),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByHead { id: requester }),
             })
             .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
 
@@ -1228,8 +1218,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             "lh_outgoing_backfill_block_by_head_request",
             %beacon_root,
         );
-        self.backfill_blocks_by_head_requests.insert(
-            id,
+        self.blocks_by_head_requests.insert(
+            requester,
             peer_id,
             // false = the peer may return fewer blocks than requested (e.g. reached genesis or
             // finalization), so the request completes on stream termination.
@@ -1239,29 +1229,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         );
 
         Ok((id, peer_id))
-    }
-
-    /// Handle a `beacon_blocks_by_head` response for a backfill request, accumulating the parent
-    /// chain run. The response has the requested `beacon_root` first followed by its ancestors in
-    /// descending slot order.
-    pub(crate) fn on_blocks_by_head_backfill_response(
-        &mut self,
-        id: SingleLookupReqId,
-        peer_id: PeerId,
-        rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) -> Option<RpcResponseResult<AncestorBlocks<T::EthSpec>>> {
-        let resp = self
-            .backfill_blocks_by_head_requests
-            .on_response(id, rpc_event);
-        let resp = resp.map(|res| {
-            res.and_then(|(blocks, seen_timestamp)| {
-                let value = AncestorBlocks::from_vec(blocks).ok_or(RpcResponseError::from(
-                    LookupVerifyError::NotEnoughResponsesReturned { actual: 0 },
-                ))?;
-                Ok((value, seen_timestamp))
-            })
-        });
-        self.on_rpc_response_result(resp, peer_id)
     }
 
     /// Request a payload envelope for a block root via PayloadEnvelopesByRoot RPC.
@@ -1828,7 +1795,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub(crate) fn on_blocks_by_head_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: BlocksByHeadRequester,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<AncestorBlocks<T::EthSpec>>> {
@@ -2192,10 +2159,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         for (id, count) in [
             ("blocks_by_root", self.blocks_by_root_requests.len()),
             ("blocks_by_head", self.blocks_by_head_requests.len()),
-            (
-                "backfill_blocks_by_head",
-                self.backfill_blocks_by_head_requests.len(),
-            ),
             (
                 "data_columns_by_root",
                 self.data_columns_by_root_requests.len(),
