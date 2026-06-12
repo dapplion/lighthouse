@@ -3,7 +3,7 @@ use libp2p::PeerId;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use types::{
-    BlobSidecar, DataColumnSidecar, Epoch, EthSpec, LightClientBootstrap,
+    BlobSidecar, DataColumnSidecar, Epoch, EthSpec, Hash256, LightClientBootstrap,
     LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock,
     SignedExecutionPayloadEnvelope,
 };
@@ -16,13 +16,30 @@ pub struct SingleLookupReqId {
     pub req_id: Id,
 }
 
+/// Downstream components that issue `beacon_blocks_by_head` requests.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum BlocksByHeadRequester {
+    Lookup(SingleLookupReqId),
+    Backfill(SingleLookupReqId),
+}
+
+impl Display for BlocksByHeadRequester {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lookup(id) => write!(f, "Lookup/{id}"),
+            Self::Backfill(id) => write!(f, "Backfill/{id}"),
+        }
+    }
+}
+
 /// Id of rpc requests sent by sync to the network.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum SyncRequestId {
     /// Request searching for a block given a hash.
     SingleBlock { id: SingleLookupReqId },
-    /// Request walking the ancestors of a block given its root, via `beacon_blocks_by_head`.
-    BlocksByHead { id: SingleLookupReqId },
+    /// Request walking the ancestors of a block via `beacon_blocks_by_head`, for either a block
+    /// lookup or backfill sync (distinguished by [`BlocksByHeadRequester`]).
+    BlocksByHead { id: BlocksByHeadRequester },
     /// Request searching for a payload envelope given a hash.
     SinglePayloadEnvelope { id: SingleLookupReqId },
     /// Request searching for a set of data columns given a hash and list of column indices.
@@ -115,11 +132,10 @@ pub struct CustodyBackfillBatchId {
     pub run_id: u64,
 }
 
-/// Range sync chain or backfill batch
+/// Range sync chain
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum RangeRequestId {
     RangeSync { chain_id: Id, batch_id: Epoch },
-    BackfillSync { batch_id: Epoch },
 }
 
 // TODO(das) refactor in a separate PR. We might be able to remove this and replace
@@ -141,9 +157,17 @@ pub struct CustodyId {
 }
 
 /// Downstream components that perform custody by root requests.
-/// Currently, it's only single block lookups, so not using an enum
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct CustodyRequester(pub SingleLookupReqId);
+pub enum CustodyRequester {
+    SingleLookup(SingleLookupReqId),
+    Backfill(BackfillCustodyId),
+}
+
+/// Identifies a backfill-sync custody-by-root request by the block root whose columns it fetches.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BackfillCustodyId {
+    pub block_root: Hash256,
+}
 
 /// Application level requests sent to the network.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -292,7 +316,10 @@ impl Display for DataColumnsByRootRequester {
 
 impl Display for CustodyRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        match self {
+            Self::SingleLookup(id) => write!(f, "{id}"),
+            Self::Backfill(id) => write!(f, "Backfill/{:?}", id.block_root),
+        }
     }
 }
 
@@ -300,7 +327,6 @@ impl Display for RangeRequestId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RangeSync { chain_id, batch_id } => write!(f, "RangeSync/{batch_id}/{chain_id}"),
-            Self::BackfillSync { batch_id } => write!(f, "BackfillSync/{batch_id}"),
         }
     }
 }
@@ -323,7 +349,7 @@ mod tests {
         let id = DataColumnsByRootRequestId {
             id: 123,
             requester: DataColumnsByRootRequester::Custody(CustodyId {
-                requester: CustodyRequester(SingleLookupReqId {
+                requester: CustodyRequester::SingleLookup(SingleLookupReqId {
                     req_id: 121,
                     lookup_id: 101,
                 }),

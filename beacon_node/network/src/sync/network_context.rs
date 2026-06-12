@@ -33,11 +33,11 @@ use lighthouse_network::rpc::{
 };
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
-    SyncRequestId,
+    AppRequestId, BackfillCustodyId, BlobsByRangeRequestId, BlocksByHeadRequester,
+    BlocksByRangeRequestId, ComponentsByRangeRequestId, CustodyBackFillBatchRequestId,
+    CustodyBackfillBatchId, CustodyId, CustodyRequester, DataColumnsByRangeRequestId,
+    DataColumnsByRangeRequester, DataColumnsByRootRequestId, DataColumnsByRootRequester, Id,
+    PayloadEnvelopesByRangeRequestId, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
@@ -261,9 +261,10 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
     blocks_by_root_requests:
         ActiveRequests<SingleLookupReqId, BlocksByRootRequestItems<T::EthSpec>>,
-    /// A mapping of active BlocksByHead requests, used by block lookups to walk a block's ancestors.
+    /// A mapping of active BlocksByHead requests, used by block lookups and backfill sync to walk a
+    /// block's ancestors (distinguished by [`BlocksByHeadRequester`]).
     blocks_by_head_requests:
-        ActiveRequests<SingleLookupReqId, BlocksByHeadRequestItems<T::EthSpec>>,
+        ActiveRequests<BlocksByHeadRequester, BlocksByHeadRequestItems<T::EthSpec>>,
     /// A mapping of active PayloadEnvelopesByRoot requests
     payload_envelopes_by_root_requests:
         ActiveRequests<SingleLookupReqId, PayloadEnvelopesByRootRequestItems<T::EthSpec>>,
@@ -1117,6 +1118,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             lookup_id,
             req_id: self.next_id(),
         };
+        let requester = BlocksByHeadRequester::Lookup(id);
         // Lookup sync event safety: see `send_block_by_root_request`. The same guarantees apply,
         // with the events handled by `Self::on_blocks_by_head_response`.
         let request = BlocksByHeadRequest {
@@ -1127,7 +1129,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .send(NetworkMessage::SendRequest {
                 peer_id,
                 request: RequestType::BlocksByHead(request),
-                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByHead { id }),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByHead { id: requester }),
             })
             .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
 
@@ -1145,7 +1147,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             %block_root,
         );
         self.blocks_by_head_requests.insert(
-            id,
+            requester,
             peer_id,
             // false = the peer may return fewer blocks than requested (e.g. reached genesis or
             // finalization), so the request completes on stream termination.
@@ -1155,6 +1157,73 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         );
 
         Ok(id.req_id)
+    }
+
+    /// Selects a synced peer advertising `beacon_blocks_by_head` from `candidate_peers` and sends a
+    /// request to walk the parent chain of `beacon_root` for backfill sync. Returns the request id
+    /// and the chosen peer.
+    pub fn backfill_blocks_by_head_request(
+        &mut self,
+        beacon_root: Hash256,
+        candidate_peers: &HashSet<PeerId>,
+    ) -> Result<(SingleLookupReqId, PeerId), RpcRequestSendError> {
+        let active_request_count_by_peer = self.active_request_count_by_peer();
+        let by_head_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_head_requests);
+        let peer_id = *candidate_peers
+            .iter()
+            .filter(|peer| self.peer_supports_blocks_by_head(peer))
+            .min_by_key(|peer| {
+                (
+                    // De-prioritize peers already at the per-protocol concurrent-request limit.
+                    by_head_per_peer.at_concurrency_limit(peer),
+                    // Prefer peers with fewer overall in-flight requests.
+                    active_request_count_by_peer.get(peer).copied().unwrap_or(0),
+                    **peer,
+                )
+            })
+            .ok_or(RpcRequestSendError::NoPeer(NoPeerError::BlockPeer))?;
+
+        let id = SingleLookupReqId {
+            lookup_id: 0,
+            req_id: self.next_id(),
+        };
+        let requester = BlocksByHeadRequester::Backfill(id);
+        let request = BlocksByHeadRequest {
+            beacon_root,
+            count: BLOCKS_BY_HEAD_REQUEST_COUNT,
+        };
+        self.network_send
+            .send(NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::BlocksByHead(request),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByHead { id: requester }),
+            })
+            .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        debug!(
+            method = "BackfillBlocksByHead",
+            ?beacon_root,
+            peer = %peer_id,
+            %id,
+            "Sync RPC request sent"
+        );
+
+        let request_span = debug_span!(
+            parent: Span::current(),
+            "lh_outgoing_backfill_block_by_head_request",
+            %beacon_root,
+        );
+        self.blocks_by_head_requests.insert(
+            requester,
+            peer_id,
+            // false = the peer may return fewer blocks than requested (e.g. reached genesis or
+            // finalization), so the request completes on stream termination.
+            false,
+            BlocksByHeadRequestItems::new(beacon_root, BLOCKS_BY_HEAD_REQUEST_COUNT as usize),
+            request_span,
+        );
+
+        Ok((id, peer_id))
     }
 
     /// Request a payload envelope for a block root via PayloadEnvelopesByRoot RPC.
@@ -1293,6 +1362,45 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         block_slot: Slot,
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Result<LookupRequestResult<DataColumnSidecarList<T::EthSpec>>, RpcRequestSendError> {
+        let id = SingleLookupReqId {
+            lookup_id,
+            req_id: self.next_id(),
+        };
+        self.start_custody_request(
+            CustodyRequester::SingleLookup(id),
+            id.req_id,
+            block_root,
+            block_slot,
+            lookup_peers,
+        )
+    }
+
+    /// Issues a custody (data-columns-by-root) request on behalf of backfill sync, fetching the
+    /// custody columns for `block_root`.
+    pub fn backfill_custody_request(
+        &mut self,
+        block_root: Hash256,
+        block_slot: Slot,
+        lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
+    ) -> Result<LookupRequestResult<DataColumnSidecarList<T::EthSpec>>, RpcRequestSendError> {
+        let req_id = self.next_id();
+        self.start_custody_request(
+            CustodyRequester::Backfill(BackfillCustodyId { block_root }),
+            req_id,
+            block_root,
+            block_slot,
+            lookup_peers,
+        )
+    }
+
+    fn start_custody_request(
+        &mut self,
+        requester: CustodyRequester,
+        req_id: Id,
+        block_root: Hash256,
+        block_slot: Slot,
+        lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
+    ) -> Result<LookupRequestResult<DataColumnSidecarList<T::EthSpec>>, RpcRequestSendError> {
         // Code below will issue column requests even if `lookup_peers` is empty. This is not okay,
         // as we want to have at least one signal that some of our peers has already seen the
         // block's data.
@@ -1323,19 +1431,13 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             ));
         }
 
-        let id = SingleLookupReqId {
-            lookup_id,
-            req_id: self.next_id(),
-        };
-
         debug!(
             ?block_root,
             indices = ?custody_indexes_to_fetch,
-            %id,
+            %requester,
             "Starting custody columns request"
         );
 
-        let requester = CustodyRequester(id);
         let mut request = ActiveCustodyRequest::new(
             block_root,
             CustodyId { requester },
@@ -1350,7 +1452,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                 // created cannot return data immediately, it must send some request to the network
                 // first. And there must exist some request, `custody_indexes_to_fetch` is not empty.
                 self.custody_by_root_requests.insert(requester, request);
-                Ok(LookupRequestResult::RequestSent(id.req_id))
+                Ok(LookupRequestResult::RequestSent(req_id))
             }
             Err(e) => Err(match e {
                 CustodyRequestError::NoPeer(column_index) => {
@@ -1688,7 +1790,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub(crate) fn on_blocks_by_head_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: BlocksByHeadRequester,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<AncestorBlocks<T::EthSpec>>> {
