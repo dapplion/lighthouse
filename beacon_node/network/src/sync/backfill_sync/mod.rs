@@ -292,10 +292,11 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         self.couple_and_process(network, blocks, HashMap::new(), HashSet::from([peer_id]))
     }
 
-    /// Returns true if the block requires sidecar data (data columns, or a Gloas envelope) to be
-    /// fetched before it can be coupled and processed.
+    /// Returns true if we must fetch data columns by root before the block can be coupled. Gloas
+    /// blocks carry their data in the execution payload envelope, which we do not backfill, so they
+    /// are imported block-only and need no fetch.
     fn block_needs_data(block: &Arc<SignedBeaconBlock<T::EthSpec>>) -> bool {
-        block.fork_name_unchecked().gloas_enabled() || block.num_expected_blobs() > 0
+        !block.fork_name_unchecked().gloas_enabled() && block.num_expected_blobs() > 0
     }
 
     /// Begins fetching custody data columns by root for the blocks that require them. Once every
@@ -306,16 +307,6 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         blocks: Vec<Arc<SignedBeaconBlock<T::EthSpec>>>,
         block_peer: PeerId,
     ) -> ProcessResult {
-        // Gloas envelope backfill by root is not yet implemented; pause rather than skip data.
-        if blocks
-            .iter()
-            .any(|b| b.fork_name_unchecked().gloas_enabled())
-        {
-            warn!("Backfill paused: Gloas envelope backfill by root is not yet implemented");
-            self.set_state(BackFillState::Paused);
-            return ProcessResult::Successful;
-        }
-
         let segment_epoch = blocks
             .last()
             .map(|b| b.slot().epoch(slots_per_epoch::<T>()))
@@ -472,18 +463,23 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
 
         let mut segment = Vec::with_capacity(blocks.len());
         for block in blocks {
-            let block_data = if block.num_expected_blobs() > 0 {
-                let cols = columns
-                    .get(&block.canonical_root())
-                    .cloned()
-                    .unwrap_or_default();
-                AvailableBlockData::new_with_data_columns(cols)
+            let range_block = if block.fork_name_unchecked().gloas_enabled() {
+                // Gloas data lives in the execution payload envelope, which we do not backfill.
+                RangeSyncBlock::new_gloas(block.clone(), None)
+                    .map_err(|e| format!("coupling backfill gloas block: {e}"))?
             } else {
-                AvailableBlockData::NoData
-            };
-            let range_block =
+                let block_data = if block.num_expected_blobs() > 0 {
+                    let cols = columns
+                        .get(&block.canonical_root())
+                        .cloned()
+                        .unwrap_or_default();
+                    AvailableBlockData::new_with_data_columns(cols)
+                } else {
+                    AvailableBlockData::NoData
+                };
                 RangeSyncBlock::new(block.clone(), block_data, da_checker, spec.clone())
-                    .map_err(|e| format!("coupling backfill block: {e:?}"))?;
+                    .map_err(|e| format!("coupling backfill block: {e:?}"))?
+            };
             segment.push(range_block);
         }
         Ok(segment)
