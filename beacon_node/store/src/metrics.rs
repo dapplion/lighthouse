@@ -269,6 +269,36 @@ pub static STORE_BEACON_STATE_CACHE_SIZE: LazyLock<Result<IntGauge>> = LazyLock:
         "Current count of items in beacon store state cache",
     )
 });
+pub static STORE_BEACON_STATE_CACHE_ESTIMATED_BYTE_SIZE: LazyLock<Result<IntGauge>> =
+    LazyLock::new(|| {
+        try_create_int_gauge(
+            "store_beacon_state_cache_estimated_byte_size",
+            "Estimated memory consumed by states in the state cache (bytes)",
+        )
+    });
+pub static STORE_BEACON_STATE_CACHE_COW_BYTE_SIZE: LazyLock<Result<IntGauge>> =
+    LazyLock::new(|| {
+        try_create_int_gauge(
+            "store_beacon_state_cache_cow_byte_size",
+            "Total unique COW bytes across all cached states (from ApproxOwnedBytes)",
+        )
+    });
+pub static STORE_BEACON_STATE_CACHE_EVICTIONS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "store_beacon_state_cache_evictions_total",
+        "Total number of states evicted from the state cache due to byte budget",
+    )
+});
+pub static STORE_BEACON_STATE_CACHE_SEGMENT_COUNT: LazyLock<Result<Histogram>> =
+    LazyLock::new(|| {
+        try_create_histogram_with_buckets(
+            "store_beacon_state_cache_segment_count",
+            "Number of ApproxOwnedBytes segments per cached state",
+            Ok(vec![
+                1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
+            ]),
+        )
+    });
 pub static STORE_BEACON_HISTORIC_STATE_CACHE_SIZE: LazyLock<Result<IntGauge>> =
     LazyLock::new(|| {
         try_create_int_gauge(

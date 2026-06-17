@@ -29,6 +29,9 @@ pub const DEFAULT_HOT_HDIFF_BUFFER_CACHE_SIZE: NonZeroUsize = new_non_zero_usize
 const EST_COMPRESSION_FACTOR: usize = 2;
 pub const DEFAULT_EPOCHS_PER_BLOB_PRUNE: u64 = 1;
 pub const DEFAULT_BLOB_PUNE_MARGIN_EPOCHS: u64 = 0;
+/// Default maximum memory budget for the state cache in megabytes. `None` means no byte-budget
+/// limit (count-based eviction only, the previous behaviour).
+pub const DEFAULT_STATE_CACHE_MAX_MB: Option<usize> = None;
 
 /// Database configuration parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +67,10 @@ pub struct StoreConfig {
     /// The margin for blob pruning in epochs. The oldest blobs are pruned up until
     /// data_availability_boundary - blob_prune_margin_epochs. Default: 0.
     pub blob_prune_margin_epochs: u64,
+    /// Maximum memory budget for the state cache in megabytes. When set, the cache will evict
+    /// states to stay within this budget using spec-derived byte cost estimates. `None` disables
+    /// byte-budget eviction (count-based only).
+    pub state_cache_max_mb: Option<usize>,
 }
 
 /// Variant of `StoreConfig` that gets written to disk. Contains immutable configuration params.
@@ -120,6 +127,7 @@ impl Default for StoreConfig {
             prune_blobs: true,
             epochs_per_blob_prune: DEFAULT_EPOCHS_PER_BLOB_PRUNE,
             blob_prune_margin_epochs: DEFAULT_BLOB_PUNE_MARGIN_EPOCHS,
+            state_cache_max_mb: DEFAULT_STATE_CACHE_MAX_MB,
         }
     }
 }

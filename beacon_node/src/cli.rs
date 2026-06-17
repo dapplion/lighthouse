@@ -830,8 +830,19 @@ pub fn cli_app() -> Command {
             Arg::new("state-cache-size")
                 .long("state-cache-size")
                 .value_name("STATE_CACHE_SIZE")
-                .help("Specifies the size of the state cache")
+                .help("Specifies the maximum number of states in the state cache")
                 .default_value("128")
+                .action(ArgAction::Set)
+                .display_order(0)
+        )
+        .arg(
+            Arg::new("state-cache-max-mb")
+                .long("state-cache-max-mb")
+                .value_name("STATE_CACHE_MAX_MB")
+                .help("Maximum memory budget for the state cache in megabytes. When set, the \
+                       cache evicts states to stay within this budget using estimated byte costs. \
+                       Epoch boundary states (~32MB each on mainnet) are deprioritized for \
+                       eviction. If unset, only count-based eviction is used.")
                 .action(ArgAction::Set)
                 .display_order(0)
         )

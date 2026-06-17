@@ -119,6 +119,7 @@ pub fn upgrade_state_to_gloas<E: EthSpec>(
         exit_cache: mem::take(&mut pre.exit_cache),
         slashings_cache: mem::take(&mut pre.slashings_cache),
         epoch_cache: mem::take(&mut pre.epoch_cache),
+        approx_owned_bytes: mem::take(&mut pre.approx_owned_bytes),
     });
     // [New in Gloas:EIP7732]
     onboard_builders_from_pending_deposits(&mut post, spec)?;

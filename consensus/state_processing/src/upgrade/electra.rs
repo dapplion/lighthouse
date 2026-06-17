@@ -168,6 +168,7 @@ pub fn upgrade_state_to_electra<E: EthSpec>(
         exit_cache: mem::take(&mut pre.exit_cache),
         slashings_cache: mem::take(&mut pre.slashings_cache),
         epoch_cache: EpochCache::default(),
+        approx_owned_bytes: mem::take(&mut pre.approx_owned_bytes),
     });
     Ok(post)
 }

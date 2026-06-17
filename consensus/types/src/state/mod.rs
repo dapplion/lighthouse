@@ -3,6 +3,7 @@ mod balance;
 mod beacon_state;
 #[macro_use]
 mod committee_cache;
+mod approx_owned_bytes;
 mod epoch_cache;
 mod exit_cache;
 mod historical_batch;
@@ -13,6 +14,10 @@ mod pubkey_cache;
 mod slashings_cache;
 
 pub use activation_queue::ActivationQueue;
+pub use approx_owned_bytes::{
+    ApproxOwnedBytes, ApproxOwnedBytesList, cow_bytes_between, sum_approx_owned_bytes,
+    total_state_tree_bytes,
+};
 pub use balance::Balance;
 pub use beacon_state::{
     BeaconState, BeaconStateAltair, BeaconStateBase, BeaconStateBellatrix, BeaconStateCapella,

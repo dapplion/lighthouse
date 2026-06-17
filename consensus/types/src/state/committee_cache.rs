@@ -60,6 +60,18 @@ fn compare_shuffling_positions(xs: &Vec<NonZeroUsizeOption>, ys: &Vec<NonZeroUsi
 }
 
 impl CommitteeCache {
+    /// Approximate heap bytes consumed by this cache.
+    pub fn approx_heap_bytes(&self) -> usize {
+        self.shuffling
+            .capacity()
+            .saturating_mul(std::mem::size_of::<usize>())
+            .saturating_add(
+                self.shuffling_positions
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<NonZeroUsizeOption>()),
+            )
+    }
+
     /// Return a new, fully initialized cache.
     ///
     /// The epoch must be within the range that the state can service: historic epochs with

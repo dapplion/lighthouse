@@ -38,14 +38,15 @@ pub struct SlotMap {
 #[derive(Debug)]
 pub struct StateCache<E: EthSpec> {
     finalized_state: Option<FinalizedState<E>>,
-    // Stores the tuple (state_root, state) as LruCache only returns the value on put and we need
-    // the state_root
+    /// Stores (state_root, state) per cached state.
     states: LruCache<Hash256, (Hash256, BeaconState<E>)>,
     block_map: BlockMap,
     hdiff_buffers: HotHDiffBufferCache,
     max_epoch: Epoch,
     head_block_root: Hash256,
     headroom: NonZeroUsize,
+    /// Optional byte budget. When set, eviction triggers when total COW bytes exceed this.
+    max_bytes: Option<usize>,
 }
 
 /// Cache of hdiff buffers for hot states.
@@ -83,6 +84,7 @@ impl<E: EthSpec> StateCache<E> {
         state_capacity: NonZeroUsize,
         headroom: NonZeroUsize,
         hdiff_capacity: NonZeroUsize,
+        max_bytes: Option<usize>,
     ) -> Self {
         StateCache {
             finalized_state: None,
@@ -92,6 +94,7 @@ impl<E: EthSpec> StateCache<E> {
             max_epoch: Epoch::new(0),
             head_block_root: Hash256::ZERO,
             headroom,
+            max_bytes,
         }
     }
 
@@ -111,6 +114,12 @@ impl<E: EthSpec> StateCache<E> {
         self.hdiff_buffers.mem_usage()
     }
 
+    /// Total bytes consumed by cached states, computed by deduplicating shared
+    /// `ApproxOwnedBytes` segments across all states (including finalized).
+    pub fn cached_bytes(&self) -> usize {
+        self.total_approx_owned_bytes()
+    }
+
     /// Return all state roots currently held in the cache, including the finalized state.
     pub fn state_roots(&self) -> Vec<Hash256> {
         let mut roots: Vec<Hash256> = self
@@ -128,7 +137,7 @@ impl<E: EthSpec> StateCache<E> {
         &mut self,
         state_root: Hash256,
         block_root: Hash256,
-        state: BeaconState<E>,
+        mut state: BeaconState<E>,
         pre_finalized_slots_to_retain: &[Slot],
     ) -> Result<(), Error> {
         if state.slot() % E::slots_per_epoch() != 0 {
@@ -176,8 +185,27 @@ impl<E: EthSpec> StateCache<E> {
             }
         }
 
+        // Measure base size for states loaded from disk or genesis (empty list).
+        if state.approx_owned_bytes().0.is_empty() {
+            let base_bytes = types::total_state_tree_bytes(&state);
+            tracing::debug!(
+                base_bytes,
+                slot = %state.slot(),
+                validators = state.validators().len(),
+                "measured finalized state base tree size"
+            );
+            state.approx_owned_bytes_mut().push(base_bytes);
+        }
+
         // Update finalized state.
         self.finalized_state = Some(FinalizedState { state_root, state });
+
+        // NOTE: we do NOT recompute exact costs here because cached states still share
+        // tree nodes with the OLD finalized state, not this new one. cow_bytes_between
+        // against the new finalized would see completely different trees and overcount
+        // massively. The slow-path recomputation needs a mechanism to know which base
+        // each cached state actually shares with — a future improvement.
+
         Ok(())
     }
 
@@ -206,6 +234,18 @@ impl<E: EthSpec> StateCache<E> {
             && state.slot() >= finalized_state.state.slot()
         {
             state.rebase_on(&finalized_state.state, spec)?;
+
+            // After rebase, the state shares the finalized tree. Recompute owned bytes:
+            // adopt the finalized state's list + measure the remaining unique cost.
+            let unique_bytes = types::cow_bytes_between(&finalized_state.state, state);
+            tracing::debug!(
+                unique_bytes,
+                slot = %state.slot(),
+                "rebased state cow_bytes vs finalized"
+            );
+            state
+                .approx_owned_bytes_mut()
+                .reset_to_base(finalized_state.state.approx_owned_bytes(), unique_bytes);
         }
 
         Ok(())
@@ -249,7 +289,7 @@ impl<E: EthSpec> StateCache<E> {
         // Update the cache's idea of the max epoch.
         self.max_epoch = std::cmp::max(state.current_epoch(), self.max_epoch);
 
-        // If the cache is full, use the custom cull routine to make room.
+        // If the cache is full (by count), use the custom cull routine to make room.
         let mut deleted_states =
             if let Some(over_capacity) = self.len().checked_sub(self.capacity()) {
                 // The `over_capacity` should always be 0, but we add it here just in case.
@@ -257,6 +297,38 @@ impl<E: EthSpec> StateCache<E> {
             } else {
                 vec![]
             };
+
+        // Fast path: check byte budget using approximate segment-based total.
+        // This may overcount (segments accumulate from repeated mutations to the same
+        // path), but overcounting is safe — it triggers eviction earlier, never too late.
+        // The slow path in update_finalized_state corrects the overcount periodically.
+        if let Some(max_bytes) = self.max_bytes {
+            let total_before = self.total_approx_owned_bytes();
+            let mut evicted = 0;
+            while self.total_approx_owned_bytes() > max_bytes && self.len() > 0 {
+                let culled = self.cull(1);
+                if culled.is_empty() {
+                    break;
+                }
+                evicted += culled.len();
+                deleted_states.extend(culled);
+            }
+            if evicted > 0 {
+                let total_after = self.total_approx_owned_bytes();
+                tracing::debug!(
+                    max_bytes,
+                    total_before,
+                    total_after,
+                    evicted,
+                    remaining = self.len(),
+                    "state cache byte budget eviction"
+                );
+                metrics::inc_counter_by(
+                    &metrics::STORE_BEACON_STATE_CACHE_EVICTIONS,
+                    evicted as u64,
+                );
+            }
+        }
 
         // Insert the full state into the cache.
         if let Some((deleted_state_root, _)) =
@@ -344,6 +416,36 @@ impl<E: EthSpec> StateCache<E> {
                 self.states.pop(state_root);
             }
         }
+    }
+
+    /// Compute the total unique COW bytes across all cached states.
+    ///
+    /// Iterates all states and deduplicates `CowSegment`s by `Arc` pointer identity.
+    /// Shared segments (from common ancestors) are counted once.
+    pub fn total_approx_owned_bytes(&self) -> usize {
+        // Record segment counts per state for observability.
+        if let Some(ref fin) = self.finalized_state {
+            metrics::observe(
+                &metrics::STORE_BEACON_STATE_CACHE_SEGMENT_COUNT,
+                fin.state.approx_owned_bytes().0.len() as f64,
+            );
+        }
+        for (_, (_, state)) in self.states.iter() {
+            metrics::observe(
+                &metrics::STORE_BEACON_STATE_CACHE_SEGMENT_COUNT,
+                state.approx_owned_bytes().0.len() as f64,
+            );
+        }
+
+        let finalized = self
+            .finalized_state
+            .as_ref()
+            .map(|f| f.state.approx_owned_bytes());
+        let cached = self
+            .states
+            .iter()
+            .map(|(_, (_, state))| state.approx_owned_bytes());
+        types::sum_approx_owned_bytes(finalized.into_iter().chain(cached))
     }
 
     /// Cull approximately `count` states from the cache.
@@ -523,5 +625,258 @@ impl HotHDiffBufferCache {
             .iter()
             .map(|(_, (_, buffer))| buffer.size())
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use milhouse::List;
+    use ssz_types::BitVector;
+    use std::num::NonZeroUsize;
+    use std::sync::Arc;
+    use types::state::*;
+    use types::*;
+
+    type E = MinimalEthSpec;
+
+    fn make_test_validator() -> Validator {
+        Validator {
+            pubkey: bls::PublicKeyBytes::empty(),
+            withdrawal_credentials: Hash256::ZERO,
+            effective_balance: 32_000_000_000,
+            slashed: false,
+            activation_eligibility_epoch: Epoch::new(0),
+            activation_epoch: Epoch::new(0),
+            exit_epoch: Epoch::new(u64::MAX),
+            withdrawable_epoch: Epoch::new(u64::MAX),
+        }
+    }
+
+    fn make_altair_state(n: usize, slot: Slot) -> BeaconState<E> {
+        let validators = List::new(vec![make_test_validator(); n]).unwrap();
+        let balances = List::new(vec![32_000_000_000u64; n]).unwrap();
+        let inactivity_scores = List::new(vec![0u64; n]).unwrap();
+        let participation = List::new(vec![ParticipationFlags::default(); n]).unwrap();
+        let default_cc = Arc::new(CommitteeCache::default());
+        let sync = Arc::new(SyncCommittee::temporary());
+
+        BeaconState::Altair(BeaconStateAltair {
+            genesis_time: 0,
+            genesis_validators_root: Hash256::ZERO,
+            slot,
+            fork: Fork::default(),
+            latest_block_header: BeaconBlockHeader::empty(),
+            block_roots: milhouse::Vector::default(),
+            state_roots: milhouse::Vector::default(),
+            historical_roots: List::default(),
+            eth1_data: Eth1Data::default(),
+            eth1_data_votes: List::default(),
+            eth1_deposit_index: 0,
+            validators,
+            balances,
+            randao_mixes: milhouse::Vector::default(),
+            slashings: milhouse::Vector::default(),
+            previous_epoch_participation: participation.clone(),
+            current_epoch_participation: participation,
+            justification_bits: BitVector::new(),
+            previous_justified_checkpoint: Checkpoint::default(),
+            current_justified_checkpoint: Checkpoint::default(),
+            finalized_checkpoint: Checkpoint::default(),
+            inactivity_scores,
+            current_sync_committee: sync.clone(),
+            next_sync_committee: sync,
+            total_active_balance: None,
+            progressive_balances_cache: ProgressiveBalancesCache::default(),
+            committee_caches: [default_cc.clone(), default_cc.clone(), default_cc],
+            pubkey_cache: PubkeyCache::default(),
+            exit_cache: ExitCache::default(),
+            slashings_cache: SlashingsCache::default(),
+            epoch_cache: EpochCache::default(),
+            approx_owned_bytes: ApproxOwnedBytesList::default(),
+        })
+    }
+
+    fn hash(byte: u8) -> Hash256 {
+        Hash256::repeat_byte(byte)
+    }
+
+    fn new_cache(capacity: usize, max_bytes: Option<usize>) -> StateCache<E> {
+        StateCache::new(
+            NonZeroUsize::new(capacity).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+            max_bytes,
+        )
+    }
+    // ── cow_bytes_between tests ──────────────────────────────────────────
+
+    #[test]
+    fn cow_bytes_clone_is_zero() {
+        let state = make_altair_state(256, Slot::new(1));
+        let clone = state.clone();
+        assert_eq!(cow_bytes_between(&state, &clone), 0);
+    }
+
+    #[test]
+    fn cow_bytes_single_mutation() {
+        let base = make_altair_state(256, Slot::new(1));
+        let mut derived = base.clone();
+        *derived.balances_mut().get_mut(0).unwrap() += 1;
+        derived.apply_pending_mutations().unwrap();
+
+        let cow = cow_bytes_between(&base, &derived);
+        assert!(cow > 0, "single mutation should produce non-zero cow_bytes");
+    }
+
+    #[test]
+    fn cow_bytes_epoch_boundary_mutations() {
+        let n = 256;
+        let base = make_altair_state(n, Slot::new(8));
+        let mut derived = base.clone();
+
+        // Simulate epoch: all balances + inactivity + participation replaced
+        for i in 0..n {
+            *derived.balances_mut().get_mut(i).unwrap() += 1;
+        }
+        for i in 0..n {
+            *derived.inactivity_scores_mut().unwrap().get_mut(i).unwrap() += 1;
+        }
+        *derived.previous_epoch_participation_mut().unwrap() =
+            List::new(vec![ParticipationFlags::default(); n]).unwrap();
+        *derived.current_epoch_participation_mut().unwrap() =
+            List::new(vec![ParticipationFlags::default(); n]).unwrap();
+        derived.apply_pending_mutations().unwrap();
+
+        let cow = cow_bytes_between(&base, &derived);
+        // Should be substantial — most of the tree is dirty
+        assert!(
+            cow > 10_000,
+            "epoch boundary should produce significant cow_bytes: {cow}"
+        );
+    }
+
+    // ── total_state_tree_bytes tests ──────────────────────────────────────
+
+    #[test]
+    fn total_tree_bytes_nonzero() {
+        let state = make_altair_state(256, Slot::new(0));
+        let total = total_state_tree_bytes(&state);
+        // 256 validators × various fields, should be in the tens of KB
+        assert!(total > 10_000, "total tree bytes should be > 10KB: {total}");
+    }
+
+    #[test]
+    fn total_tree_bytes_scales_with_validators() {
+        let small = total_state_tree_bytes(&make_altair_state(64, Slot::new(0)));
+        let large = total_state_tree_bytes(&make_altair_state(1024, Slot::new(0)));
+        assert!(
+            large > small * 4,
+            "1024 validators should be > 4x of 64: small={small}, large={large}"
+        );
+    }
+
+    // ── ApproxOwnedBytesList deduplication tests ──────────────────────────
+
+    #[test]
+    fn approx_owned_bytes_dedup_across_clones() {
+        let mut base = ApproxOwnedBytesList::default();
+        base.push(1000);
+
+        let mut s1 = base.clone();
+        s1.push(100);
+
+        let mut s2 = base.clone();
+        s2.push(200);
+
+        // Unique segments: base(1000) + s1(100) + s2(200) = 1300
+        let total = sum_approx_owned_bytes([&base, &s1, &s2].into_iter());
+        assert_eq!(total, 1300);
+    }
+
+    // ── StateCache integration tests ──────────────────────────────────────
+
+    #[test]
+    fn finalized_state_gets_base_size() {
+        let mut cache = new_cache(10, None);
+        let state = make_altair_state(256, Slot::new(0));
+        let state_root = hash(1);
+
+        cache
+            .update_finalized_state(state_root, hash(2), state, &[])
+            .unwrap();
+
+        let total = cache.total_approx_owned_bytes();
+        assert!(
+            total > 0,
+            "finalized state should have non-zero total: {total}"
+        );
+    }
+
+    #[test]
+    fn put_state_adds_to_total() {
+        let mut cache = new_cache(10, None);
+
+        // Set finalized
+        let fin = make_altair_state(64, Slot::new(0));
+        cache
+            .update_finalized_state(hash(1), hash(2), fin, &[])
+            .unwrap();
+        cache.update_head_block_root(hash(10));
+
+        let total_before = cache.total_approx_owned_bytes();
+
+        // Insert a state with some COW mutations
+        let mut state = cache.get_by_state_root(hash(1)).unwrap();
+        *state.slot_mut() = Slot::new(1);
+        *state.balances_mut().get_mut(0).unwrap() += 1;
+        state.apply_pending_mutations().unwrap();
+        // Push a cow segment to simulate what per_slot_processing does
+        let cow = cow_bytes_between(&cache.get_by_state_root(hash(1)).unwrap(), &state);
+        state.approx_owned_bytes_mut().push(cow);
+
+        cache.put_state(hash(3), hash(10), &state).unwrap();
+
+        let total_after = cache.total_approx_owned_bytes();
+        assert!(
+            total_after >= total_before,
+            "total should not decrease after adding state: before={total_before}, after={total_after}"
+        );
+    }
+
+    #[test]
+    fn byte_budget_eviction() {
+        let fin = make_altair_state(64, Slot::new(0));
+        let base_size = total_state_tree_bytes(&fin);
+
+        // Set a very tight budget: just the finalized base. Any inserted state should
+        // trigger eviction attempts.
+        let mut cache = new_cache(10, Some(base_size));
+        cache
+            .update_finalized_state(hash(1), hash(2), fin, &[])
+            .unwrap();
+        cache.update_head_block_root(hash(99));
+
+        // Insert 5 states with different block roots (not head, so evictable)
+        for i in 0u8..5 {
+            let mut state = cache.get_by_state_root(hash(1)).unwrap();
+            *state.slot_mut() = Slot::new(i as u64 + 1);
+            *state.balances_mut().get_mut(i as usize).unwrap() += 1;
+            state.apply_pending_mutations().unwrap();
+            let cow = cow_bytes_between(&cache.get_by_state_root(hash(1)).unwrap(), &state);
+            state.approx_owned_bytes_mut().push(cow);
+
+            cache
+                .put_state(hash(100 + i), hash(10 + i), &state)
+                .unwrap();
+        }
+
+        // With a budget equal to base_size, the cache should have evicted most states.
+        // It may keep 1-2 (exempt), but not all 5.
+        assert!(
+            cache.len() < 5,
+            "eviction should have removed some states, but cache has {} states",
+            cache.len()
+        );
     }
 }

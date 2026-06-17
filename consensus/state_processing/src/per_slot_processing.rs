@@ -45,6 +45,9 @@ pub fn per_slot_processing<E: EthSpec>(
         .fork_name(spec)
         .map_err(Error::InconsistentStateFork)?;
 
+    // Snapshot state before mutations for COW tracking.
+    let pre = state.clone();
+
     cache_state(state, state_root)?;
 
     let summary = if state.slot() > spec.genesis_slot
@@ -108,6 +111,10 @@ pub fn per_slot_processing<E: EthSpec>(
         // layers.
         state.build_caches(spec)?;
     }
+
+    // Record COW bytes from this slot transition.
+    let delta = cow_bytes_between(&pre, state);
+    state.approx_owned_bytes_mut().push(delta);
 
     Ok(summary)
 }

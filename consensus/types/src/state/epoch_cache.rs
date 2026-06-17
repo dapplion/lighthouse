@@ -73,6 +73,25 @@ impl From<ArithError> for EpochCacheError {
 }
 
 impl EpochCache {
+    /// Approximate heap bytes consumed by this cache.
+    pub fn approx_heap_bytes(&self) -> usize {
+        self.inner
+            .as_ref()
+            .map(|inner| {
+                inner
+                    .effective_balances
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<u64>())
+                    .saturating_add(
+                        inner
+                            .base_rewards
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<u64>()),
+                    )
+            })
+            .unwrap_or(0)
+    }
+
     pub fn new(
         key: EpochCacheKey,
         effective_balances: Vec<u64>,
