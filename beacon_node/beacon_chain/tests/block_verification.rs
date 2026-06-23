@@ -2489,7 +2489,8 @@ async fn process_chain_segment_imports_missing_envelope_for_duplicate_gloas_bloc
     );
 }
 
-/// Once the payload has been received, retrying the same block and envelope is a no-op.
+/// Once the payload has been received, retrying the same block reports it as processed (range sync
+/// re-fetches whole epochs) but does not re-import the envelope.
 #[tokio::test]
 async fn process_chain_segment_ignores_duplicate_gloas_block_when_payload_received() {
     let spec = test_spec::<E>();
@@ -2514,6 +2515,7 @@ async fn process_chain_segment_ignores_duplicate_gloas_block_when_payload_receiv
         .on_valid_payload_envelope_received(block_root)
         .expect("payload should be marked received");
 
+    let block_slot = block.slot();
     let available_envelope = AvailableEnvelope::new(Arc::new(envelope), vec![]);
     let segment = vec![RangeSyncBlock::new_gloas(block, Some(available_envelope)).unwrap()];
 
@@ -2526,9 +2528,19 @@ async fn process_chain_segment_ignores_duplicate_gloas_block_when_payload_receiv
         panic!("range sync should succeed");
     };
 
+    assert_eq!(
+        imported_blocks,
+        vec![(block_root, block_slot)],
+        "the already-known block should be reported as processed"
+    );
     assert!(
-        imported_blocks.is_empty(),
-        "block whose payload was already received should be ignored as a duplicate"
+        harness
+            .chain
+            .store
+            .get_payload_envelope(&block_root)
+            .expect("should read envelope from store")
+            .is_none(),
+        "envelope should not be re-imported when the payload is already received"
     );
 }
 
