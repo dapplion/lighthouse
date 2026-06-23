@@ -2990,7 +2990,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// `Self::process_block`.
     pub async fn process_chain_segment(
         self: &Arc<Self>,
-        chain_segment: Vec<RangeSyncBlock<T::EthSpec>>,
+        mut chain_segment: Vec<RangeSyncBlock<T::EthSpec>>,
         notify_execution_layer: NotifyExecutionLayer,
     ) -> ChainSegmentResult {
         for block in chain_segment.iter() {
@@ -3014,12 +3014,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             };
         }
 
-        let mut chain_segment_with_roots = chain_segment
-            .into_iter()
-            .map(|block| (block.block_root(), block))
-            .collect::<Vec<_>>();
-
-        while let Some((_root, block)) = chain_segment_with_roots.first() {
+        while let Some(block) = chain_segment.first() {
             // Determine the epoch of the first block in the remaining segment.
             let start_epoch = block.epoch();
 
@@ -3027,61 +3022,35 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // than the current epoch: partitioning the blocks into a run of blocks in the same
             // epoch and everything else. These same-epoch blocks can all be signature-verified with
             // the same `BeaconState`.
-            let last_index = chain_segment_with_roots
+            let last_index = chain_segment
                 .iter()
-                .position(|(_root, block)| block.epoch() > start_epoch)
-                .unwrap_or(chain_segment_with_roots.len());
+                .position(|block| block.epoch() > start_epoch)
+                .unwrap_or(chain_segment.len());
 
-            let mut blocks = chain_segment_with_roots.split_off(last_index);
-            std::mem::swap(&mut blocks, &mut chain_segment_with_roots);
+            let mut blocks = chain_segment.split_off(last_index);
+            std::mem::swap(&mut blocks, &mut chain_segment);
 
-            // Here, we are special casing the checkpoint sync block's envelope processing.
-            // Post-gloas, if the first filtered block is the checkpoint block, range
-            // sync may still need to process its envelope so that the first post-checkpoint
-            // child can resolve its parent payload status.
-            // The block is an anchor, so there won't be a parent present in fork choice,
-            // so we need to avoid processing it.
-            if matches!(blocks.first(), Some((root, _)) if *root == self
-                .canonical_head
-                .cached_head()
-                .finalized_checkpoint()
-                .root)
-            {
-                let (block_root, block) = blocks.remove(0);
-                let block_slot = block.slot();
-
-                if let RangeSyncBlock::Gloas {
-                    block,
-                    envelope: Some(envelope),
-                    ..
-                } = block
-                {
-                    let chain = self.clone();
-                    if let Err(error) = async move {
-                        verify_columns_against_block(&chain.kzg, &block, &envelope.columns)
-                            .map_err(BlockError::AvailabilityCheck)?;
-
-                        self.process_range_sync_envelope(envelope, block_root, block)
-                            .await
-                            .map_err(BlockError::from)?;
-
-                        Ok::<(), BlockError>(())
-                    }
-                    .await
-                    {
-                        return ChainSegmentResult::Failed {
-                            imported_blocks,
-                            error,
-                        };
-                    }
-                    imported_blocks.push((block_root, block_slot));
-                }
-            }
+            // The checkpoint anchor (the first block, equal to the finalized root) is already
+            // imported and has no parent in fork choice, so it can't be signature-verified or
+            // re-imported. We exclude it from signature verification, but still KZG-verify its
+            // columns and import its envelope just like any other block.
+            let anchor = blocks
+                .first()
+                .filter(|block| {
+                    block.block_root()
+                        == self
+                            .canonical_head
+                            .cached_head()
+                            .finalized_checkpoint()
+                            .root
+                })
+                .map(|block| (block.block_root(), block.slot(), block.block_cloned()));
+            let skip = usize::from(anchor.is_some());
 
             // Extract envelopes before passing blocks to signature verification.
             let envelopes: Vec<_> = blocks
                 .iter()
-                .map(|(_, block)| match block {
+                .map(|block| match block {
                     RangeSyncBlock::Gloas { envelope, .. } => envelope.clone(),
                     RangeSyncBlock::Base(_) => None,
                 })
@@ -3089,7 +3058,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
             let chain = self.clone();
             let signature_verification_future = self.spawn_blocking_handle(
-                move || signature_verify_chain_segment(blocks, &chain),
+                move || {
+                    // KZG-verify the data columns of every block (incl. the anchor; from the block
+                    // pre-gloas, from the envelope post-gloas) before verifying signatures. Both
+                    // are CPU-bound and run on this blocking thread.
+                    for block in &blocks {
+                        if let Some(columns) = block.data_columns() {
+                            verify_columns_against_block(&chain.kzg, block.as_block(), &columns)?;
+                        }
+                    }
+                    // Only signature-verify the blocks after the anchor.
+                    let after_anchor = blocks.split_off(skip);
+                    signature_verify_chain_segment(after_anchor, &chain)
+                },
                 "signature_verify_chain_segment",
             );
 
@@ -3110,9 +3091,26 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 }
             };
 
+            // The anchor block is already imported; only its envelope needs processing.
+            if let Some((block_root, block_slot, block)) = anchor
+                && let Some(envelope) = envelopes.first().cloned().flatten()
+            {
+                if let Err(e) = self
+                    .process_range_sync_envelope(envelope, block_root, block)
+                    .await
+                {
+                    return ChainSegmentResult::Failed {
+                        imported_blocks,
+                        error: BlockError::EnvelopeError(Box::new(e)),
+                    };
+                }
+                imported_blocks.push((block_root, block_slot));
+            }
+
             // Import the blocks into the chain.
-            for (signature_verified_block, maybe_envelope) in
-                signature_verified_blocks.into_iter().zip(envelopes)
+            for (signature_verified_block, maybe_envelope) in signature_verified_blocks
+                .into_iter()
+                .zip(envelopes.into_iter().skip(skip))
             {
                 let block_slot = signature_verified_block.slot();
                 let block_root = signature_verified_block.block_root();

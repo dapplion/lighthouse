@@ -52,7 +52,6 @@ use crate::beacon_snapshot::PreProcessingSnapshot;
 use crate::block_verification_types::{AsBlock, BlockImportData, LookupBlock, RangeSyncBlock};
 use crate::data_availability_checker::{
     AvailabilityCheckError, AvailableBlock, AvailableBlockData, MaybeAvailableBlock,
-    verify_columns_against_block,
 };
 use crate::data_column_verification::GossipDataColumnError;
 use crate::execution_payload::{
@@ -621,28 +620,27 @@ pub(crate) fn process_block_slash_info<T: BeaconChainTypes, TErr: BlockBlobError
 /// signature in the block is invalid, an `Err` is returned (it is not possible to known _which_
 /// signature was invalid).
 ///
-/// Also performs kzg verification on columns if they exist.
 /// ## Errors
 ///
 /// The given `chain_segment` must contain only blocks from the same epoch, otherwise an error
 /// will be returned.
 #[instrument(skip_all)]
 pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
-    mut chain_segment: Vec<(Hash256, RangeSyncBlock<T::EthSpec>)>,
+    mut chain_segment: Vec<RangeSyncBlock<T::EthSpec>>,
     chain: &BeaconChain<T>,
 ) -> Result<Vec<SignatureVerifiedBlock<T>>, BlockError> {
     if chain_segment.is_empty() {
         return Ok(vec![]);
     }
 
-    let (first_root, first_block) = chain_segment.remove(0);
+    let first_block = chain_segment.remove(0);
     let (mut parent, first_block) = load_parent(first_block, chain)?;
     let slot = first_block.slot();
-    chain_segment.insert(0, (first_root, first_block));
+    chain_segment.insert(0, first_block);
 
     let highest_slot = chain_segment
         .last()
-        .map(|(_, block)| block.slot())
+        .map(|block| block.slot())
         .unwrap_or_else(|| slot);
 
     let state = cheap_state_advance_to_obtain_committees::<_, BlockError>(
@@ -654,14 +652,10 @@ pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
 
     let mut signature_verified_blocks = Vec::with_capacity(chain_segment.len());
 
-    for (block_root, block) in chain_segment {
+    for block in chain_segment {
+        let block_root = block.block_root();
         let consensus_context =
             ConsensusContext::new(block.slot()).set_current_block_root(block_root);
-        // This gets columns from the block for pre-gloas and from the envelope for
-        // post gloas.
-        if let Some(columns) = block.data_columns() {
-            verify_columns_against_block(&chain.kzg, block.as_block(), &columns)?;
-        }
         let (available_block, _envelope) = block.into_available_block()?;
         signature_verified_blocks.push(SignatureVerifiedBlock {
             block: MaybeAvailableBlock::Available(available_block),
