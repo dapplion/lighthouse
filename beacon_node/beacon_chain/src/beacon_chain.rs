@@ -3098,75 +3098,58 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             for ((block_root, block_slot, block), maybe_envelope) in
                 block_infos.into_iter().zip(envelopes)
             {
-                let signature_verified_block = (block_slot > finalized_slot)
-                    .then(|| signature_verified_blocks.next())
-                    .flatten();
-
-                if let Some(signature_verified_block) = signature_verified_block {
-                    match self
-                        .process_block(
-                            block_root,
-                            signature_verified_block,
-                            notify_execution_layer,
-                            BlockImportSource::RangeSync,
-                            || Ok(()),
-                        )
-                        .await
-                    {
-                        Ok(status) => match status {
-                            AvailabilityProcessingStatus::Imported(block_root) => {
-                                // The block was imported successfully.
-                                imported_blocks.push((block_root, block_slot));
-                            }
-                            AvailabilityProcessingStatus::MissingComponents(slot, block_root) => {
-                                warn!(
-                                    ?block_root,
-                                    %slot,
-                                    "Blobs missing in response to range request"
-                                );
-                                return ChainSegmentResult::Failed {
-                                    imported_blocks,
-                                    error: BlockError::AvailabilityCheck(
-                                        AvailabilityCheckError::MissingBlobs,
-                                    ),
-                                };
-                            }
-                        },
-                        Err(BlockError::DuplicateFullyImported(block_root)) => {
-                            // The block was already imported. Post-Gloas its payload envelope may
-                            // still be missing, in which case we fall through to import the envelope
-                            // below. Otherwise there's nothing to do, so skip it.
-                            let envelope_needs_import = maybe_envelope.is_some()
-                                && !self
-                                    .canonical_head
-                                    .fork_choice_read_lock()
-                                    .is_payload_received(&block_root);
-                            if !envelope_needs_import {
-                                continue;
-                            }
+                match self
+                    .process_block(
+                        block_root,
+                        signature_verified_block,
+                        notify_execution_layer,
+                        BlockImportSource::RangeSync,
+                        || Ok(()),
+                    )
+                    .await
+                {
+                    Ok(status) => match status {
+                        AvailabilityProcessingStatus::Imported(block_root) => {
+                            // The block was imported successfully.
                             imported_blocks.push((block_root, block_slot));
                         }
-                        // Already-finalized or genesis blocks can show up when a batch is
-                        // re-fetched. They should never be imported, so skip them.
-                        Err(
-                            BlockError::WouldRevertFinalizedSlot { .. } | BlockError::GenesisBlock,
-                        ) => {
-                            continue;
-                        }
-                        Err(error) => {
+                        AvailabilityProcessingStatus::MissingComponents(slot, block_root) => {
+                            warn!(
+                                ?block_root,
+                                %slot,
+                                "Blobs missing in response to range request"
+                            );
                             return ChainSegmentResult::Failed {
                                 imported_blocks,
-                                error,
+                                error: BlockError::AvailabilityCheck(
+                                    AvailabilityCheckError::MissingBlobs,
+                                ),
                             };
                         }
+                    },
+                    // Range sync may attempt to re-import blocks:
+                    // - Blocks that are already known, as it fetches always entire epochs
+                    // - The finalized or parents of the finalized block = anchor
+                    // - The genesis block when fetching the batch for epoch 0
+                    Err(BlockError::DuplicateFullyImported(_))
+                    | Err(BlockError::WouldRevertFinalizedSlot { .. } | BlockError::GenesisBlock) =>
+                    {
+                        imported_blocks.push((block_root, block_slot));
                     }
-                } else if maybe_envelope.is_some() {
-                    // The already-imported anchor whose envelope is imported below.
-                    imported_blocks.push((block_root, block_slot));
+                    Err(error) => {
+                        return ChainSegmentResult::Failed {
+                            imported_blocks,
+                            error,
+                        };
+                    }
                 }
 
                 // Process the envelope after the block has been imported.
                 if let Some(envelope) = maybe_envelope
+                    && !self
+                        .canonical_head
+                        .fork_choice_read_lock()
+                        .is_payload_received(&block_root)
                     && let Err(e) = self
                         .process_range_sync_envelope(envelope, block_root, block)
                         .await
