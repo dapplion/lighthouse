@@ -54,6 +54,7 @@ impl<E: EthSpec> LookupBlock<E> {
 pub enum RangeSyncBlock<E: EthSpec> {
     Base(AvailableBlock<E>),
     Gloas {
+        block_root: Hash256,
         block: Arc<SignedBeaconBlock<E>>,
         envelope: Option<AvailableEnvelope<E>>,
     },
@@ -75,7 +76,7 @@ impl<E: EthSpec> RangeSyncBlock<E> {
     pub fn block_root(&self) -> Hash256 {
         match self {
             Self::Base(block) => block.block_root(),
-            Self::Gloas { block, .. } => block.canonical_root(),
+            Self::Gloas { block_root, .. } => *block_root,
         }
     }
 
@@ -162,16 +163,21 @@ impl<E: EthSpec> RangeSyncBlock<E> {
             .map_err(|e| format!("Inconsistent envelope: {e:?}"))?;
         }
 
-        Ok(Self::Gloas { block, envelope })
+        let block_root = block.canonical_root();
+        Ok(Self::Gloas {
+            block_root,
+            block,
+            envelope,
+        })
     }
 
     #[allow(clippy::type_complexity)]
     pub fn deconstruct(self) -> (Hash256, Arc<SignedBeaconBlock<E>>, AvailableBlockData<E>) {
         match self {
             Self::Base(block) => block.deconstruct(),
-            Self::Gloas { block, .. } => {
-                (block.canonical_root(), block, AvailableBlockData::NoData)
-            }
+            Self::Gloas {
+                block_root, block, ..
+            } => (block_root, block, AvailableBlockData::NoData),
         }
     }
 
@@ -203,7 +209,9 @@ impl<E: EthSpec> RangeSyncBlock<E> {
     ) -> Result<(AvailableBlock<E>, Option<AvailableEnvelope<E>>), AvailabilityCheckError> {
         match self {
             Self::Base(block) => Ok((block, None)),
-            Self::Gloas { block, envelope } => {
+            Self::Gloas {
+                block, envelope, ..
+            } => {
                 let available =
                     AvailableBlock::new_gloas(block).map_err(AvailabilityCheckError::Unexpected)?;
                 Ok((available, envelope))

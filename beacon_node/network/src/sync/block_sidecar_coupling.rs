@@ -1095,6 +1095,7 @@ mod tests {
                 RangeSyncBlock::Gloas {
                     block,
                     envelope: Some(envelope),
+                    ..
                 } => {
                     assert_eq!(
                         envelope.envelope().beacon_block_root(),

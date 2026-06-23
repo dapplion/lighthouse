@@ -8,8 +8,8 @@ use crate::beacon_proposer_cache::{BeaconProposerCache, EpochBlockProposers};
 use crate::block_times_cache::BlockTimesCache;
 use crate::block_verification::{
     BlockError, ExecutionPendingBlock, GossipVerifiedBlock, IntoExecutionPendingBlock,
-    check_block_is_finalized_checkpoint_or_descendant, check_block_relevancy,
-    signature_verify_chain_segment, verify_header_signature,
+    check_block_is_finalized_checkpoint_or_descendant, signature_verify_chain_segment,
+    verify_header_signature,
 };
 use crate::block_verification_types::{
     AsBlock, AvailableExecutedBlock, BlockImportData, ExecutedBlock, RangeSyncBlock,
@@ -152,9 +152,6 @@ use types::execution::BlockProductionVersion;
 use types::*;
 
 pub type ForkChoiceError = fork_choice::Error<crate::ForkChoiceStoreError>;
-
-/// Alias to appease clippy.
-type HashBlockTuple<E> = (Hash256, RangeSyncBlock<E>);
 
 // These keys are all zero because they get stored in different columns, see `DBColumn` type.
 pub const BEACON_CHAIN_DB_KEY: Hash256 = Hash256::ZERO;
@@ -2946,139 +2943,39 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         handle.await.map_err(Error::TokioJoin)
     }
 
-    /// Accepts a `chain_segment` and filters out any uninteresting blocks (e.g., pre-finalization
-    /// or already-known).
+    /// Asserts that `chain_segment` forms a single linear chain: every block has the correct
+    /// structure for the fork at its slot, every block (except the first) lists its predecessor in
+    /// the segment as its parent, and slots are strictly increasing.
     ///
-    /// This method is potentially long-running and should not run on the core executor.
-    #[instrument(skip_all, level = "debug")]
-    pub fn filter_chain_segment(
-        self: &Arc<Self>,
-        chain_segment: Vec<RangeSyncBlock<T::EthSpec>>,
-    ) -> Result<Vec<HashBlockTuple<T::EthSpec>>, Box<ChainSegmentResult>> {
-        // This function will never import any blocks.
-        let imported_blocks = vec![];
-        let mut filtered_chain_segment = Vec::with_capacity(chain_segment.len());
-
-        // Produce a list of the parent root and slot of the child of each block.
-        //
-        // E.g., `children[0] == (chain_segment[1].parent_root(), chain_segment[1].slot())`
-        let children = chain_segment
-            .iter()
-            .skip(1)
-            .map(|block| (block.parent_root(), block.slot()))
-            .collect::<Vec<_>>();
-
-        for (i, block) in chain_segment.into_iter().enumerate() {
+    /// This is a precondition for `signature_verify_chain_segment`, which verifies the whole
+    /// segment against a single shared state's shuffling. Without it, a non-linear segment could be
+    /// verified using the incorrect shuffling. That would be bad, mmkay.
+    fn assert_block_chain(
+        &self,
+        chain_segment: &[RangeSyncBlock<T::EthSpec>],
+    ) -> Result<(), BlockError> {
+        let mut parent: Option<(Hash256, Slot)> = None;
+        for block in chain_segment {
             // Ensure the block is the correct structure for the fork at `block.slot()`.
-            if let Err(e) = block.as_block().fork_name(&self.spec) {
-                return Err(Box::new(ChainSegmentResult::Failed {
-                    imported_blocks,
-                    error: BlockError::InconsistentFork(e),
-                }));
-            }
+            block
+                .as_block()
+                .fork_name(&self.spec)
+                .map_err(BlockError::InconsistentFork)?;
 
-            let block_root = block.block_root();
-
-            if let Some((child_parent_root, child_slot)) = children.get(i) {
-                // If this block has a child in this chain segment, ensure that its parent root matches
-                // the root of this block.
-                //
-                // Without this check it would be possible to have a block verified using the
-                // incorrect shuffling. That would be bad, mmkay.
-                if block_root != *child_parent_root {
-                    return Err(Box::new(ChainSegmentResult::Failed {
-                        imported_blocks,
-                        error: BlockError::NonLinearParentRoots,
-                    }));
+            if let Some((parent_root, parent_slot)) = parent {
+                // Ensure each block lists its predecessor in the segment as its parent.
+                if block.parent_root() != parent_root {
+                    return Err(BlockError::NonLinearParentRoots);
                 }
-
                 // Ensure that the slots are strictly increasing throughout the chain segment.
-                if *child_slot <= block.slot() {
-                    return Err(Box::new(ChainSegmentResult::Failed {
-                        imported_blocks,
-                        error: BlockError::NonLinearSlots,
-                    }));
+                if block.slot() <= parent_slot {
+                    return Err(BlockError::NonLinearSlots);
                 }
             }
-
-            // The envelope needs import only if it's a Gloas block with an envelope and
-            // the envelope isn't already in fork choice.
-            let range_sync_envelope_needs_import = matches!(
-                block,
-                RangeSyncBlock::Gloas {
-                    envelope: Some(_),
-                    ..
-                }
-            ) && !self
-                .canonical_head
-                .fork_choice_read_lock()
-                .is_payload_received(&block_root);
-
-            match check_block_relevancy(block.as_block(), block_root, self) {
-                // If the block is relevant, add it to the filtered chain segment.
-                Ok(_) => filtered_chain_segment.push((block_root, block)),
-                Err(BlockError::DuplicateFullyImported(_)) if range_sync_envelope_needs_import => {
-                    filtered_chain_segment.push((block_root, block));
-                }
-                // If the block is already known, simply ignore this block.
-                //
-                // Note that `check_block_relevancy` is incapable of returning
-                // `DuplicateImportStatusUnknown` so we don't need to handle that case here.
-                Err(BlockError::DuplicateFullyImported(_)) => continue,
-                // If the block is the genesis block, simply ignore this block.
-                Err(BlockError::GenesisBlock) => continue,
-                // If the block is is for a finalized slot, simply ignore this block.
-                //
-                // The block is either:
-                //
-                // 1. In the canonical finalized chain.
-                // 2. In some non-canonical chain at a slot that has been finalized already.
-                //
-                // In the case of (1), there's no need to re-import and later blocks in this
-                // segment might be useful.
-                // This changes slightly post-gloas because the finalized block can be
-                // imported without its corresponding envelope. If the block we are processing is
-                // the finalized block then we still add it to the filtered chain segment so that
-                // its envelope can be processed.
-                //
-                // In the case of (2), skipping the block is valid since we should never import it.
-                // However, we will potentially get a `ParentUnknown` on a later block. The sync
-                // protocol will need to ensure this is handled gracefully.
-                Err(BlockError::WouldRevertFinalizedSlot { .. }) => {
-                    if range_sync_envelope_needs_import
-                        && self
-                            .canonical_head
-                            .cached_head()
-                            .finalized_checkpoint()
-                            .root
-                            == block_root
-                    {
-                        filtered_chain_segment.push((block_root, block));
-                    }
-                }
-                // The block has a known parent that does not descend from the finalized block.
-                // There is no need to process this block or any children.
-                Err(BlockError::NotFinalizedDescendant { block_parent_root }) => {
-                    return Err(Box::new(ChainSegmentResult::Failed {
-                        imported_blocks,
-                        error: BlockError::NotFinalizedDescendant { block_parent_root },
-                    }));
-                }
-                // If there was an error whilst determining if the block was invalid, return that
-                // error.
-                Err(BlockError::BeaconChainError(e)) => {
-                    return Err(Box::new(ChainSegmentResult::Failed {
-                        imported_blocks,
-                        error: BlockError::BeaconChainError(e),
-                    }));
-                }
-                // If the block was decided to be irrelevant for any other reason, don't include
-                // this block or any of it's children in the filtered chain segment.
-                _ => break,
-            }
+            parent = Some((block.block_root(), block.slot()));
         }
 
-        Ok(filtered_chain_segment)
+        Ok(())
     }
 
     /// Attempt to verify and import a chain of blocks to `self`.
@@ -3107,24 +3004,22 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         let mut imported_blocks = vec![];
 
-        // Filter uninteresting blocks from the chain segment in a blocking task.
-        let chain = self.clone();
-        let filtered_chain_segment_future = self.spawn_blocking_handle(
-            move || chain.filter_chain_segment(chain_segment),
-            "filter_chain_segment",
-        );
-        let mut filtered_chain_segment = match filtered_chain_segment_future.await {
-            Ok(Ok(filtered_segment)) => filtered_segment,
-            Ok(Err(segment_result)) => return *segment_result,
-            Err(error) => {
-                return ChainSegmentResult::Failed {
-                    imported_blocks,
-                    error: BlockError::BeaconChainError(error.into()),
-                };
-            }
-        };
+        // Ensure the segment forms a linear chain before signature-verifying it as a batch.
+        // Irrelevant blocks (already-imported, finalized, genesis) are no longer filtered out here;
+        // they are handled gracefully during import below.
+        if let Err(error) = self.assert_block_chain(&chain_segment) {
+            return ChainSegmentResult::Failed {
+                imported_blocks,
+                error,
+            };
+        }
 
-        while let Some((_root, block)) = filtered_chain_segment.first() {
+        let mut chain_segment_with_roots = chain_segment
+            .into_iter()
+            .map(|block| (block.block_root(), block))
+            .collect::<Vec<_>>();
+
+        while let Some((_root, block)) = chain_segment_with_roots.first() {
             // Determine the epoch of the first block in the remaining segment.
             let start_epoch = block.epoch();
 
@@ -3132,13 +3027,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // than the current epoch: partitioning the blocks into a run of blocks in the same
             // epoch and everything else. These same-epoch blocks can all be signature-verified with
             // the same `BeaconState`.
-            let last_index = filtered_chain_segment
+            let last_index = chain_segment_with_roots
                 .iter()
                 .position(|(_root, block)| block.epoch() > start_epoch)
-                .unwrap_or(filtered_chain_segment.len());
+                .unwrap_or(chain_segment_with_roots.len());
 
-            let mut blocks = filtered_chain_segment.split_off(last_index);
-            std::mem::swap(&mut blocks, &mut filtered_chain_segment);
+            let mut blocks = chain_segment_with_roots.split_off(last_index);
+            std::mem::swap(&mut blocks, &mut chain_segment_with_roots);
 
             // Here, we are special casing the checkpoint sync block's envelope processing.
             // Post-gloas, if the first filtered block is the checkpoint block, range
@@ -3158,6 +3053,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 if let RangeSyncBlock::Gloas {
                     block,
                     envelope: Some(envelope),
+                    ..
                 } = block
                 {
                     let chain = self.clone();
@@ -3178,8 +3074,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             error,
                         };
                     }
+                    imported_blocks.push((block_root, block_slot));
                 }
-                imported_blocks.push((block_root, block_slot));
             }
 
             // Extract envelopes before passing blocks to signature verification.
@@ -3253,8 +3149,23 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         }
                     }
                     Err(BlockError::DuplicateFullyImported(block_root)) => {
-                        // Block was already imported, envelope might need re-import
+                        // The block was already imported. Post-Gloas its payload envelope may still
+                        // be missing, in which case we fall through to import the envelope below.
+                        // Otherwise there's nothing to do, so skip it (don't report it as imported).
+                        let envelope_needs_import = maybe_envelope.is_some()
+                            && !self
+                                .canonical_head
+                                .fork_choice_read_lock()
+                                .is_payload_received(&block_root);
+                        if !envelope_needs_import {
+                            continue;
+                        }
                         imported_blocks.push((block_root, block_slot));
+                    }
+                    // Already-finalized or genesis blocks can show up when a batch is re-fetched.
+                    // They should never be imported, so skip them rather than fail the segment.
+                    Err(BlockError::WouldRevertFinalizedSlot { .. } | BlockError::GenesisBlock) => {
+                        continue;
                     }
                     Err(error) => {
                         return ChainSegmentResult::Failed {
