@@ -3030,24 +3030,22 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             let mut blocks = chain_segment.split_off(last_index);
             std::mem::swap(&mut blocks, &mut chain_segment);
 
-            // The checkpoint anchor (the first block, equal to the finalized root) is already
-            // imported and has no parent in fork choice, so it can't be signature-verified or
-            // re-imported. We exclude it from signature verification, but still KZG-verify its
-            // columns and import its envelope just like any other block.
-            let anchor = blocks
-                .first()
-                .filter(|block| {
-                    block.block_root()
-                        == self
-                            .canonical_head
-                            .cached_head()
-                            .finalized_checkpoint()
-                            .root
-                })
-                .map(|block| (block.block_root(), block.slot(), block.block_cloned()));
-            let skip = usize::from(anchor.is_some());
+            // Blocks at or below the finalized slot (the already-imported checkpoint anchor) can't
+            // be signature-verified or re-imported — they have no parent in fork choice. They are
+            // excluded from signature verification below; only their payload envelope is imported.
+            let finalized_slot = self
+                .canonical_head
+                .cached_head()
+                .finalized_checkpoint()
+                .epoch
+                .start_slot(T::EthSpec::slots_per_epoch());
 
-            // Extract envelopes before passing blocks to signature verification.
+            // The root, slot and block are needed to import each envelope (and the anchor) after
+            // the blocks themselves are consumed by signature verification.
+            let block_infos: Vec<_> = blocks
+                .iter()
+                .map(|block| (block.block_root(), block.slot(), block.block_cloned()))
+                .collect();
             let envelopes: Vec<_> = blocks
                 .iter()
                 .map(|block| match block {
@@ -3067,9 +3065,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             verify_columns_against_block(&chain.kzg, block.as_block(), &columns)?;
                         }
                     }
-                    // Only signature-verify the blocks after the anchor.
-                    let after_anchor = blocks.split_off(skip);
-                    signature_verify_chain_segment(after_anchor, &chain)
+                    // Only signature-verify blocks after the finalized slot.
+                    let to_verify = blocks
+                        .into_iter()
+                        .filter(|block| block.slot() > finalized_slot)
+                        .collect();
+                    signature_verify_chain_segment(to_verify, &chain)
                 },
                 "signature_verify_chain_segment",
             );
@@ -3091,42 +3092,28 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 }
             };
 
-            // The anchor block is already imported; only its envelope needs processing.
-            if let Some((block_root, block_slot, block)) = anchor
-                && let Some(envelope) = envelopes.first().cloned().flatten()
+            // Import each block, then its envelope. The anchor (at or below the finalized slot) was
+            // not signature-verified, so it skips block import and only its envelope is processed.
+            let mut signature_verified_blocks = signature_verified_blocks.into_iter();
+            for ((block_root, block_slot, block), maybe_envelope) in
+                block_infos.into_iter().zip(envelopes)
             {
-                if let Err(e) = self
-                    .process_range_sync_envelope(envelope, block_root, block)
-                    .await
-                {
-                    return ChainSegmentResult::Failed {
-                        imported_blocks,
-                        error: BlockError::EnvelopeError(Box::new(e)),
-                    };
-                }
-                imported_blocks.push((block_root, block_slot));
-            }
+                let signature_verified_block = (block_slot > finalized_slot)
+                    .then(|| signature_verified_blocks.next())
+                    .flatten();
 
-            // Import the blocks into the chain.
-            for (signature_verified_block, maybe_envelope) in signature_verified_blocks
-                .into_iter()
-                .zip(envelopes.into_iter().skip(skip))
-            {
-                let block_slot = signature_verified_block.slot();
-                let block_root = signature_verified_block.block_root();
-                let block = signature_verified_block.block_cloned();
-                match self
-                    .process_block(
-                        block_root,
-                        signature_verified_block,
-                        notify_execution_layer,
-                        BlockImportSource::RangeSync,
-                        || Ok(()),
-                    )
-                    .await
-                {
-                    Ok(status) => {
-                        match status {
+                if let Some(signature_verified_block) = signature_verified_block {
+                    match self
+                        .process_block(
+                            block_root,
+                            signature_verified_block,
+                            notify_execution_layer,
+                            BlockImportSource::RangeSync,
+                            || Ok(()),
+                        )
+                        .await
+                    {
+                        Ok(status) => match status {
                             AvailabilityProcessingStatus::Imported(block_root) => {
                                 // The block was imported successfully.
                                 imported_blocks.push((block_root, block_slot));
@@ -3144,33 +3131,38 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                                     ),
                                 };
                             }
+                        },
+                        Err(BlockError::DuplicateFullyImported(block_root)) => {
+                            // The block was already imported. Post-Gloas its payload envelope may
+                            // still be missing, in which case we fall through to import the envelope
+                            // below. Otherwise there's nothing to do, so skip it.
+                            let envelope_needs_import = maybe_envelope.is_some()
+                                && !self
+                                    .canonical_head
+                                    .fork_choice_read_lock()
+                                    .is_payload_received(&block_root);
+                            if !envelope_needs_import {
+                                continue;
+                            }
+                            imported_blocks.push((block_root, block_slot));
                         }
-                    }
-                    Err(BlockError::DuplicateFullyImported(block_root)) => {
-                        // The block was already imported. Post-Gloas its payload envelope may still
-                        // be missing, in which case we fall through to import the envelope below.
-                        // Otherwise there's nothing to do, so skip it (don't report it as imported).
-                        let envelope_needs_import = maybe_envelope.is_some()
-                            && !self
-                                .canonical_head
-                                .fork_choice_read_lock()
-                                .is_payload_received(&block_root);
-                        if !envelope_needs_import {
+                        // Already-finalized or genesis blocks can show up when a batch is
+                        // re-fetched. They should never be imported, so skip them.
+                        Err(
+                            BlockError::WouldRevertFinalizedSlot { .. } | BlockError::GenesisBlock,
+                        ) => {
                             continue;
                         }
-                        imported_blocks.push((block_root, block_slot));
+                        Err(error) => {
+                            return ChainSegmentResult::Failed {
+                                imported_blocks,
+                                error,
+                            };
+                        }
                     }
-                    // Already-finalized or genesis blocks can show up when a batch is re-fetched.
-                    // They should never be imported, so skip them rather than fail the segment.
-                    Err(BlockError::WouldRevertFinalizedSlot { .. } | BlockError::GenesisBlock) => {
-                        continue;
-                    }
-                    Err(error) => {
-                        return ChainSegmentResult::Failed {
-                            imported_blocks,
-                            error,
-                        };
-                    }
+                } else if maybe_envelope.is_some() {
+                    // The already-imported anchor whose envelope is imported below.
+                    imported_blocks.push((block_root, block_slot));
                 }
 
                 // Process the envelope after the block has been imported.
