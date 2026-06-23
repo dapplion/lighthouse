@@ -3040,20 +3040,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .epoch
                 .start_slot(T::EthSpec::slots_per_epoch());
 
-            // The root, slot and block are needed to import each envelope (and the anchor) after
-            // the blocks themselves are consumed by signature verification.
-            let block_infos: Vec<_> = blocks
-                .iter()
-                .map(|block| (block.block_root(), block.slot(), block.block_cloned()))
-                .collect();
-            let envelopes: Vec<_> = blocks
-                .iter()
-                .map(|block| match block {
-                    RangeSyncBlock::Gloas { envelope, .. } => envelope.clone(),
-                    RangeSyncBlock::Base(_) => None,
-                })
-                .collect();
-
             let chain = self.clone();
             let signature_verification_future = self.spawn_blocking_handle(
                 move || {
@@ -3094,10 +3080,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
             // Import each block, then its envelope. The anchor (at or below the finalized slot) was
             // not signature-verified, so it skips block import and only its envelope is processed.
-            let mut signature_verified_blocks = signature_verified_blocks.into_iter();
-            for ((block_root, block_slot, block), maybe_envelope) in
-                block_infos.into_iter().zip(envelopes)
-            {
+            for signature_verified_block in signature_verified_blocks {
+                let block_root = signature_verified_block.block_root();
+                let block_slot = signature_verified_block.slot();
+                let block = signature_verified_block.block.block_cloned();
+                let envelope = signature_verified_block.envelope.clone();
                 match self
                     .process_block(
                         block_root,
@@ -3145,11 +3132,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 }
 
                 // Process the envelope after the block has been imported.
-                if let Some(envelope) = maybe_envelope
-                    && !self
-                        .canonical_head
-                        .fork_choice_read_lock()
-                        .is_payload_received(&block_root)
+                if let Some(envelope) = envelope
                     && let Err(e) = self
                         .process_range_sync_envelope(envelope, block_root, block)
                         .await

@@ -59,7 +59,7 @@ use crate::execution_payload::{
 };
 use crate::kzg_utils::blobs_to_data_column_sidecars;
 use crate::observed_block_producers::SeenBlock;
-use crate::payload_envelope_verification::EnvelopeError;
+use crate::payload_envelope_verification::{AvailableEnvelope, EnvelopeError};
 use crate::validator_monitor::HISTORIC_EPOCHS as VALIDATOR_MONITOR_HISTORIC_EPOCHS;
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
 use crate::{
@@ -656,12 +656,13 @@ pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
         let block_root = block.block_root();
         let consensus_context =
             ConsensusContext::new(block.slot()).set_current_block_root(block_root);
-        let (available_block, _envelope) = block.into_available_block()?;
+        let (available_block, envelope) = block.into_available_block()?;
         signature_verified_blocks.push(SignatureVerifiedBlock {
             block: MaybeAvailableBlock::Available(available_block),
             block_root,
             parent: None,
             consensus_context,
+            envelope,
         });
     }
 
@@ -700,10 +701,11 @@ pub struct GossipVerifiedBlock<T: BeaconChainTypes> {
 /// A wrapper around a `SignedBeaconBlock` that indicates that all signatures (except the deposit
 /// signatures) have been verified.
 pub struct SignatureVerifiedBlock<T: BeaconChainTypes> {
-    block: MaybeAvailableBlock<T::EthSpec>,
+    pub block: MaybeAvailableBlock<T::EthSpec>,
     block_root: Hash256,
     parent: Option<PreProcessingSnapshot<T::EthSpec>>,
     consensus_context: ConsensusContext<T::EthSpec>,
+    pub envelope: Option<AvailableEnvelope<T::EthSpec>>,
 }
 
 /// Used to await the result of executing payload with an EE.
@@ -1151,6 +1153,7 @@ impl<T: BeaconChainTypes> SignatureVerifiedBlock<T> {
                 block,
                 block_root,
                 parent: Some(parent),
+                envelope: None,
             })
         } else {
             // Re-verify the proposer signature in isolation to attribute fault
@@ -1246,6 +1249,7 @@ impl<T: BeaconChainTypes> SignatureVerifiedBlock<T> {
                     block_root: from.block_root,
                     parent: Some(parent),
                     consensus_context,
+                    envelope: None,
                 })
             }
             Err(_) => Err(BlockError::InvalidSignature(

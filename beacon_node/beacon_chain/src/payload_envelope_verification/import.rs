@@ -385,6 +385,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         block_root: Hash256,
         block: Arc<SignedBeaconBlock<T::EthSpec>>,
     ) -> Result<(), EnvelopeError> {
+        if self
+            .canonical_head
+            .fork_choice_read_lock()
+            .is_payload_received(&block_root)
+        {
+            return Ok(());
+        }
+
         let signed_envelope = available_envelope.envelope().clone();
 
         // Load the state snapshot for envelope processing
