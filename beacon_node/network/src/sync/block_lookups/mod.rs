@@ -562,7 +562,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
 
         for (id, lookup) in self.single_block_lookups.iter_mut() {
             if lookup.is_awaiting_parent(parent_root, imported_parent) {
-                lookup.resolve_awaiting_parent();
+                lookup.resolve_awaiting_parent(cx.spec());
                 debug!(
                     ?imported_parent,
                     id,
