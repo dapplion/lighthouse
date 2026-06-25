@@ -126,7 +126,7 @@ impl<E: EthSpec> DataRequest<E> {
 enum PayloadRequest<E: EthSpec> {
     /// Post-Gloas block: an execution payload envelope must be fetched and processed *if* the block
     /// is FULL. We can't tell FULL from EMPTY from the block alone: only a FULL child of this block
-    /// proves a payload was published, which is signalled by `peers` becoming non-empty.
+    /// proves a payload was published, which is signalled by `data_peers` becoming non-empty.
     Request {
         state: SingleLookupRequestState<Arc<SignedExecutionPayloadEnvelope<E>>>,
     },
@@ -189,11 +189,16 @@ pub struct SingleBlockLookup<T: BeaconChainTypes> {
     /// block's payload envelope and data columns.
     #[educe(Debug(method(fmt_peer_map_as_len)))]
     gloas_child_peers: HashMap<ExecutionBlockHash, PeerSet>,
+    /// Set while this lookup knows it is awaiting a parent (e.g. created from a gossip
+    /// `UnknownParentBlock`, or a downloaded block that returned `ParentUnknown`). While set, the
+    /// block is held but not submitted for processing.
+    awaiting_parent: Option<AwaitingParent>,
     created: Instant,
     pub(crate) span: Span,
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Status<E: EthSpec> {
     FetchingHeader(BlockRequest<E>),
     WaitingForParent {
@@ -201,7 +206,6 @@ enum Status<E: EthSpec> {
         /// Peers to fetch the data columns from. Pre-Gloas this is the lookup's `peers`; for FULL
         /// Gloas blocks this is the `gloas_child_peers` set proven to hold the columns.
         data_peers: PeerSet,
-        awaiting_parent: AwaitingParent,
     },
     ComponentsDownload {
         header: RichHeader,
@@ -216,20 +220,19 @@ enum Status<E: EthSpec> {
 
 #[derive(Debug, Clone)]
 struct RichHeader {
-    parent_root: Hash256,
     slot: Slot,
+    /// Whether the block expects blobs (`num_expected_blobs() > 0`). The full "columns required"
+    /// decision additionally gates on the peer-das fork (done in `new_components_download`); the
+    /// DA-boundary gate is skipped because lookup sync only runs inside the data-availability window.
     has_data: bool,
-    bid_parent_hash: Option<ExecutionBlockHash>,
     bid_block_hash: Option<ExecutionBlockHash>,
 }
 
 impl RichHeader {
     fn from_block<E: EthSpec>(block: &SignedBeaconBlock<E>) -> Self {
         Self {
-            parent_root: block.parent_root(),
             slot: block.slot(),
             has_data: block.num_expected_blobs() > 0,
-            bid_parent_hash: block.payload_bid_parent_block_hash().ok(),
             bid_block_hash: block.payload_bid_block_hash().ok(),
         }
     }
@@ -253,14 +256,19 @@ impl<E: EthSpec> Status<E> {
         }
     }
 
-    fn new_components_download(header: RichHeader, data_peers: PeerSet, spec: &ChainSpec) -> Self {
+    fn new_components_download(
+        header: RichHeader,
+        data_peers: PeerSet,
+        block_request: BlockRequest<E>,
+        spec: &ChainSpec,
+    ) -> Self {
         Self::ComponentsDownload {
             header: header.clone(),
             data_peers,
-            block_request: BlockRequest {
-                state: SingleLookupRequestState::new(),
-            },
-            data_request: if header.has_data {
+            block_request,
+            data_request: if header.has_data
+                && spec.is_peer_das_enabled_for_epoch(header.slot.epoch(E::slots_per_epoch()))
+            {
                 DataRequest::Request {
                     state: SingleLookupRequestState::new(),
                 }
@@ -293,7 +301,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         peers: &[PeerId],
         peer_type: &PeerType,
         id: Id,
+        block_component: Option<BlockComponent<T::EthSpec>>,
         awaiting_parent: Option<AwaitingParent>,
+        spec: &ChainSpec,
     ) -> Self {
         let lookup_span = debug_span!(
             "lh_single_block_lookup",
@@ -310,12 +320,32 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             }
         }
 
+        // If we already hold the full block (gossip `UnknownParentBlock`), skip the header-fetch
+        // stage and seed it for processing. We do NOT pre-park on the gossip parent hint: only the
+        // beacon processor authoritatively reports `ParentUnknown`, so let processing decide.
+        let status = match block_component {
+            Some(BlockComponent::Block(block)) => {
+                let header = RichHeader::from_block(&block.value);
+                let data_peers = match header.bid_block_hash {
+                    Some(bid_block_hash) => {
+                        gloas_child_peers.entry(bid_block_hash).or_default().clone()
+                    }
+                    None => block_peers.clone(),
+                };
+                let mut block_request = BlockRequest::new();
+                block_request.state.insert_verified_response(block);
+                Status::new_components_download(header, data_peers, block_request, spec)
+            }
+            Some(BlockComponent::Sidecar) | None => Status::FetchingHeader(BlockRequest::new()),
+        };
+
         Self {
             id,
             block_root: requested_block_root,
-            status: Status::FetchingHeader(BlockRequest::new()),
+            status,
             peers: block_peers,
             gloas_child_peers,
+            awaiting_parent,
             created: Instant::now(),
             span: lookup_span,
         }
@@ -338,13 +368,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     }
 
     pub fn awaiting_parent(&self) -> Option<&AwaitingParent> {
-        match &self.status {
-            Status::FetchingHeader(_) => None,
-            Status::WaitingForParent {
-                awaiting_parent, ..
-            } => Some(awaiting_parent),
-            Status::ComponentsDownload { .. } => None,
-        }
+        self.awaiting_parent.as_ref()
     }
 
     pub fn is_awaiting_block(&self, block_root: Hash256) -> bool {
@@ -358,15 +382,16 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
     /// Mark this lookup as no longer awaiting a parent lookup. Components can be sent for
     /// processing.
     pub fn resolve_awaiting_parent(&mut self, spec: &ChainSpec) {
-        match &self.status {
-            Status::FetchingHeader(_) => {}
-            Status::WaitingForParent {
-                header, data_peers, ..
-            } => {
-                self.status =
-                    Status::new_components_download(header.clone(), data_peers.clone(), spec);
-            }
-            Status::ComponentsDownload { .. } => {}
+        self.awaiting_parent = None;
+        // A parked lookup (block dropped) must re-fetch; a lookup that held its block (e.g. a gossip
+        // child) keeps it and is simply un-gated for processing by clearing `awaiting_parent`.
+        if let Status::WaitingForParent { header, data_peers } = &self.status {
+            self.status = Status::new_components_download(
+                header.clone(),
+                data_peers.clone(),
+                BlockRequest::new(),
+                spec,
+            );
         }
     }
 
@@ -377,10 +402,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         parent_root: Hash256,
         imported_parent: ImportedParent,
     ) -> bool {
-        let Status::WaitingForParent {
-            awaiting_parent, ..
-        } = self.status
-        else {
+        let Some(awaiting_parent) = self.awaiting_parent else {
             return false;
         };
         if awaiting_parent.parent_root() != parent_root {
@@ -409,22 +431,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         self.created.elapsed()
     }
 
-    /// Maybe insert a verified response into this lookup. Returns true if imported
-    pub fn add_child_components(&mut self, block_component: BlockComponent<T::EthSpec>) -> bool {
-        match block_component {
-            BlockComponent::Block(block) => match &mut self.status {
-                Status::FetchingHeader(req) => req.state.insert_verified_response(block),
-                Status::WaitingForParent { .. } => false,
-                Status::ComponentsDownload { .. } => todo!(),
-            },
-            BlockComponent::Sidecar => {
-                // There's nothing to do here, there's no component to insert. The lookup downloads
-                // its required data columns itself once it has the block.
-                false
-            }
-        }
-    }
-
     /// Check the block root matches the requested block root.
     pub fn is_for_block(&self, block_root: Hash256) -> bool {
         self.block_root() == block_root
@@ -432,6 +438,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
 
     /// Returns true if this request is expecting some event to make progress
     pub fn is_awaiting_event(&self) -> bool {
+        // While awaiting a parent we expect the parent lookup to resolve us.
+        if self.awaiting_parent.is_some() {
+            return true;
+        }
         match &self.status {
             Status::FetchingHeader(req) => req.state.is_awaiting_event(),
             Status::WaitingForParent { .. } => true,
@@ -465,15 +475,24 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         loop {
             match &mut self.status {
                 Status::FetchingHeader(req) => {
+                    // Fetch the block so its header can be cached.
+                    req.state.maybe_start_downloading(|| {
+                        cx.block_lookup_request(self.id, self.peers.clone(), self.block_root)
+                    })?;
                     if let Some(block) = req.state.peek_downloaded_data() {
                         let header = RichHeader::from_block(block);
                         let data_peers = self.get_data_peers(header.bid_block_hash);
-                        self.status =
-                            Status::new_components_download(header, data_peers, cx.spec());
+                        self.status = Status::new_components_download(
+                            header,
+                            data_peers,
+                            BlockRequest::new(),
+                            cx.spec(),
+                        );
                         continue;
                     }
+                    break;
                 }
-                Status::WaitingForParent { .. } => {}
+                Status::WaitingForParent { .. } => break,
                 Status::ComponentsDownload {
                     header,
                     data_peers,
@@ -485,7 +504,11 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     block_request.state.maybe_start_downloading(|| {
                         cx.block_lookup_request(self.id, self.peers.clone(), self.block_root)
                     })?;
-                    if let Some(data) = block_request.state.maybe_start_processing() {
+                    // Do not submit the block for processing while awaiting a parent: it would
+                    // return `ParentUnknown` and force the lookup to drop and re-fetch it.
+                    if self.awaiting_parent.is_none()
+                        && let Some(data) = block_request.state.maybe_start_processing()
+                    {
                         cx.send_block_for_processing(self.id, self.block_root, data.value)
                             .map_err(LookupRequestError::SendFailedProcessor)?;
                     }
@@ -514,7 +537,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                                 )
                                 .map_err(LookupRequestError::SendFailedProcessor)?;
                             }
-                            break;
                         }
                         DataRequest::NoData => {}
                     }
@@ -545,6 +567,8 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                         }
                         PayloadRequest::PreGloas => {}
                     }
+
+                    break;
                 }
             }
         }
@@ -602,18 +626,17 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 parent_block_hash,
             } => {
                 // `BlockError::ParentUnknown` is only returned when processing blocks. Revert the
-                // block request to `Downloaded` and park this lookup until the parent resolves; a
-                // future call to `continue_requests` will re-submit the block for processing once
-                // the parent lookup completes.
+                // block request to `Downloaded` and park this lookup until the parent resolves,
+                // dropping the block (it will be re-fetched once the parent lookup completes).
                 block_request.state.revert_to_awaiting_processing()?;
                 self.status = Status::WaitingForParent {
                     header: header.clone(),
                     data_peers: data_peers.clone(),
-                    awaiting_parent: AwaitingParent {
-                        parent_root,
-                        parent_block_hash,
-                    },
                 };
+                self.awaiting_parent = Some(AwaitingParent {
+                    parent_root,
+                    parent_block_hash,
+                });
                 return Ok(LookupResult::ParentUnknown {
                     parent_root,
                     parent_block_hash,
@@ -729,7 +752,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             ..
         } = &mut self.status
         else {
-            return Err(LookupRequestError::BadState("no data_request".to_owned()));
+            // The lookup parked awaiting its parent (or otherwise moved on) while this custody
+            // request was in flight. The response is for an abandoned request; ignore it.
+            return self.continue_requests(cx);
         };
 
         state.on_download_response(req_id, result)?;
@@ -748,9 +773,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             ..
         } = &mut self.status
         else {
-            return Err(LookupRequestError::BadState(
-                "no payload_request".to_owned(),
-            ));
+            // The lookup parked awaiting its parent (or otherwise moved on) while this payload
+            // envelope request was in flight. The response is for an abandoned request; ignore it.
+            return self.continue_requests(cx);
         };
 
         state.on_download_response(req_id, result)?;

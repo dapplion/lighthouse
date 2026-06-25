@@ -349,16 +349,16 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         }
 
         // Do not re-request a block that is already being requested
-        if let Some((&lookup_id, lookup)) = self
+        if let Some((&lookup_id, _lookup)) = self
             .single_block_lookups
             .iter_mut()
             .find(|(_id, lookup)| lookup.is_for_block(block_root))
         {
-            if let Some(block_component) = block_component {
-                let imported = lookup.add_child_components(block_component);
-                if !imported {
-                    debug!(?block_root, "Lookup child component ignored");
-                }
+            // A lookup for this root already exists. Drop any gossip-provided component: injecting
+            // it could collide with an in-flight request, and the existing lookup will complete on
+            // its own.
+            if block_component.is_some() {
+                debug!(?block_root, "Lookup child component ignored");
             }
 
             if let Err(e) = self.add_peers_to_lookup_and_ancestors(lookup_id, peers, peer_type, cx)
@@ -389,16 +389,18 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
 
         // If we know that this lookup has unknown parent (is awaiting a parent lookup to resolve),
         // signal here to hold processing downloaded data.
-        let mut lookup =
-            SingleBlockLookup::new(block_root, peers, peer_type, cx.next_id(), awaiting_parent);
+        let id = cx.next_id();
+        let lookup = SingleBlockLookup::new(
+            block_root,
+            peers,
+            peer_type,
+            id,
+            block_component,
+            awaiting_parent,
+            cx.spec(),
+        );
         let _guard = lookup.span.clone().entered();
 
-        // Add block components to the new request
-        if let Some(block_component) = block_component {
-            lookup.add_child_components(block_component);
-        }
-
-        let id = lookup.id;
         let lookup = match self.single_block_lookups.entry(id) {
             Entry::Vacant(entry) => entry.insert(lookup),
             Entry::Occupied(_) => {
