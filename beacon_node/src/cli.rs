@@ -693,6 +693,37 @@ pub fn cli_app() -> Command {
                 .default_missing_value("true")
                 .display_order(0)
         )
+        .arg(
+            Arg::new("tree-sync")
+                .long("tree-sync")
+                .action(ArgAction::SetTrue)
+                .help_heading(FLAG_HEADER)
+                .help("Direct every peer with an unknown head to block (lookup) sync instead of \
+                splitting between range and lookup sync based on how far ahead the peer is. \
+                Approximates tree sync. Experimental.")
+                .hide(true)
+                .display_order(0)
+        )
+        .arg(
+            Arg::new("lookup-sync-max-parent-depth")
+                .long("lookup-sync-max-parent-depth")
+                .value_name("DEPTH")
+                .help("Maximum depth of the parent chain that lookup sync will search before \
+                forcing range sync. Experimental.")
+                .action(ArgAction::Set)
+                .hide(true)
+                .display_order(0)
+        )
+        .arg(
+            Arg::new("lookup-sync-max-lookups")
+                .long("lookup-sync-max-lookups")
+                .value_name("COUNT")
+                .help("Maximum number of concurrent block lookups held by lookup sync. \
+                Experimental.")
+                .action(ArgAction::Set)
+                .hide(true)
+                .display_order(0)
+        )
         /*
          * Monitoring metrics
          */

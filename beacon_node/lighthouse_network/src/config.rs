@@ -23,6 +23,14 @@ pub const DEFAULT_DISC_PORT: u16 = 9000u16;
 pub const DEFAULT_QUIC_PORT: u16 = 9001u16;
 pub const DEFAULT_IDONTWANT_MESSAGE_SIZE_THRESHOLD: usize = 1000usize;
 
+/// Default maximum depth of the parent chain searched by lookup sync. Matches the historical
+/// `PARENT_DEPTH_TOLERANCE` (equal to `SLOT_IMPORT_TOLERANCE`) used by block lookup sync.
+pub const DEFAULT_LOOKUP_SYNC_MAX_PARENT_DEPTH: usize = 32;
+
+/// Default maximum number of concurrent block lookups held by lookup sync. Matches the historical
+/// `MAX_LOOKUPS` used by block lookup sync.
+pub const DEFAULT_LOOKUP_SYNC_MAX_LOOKUPS: usize = 200;
+
 pub struct GossipsubConfigParams {
     pub message_domain_valid_snappy: [u8; 4],
     pub gossipsub_max_transmit_size: usize,
@@ -146,6 +154,16 @@ pub struct Config {
 
     /// Whether to enable partial data column support.
     pub enable_partial_columns: bool,
+
+    /// Route every peer with an unknown head straight to block (lookup) sync instead of using the
+    /// range/lookup split based on how far ahead the peer is. Approximates "tree sync".
+    pub tree_sync: bool,
+
+    /// Maximum depth of the parent chain that lookup sync will search before forcing range sync.
+    pub lookup_sync_max_parent_depth: usize,
+
+    /// Maximum number of concurrent block lookups held by lookup sync.
+    pub lookup_sync_max_lookups: usize,
 }
 
 impl Config {
@@ -372,6 +390,9 @@ impl Default for Config {
             idontwant_message_size_threshold: DEFAULT_IDONTWANT_MESSAGE_SIZE_THRESHOLD,
             advertise_false_custody_group_count: None,
             enable_partial_columns: false,
+            tree_sync: false,
+            lookup_sync_max_parent_depth: DEFAULT_LOOKUP_SYNC_MAX_PARENT_DEPTH,
+            lookup_sync_max_lookups: DEFAULT_LOOKUP_SYNC_MAX_LOOKUPS,
         }
     }
 }

@@ -309,6 +309,17 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         fork_context: Arc<ForkContext>,
     ) -> Self {
         let network_globals = beacon_processor.network_globals.clone();
+        // Tree sync follows the full tree of lookups without dropping chains, so the depth and
+        // lookup-count caps are removed (unbounded) when it is enabled.
+        let (lookup_sync_max_parent_depth, lookup_sync_max_lookups) =
+            if network_globals.config.tree_sync {
+                (usize::MAX, usize::MAX)
+            } else {
+                (
+                    network_globals.config.lookup_sync_max_parent_depth,
+                    network_globals.config.lookup_sync_max_lookups,
+                )
+            };
         Self {
             chain: beacon_chain.clone(),
             input_channel: sync_recv,
@@ -321,7 +332,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             range_sync: RangeSync::new(beacon_chain.clone()),
             backfill_sync: BackFillSync::new(beacon_chain.clone(), network_globals.clone()),
             custody_backfill_sync: CustodyBackFillSync::new(beacon_chain.clone(), network_globals),
-            block_lookups: BlockLookups::new(),
+            block_lookups: BlockLookups::new(lookup_sync_max_parent_depth, lookup_sync_max_lookups),
             notified_unknown_roots: LRUTimeCache::new(Duration::from_secs(
                 NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS,
             )),
@@ -409,25 +420,34 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         // update the state of the peer.
         let is_still_connected = self.update_peer_sync_state(&peer_id, &local, &remote, &sync_type);
         if is_still_connected {
-            match sync_type {
-                PeerSyncType::Behind => {} // Do nothing
-                PeerSyncType::Advanced => {
-                    self.range_sync
-                        .add_peer(&mut self.network, local, peer_id, remote);
+            if self.network_globals().config.tree_sync {
+                // Tree sync: direct every peer with an unknown head to block (lookup) sync
+                // regardless of how far ahead it is. If the unknown head turns out to be on a
+                // longer fork, lookup sync will force range sync once it reaches the max depth.
+                if !self.chain.block_is_known_to_fork_choice(&remote.head_root) {
+                    self.handle_unknown_block_root(peer_id, remote.head_root);
                 }
-                PeerSyncType::FullySynced => {
-                    // Sync considers this peer close enough to the head to not trigger range sync.
-                    // Range sync handles well syncing large ranges of blocks, of a least a few blocks.
-                    // However this peer may be in a fork that we should sync but we have not discovered
-                    // yet. If the head of the peer is unknown, attempt block lookup first. If the
-                    // unknown head turns out to be on a longer fork, it will trigger range sync.
-                    //
-                    // A peer should always be considered `Advanced` if its finalized root is
-                    // unknown and ahead of ours, so we don't check for that root here.
-                    //
-                    // TODO: This fork-choice check is potentially duplicated, review code
-                    if !self.chain.block_is_known_to_fork_choice(&remote.head_root) {
-                        self.handle_unknown_block_root(peer_id, remote.head_root);
+            } else {
+                match sync_type {
+                    PeerSyncType::Behind => {} // Do nothing
+                    PeerSyncType::Advanced => {
+                        self.range_sync
+                            .add_peer(&mut self.network, local, peer_id, remote);
+                    }
+                    PeerSyncType::FullySynced => {
+                        // Sync considers this peer close enough to the head to not trigger range sync.
+                        // Range sync handles well syncing large ranges of blocks, of a least a few blocks.
+                        // However this peer may be in a fork that we should sync but we have not discovered
+                        // yet. If the head of the peer is unknown, attempt block lookup first. If the
+                        // unknown head turns out to be on a longer fork, it will trigger range sync.
+                        //
+                        // A peer should always be considered `Advanced` if its finalized root is
+                        // unknown and ahead of ours, so we don't check for that root here.
+                        //
+                        // TODO: This fork-choice check is potentially duplicated, review code
+                        if !self.chain.block_is_known_to_fork_choice(&remote.head_root) {
+                            self.handle_unknown_block_root(peer_id, remote.head_root);
+                        }
                     }
                 }
             }

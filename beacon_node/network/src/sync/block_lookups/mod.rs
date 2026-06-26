@@ -70,11 +70,12 @@ const LOOKUP_MAX_DURATION_STUCK_SECS: u64 = 15 * PARENT_DEPTH_TOLERANCE as u64;
 /// lookup at most after 4 seconds, the lookup should gain peers.
 const LOOKUP_MAX_DURATION_NO_PEERS_SECS: u64 = 10;
 
-/// Lookups contain untrusted data, including blocks that have not yet been validated. In case of
-/// bugs or malicious activity we want to bound how much memory these lookups can consume. Aprox the
-/// max size of a lookup is ~ 10 MB (current max size of gossip and RPC blocks). 200 lookups can
-/// take at most 2 GB. 200 lookups allow 3 parallel chains of depth 64 (current maximum).
-const MAX_LOOKUPS: usize = 200;
+// Lookups contain untrusted data, including blocks that have not yet been validated. In case of
+// bugs or malicious activity we want to bound how much memory these lookups can consume. Aprox the
+// max size of a lookup is ~ 10 MB (current max size of gossip and RPC blocks). 200 lookups can
+// take at most 2 GB. 200 lookups allow 3 parallel chains of depth 64 (current maximum). The bound
+// is `BlockLookups::max_lookups`, defaulting to `DEFAULT_LOOKUP_SYNC_MAX_LOOKUPS` and overridable
+// via the `--lookup-sync-max-lookups` CLI flag.
 
 type BlockDownloadResponse<E> = Result<DownloadResult<Arc<SignedBeaconBlock<E>>>, RpcResponseError>;
 type CustodyDownloadResponse<E> =
@@ -98,6 +99,14 @@ pub struct BlockLookups<T: BeaconChainTypes> {
     // TODO: Why not index lookups by block_root?
     single_block_lookups: FnvHashMap<SingleLookupId, SingleBlockLookup<T>>,
 
+    /// Maximum depth of the parent chain searched before forcing range sync. Defaults to
+    /// `PARENT_DEPTH_TOLERANCE`, overridable via the `--lookup-sync-max-parent-depth` CLI flag.
+    max_parent_depth: usize,
+
+    /// Maximum number of concurrent block lookups. Defaults to `MAX_LOOKUPS`, overridable via the
+    /// `--lookup-sync-max-lookups` CLI flag.
+    max_lookups: usize,
+
     /// Used for testing assertions
     metrics: BlockLookupsMetrics,
 }
@@ -117,12 +126,14 @@ pub(crate) struct BlockLookupSummary {
 }
 
 impl<T: BeaconChainTypes> BlockLookups<T> {
-    pub fn new() -> Self {
+    pub fn new(max_parent_depth: usize, max_lookups: usize) -> Self {
         Self {
             ignored_chains: LRUTimeCache::new(Duration::from_secs(
                 IGNORED_CHAINS_CACHE_EXPIRY_SECONDS,
             )),
             single_block_lookups: Default::default(),
+            max_parent_depth,
+            max_lookups,
             metrics: <_>::default(),
         }
     }
@@ -247,7 +258,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             let trigger_is_chain_tip = parent_chain.tip == child_block_root_trigger;
 
             if (block_would_extend_chain || trigger_is_chain_tip)
-                && parent_chain.len() >= PARENT_DEPTH_TOLERANCE
+                && parent_chain.len() >= self.max_parent_depth
             {
                 debug!(block_root = ?block_root_to_search, "Parent lookup chain too long");
 
@@ -379,7 +390,7 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
 
         // Lookups contain untrusted data, bound the total count of lookups hold in memory to reduce
         // the risk of OOM in case of bugs of malicious activity.
-        if self.single_block_lookups.len() >= MAX_LOOKUPS {
+        if self.single_block_lookups.len() >= self.max_lookups {
             warn!(?block_root, "Dropping lookup reached max");
             return false;
         }
