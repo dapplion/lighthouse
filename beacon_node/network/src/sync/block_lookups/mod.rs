@@ -70,12 +70,11 @@ const LOOKUP_MAX_DURATION_STUCK_SECS: u64 = 15 * PARENT_DEPTH_TOLERANCE as u64;
 /// lookup at most after 4 seconds, the lookup should gain peers.
 const LOOKUP_MAX_DURATION_NO_PEERS_SECS: u64 = 10;
 
-// Lookups contain untrusted data, including blocks that have not yet been validated. In case of
-// bugs or malicious activity we want to bound how much memory these lookups can consume. Aprox the
-// max size of a lookup is ~ 10 MB (current max size of gossip and RPC blocks). 200 lookups can
-// take at most 2 GB. 200 lookups allow 3 parallel chains of depth 64 (current maximum). The bound
-// is `BlockLookups::max_lookups`, defaulting to `DEFAULT_LOOKUP_SYNC_MAX_LOOKUPS` and overridable
-// via the `--lookup-sync-max-lookups` CLI flag.
+/// Lookups contain untrusted data, including blocks that have not yet been validated. In case of
+/// bugs or malicious activity we want to bound how much memory these lookups can consume. Aprox the
+/// max size of a lookup is ~ 10 MB (current max size of gossip and RPC blocks). 200 lookups can
+/// take at most 2 GB. 200 lookups allow 3 parallel chains of depth 64 (current maximum).
+const MAX_LOOKUPS: usize = 200;
 
 type BlockDownloadResponse<E> = Result<DownloadResult<Arc<SignedBeaconBlock<E>>>, RpcResponseError>;
 type CustodyDownloadResponse<E> =
@@ -99,12 +98,12 @@ pub struct BlockLookups<T: BeaconChainTypes> {
     // TODO: Why not index lookups by block_root?
     single_block_lookups: FnvHashMap<SingleLookupId, SingleBlockLookup<T>>,
 
-    /// Maximum depth of the parent chain searched before forcing range sync. Defaults to
-    /// `PARENT_DEPTH_TOLERANCE`, overridable via the `--lookup-sync-max-parent-depth` CLI flag.
+    /// Maximum depth of the parent chain searched before forcing range sync. `PARENT_DEPTH_TOLERANCE`
+    /// normally, unbounded when range sync is disabled (`--disable-range-sync`).
     max_parent_depth: usize,
 
-    /// Maximum number of concurrent block lookups. Defaults to `MAX_LOOKUPS`, overridable via the
-    /// `--lookup-sync-max-lookups` CLI flag.
+    /// Maximum number of concurrent block lookups. `MAX_LOOKUPS` normally, unbounded when range sync
+    /// is disabled (`--disable-range-sync`).
     max_lookups: usize,
 
     /// Used for testing assertions
@@ -126,7 +125,15 @@ pub(crate) struct BlockLookupSummary {
 }
 
 impl<T: BeaconChainTypes> BlockLookups<T> {
-    pub fn new(max_parent_depth: usize, max_lookups: usize) -> Self {
+    pub fn new(disable_range_sync: bool) -> Self {
+        // Range sync is the fallback when a parent chain grows too long or too many lookups pile
+        // up. With range sync disabled there is no fallback, so the caps are removed (unbounded)
+        // and lookup sync follows the full tree of lookups without dropping chains.
+        let (max_parent_depth, max_lookups) = if disable_range_sync {
+            (usize::MAX, usize::MAX)
+        } else {
+            (PARENT_DEPTH_TOLERANCE, MAX_LOOKUPS)
+        };
         Self {
             ignored_chains: LRUTimeCache::new(Duration::from_secs(
                 IGNORED_CHAINS_CACHE_EXPIRY_SECONDS,

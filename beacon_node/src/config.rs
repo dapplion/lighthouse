@@ -1503,29 +1503,7 @@ pub fn set_network_config(
             })?;
     }
 
-    config.tree_sync = cli_args.get_flag("tree-sync");
-
-    if let Some(lookup_sync_max_parent_depth) =
-        cli_args.get_one::<String>("lookup-sync-max-parent-depth")
-    {
-        config.lookup_sync_max_parent_depth =
-            lookup_sync_max_parent_depth.parse::<usize>().map_err(|_| {
-                format!(
-                    "Invalid lookup-sync-max-parent-depth value passed: {}",
-                    lookup_sync_max_parent_depth
-                )
-            })?;
-    }
-
-    if let Some(lookup_sync_max_lookups) = cli_args.get_one::<String>("lookup-sync-max-lookups") {
-        config.lookup_sync_max_lookups =
-            lookup_sync_max_lookups.parse::<usize>().map_err(|_| {
-                format!(
-                    "Invalid lookup-sync-max-lookups value passed: {}",
-                    lookup_sync_max_lookups
-                )
-            })?;
-    }
+    config.disable_range_sync = cli_args.get_flag("disable-range-sync");
 
     Ok(())
 }

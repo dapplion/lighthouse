@@ -309,17 +309,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         fork_context: Arc<ForkContext>,
     ) -> Self {
         let network_globals = beacon_processor.network_globals.clone();
-        // Tree sync follows the full tree of lookups without dropping chains, so the depth and
-        // lookup-count caps are removed (unbounded) when it is enabled.
-        let (lookup_sync_max_parent_depth, lookup_sync_max_lookups) =
-            if network_globals.config.tree_sync {
-                (usize::MAX, usize::MAX)
-            } else {
-                (
-                    network_globals.config.lookup_sync_max_parent_depth,
-                    network_globals.config.lookup_sync_max_lookups,
-                )
-            };
+        let disable_range_sync = network_globals.config.disable_range_sync;
         Self {
             chain: beacon_chain.clone(),
             input_channel: sync_recv,
@@ -332,7 +322,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             range_sync: RangeSync::new(beacon_chain.clone()),
             backfill_sync: BackFillSync::new(beacon_chain.clone(), network_globals.clone()),
             custody_backfill_sync: CustodyBackFillSync::new(beacon_chain.clone(), network_globals),
-            block_lookups: BlockLookups::new(lookup_sync_max_parent_depth, lookup_sync_max_lookups),
+            block_lookups: BlockLookups::new(disable_range_sync),
             notified_unknown_roots: LRUTimeCache::new(Duration::from_secs(
                 NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS,
             )),
@@ -420,10 +410,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         // update the state of the peer.
         let is_still_connected = self.update_peer_sync_state(&peer_id, &local, &remote, &sync_type);
         if is_still_connected {
-            if self.network_globals().config.tree_sync {
-                // Tree sync: direct every peer with an unknown head to block (lookup) sync
-                // regardless of how far ahead it is. If the unknown head turns out to be on a
-                // longer fork, lookup sync will force range sync once it reaches the max depth.
+            if self.network_globals().config.disable_range_sync {
+                // Range sync disabled: direct every peer with an unknown head to block (lookup)
+                // sync regardless of how far ahead it is.
                 if !self.chain.block_is_known_to_fork_choice(&remote.head_root) {
                     self.handle_unknown_block_root(peer_id, remote.head_root);
                 }
@@ -1044,11 +1033,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         block_slot: Option<Slot>,
         peer_id: &PeerId,
     ) -> Result<(), &'static str> {
-        // Tree sync intentionally searches for blocks regardless of how far behind we are; the
-        // not-synced distance gate would otherwise reject every tree-sync head lookup and stall.
-        if !self.network_globals().config.tree_sync
-            && !self.network_globals().sync_state.read().is_synced()
-        {
+        // With range sync disabled, lookup sync is the only sync method, so search for blocks
+        // regardless of how far behind we are; the not-synced distance gate would otherwise reject
+        // every head lookup and stall.
+        if self.network_globals().config.disable_range_sync {
+            // Skip the not-synced distance gate.
+        } else if !self.network_globals().sync_state.read().is_synced() {
             let Some(block_slot) = block_slot else {
                 return Err("not synced");
             };
