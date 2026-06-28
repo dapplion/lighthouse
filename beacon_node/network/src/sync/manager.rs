@@ -1044,7 +1044,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         block_slot: Option<Slot>,
         peer_id: &PeerId,
     ) -> Result<(), &'static str> {
-        if !self.network_globals().sync_state.read().is_synced() {
+        // Tree sync intentionally searches for blocks regardless of how far behind we are; the
+        // not-synced distance gate would otherwise reject every tree-sync head lookup and stall.
+        if !self.network_globals().config.tree_sync
+            && !self.network_globals().sync_state.read().is_synced()
+        {
             let Some(block_slot) = block_slot else {
                 return Err("not synced");
             };
