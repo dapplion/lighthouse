@@ -1081,21 +1081,24 @@ pub enum WhichPeerToPenalize {
 }
 
 impl WhichPeerToPenalize {
+    /// Downscore the culpable peer(s) and return them, so the caller can also de-prioritize them
+    /// when retrying the request.
     pub fn apply<T: BeaconChainTypes>(
         self,
         action: PeerAction,
         peer_group: &PeerGroup,
         msg: &'static str,
         cx: &mut SyncNetworkContext<T>,
-    ) {
+    ) -> Vec<PeerId> {
         let peers: Vec<PeerId> = match self {
             WhichPeerToPenalize::BlockPeer => peer_group.all().copied().collect(),
             WhichPeerToPenalize::CustodyPeerForColumn(idx) => {
                 peer_group.of_index(idx as usize).copied().collect()
             }
         };
-        for peer in peers {
-            cx.report_peer(peer, action, msg);
+        for peer in &peers {
+            cx.report_peer(*peer, action, msg);
         }
+        peers
     }
 }
