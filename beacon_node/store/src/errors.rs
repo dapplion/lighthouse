@@ -1,11 +1,11 @@
 use crate::config::StoreConfigError;
 use crate::hot_cold_store::{HotColdDBError, StateSummaryIteratorError};
-use crate::static_cold::StaticColdStoreError;
 use crate::{DBColumn, hdiff};
 #[cfg(feature = "leveldb")]
 use leveldb::error::Error as LevelDBError;
 use ssz::DecodeError;
 use state_processing::BlockReplayError;
+use static_file_storage::Error as StaticFileError;
 use types::{BeaconStateError, EpochCacheError, Hash256, InconsistentFork, Slot};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -15,7 +15,7 @@ pub enum Error {
     SszDecodeError(DecodeError),
     BeaconStateError(BeaconStateError),
     HotColdDBError(HotColdDBError),
-    StaticColdStoreError(StaticColdStoreError),
+    StaticFileError(StaticFileError),
     DBError {
         message: String,
     },
@@ -146,9 +146,9 @@ impl From<HotColdDBError> for Error {
     }
 }
 
-impl From<StaticColdStoreError> for Error {
-    fn from(e: StaticColdStoreError) -> Error {
-        Error::StaticColdStoreError(e)
+impl From<StaticFileError> for Error {
+    fn from(e: StaticFileError) -> Error {
+        Error::StaticFileError(e)
     }
 }
 
