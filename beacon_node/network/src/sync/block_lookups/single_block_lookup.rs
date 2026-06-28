@@ -978,6 +978,11 @@ impl<T: Clone> SingleLookupRequestState<T> {
         match &self.state {
             State::Processing(result) => {
                 let peers_source = result.peer_group.clone();
+                // De-prioritize peers that served data which failed to process, so a retry
+                // prefers a different peer (mirrors download-failure handling).
+                for peer in peers_source.all() {
+                    self.record_failed_peer(*peer);
+                }
                 self.failed_processing = self.failed_processing.saturating_add(1);
                 if self.failed_processing >= SINGLE_BLOCK_LOOKUP_MAX_ATTEMPTS {
                     return Err(LookupRequestError::TooManyAttempts);
