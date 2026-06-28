@@ -82,9 +82,7 @@ impl BalanceSourceData {
             for (i, &epoch) in epochs.iter().enumerate() {
                 if validator.is_active_at(epoch) {
                     per_epoch[i].effective_balances.push(effective_balance);
-                    per_epoch[i].total_active_balance = per_epoch[i]
-                        .total_active_balance
-                        .saturating_add(effective_balance);
+                    per_epoch[i].total_active_balance += effective_balance;
                 } else {
                     per_epoch[i].effective_balances.push(0);
                 }
@@ -96,6 +94,22 @@ impl BalanceSourceData {
 
     pub(crate) fn balance(&self, val_idx: usize) -> u64 {
         self.effective_balances.get(val_idx).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn active_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.effective_balances
+            .iter()
+            .enumerate()
+            .filter_map(|(i, balance)| (*balance > 0).then_some(i))
+    }
+
+    pub(crate) fn unslashed_and_active_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.effective_balances
+            .iter()
+            .enumerate()
+            .filter_map(|(i, balance)| {
+                (*balance > 0 && !self.slashed.get(i).copied().unwrap_or(false)).then_some(i)
+            })
     }
 
     /// Return balance only if the validator is not slashed.

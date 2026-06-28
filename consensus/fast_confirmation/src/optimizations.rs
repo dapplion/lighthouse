@@ -180,7 +180,7 @@ pub fn precompute_chain_attestation_scores(
             continue;
         }
         if let Some(pos) = projector.project(vote_root) {
-            score_at_position[pos] = score_at_position[pos].saturating_add(balance);
+            score_at_position[pos] += balance;
         }
     }
 
@@ -188,7 +188,7 @@ pub fn precompute_chain_attestation_scores(
     let mut scores = HashMap::with_capacity(chain_len);
     let mut running = 0u64;
     for i in (0..chain_len).rev() {
-        running = running.saturating_add(score_at_position[i]);
+        running += score_at_position[i];
         scores.insert(chain[i], running);
     }
     scores
