@@ -281,19 +281,6 @@ impl FastConfirmationRule {
             state,
         )?;
 
-        // Rebuild committee assignments from the head state.
-        {
-            let _span = debug_span!("fcr_rebuild_assignments").entered();
-            self.head_assignments.rebuild::<E>(state, current_slot)?;
-        }
-
-        // Rebuild the head/current/previous balance sources (whichever are stale) in one
-        // shared validator-set pass.
-        {
-            let _span = debug_span!("fcr_rebuild_balances").entered();
-            self.rebuild_balance_sources::<E>(state, current_slot)?;
-        }
-
         if !self.spec_test_mode {
             let _span = debug_span!("fcr_get_latest_confirmed").entered();
             self.confirmed_root = self.get_latest_confirmed::<E>(
@@ -336,11 +323,19 @@ impl FastConfirmationRule {
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
 
-        // Track head changes (including within a slot, e.g. a late block or reorg).
+        // Track head changes (including within a slot, e.g. a late block or reorg) and rebuild the
+        // head-derived caches — committee assignments and the head balance source — for the new head.
         if self.current_slot_head != head_root {
             self.previous_slot_head = self.current_slot_head;
             self.current_slot_head = head_root;
-            // TODO: Rebuild head_assignments
+            {
+                let _span = debug_span!("fcr_rebuild_assignments").entered();
+                self.head_assignments.rebuild::<E>(state, current_slot)?;
+            }
+            {
+                let _span = debug_span!("fcr_rebuild_balances").entered();
+                self.rebuild_balance_sources::<E>(state, current_slot)?;
+            }
         }
 
         // Spec: update_fast_confirmation_variables is called once per slot,
