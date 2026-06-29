@@ -539,7 +539,22 @@ impl FastConfirmationRule {
 
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
         let mut confirmed_root = latest_confirmed_root;
-        let mut current_attestation_scores = None;
+
+        // Precompute attestation scores for the whole chain (confirmed → head) in one O(V × depth)
+        // pass; both loops below read per-block scores from it instead of recomputing per block.
+        let attestation_scores = {
+            let _s = debug_span!("fcr_precompute").entered();
+            let chain = get_ancestor_roots(head_root, latest_confirmed_root, proto_array)?;
+            let terminal_slot = get_block_slot(latest_confirmed_root, proto_array)?;
+            AttestationScoreCache::for_chain(
+                proto_array,
+                &chain,
+                terminal_slot,
+                self.get_current_balance_source(),
+                votes,
+                equivocating_indices,
+            )?
+        };
 
         if get_block_epoch::<E>(confirmed_root, proto_array)?.safe_add(1)? == current_epoch
             && get_voting_source_epoch::<E>(self.previous_slot_head, current_slot, proto_array)?
@@ -576,18 +591,10 @@ impl FastConfirmationRule {
                     break;
                 }
 
-                let attestation_scores = self.current_balance_attestation_scores(
-                    &mut current_attestation_scores,
-                    head_root,
-                    latest_confirmed_root,
-                    proto_array,
-                    votes,
-                    equivocating_indices,
-                )?;
                 if !self.is_one_confirmed::<E>(
                     self.get_current_balance_source(),
                     *block_root,
-                    attestation_scores,
+                    &attestation_scores,
                     current_slot,
                     proto_array,
                     votes,
@@ -626,18 +633,10 @@ impl FastConfirmationRule {
                     break;
                 }
 
-                let attestation_scores = self.current_balance_attestation_scores(
-                    &mut current_attestation_scores,
-                    head_root,
-                    latest_confirmed_root,
-                    proto_array,
-                    votes,
-                    equivocating_indices,
-                )?;
                 if !self.is_one_confirmed::<E>(
                     self.get_current_balance_source(),
                     *block_root,
-                    attestation_scores,
+                    &attestation_scores,
                     current_slot,
                     proto_array,
                     votes,
@@ -1176,34 +1175,6 @@ impl FastConfirmationRule {
     // -----------------------------------------------------------------------
     // Implementation caches / diagnostics
     // -----------------------------------------------------------------------
-
-    /// Lazy current-balance attestation score cache.
-    fn current_balance_attestation_scores<'a>(
-        &self,
-        cache: &'a mut Option<AttestationScoreCache>,
-        head_root: Hash256,
-        latest_confirmed_root: Hash256,
-        proto_array: &ProtoArray,
-        votes: &[VoteTracker],
-        equivocating_indices: &BTreeSet<u64>,
-    ) -> Result<&'a AttestationScoreCache, Error> {
-        if cache.is_none() {
-            let _s = debug_span!("fcr_precompute_current_scores").entered();
-            let chain = get_ancestor_roots(head_root, latest_confirmed_root, proto_array)?;
-            let terminal_slot = get_block_slot(latest_confirmed_root, proto_array)?;
-            *cache = Some(AttestationScoreCache::for_chain(
-                proto_array,
-                &chain,
-                terminal_slot,
-                self.get_current_balance_source(),
-                votes,
-                equivocating_indices,
-            )?);
-        }
-        Ok(cache
-            .as_ref()
-            .expect("current balance attestation score cache initialized"))
-    }
 
     /// Cached `is_one_confirmed` evaluation for metrics.
     #[allow(clippy::too_many_arguments)]
