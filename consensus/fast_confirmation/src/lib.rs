@@ -1116,7 +1116,8 @@ impl FastConfirmationRule {
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<u64, Error> {
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
-        let total_active_balance = self.head_balance_source.total_active_balance;
+        let balance_source = &self.head_balance_source;
+        let total_active_balance = balance_source.total_active_balance;
 
         let ffg_support_for_checkpoint = self.get_current_target_score::<E>(
             head_root,
@@ -1138,7 +1139,7 @@ impl FastConfirmationRule {
 
         // Compute potential adversarial weight (accounts for slashed validators).
         let adversarial_weight = self.compute_adversarial_weight::<E>(
-            &self.head_balance_source,
+            balance_source,
             compute_start_slot_at_epoch::<E>(current_epoch),
             current_slot - 1,
             equivocating_indices,
