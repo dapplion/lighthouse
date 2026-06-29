@@ -418,17 +418,16 @@ impl FastConfirmationRule {
 
             // At first slot of epoch: rotate observed justified checkpoints.
             if is_start_slot_at_epoch::<E>(current_slot) {
-                // Rotate the (checkpoint, balances) unit together: `previous` adopts `current`'s
-                // snapshot — spec's `previous_balance_source = checkpoint_states[previous_cp]` and
-                // `previous_cp` becomes the old `current_cp`, so they are equal by definition.
-                // Carrying it over (instead of re-deriving) avoids an O(V) rebuild of `previous`.
-                // `current` is retargeted to the new observed-justified checkpoint; its balances are
-                // rebuilt below (the placeholder is stale until then).
-                let new_current_checkpoint = self.previous_epoch_greatest_unrealized_checkpoint;
-                self.previous_epoch_observed_justified = std::mem::replace(
-                    &mut self.current_epoch_observed_justified,
-                    CheckpointAndBalance::new(new_current_checkpoint, BalanceSourceData::default()),
-                );
+                // Rotate the (checkpoint, balances) unit: `previous` adopts `current`'s snapshot —
+                // spec's `previous_balance_source = checkpoint_states[previous_cp]` and `previous_cp`
+                // becomes the old `current_cp`, so they are equal by definition. Carrying it over
+                // (instead of re-deriving) avoids an O(V) rebuild of `previous`. `current` keeps its
+                // balances but retargets to the new observed-justified checkpoint, marking them stale
+                // until `rebuild_balance_sources` refreshes them below.
+                self.previous_epoch_observed_justified =
+                    self.current_epoch_observed_justified.clone();
+                self.current_epoch_observed_justified
+                    .retarget(self.previous_epoch_greatest_unrealized_checkpoint);
             }
 
             self.last_update_slot = Some(current_slot);
@@ -723,7 +722,7 @@ impl FastConfirmationRule {
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
         let start_root_exclusive = if self
             .current_epoch_observed_justified
-            .checkpoint
+            .checkpoint()
             .epoch
             .safe_add(1)?
             >= current_epoch

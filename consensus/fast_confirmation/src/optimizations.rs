@@ -42,6 +42,11 @@ impl CheckpointAndBalance {
     pub(crate) fn is_stale(&self) -> bool {
         self.balances.checkpoint != self.checkpoint
     }
+
+    /// Point at a new checkpoint, keeping the existing balances (now stale until the next rebuild).
+    pub(crate) fn retarget(&mut self, checkpoint: Checkpoint) {
+        self.checkpoint = checkpoint;
+    }
 }
 
 /// Cached implementation of the spec's `get_attestation_score`.

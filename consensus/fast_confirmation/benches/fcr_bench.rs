@@ -150,14 +150,10 @@ fn build_chain(num_validators: usize) -> BenchData {
     fcr.previous_slot_head = head_root;
     fcr.current_slot_head = head_root;
     fcr.test_set_head_balance_source(balance_source.clone());
-    fcr.current_epoch_observed_justified = CheckpointAndBalance {
-        checkpoint: justified_checkpoint,
-        balances: balance_source.clone(),
-    };
-    fcr.previous_epoch_observed_justified = CheckpointAndBalance {
-        checkpoint: justified_checkpoint,
-        balances: balance_source.clone(),
-    };
+    fcr.current_epoch_observed_justified =
+        CheckpointAndBalance::new(justified_checkpoint, balance_source.clone());
+    fcr.previous_epoch_observed_justified =
+        CheckpointAndBalance::new(justified_checkpoint, balance_source.clone());
 
     // Synthetic committee slot assignments: spread validators across the epoch.
     // Canonical 3-column layout: column 0 (previous epoch) is left UNSET because

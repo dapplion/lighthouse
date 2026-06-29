@@ -841,7 +841,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     }
                     let balance_epoch = fcr
                         .current_epoch_observed_justified
-                        .balances
+                        .balances()
                         .checkpoint
                         .epoch;
                     let current_epoch = current_slot.epoch(T::EthSpec::slots_per_epoch());
