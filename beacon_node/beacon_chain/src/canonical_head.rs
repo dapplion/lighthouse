@@ -285,7 +285,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         head_payload_status: proto_array::PayloadStatus,
         fast_confirmation: FastConfirmationMode,
         spec: &ChainSpec,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, String> {
         let fork_choice_view = fork_choice.cached_fork_choice_view();
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
         let fcr = if fast_confirmation.is_enabled() {
@@ -296,7 +296,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                     spec.confirmation_byzantine_threshold,
                     spec.proposer_score_boost,
                 )
-                .map_err(|e| Error::FastConfirmationError(format!("{e:?}")))?,
+                .map_err(|e| format!("Unable to initialize fast confirmation rule: {e:?}"))?,
             ))
         } else {
             None
@@ -391,7 +391,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 spec.confirmation_byzantine_threshold,
                 spec.proposer_score_boost,
             )
-            .map_err(|e| Error::FastConfirmationError(format!("{e:?}")))?;
+            .map_err(|e| Error::DBInconsistent(format!("fast confirmation rule reset: {e:?}")))?;
         }
 
         Ok(())
@@ -1034,7 +1034,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         head_root: Hash256,
         slot: Slot,
     ) -> Result<Option<BeaconState<T::EthSpec>>, Error> {
-        let current_epoch = slot.epoch(T::EthSpec::slots_per_epoch());
         let Some((state_root, mut state)) = self
             .store
             .get_advanced_hot_state_from_cache(head_root, slot)
@@ -1044,6 +1043,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         // A previous-epoch head is pulled up to the current epoch boundary; a current-epoch
         // head is already pulled up, so leave it as-is.
+        let current_epoch = slot.epoch(T::EthSpec::slots_per_epoch());
         if state.current_epoch() < current_epoch {
             let epoch_start = current_epoch.start_slot(T::EthSpec::slots_per_epoch());
             complete_state_advance(&mut state, Some(state_root), epoch_start, &self.spec)?;
