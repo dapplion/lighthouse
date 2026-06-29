@@ -45,63 +45,20 @@ const NUM_EPOCH_COLUMNS: usize = 3;
 pub const UNSET_SLOT: Slot = Slot::new(u64::MAX);
 
 impl SlotAssignments {
-    /// Shuffling decision root this table was built for.
-    pub(crate) fn dependent_root(&self) -> Hash256 {
-        self.dependent_root
-    }
-
-    /// Get the assigned slot for a validator in a given column (0, 1, or 2).
-    fn get(&self, val_idx: usize, col: usize) -> Option<Slot> {
-        let idx = val_idx
-            .safe_mul(NUM_EPOCH_COLUMNS)
-            .ok()?
-            .safe_add(col)
-            .ok()?;
-        self.slots.get(idx).copied()
-    }
-
-    /// Check if a validator is assigned to any committee in the slot range `[start, end]`.
-    ///
-    /// Iterates over all 3 epoch columns and returns `true` if any assigned slot
-    /// falls within the range (inclusive). Columns with no assignment (`UNSET_SLOT`,
-    /// or an out-of-range index) are treated as "not in range".
-    pub(crate) fn is_in_range(
-        &self,
-        val_idx: usize,
-        start_slot: Slot,
-        end_slot: Slot,
-    ) -> Result<bool, Error> {
-        for col in 0..NUM_EPOCH_COLUMNS {
-            let Some(slot) = self.get(val_idx, col) else {
-                continue;
-            };
-            // UNSET_SLOT means no assignment in this epoch column (inactive validator
-            // or epoch not yet loaded). Treat as "not in range".
-            if slot == UNSET_SLOT {
-                continue;
-            }
-            if slot >= start_slot && slot <= end_slot {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Build assignments from a beacon state for `current_slot`, tagged with `dependent_root`.
+    /// Build assignments from a beacon state, tagged with the dependent root it derives for the
+    /// state's current epoch.
     ///
     /// Computes the 3-epoch window `[previous, current, next]` and fills assignments from the
     /// state's committee caches; validators with no committee duty in a column are left `UNSET_SLOT`.
-    /// The owner rebuilds (replaces) the table whenever `dependent_root` changes.
+    /// The owner rebuilds (replaces) the table whenever that dependent root changes.
     ///
     /// # Performance
     ///
     /// Instead of calling `get_attestation_duties()` per validator (O(N × C) where C =
     /// committees per epoch), we iterate the committee cache's shuffled list directly and
     /// derive slot from shuffled position in O(1). Total cost: O(N) per epoch column.
-    pub(crate) fn new<E: EthSpec>(
-        state: &BeaconState<E>,
-        dependent_root: Hash256,
-    ) -> Result<Self, Error> {
+    pub(crate) fn new<E: EthSpec>(state: &BeaconState<E>) -> Result<Self, Error> {
+        let dependent_root = crate::dependent_root::<E>(state, state.current_epoch())?;
         let validator_count = state.validators().len();
         let total_columns = validator_count.safe_mul(NUM_EPOCH_COLUMNS)?;
         let mut new_slots = vec![UNSET_SLOT; total_columns];
@@ -145,13 +102,55 @@ impl SlotAssignments {
             dependent_root,
         })
     }
+
+    /// Shuffling decision root this table was built for.
+    pub(crate) fn dependent_root(&self) -> Hash256 {
+        self.dependent_root
+    }
+
+    /// Get the assigned slot for a validator in a given column (0, 1, or 2).
+    fn get(&self, val_idx: usize, col: usize) -> Option<Slot> {
+        let idx = val_idx
+            .safe_mul(NUM_EPOCH_COLUMNS)
+            .ok()?
+            .safe_add(col)
+            .ok()?;
+        self.slots.get(idx).copied()
+    }
+
+    /// Check if a validator is assigned to any committee in the slot range `[start, end]`.
+    ///
+    /// Iterates over all 3 epoch columns and returns `true` if any assigned slot
+    /// falls within the range (inclusive). Columns with no assignment (`UNSET_SLOT`,
+    /// or an out-of-range index) are treated as "not in range".
+    pub(crate) fn is_in_range(
+        &self,
+        val_idx: usize,
+        start_slot: Slot,
+        end_slot: Slot,
+    ) -> Result<bool, Error> {
+        for col in 0..NUM_EPOCH_COLUMNS {
+            let Some(slot) = self.get(val_idx, col) else {
+                continue;
+            };
+            // UNSET_SLOT means no assignment in this epoch column (inactive validator
+            // or epoch not yet loaded). Treat as "not in range".
+            if slot == UNSET_SLOT {
+                continue;
+            }
+            if slot >= start_slot && slot <= end_slot {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use state_processing::per_slot_processing;
-    use types::{Epoch, Hash256, MinimalEthSpec};
+    use types::{Epoch, MinimalEthSpec};
 
     type E = MinimalEthSpec;
 
@@ -213,7 +212,7 @@ mod tests {
     #[test]
     fn builds_from_genesis_state() {
         let (state, _spec) = genesis_state(64);
-        SlotAssignments::new::<E>(&state, Hash256::ZERO).expect("builds from genesis state");
+        SlotAssignments::new::<E>(&state).expect("builds from genesis state");
     }
 
     #[test]
@@ -224,7 +223,7 @@ mod tests {
         let epoch_2_start = E::slots_per_epoch() * 2;
         advance_state(&mut state, Slot::new(epoch_2_start), &spec);
 
-        let sa = SlotAssignments::new::<E>(&state, Hash256::ZERO).expect("build should succeed");
+        let sa = SlotAssignments::new::<E>(&state).expect("build should succeed");
 
         // Every validator should have an assignment in at least the current epoch.
         let validator_count = state.validators().len();
@@ -268,7 +267,7 @@ mod tests {
         let (state, _spec) = genesis_state(64);
 
         // State at epoch 0, covers epochs [0, 0, 1].
-        let sa = SlotAssignments::new::<E>(&state, Hash256::ZERO).expect("should build");
+        let sa = SlotAssignments::new::<E>(&state).expect("should build");
 
         // Query for a slot in epoch 5 — no validator should match.
         let far_slot = Slot::new(E::slots_per_epoch() * 5);
