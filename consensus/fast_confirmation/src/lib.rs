@@ -242,11 +242,10 @@ impl FastConfirmationRule {
         // epoch). Two chains share the same validator-set view at `current_epoch` iff they
         // share this root, so it is the right chain-identity cache key. A re-org that pivots
         // before the previous-epoch boundary changes it, forcing a rebuild.
-        let head_dependent_slot = if current_epoch == Epoch::new(0) {
-            compute_start_slot_at_epoch::<E>(current_epoch)
-        } else {
-            compute_start_slot_at_epoch::<E>(current_epoch).safe_sub(1)?
-        };
+        // Last slot of the previous epoch; clamps to genesis (slot 0) at epoch 0, which has no
+        // previous epoch.
+        let head_dependent_slot =
+            compute_start_slot_at_epoch::<E>(current_epoch).saturating_sub(1u64);
         let head_checkpoint = Checkpoint {
             epoch: current_epoch,
             root: *state
