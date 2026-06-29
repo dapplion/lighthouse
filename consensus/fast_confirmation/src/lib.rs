@@ -22,8 +22,8 @@
 //!
 //! 2. **Cached spec helpers**: `is_one_confirmed` still reads as
 //!    `support > compute_safety_threshold`, but `get_attestation_score` is backed by a
-//!    precomputed chain score cache. Likewise the FFG predicates keep their spec shape while
-//!    sharing one cached `compute_honest_ffg_support` result per run.
+//!    precomputed chain score cache. Likewise `compute_honest_ffg_support` is evaluated once
+//!    per descendant search and passed by value into the FFG predicates.
 //!
 //! 3. **Multi-entry vote-root / checkpoint memos** (`optimizations::RootMemo`): inside
 //!    `precompute_chain_attestation_scores` and `get_current_target_score`, each distinct
@@ -575,31 +575,41 @@ impl FastConfirmationRule {
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
         let mut confirmed_root = latest_confirmed_root;
         let mut current_attestation_scores = None;
-        let mut honest_ffg_support = None;
-        let mut no_conflicting_checkpoint = None;
+
+        // FFG support is invariant across this run (fixed head, slot, vote set), so compute it
+        // once and thread it into the will_* checks below.
+        let honest_ffg = {
+            let _s = debug_span!("fcr_honest_ffg").entered();
+            self.compute_honest_ffg_support::<E>(
+                head_root,
+                current_slot,
+                proto_array,
+                votes,
+                equivocating_indices,
+            )?
+        };
+        let no_conflict = self.will_no_conflicting_checkpoint_be_justified::<E>(
+            head_root,
+            unrealized_justified_checkpoint,
+            current_slot,
+            proto_array,
+            honest_ffg,
+        )?;
 
         if get_block_epoch::<E>(confirmed_root, proto_array)?.safe_add(1)? == current_epoch
             && get_voting_source_epoch::<E>(self.previous_slot_head, current_slot, proto_array)?
                 .safe_add(2)?
                 >= current_epoch
             && (is_start_slot_at_epoch::<E>(current_slot)
-                || (self.will_no_conflicting_checkpoint_be_justified_cached::<E>(
-                    head_root,
-                    unrealized_justified_checkpoint,
-                    current_slot,
-                    proto_array,
-                    votes,
-                    equivocating_indices,
-                    &mut honest_ffg_support,
-                    &mut no_conflicting_checkpoint,
-                )? && (unrealized_justification_of(self.previous_slot_head, proto_array)?
-                    .epoch
-                    .safe_add(1)?
-                    >= current_epoch
-                    || unrealized_justification_of(head_root, proto_array)?
+                || (no_conflict
+                    && (unrealized_justification_of(self.previous_slot_head, proto_array)?
                         .epoch
                         .safe_add(1)?
-                        >= current_epoch)))
+                        >= current_epoch
+                        || unrealized_justification_of(head_root, proto_array)?
+                            .epoch
+                            .safe_add(1)?
+                            >= current_epoch)))
         {
             let _s = debug_span!("fcr_loop1").entered();
             let canonical_roots = get_ancestor_roots(head_root, confirmed_root, proto_array)?;
@@ -654,14 +664,7 @@ impl FastConfirmationRule {
                 let tentative_epoch = get_block_epoch::<E>(tentative_confirmed_root, proto_array)?;
 
                 if block_epoch > tentative_epoch
-                    && !self.will_current_target_be_justified::<E>(
-                        head_root,
-                        current_slot,
-                        proto_array,
-                        votes,
-                        equivocating_indices,
-                        &mut honest_ffg_support,
-                    )?
+                    && !self.will_current_target_be_justified(honest_ffg)?
                 {
                     break;
                 }
@@ -696,17 +699,7 @@ impl FastConfirmationRule {
                 )?
                 .safe_add(2)?
                     >= current_epoch
-                    && (is_start_slot_at_epoch::<E>(current_slot)
-                        || self.will_no_conflicting_checkpoint_be_justified_cached::<E>(
-                            head_root,
-                            unrealized_justified_checkpoint,
-                            current_slot,
-                            proto_array,
-                            votes,
-                            equivocating_indices,
-                            &mut honest_ffg_support,
-                            &mut no_conflicting_checkpoint,
-                        )?))
+                    && (is_start_slot_at_epoch::<E>(current_slot) || no_conflict))
             {
                 confirmed_root = tentative_confirmed_root;
             }
@@ -1053,16 +1046,16 @@ impl FastConfirmationRule {
     // -----------------------------------------------------------------------
 
     /// Spec: `will_no_conflicting_checkpoint_be_justified`.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// `honest_ffg` is the precomputed `compute_honest_ffg_support` result (identical for
+    /// every FFG check in a descendant search, so computed once and passed in).
     fn will_no_conflicting_checkpoint_be_justified<E: EthSpec>(
         &self,
         head_root: Hash256,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
         proto_array: &ProtoArray,
-        votes: &[VoteTracker],
-        equivocating_indices: &BTreeSet<u64>,
-        honest_ffg_support: &mut Option<u64>,
+        honest_ffg: u64,
     ) -> Result<bool, Error> {
         if get_current_target::<E>(head_root, current_slot, proto_array)?
             == *unrealized_justified_checkpoint
@@ -1071,40 +1064,16 @@ impl FastConfirmationRule {
         }
 
         let total_active_balance = self.head_balance_source.total_active_balance;
-        let honest_ffg_support = self.compute_honest_ffg_support_cached::<E>(
-            head_root,
-            current_slot,
-            proto_array,
-            votes,
-            equivocating_indices,
-            honest_ffg_support,
-        )?;
-
-        Ok(3u128 * honest_ffg_support as u128 > total_active_balance as u128)
+        Ok(3u128 * honest_ffg as u128 > total_active_balance as u128)
     }
 
     /// Spec: `will_current_target_be_justified`.
-    #[allow(clippy::too_many_arguments)]
-    fn will_current_target_be_justified<E: EthSpec>(
-        &self,
-        head_root: Hash256,
-        current_slot: Slot,
-        proto_array: &ProtoArray,
-        votes: &[VoteTracker],
-        equivocating_indices: &BTreeSet<u64>,
-        honest_ffg_support: &mut Option<u64>,
-    ) -> Result<bool, Error> {
+    ///
+    /// `honest_ffg` is the precomputed `compute_honest_ffg_support` result (see
+    /// `will_no_conflicting_checkpoint_be_justified`).
+    fn will_current_target_be_justified(&self, honest_ffg: u64) -> Result<bool, Error> {
         let total_active_balance = self.head_balance_source.total_active_balance;
-        let honest_ffg_support = self.compute_honest_ffg_support_cached::<E>(
-            head_root,
-            current_slot,
-            proto_array,
-            votes,
-            equivocating_indices,
-            honest_ffg_support,
-        )?;
-
-        Ok(3u128 * honest_ffg_support as u128 >= 2u128 * total_active_balance as u128)
+        Ok(3u128 * honest_ffg as u128 >= 2u128 * total_active_balance as u128)
     }
 
     /// Spec: `get_current_target_score` — estimates FFG support for current epoch target.
@@ -1252,61 +1221,6 @@ impl FastConfirmationRule {
         Ok(cache
             .as_ref()
             .expect("current balance attestation score cache initialized"))
-    }
-
-    /// Lazy FFG support cache for one descendant search.
-    #[allow(clippy::too_many_arguments)]
-    fn compute_honest_ffg_support_cached<E: EthSpec>(
-        &self,
-        head_root: Hash256,
-        current_slot: Slot,
-        proto_array: &ProtoArray,
-        votes: &[VoteTracker],
-        equivocating_indices: &BTreeSet<u64>,
-        honest_ffg_support: &mut Option<u64>,
-    ) -> Result<u64, Error> {
-        if let Some(honest_ffg) = *honest_ffg_support {
-            return Ok(honest_ffg);
-        }
-        let _s = debug_span!("fcr_honest_ffg").entered();
-        let honest_ffg = self.compute_honest_ffg_support::<E>(
-            head_root,
-            current_slot,
-            proto_array,
-            votes,
-            equivocating_indices,
-        )?;
-        *honest_ffg_support = Some(honest_ffg);
-        Ok(honest_ffg)
-    }
-
-    /// Lazy no-conflicting-checkpoint cache for one descendant search.
-    #[allow(clippy::too_many_arguments)]
-    fn will_no_conflicting_checkpoint_be_justified_cached<E: EthSpec>(
-        &self,
-        head_root: Hash256,
-        unrealized_justified_checkpoint: &Checkpoint,
-        current_slot: Slot,
-        proto_array: &ProtoArray,
-        votes: &[VoteTracker],
-        equivocating_indices: &BTreeSet<u64>,
-        honest_ffg_support: &mut Option<u64>,
-        no_conflicting_checkpoint: &mut Option<bool>,
-    ) -> Result<bool, Error> {
-        if let Some(will_not_conflict) = *no_conflicting_checkpoint {
-            return Ok(will_not_conflict);
-        }
-        let will_not_conflict = self.will_no_conflicting_checkpoint_be_justified::<E>(
-            head_root,
-            unrealized_justified_checkpoint,
-            current_slot,
-            proto_array,
-            votes,
-            equivocating_indices,
-            honest_ffg_support,
-        )?;
-        *no_conflicting_checkpoint = Some(will_not_conflict);
-        Ok(will_not_conflict)
     }
 
     /// Cached `is_one_confirmed` evaluation for metrics.
