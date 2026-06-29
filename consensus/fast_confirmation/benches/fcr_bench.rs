@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use fast_confirmation::{BalanceSourceData, FastConfirmationRule};
+use fast_confirmation::{BalanceSourceData, CheckpointAndBalance, FastConfirmationRule};
 use fixed_bytes::FixedBytesExtended;
 use proto_array::core::{ProtoArray, VoteTracker};
 use proto_array::{Block, ExecutionStatus, JustifiedBalances, ProtoArrayForkChoice};
@@ -150,10 +150,14 @@ fn build_chain(num_validators: usize) -> BenchData {
     fcr.previous_slot_head = head_root;
     fcr.current_slot_head = head_root;
     fcr.test_set_head_balance_source(balance_source.clone());
-    fcr.current_balance_source = balance_source.clone();
-    fcr.previous_balance_source = balance_source.clone();
-    fcr.current_epoch_observed_justified_checkpoint = justified_checkpoint;
-    fcr.previous_epoch_observed_justified_checkpoint = justified_checkpoint;
+    fcr.current_epoch_observed_justified = CheckpointAndBalance {
+        checkpoint: justified_checkpoint,
+        balances: balance_source.clone(),
+    };
+    fcr.previous_epoch_observed_justified = CheckpointAndBalance {
+        checkpoint: justified_checkpoint,
+        balances: balance_source.clone(),
+    };
 
     // Synthetic committee slot assignments: spread validators across the epoch.
     // Canonical 3-column layout: column 0 (previous epoch) is left UNSET because

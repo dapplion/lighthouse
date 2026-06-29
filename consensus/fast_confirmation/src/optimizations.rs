@@ -8,7 +8,41 @@ use crate::{BalanceSourceData, Error};
 use proto_array::core::{ProtoArray, VoteTracker};
 use safe_arith::SafeArith;
 use std::collections::{BTreeSet, HashMap};
-use types::{Epoch, Hash256, Slot};
+use types::{Checkpoint, Epoch, Hash256, Slot};
+
+/// An observed-justified checkpoint paired with the balance snapshot anchored to it.
+///
+/// The fields are private and can only be set together through [`Self::new`], so the spec tracking
+/// variable and its `get_*_balance_source` data cannot drift apart by accident. The balances carry
+/// their own `checkpoint` (the one they were built for); [`Self::is_stale`] reports when that lags
+/// the tracked `checkpoint` and a rebuild is due.
+#[derive(Clone, Debug)]
+pub struct CheckpointAndBalance {
+    checkpoint: Checkpoint,
+    balances: BalanceSourceData,
+}
+
+impl CheckpointAndBalance {
+    pub fn new(checkpoint: Checkpoint, balances: BalanceSourceData) -> Self {
+        Self {
+            checkpoint,
+            balances,
+        }
+    }
+
+    pub fn checkpoint(&self) -> Checkpoint {
+        self.checkpoint
+    }
+
+    pub fn balances(&self) -> &BalanceSourceData {
+        &self.balances
+    }
+
+    /// `true` when the cached balances were built for a different checkpoint than the tracked one.
+    pub(crate) fn is_stale(&self) -> bool {
+        self.balances.checkpoint != self.checkpoint
+    }
+}
 
 /// Cached implementation of the spec's `get_attestation_score`.
 ///

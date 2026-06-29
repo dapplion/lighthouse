@@ -48,6 +48,7 @@ mod slot_assignments;
 
 pub use balance_source::BalanceSourceData;
 use optimizations::AttestationScoreCache;
+pub use optimizations::CheckpointAndBalance;
 use slot_assignments::SlotAssignments;
 pub use slot_assignments::UNSET_SLOT;
 
@@ -124,17 +125,15 @@ pub struct FastConfirmationRule {
     pub confirmed_root: Hash256,
 
     // === Tracking state (spec's 6 new store fields) ===
-    pub previous_epoch_observed_justified_checkpoint: Checkpoint,
-    pub current_epoch_observed_justified_checkpoint: Checkpoint,
+    /// Spec `previous_epoch_observed_justified_checkpoint` with its `get_previous_balance_source`
+    /// snapshot; used to re-confirm.
+    pub previous_epoch_observed_justified: CheckpointAndBalance,
+    /// Spec `current_epoch_observed_justified_checkpoint` with its `get_current_balance_source`
+    /// snapshot; used to advance.
+    pub current_epoch_observed_justified: CheckpointAndBalance,
     pub previous_epoch_greatest_unrealized_checkpoint: Checkpoint,
     pub previous_slot_head: Hash256,
     pub current_slot_head: Hash256,
-
-    // === Balance source snapshots (paired with the observed-justified checkpoints) ===
-    /// Snapshot at `previous_epoch_observed_justified_checkpoint`; used to re-confirm.
-    pub previous_balance_source: BalanceSourceData,
-    /// Snapshot at `current_epoch_observed_justified_checkpoint`; used to advance.
-    pub current_balance_source: BalanceSourceData,
 
     // === Config ===
     pub byzantine_threshold: u64,
@@ -186,13 +185,17 @@ impl FastConfirmationRule {
         let byzantine_threshold = byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD);
         Self {
             confirmed_root: finalized_checkpoint.root,
-            previous_epoch_observed_justified_checkpoint: finalized_checkpoint,
-            current_epoch_observed_justified_checkpoint: finalized_checkpoint,
+            previous_epoch_observed_justified: CheckpointAndBalance::new(
+                finalized_checkpoint,
+                BalanceSourceData::default(),
+            ),
+            current_epoch_observed_justified: CheckpointAndBalance::new(
+                finalized_checkpoint,
+                BalanceSourceData::default(),
+            ),
             previous_epoch_greatest_unrealized_checkpoint: finalized_checkpoint,
             previous_slot_head: finalized_checkpoint.root,
             current_slot_head: finalized_checkpoint.root,
-            previous_balance_source: BalanceSourceData::default(),
-            current_balance_source: BalanceSourceData::default(),
             byzantine_threshold,
             proposer_score_boost,
             head_assignments: SlotAssignments::new(),
@@ -264,10 +267,10 @@ impl FastConfirmationRule {
 
         // Current/previous sources: keyed on the observed-justified checkpoints; rebuilt when
         // those rotate (epoch boundary).
-        let current_cp = self.current_epoch_observed_justified_checkpoint;
-        let previous_cp = self.previous_epoch_observed_justified_checkpoint;
-        let current_stale = self.current_balance_source.checkpoint != current_cp;
-        let previous_stale = self.previous_balance_source.checkpoint != previous_cp;
+        let current_cp = self.current_epoch_observed_justified.checkpoint();
+        let previous_cp = self.previous_epoch_observed_justified.checkpoint();
+        let current_stale = self.current_epoch_observed_justified.is_stale();
+        let previous_stale = self.previous_epoch_observed_justified.is_stale();
 
         if !head_stale && !current_stale && !previous_stale {
             return Ok(());
@@ -295,20 +298,26 @@ impl FastConfirmationRule {
         }
         if let Some(i) = current_i {
             let eb = per_epoch.get(i).ok_or(Error::IndexOutOfBounds(i))?;
-            self.current_balance_source = BalanceSourceData::from_parts(
+            self.current_epoch_observed_justified = CheckpointAndBalance::new(
                 current_cp,
-                eb.effective_balances.clone(),
-                eb.total_active_balance,
-                slashed.clone(),
+                BalanceSourceData::from_parts(
+                    current_cp,
+                    eb.effective_balances.clone(),
+                    eb.total_active_balance,
+                    slashed.clone(),
+                ),
             );
         }
         if let Some(i) = previous_i {
             let eb = per_epoch.get(i).ok_or(Error::IndexOutOfBounds(i))?;
-            self.previous_balance_source = BalanceSourceData::from_parts(
+            self.previous_epoch_observed_justified = CheckpointAndBalance::new(
                 previous_cp,
-                eb.effective_balances.clone(),
-                eb.total_active_balance,
-                slashed,
+                BalanceSourceData::from_parts(
+                    previous_cp,
+                    eb.effective_balances.clone(),
+                    eb.total_active_balance,
+                    slashed,
+                ),
             );
         }
 
@@ -377,12 +386,12 @@ impl FastConfirmationRule {
 
     /// Spec: `get_previous_balance_source`.
     fn get_previous_balance_source(&self) -> &BalanceSourceData {
-        &self.previous_balance_source
+        self.previous_epoch_observed_justified.balances()
     }
 
     /// Spec: `get_current_balance_source`.
     fn get_current_balance_source(&self) -> &BalanceSourceData {
-        &self.current_balance_source
+        self.current_epoch_observed_justified.balances()
     }
 
     /// Spec: `update_fast_confirmation_variables`.
@@ -409,10 +418,17 @@ impl FastConfirmationRule {
 
             // At first slot of epoch: rotate observed justified checkpoints.
             if is_start_slot_at_epoch::<E>(current_slot) {
-                self.previous_epoch_observed_justified_checkpoint =
-                    self.current_epoch_observed_justified_checkpoint;
-                self.current_epoch_observed_justified_checkpoint =
-                    self.previous_epoch_greatest_unrealized_checkpoint;
+                // Rotate the (checkpoint, balances) unit together: `previous` adopts `current`'s
+                // snapshot — spec's `previous_balance_source = checkpoint_states[previous_cp]` and
+                // `previous_cp` becomes the old `current_cp`, so they are equal by definition.
+                // Carrying it over (instead of re-deriving) avoids an O(V) rebuild of `previous`.
+                // `current` is retargeted to the new observed-justified checkpoint; its balances are
+                // rebuilt below (the placeholder is stale until then).
+                let new_current_checkpoint = self.previous_epoch_greatest_unrealized_checkpoint;
+                self.previous_epoch_observed_justified = std::mem::replace(
+                    &mut self.current_epoch_observed_justified,
+                    CheckpointAndBalance::new(new_current_checkpoint, BalanceSourceData::default()),
+                );
             }
 
             self.last_update_slot = Some(current_slot);
@@ -475,7 +491,7 @@ impl FastConfirmationRule {
         // Restart the confirmation chain if each of the following conditions are true:
         // 1) it is the start of the current epoch,
         let observed_justified_block_slot = get_block_slot(
-            self.current_epoch_observed_justified_checkpoint.root,
+            self.current_epoch_observed_justified.checkpoint().root,
             proto_array,
         )?;
         // 2) epoch of fcr_store.current_epoch_observed_justified_checkpoint.root equals to the previous epoch,
@@ -484,7 +500,7 @@ impl FastConfirmationRule {
             .safe_add(1)?
             == current_epoch;
         // 3) fcr_store.current_epoch_observed_justified_checkpoint equals to unrealized justification of the head,
-        let is_head_unrealized_justified_ok = self.current_epoch_observed_justified_checkpoint
+        let is_head_unrealized_justified_ok = self.current_epoch_observed_justified.checkpoint()
             == unrealized_justification_of(head_root, proto_array)?;
         // 4) confirmed block is older than the block of fcr_store.current_epoch_observed_justified_checkpoint.
         let is_confirmed_block_stale =
@@ -496,11 +512,11 @@ impl FastConfirmationRule {
         {
             debug!(
                 prev_confirmed = %confirmed_root,
-                justified = %self.current_epoch_observed_justified_checkpoint.root,
-                justified_epoch = %self.current_epoch_observed_justified_checkpoint.epoch,
+                justified = %self.current_epoch_observed_justified.checkpoint().root,
+                justified_epoch = %self.current_epoch_observed_justified.checkpoint().epoch,
                 "FCR restarted from observed justified"
             );
-            confirmed_root = self.current_epoch_observed_justified_checkpoint.root;
+            confirmed_root = self.current_epoch_observed_justified.checkpoint().root;
             metrics::inc_counter(&metrics::FCR_RESTART_FROM_JUSTIFIED);
         }
 
@@ -694,10 +710,10 @@ impl FastConfirmationRule {
     ) -> Result<Option<&'static str>, Error> {
         // `Ok(None)` = the confirmed chain is safe (re-confirmable). `Ok(Some(reason))` = it
         // isn't, with `reason` naming which check failed (surfaced as the revert metric label).
-        if self.current_epoch_observed_justified_checkpoint
+        if self.current_epoch_observed_justified.checkpoint()
             != get_checkpoint_for_block::<E>(
                 confirmed_root,
-                self.current_epoch_observed_justified_checkpoint.epoch,
+                self.current_epoch_observed_justified.checkpoint().epoch,
                 proto_array,
             )?
         {
@@ -706,12 +722,13 @@ impl FastConfirmationRule {
 
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
         let start_root_exclusive = if self
-            .current_epoch_observed_justified_checkpoint
+            .current_epoch_observed_justified
+            .checkpoint
             .epoch
             .safe_add(1)?
             >= current_epoch
         {
-            self.current_epoch_observed_justified_checkpoint.root
+            self.current_epoch_observed_justified.checkpoint().root
         } else {
             // Limit reconfirmation to the first block of the previous epoch.
             // If successful, reconfirmation of ancestors is implied.

@@ -2,7 +2,7 @@
 
 use crate::Error;
 use safe_arith::SafeArith;
-use types::{BeaconState, Epoch, EthSpec, RelativeEpoch, Slot};
+use types::{BeaconState, Epoch, EthSpec, Hash256, RelativeEpoch, Slot};
 
 /// Per-validator committee slot assignments across a 3-epoch window.
 ///
@@ -35,6 +35,10 @@ pub(crate) struct SlotAssignments {
     slots: Vec<Slot>,
     /// The 3 epochs covered by columns 0, 1, 2 (typically `[current-2, current-1, current]`).
     epochs: [Epoch; NUM_EPOCH_COLUMNS],
+    /// Shuffling decision root (block at the last slot of the state's previous epoch) that fixes the
+    /// committee shufflings for all three columns. Part of the cache key so a reorg that changes the
+    /// shuffling — same epoch numbers, different chain — invalidates the table.
+    dependent_root: Hash256,
 }
 
 /// Number of epoch columns in the slot assignment table.
@@ -50,6 +54,7 @@ impl SlotAssignments {
         Self {
             slots: Vec::new(),
             epochs: [Epoch::new(0); NUM_EPOCH_COLUMNS],
+            dependent_root: Hash256::ZERO,
         }
     }
 
@@ -103,10 +108,11 @@ impl SlotAssignments {
     /// Rebuild assignments from a beacon state for the given slot.
     ///
     /// Computes the 3-epoch window `[current-2, current-1, current]` and fills
-    /// assignments from the state's committee caches. Preserves old assignments
-    /// that still fall within the new window (epoch column remapping).
+    /// assignments from the state's committee caches; validators with no committee duty in a column
+    /// are left `UNSET_SLOT`.
     ///
-    /// Returns early (cache hit) if the epoch window and validator count haven't changed.
+    /// Returns early (cache hit) when the epoch window, the shuffling decision root, and the
+    /// validator count are all unchanged.
     ///
     /// # Performance
     ///
@@ -140,32 +146,37 @@ impl SlotAssignments {
         let state_prev = state.previous_epoch();
         let desired_epochs = [state_prev, state_current, state_next];
 
+        // Shuffling decision root for this state: the block at the last slot of the previous epoch.
+        // Sharing it means sharing all earlier shuffling-decision history, so it uniquely fixes the
+        // committee shufflings for [prev, current, next]. Keying on it makes the cache reorg-safe.
+        // The genesis epoch has no previous-epoch block; its shuffling is fixed by genesis, so a
+        // constant sentinel is a sufficient (and reorg-free) key there.
+        let dependent_root = if state_current == 0 {
+            Hash256::ZERO
+        } else {
+            let dependent_slot = state_current.start_slot(E::slots_per_epoch()).safe_sub(1)?;
+            *state
+                .get_block_root(dependent_slot)
+                .map_err(|e| Error::CommitteeCache(format!("dep_root lookup: {e:?}")))?
+        };
+
         let total_columns = validator_count.safe_mul(NUM_EPOCH_COLUMNS)?;
 
-        // Fast path: skip if epoch window and validator count are unchanged.
-        if self.epochs == desired_epochs && self.slots.len() == total_columns {
+        // Fast path: skip if the epoch window, shuffling decision root, and validator count are all
+        // unchanged. The decision root invalidates the cache when a reorg changes the shuffling
+        // without changing the epoch numbers.
+        if self.epochs == desired_epochs
+            && self.dependent_root == dependent_root
+            && self.slots.len() == total_columns
+        {
             return Ok(());
         }
 
+        // Recompute every column from the current state's committee caches. Validators not in a
+        // column's shuffling stay `UNSET_SLOT` (no committee duty that epoch) — we deliberately do
+        // not carry forward old assignments, since a reorg can change the shuffling for the same
+        // epoch number and stale entries would corrupt the support calculation.
         let mut new_slots = vec![UNSET_SLOT; total_columns];
-
-        // Preserve old assignments that overlap the new epoch window.
-        if self.slots.len() == total_columns {
-            for val_idx in 0..validator_count {
-                for (old_col, old_epoch) in self.epochs.iter().enumerate() {
-                    if let Some(new_col) = desired_epochs.iter().position(|e| e == old_epoch) {
-                        let new_idx = val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(new_col)?;
-                        let old_idx = val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(old_col)?;
-                        *new_slots
-                            .get_mut(new_idx)
-                            .ok_or(Error::IndexOutOfBounds(new_idx))? = *self
-                            .slots
-                            .get(old_idx)
-                            .ok_or(Error::IndexOutOfBounds(old_idx))?;
-                    }
-                }
-            }
-        }
 
         // Fill from the committee caches by iterating the shuffled list directly.
         // This is O(active_validators) per epoch instead of O(validators × committees).
@@ -218,6 +229,7 @@ impl SlotAssignments {
 
         self.slots = new_slots;
         self.epochs = desired_epochs;
+        self.dependent_root = dependent_root;
         Ok(())
     }
 }
