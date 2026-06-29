@@ -1037,10 +1037,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// The current head's state pulled up as in spec `get_pulled_up_head_state`, with committee
     /// caches built, as the Fast Confirmation Rule requires.
     ///
-    /// Prefer a cached state at or before the current epoch start, which lets us pull a previous
-    /// epoch head exactly to the spec target. If the head itself is from the current epoch, no such
-    /// state exists with `head_root` as latest block, so fall back to the normal per-slot advanced
-    /// cache. Returns `Ok(None)` if no state for `head_root` is cached.
+    /// Takes the best cached state for `head_root` (populated by `state_advance_timer`) and, if it
+    /// is still in an earlier epoch, advances it to the current epoch boundary. Within an epoch the
+    /// committee assignments and effective balances FCR reads are invariant, so a current-epoch
+    /// state needs no further advance. Returns `Ok(None)` if no state for `head_root` is cached.
     fn fcr_pulled_up_head_state(
         &self,
         head_root: Hash256,
@@ -1050,21 +1050,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let epoch_start = current_epoch.start_slot(T::EthSpec::slots_per_epoch());
         let Some((state_root, mut state)) = self
             .store
-            .get_advanced_hot_state_from_cache(head_root, epoch_start)
-            .or_else(|| {
-                self.store
-                    .get_advanced_hot_state_from_cache(head_root, slot)
-            })
+            .get_advanced_hot_state_from_cache(head_root, slot)
         else {
             return Ok(None);
         };
 
-        let target_slot = if state.current_epoch() < current_epoch {
-            epoch_start
-        } else {
-            state.slot()
-        };
-        complete_state_advance(&mut state, Some(state_root), target_slot, &self.spec)?;
+        // A previous-epoch head is pulled up to the current epoch boundary; a current-epoch
+        // head is already pulled up, so leave it as-is.
+        if state.current_epoch() < current_epoch {
+            complete_state_advance(&mut state, Some(state_root), epoch_start, &self.spec)?;
+        }
         state.build_all_caches(&self.spec)?;
         Ok(Some(state))
     }
