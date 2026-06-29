@@ -290,22 +290,19 @@ impl FastConfirmationRule {
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
 
-        // Track head changes (including within a slot, e.g. a late block or reorg) and rebuild the
-        // head-derived caches — committee assignments and the head balance source — for the new head.
+        // Track head changes (including within a slot, e.g. a late block or reorg).
         if self.current_slot_head != head_root {
             self.previous_slot_head = self.current_slot_head;
             self.current_slot_head = head_root;
-            {
-                let _span = debug_span!("fcr_rebuild_assignments").entered();
-                self.head_assignments.rebuild::<E>(state, current_slot)?;
-            }
 
-            // Head balance source is keyed on the dependent root; rebuild it when a reorg past the
-            // previous-epoch boundary changes it.
+            // The head-derived caches (committee assignments + head balance source) are keyed on the
+            // dependent root; rebuild both from scratch when a reorg past the previous-epoch boundary
+            // (or a new epoch) changes it.
             let current_epoch = current_slot.epoch(E::slots_per_epoch());
             let head_dependent_root = dependent_root::<E>(state, current_epoch)?;
             if self.head_balance_source.dependent_root != head_dependent_root {
-                let _span = debug_span!("fcr_rebuild_balances").entered();
+                let _span = debug_span!("fcr_rebuild_head_caches").entered();
+                self.head_assignments = SlotAssignments::for_state::<E>(state, current_slot)?;
                 let head_epoch = if state.current_epoch() < current_epoch {
                     state
                         .next_epoch()
