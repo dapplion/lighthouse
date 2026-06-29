@@ -47,12 +47,13 @@ pub mod optimizations;
 mod slot_assignments;
 
 pub use balance_source::BalanceSourceData;
+use optimizations::AttestationScoreCache;
 use slot_assignments::SlotAssignments;
 pub use slot_assignments::UNSET_SLOT;
 
 use proto_array::core::{ProtoArray, VoteTracker};
 use safe_arith::{ArithError, SafeArith};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use tracing::{debug, debug_span};
 use types::{BeaconState, Checkpoint, Epoch, EthSpec, Hash256, Slot};
 
@@ -105,44 +106,6 @@ fn dedup_epoch_index(epochs: &mut Vec<Epoch>, e: Epoch) -> usize {
             epochs.push(e);
             index
         }
-    }
-}
-
-/// Cached implementation of the spec's `get_attestation_score`.
-///
-/// The Python spec computes `get_attestation_score(store, node, balance_source)` independently
-/// for each candidate block. Lighthouse computes the same scores for a canonical chain segment in
-/// one pass and then serves individual `get_attestation_score` calls from this cache.
-struct AttestationScoreCache {
-    scores: HashMap<Hash256, u64>,
-}
-
-impl AttestationScoreCache {
-    fn for_chain(
-        proto_array: &ProtoArray,
-        chain: &[Hash256],
-        terminal_slot: Slot,
-        balance_source: &BalanceSourceData,
-        votes: &[VoteTracker],
-        equivocating_indices: &BTreeSet<u64>,
-    ) -> Result<Self, Error> {
-        Ok(Self {
-            scores: optimizations::precompute_chain_attestation_scores(
-                proto_array,
-                chain,
-                terminal_slot,
-                balance_source,
-                votes,
-                equivocating_indices,
-            )?,
-        })
-    }
-
-    fn get_attestation_score(&self, block_root: Hash256) -> Result<u64, Error> {
-        self.scores
-            .get(&block_root)
-            .copied()
-            .ok_or(Error::MissingPrecomputedScore(block_root))
     }
 }
 

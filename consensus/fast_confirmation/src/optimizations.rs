@@ -10,6 +10,44 @@ use safe_arith::SafeArith;
 use std::collections::{BTreeSet, HashMap};
 use types::{Epoch, Hash256, Slot};
 
+/// Cached implementation of the spec's `get_attestation_score`.
+///
+/// The Python spec computes `get_attestation_score(store, node, balance_source)` independently
+/// for each candidate block. Lighthouse computes the same scores for a canonical chain segment in
+/// one pass and then serves individual `get_attestation_score` calls from this cache.
+pub(crate) struct AttestationScoreCache {
+    scores: HashMap<Hash256, u64>,
+}
+
+impl AttestationScoreCache {
+    pub(crate) fn for_chain(
+        proto_array: &ProtoArray,
+        chain: &[Hash256],
+        terminal_slot: Slot,
+        balance_source: &BalanceSourceData,
+        votes: &[VoteTracker],
+        equivocating_indices: &BTreeSet<u64>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            scores: precompute_chain_attestation_scores(
+                proto_array,
+                chain,
+                terminal_slot,
+                balance_source,
+                votes,
+                equivocating_indices,
+            )?,
+        })
+    }
+
+    pub(crate) fn get_attestation_score(&self, block_root: Hash256) -> Result<u64, Error> {
+        self.scores
+            .get(&block_root)
+            .copied()
+            .ok_or(Error::MissingPrecomputedScore(block_root))
+    }
+}
+
 /// Identity hasher for `u64` keys that are already well-distributed (block-root byte prefixes).
 /// The per-vote memos resolve each vote's root/checkpoint at most once across the whole validator
 /// set; keying them on a root prefix with this no-op hasher avoids SipHashing a 32-byte `Hash256`
