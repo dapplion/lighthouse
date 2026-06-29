@@ -336,13 +336,16 @@ impl FastConfirmationRule {
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
 
+        // Track head changes (including within a slot, e.g. a late block or reorg).
+        if self.current_slot_head != head_root {
+            self.previous_slot_head = self.current_slot_head;
+            self.current_slot_head = head_root;
+            // TODO: Rebuild head_assignments
+        }
+
         // Spec: update_fast_confirmation_variables is called once per slot,
         // at the attestation deadline. Guard against duplicate calls within the same slot.
         if self.last_update_slot.is_none_or(|s| current_slot > s) {
-            // Rotate slot heads.
-            self.previous_slot_head = self.current_slot_head;
-            self.current_slot_head = head_root;
-
             // At last slot of epoch: snapshot greatest unrealized justified.
             if is_start_slot_at_epoch::<E>(current_slot.safe_add(1)?) {
                 self.previous_epoch_greatest_unrealized_checkpoint =
