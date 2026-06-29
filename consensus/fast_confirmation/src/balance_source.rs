@@ -52,6 +52,25 @@ impl BalanceSourceData {
         }
     }
 
+    /// Build a balance source for a single `epoch`, anchored to `checkpoint`.
+    pub(crate) fn for_epoch<E: EthSpec>(
+        state: &BeaconState<E>,
+        epoch: Epoch,
+        checkpoint: Checkpoint,
+    ) -> Result<Self, Error> {
+        let (slashed, per_epoch) = Self::build_for_epochs(state, &[epoch])?;
+        let eb = per_epoch
+            .into_iter()
+            .next()
+            .ok_or(Error::IndexOutOfBounds(0))?;
+        Ok(Self::from_parts(
+            checkpoint,
+            eb.effective_balances,
+            eb.total_active_balance,
+            slashed,
+        ))
+    }
+
     /// Build the shared (epoch-independent) `slashed` bitvec and, for each requested epoch, the
     /// active-validator `effective_balances` vector and `total_active_balance`, in a **single**
     /// pass over the validator set.

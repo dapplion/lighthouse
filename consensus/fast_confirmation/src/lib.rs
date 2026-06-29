@@ -34,9 +34,10 @@
 //!    walks into ~tens. Keyed on the root prefix via an identity hasher to avoid
 //!    SipHashing 32-byte roots per validator (full key stored for collision safety).
 //!
-//! 4. **Single-pass balance rebuild** (`BalanceSourceData::build_for_epochs`): the
-//!    head/current/previous balance sources are rebuilt from one validator-set iteration
-//!    over the (usually two) distinct epochs rather than one iteration each.
+//! 4. **Snapshot balance sources** (`BalanceSourceData`): the current/previous observed-justified
+//!    sources are rebuilt only at the epoch-boundary rotation (bundled with their checkpoint in
+//!    `CheckpointAndBalance`), and the head source only when its dependent root changes — instead
+//!    of re-scanning the validator set every slot.
 //!
 //! The visible algorithm deliberately keeps the spec function names and control-flow shape;
 //! the caches are implementation details behind those helpers.
@@ -96,19 +97,6 @@ impl From<ArithError> for Error {
 
 /// Per-mille adjustment factor for committee weight estimates that don't cover a full epoch.
 const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
-
-/// Index of `e` in `epochs`, appending it if absent. Used to dedup the (few) epochs needed by
-/// a fused balance-source rebuild so coinciding sources share one validator pass.
-fn dedup_epoch_index(epochs: &mut Vec<Epoch>, e: Epoch) -> usize {
-    match epochs.iter().position(|x| *x == e) {
-        Some(i) => i,
-        None => {
-            let index = epochs.len();
-            epochs.push(e);
-            index
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -262,63 +250,14 @@ impl FastConfirmationRule {
         } else {
             state.current_epoch()
         };
+        // Only the head source is rebuilt here. The current/previous observed-justified sources are
+        // built together with their checkpoints at the epoch-boundary rotation in
+        // `update_fast_confirmation_variables`, so they are never stale between rebuilds.
         let head_stale = self.head_balance_source.checkpoint != head_checkpoint
             || self.head_balance_source.effective_balances.is_empty();
-
-        // Current/previous sources: keyed on the observed-justified checkpoints; rebuilt when
-        // those rotate (epoch boundary).
-        let current_cp = self.current_epoch_observed_justified.checkpoint();
-        let previous_cp = self.previous_epoch_observed_justified.checkpoint();
-        let current_stale = self.current_epoch_observed_justified.is_stale();
-        let previous_stale = self.previous_epoch_observed_justified.is_stale();
-
-        if !head_stale && !current_stale && !previous_stale {
-            return Ok(());
-        }
-
-        // Collect the distinct epochs needed by the stale sources (head & current coincide in
-        // the common case), then resolve all balances in one pass.
-        let mut epochs: Vec<Epoch> = Vec::with_capacity(3);
-        let head_i = head_stale.then(|| dedup_epoch_index(&mut epochs, head_epoch));
-        let current_i =
-            current_stale.then(|| dedup_epoch_index(&mut epochs, state.current_epoch()));
-        let previous_i =
-            previous_stale.then(|| dedup_epoch_index(&mut epochs, state.previous_epoch()));
-
-        let (slashed, per_epoch) = BalanceSourceData::build_for_epochs(state, &epochs)?;
-
-        if let Some(i) = head_i {
-            let eb = per_epoch.get(i).ok_or(Error::IndexOutOfBounds(i))?;
-            self.head_balance_source = BalanceSourceData::from_parts(
-                head_checkpoint,
-                eb.effective_balances.clone(),
-                eb.total_active_balance,
-                slashed.clone(),
-            );
-        }
-        if let Some(i) = current_i {
-            let eb = per_epoch.get(i).ok_or(Error::IndexOutOfBounds(i))?;
-            self.current_epoch_observed_justified = CheckpointAndBalance::new(
-                current_cp,
-                BalanceSourceData::from_parts(
-                    current_cp,
-                    eb.effective_balances.clone(),
-                    eb.total_active_balance,
-                    slashed.clone(),
-                ),
-            );
-        }
-        if let Some(i) = previous_i {
-            let eb = per_epoch.get(i).ok_or(Error::IndexOutOfBounds(i))?;
-            self.previous_epoch_observed_justified = CheckpointAndBalance::new(
-                previous_cp,
-                BalanceSourceData::from_parts(
-                    previous_cp,
-                    eb.effective_balances.clone(),
-                    eb.total_active_balance,
-                    slashed,
-                ),
-            );
+        if head_stale {
+            self.head_balance_source =
+                BalanceSourceData::for_epoch(state, head_epoch, head_checkpoint)?;
         }
 
         Ok(())
@@ -347,6 +286,7 @@ impl FastConfirmationRule {
             head_root,
             unrealized_justified_checkpoint,
             current_slot,
+            state,
         )?;
 
         // Rebuild committee assignments from the head state.
@@ -400,6 +340,7 @@ impl FastConfirmationRule {
         head_root: Hash256,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
+        state: &BeaconState<E>,
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
 
@@ -416,18 +357,20 @@ impl FastConfirmationRule {
                     *unrealized_justified_checkpoint;
             }
 
-            // At first slot of epoch: rotate observed justified checkpoints.
+            // At first slot of epoch: rotate observed justified checkpoints together with their
+            // balances. `previous` adopts `current`'s snapshot — spec's
+            // `previous_balance_source = checkpoint_states[previous_cp]` and `previous_cp` becomes
+            // the old `current_cp`, so they are equal by definition (carrying it over avoids an O(V)
+            // re-derive). `current` is rebuilt for the new observed-justified checkpoint in one step,
+            // so the (checkpoint, balances) pair is always coherent.
             if is_start_slot_at_epoch::<E>(current_slot) {
-                // Rotate the (checkpoint, balances) unit: `previous` adopts `current`'s snapshot —
-                // spec's `previous_balance_source = checkpoint_states[previous_cp]` and `previous_cp`
-                // becomes the old `current_cp`, so they are equal by definition. Carrying it over
-                // (instead of re-deriving) avoids an O(V) rebuild of `previous`. `current` keeps its
-                // balances but retargets to the new observed-justified checkpoint, marking them stale
-                // until `rebuild_balance_sources` refreshes them below.
+                let new_current_cp = self.previous_epoch_greatest_unrealized_checkpoint;
                 self.previous_epoch_observed_justified =
                     self.current_epoch_observed_justified.clone();
-                self.current_epoch_observed_justified
-                    .retarget(self.previous_epoch_greatest_unrealized_checkpoint);
+                self.current_epoch_observed_justified = CheckpointAndBalance::new(
+                    new_current_cp,
+                    BalanceSourceData::for_epoch(state, state.current_epoch(), new_current_cp)?,
+                );
             }
 
             self.last_update_slot = Some(current_slot);
