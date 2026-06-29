@@ -55,6 +55,7 @@ pub use slot_assignments::UNSET_SLOT;
 
 use proto_array::core::{ProtoArray, VoteTracker};
 use safe_arith::{ArithError, SafeArith};
+use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use tracing::{debug, debug_span};
 use types::{BeaconState, Checkpoint, Epoch, EthSpec, Hash256, Slot};
@@ -448,6 +449,9 @@ impl FastConfirmationRule {
             )?
         };
 
+        // Shared across both FFG predicates so the O(V) honest-support sweep runs at most once.
+        let honest_ffg_support = HonestFfgSupportCache::new();
+
         if get_block_epoch::<E>(confirmed_root, proto_array)?.safe_add(1)? == current_epoch
             && get_voting_source_epoch::<E>(self.previous_slot_head, current_slot, proto_array)?
                 .safe_add(2)?
@@ -460,6 +464,7 @@ impl FastConfirmationRule {
                     proto_array,
                     votes,
                     equivocating_indices,
+                    &honest_ffg_support,
                 )? && (unrealized_justification_of(self.previous_slot_head, proto_array)?
                     .epoch
                     .safe_add(1)?
@@ -520,6 +525,7 @@ impl FastConfirmationRule {
                         proto_array,
                         votes,
                         equivocating_indices,
+                        &honest_ffg_support,
                     )?
                 {
                     break;
@@ -555,6 +561,7 @@ impl FastConfirmationRule {
                             proto_array,
                             votes,
                             equivocating_indices,
+                            &honest_ffg_support,
                         )?))
             {
                 confirmed_root = tentative_confirmed_root;
@@ -903,6 +910,7 @@ impl FastConfirmationRule {
     // -----------------------------------------------------------------------
 
     /// Spec: `will_no_conflicting_checkpoint_be_justified`.
+    #[allow(clippy::too_many_arguments)]
     fn will_no_conflicting_checkpoint_be_justified<E: EthSpec>(
         &self,
         head_root: Hash256,
@@ -911,6 +919,7 @@ impl FastConfirmationRule {
         proto_array: &ProtoArray,
         votes: &[VoteTracker],
         equivocating_indices: &BTreeSet<u64>,
+        honest_ffg_support: &HonestFfgSupportCache,
     ) -> Result<bool, Error> {
         if get_current_target::<E>(head_root, current_slot, proto_array)?
             == *unrealized_justified_checkpoint
@@ -919,7 +928,8 @@ impl FastConfirmationRule {
         }
 
         let total_active_balance = self.head_balance_source.total_active_balance;
-        let honest_ffg = self.compute_honest_ffg_support::<E>(
+        let honest_ffg = honest_ffg_support.get_or_compute::<E>(
+            self,
             head_root,
             current_slot,
             proto_array,
@@ -937,9 +947,11 @@ impl FastConfirmationRule {
         proto_array: &ProtoArray,
         votes: &[VoteTracker],
         equivocating_indices: &BTreeSet<u64>,
+        honest_ffg_support: &HonestFfgSupportCache,
     ) -> Result<bool, Error> {
         let total_active_balance = self.head_balance_source.total_active_balance;
-        let honest_ffg = self.compute_honest_ffg_support::<E>(
+        let honest_ffg = honest_ffg_support.get_or_compute::<E>(
+            self,
             head_root,
             current_slot,
             proto_array,
@@ -1102,6 +1114,44 @@ impl FastConfirmationRule {
                 equivocating_indices,
             )?,
         })
+    }
+}
+
+/// DIVERGENCE (same shape as `AttestationScoreCache`): memoizes the O(V) `compute_honest_ffg_support`
+/// sweep so both FFG predicates share one pass per `get_latest_confirmed` call instead of
+/// recomputing it. The spec recomputes; the control flow is unchanged.
+struct HonestFfgSupportCache {
+    support: OnceCell<u64>,
+}
+
+impl HonestFfgSupportCache {
+    fn new() -> Self {
+        Self {
+            support: OnceCell::new(),
+        }
+    }
+
+    fn get_or_compute<E: EthSpec>(
+        &self,
+        rule: &FastConfirmationRule,
+        head_root: Hash256,
+        current_slot: Slot,
+        proto_array: &ProtoArray,
+        votes: &[VoteTracker],
+        equivocating_indices: &BTreeSet<u64>,
+    ) -> Result<u64, Error> {
+        if let Some(support) = self.support.get() {
+            return Ok(*support);
+        }
+        let support = rule.compute_honest_ffg_support::<E>(
+            head_root,
+            current_slot,
+            proto_array,
+            votes,
+            equivocating_indices,
+        )?;
+        let _ = self.support.set(support);
+        Ok(support)
     }
 }
 
