@@ -288,6 +288,17 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     ) -> Self {
         let fork_choice_view = fork_choice.cached_fork_choice_view();
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
+        let fcr = if fast_confirmation.is_enabled() {
+            Some(Mutex::new(FastConfirmationRule::new(
+                fork_choice_view.finalized_checkpoint,
+                &snapshot.beacon_state,
+                spec.confirmation_byzantine_threshold,
+                spec.proposer_score_boost,
+            )))
+        } else {
+            None
+        };
+
         let cached_head = CachedHead {
             snapshot,
             justified_checkpoint: fork_choice_view.justified_checkpoint,
@@ -296,16 +307,6 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             head_hash: forkchoice_update_params.head_hash,
             justified_hash: forkchoice_update_params.justified_hash,
             finalized_hash: forkchoice_update_params.finalized_hash,
-        };
-
-        let fcr = if fast_confirmation.is_enabled() {
-            Some(Mutex::new(FastConfirmationRule::new(
-                fork_choice_view.finalized_checkpoint,
-                spec.confirmation_byzantine_threshold,
-                spec.proposer_score_boost,
-            )))
-        } else {
-            None
         };
 
         Self {
@@ -383,6 +384,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         if let Some(ref fcr_mutex) = self.fast_confirmation {
             *fcr_mutex.lock() = FastConfirmationRule::new(
                 fork_choice_view.finalized_checkpoint,
+                &self.cached_head.read().snapshot.beacon_state,
                 spec.confirmation_byzantine_threshold,
                 spec.proposer_score_boost,
             );

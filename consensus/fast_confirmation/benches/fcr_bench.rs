@@ -144,9 +144,11 @@ fn build_chain(num_validators: usize) -> BenchData {
         slashed: vec![false; num_validators],
     };
 
-    // Build FCR state.
+    // Build FCR state. `new` needs a state to seed balances; the bench overwrites them below, so an
+    // empty genesis state suffices.
     let unrealized_justified_checkpoint = justified_checkpoint;
-    let mut fcr = FastConfirmationRule::new(finalized_checkpoint, 25, 40);
+    let empty_state = BeaconState::<E>::new(0, Default::default(), &spec);
+    let mut fcr = FastConfirmationRule::new(finalized_checkpoint, &empty_state, 25, 40);
     fcr.previous_slot_head = head_root;
     fcr.current_slot_head = head_root;
     fcr.test_set_head_balance_source(balance_source.clone());

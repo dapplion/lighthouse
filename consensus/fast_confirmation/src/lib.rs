@@ -162,11 +162,12 @@ impl FastConfirmationRule {
     /// Maximum valid value for `byzantine_threshold` (25%).
     const MAX_BYZANTINE_THRESHOLD: u64 = 25;
 
-    /// Initialize FCR from an anchor (finalized) checkpoint.
-    ///
-    /// `byzantine_threshold` is clamped to [0, 25].
-    pub fn new(
+    /// Initialize FCR from the finalized checkpoint and head `state`, building all three balance
+    /// sources up front. Head is anchored to `finalized_checkpoint` as a placeholder and re-anchored
+    /// to its dependent root on the first tick. `byzantine_threshold` is clamped to [0, 25].
+    pub fn new<E: EthSpec>(
         finalized_checkpoint: Checkpoint,
+        state: &BeaconState<E>,
         byzantine_threshold: u64,
         proposer_score_boost: u64,
     ) -> Self {
@@ -175,11 +176,11 @@ impl FastConfirmationRule {
             confirmed_root: finalized_checkpoint.root,
             previous_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
-                BalanceSourceData::default(),
+                BalanceSourceData::for_epoch(state, state.previous_epoch(), finalized_checkpoint),
             ),
             current_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
-                BalanceSourceData::default(),
+                BalanceSourceData::for_epoch(state, state.current_epoch(), finalized_checkpoint),
             ),
             previous_epoch_greatest_unrealized_checkpoint: finalized_checkpoint,
             previous_slot_head: finalized_checkpoint.root,
@@ -187,7 +188,11 @@ impl FastConfirmationRule {
             byzantine_threshold,
             proposer_score_boost,
             head_assignments: SlotAssignments::new(),
-            head_balance_source: BalanceSourceData::default(),
+            head_balance_source: BalanceSourceData::for_epoch(
+                state,
+                state.current_epoch(),
+                finalized_checkpoint,
+            ),
             last_update_slot: None,
             spec_test_mode: false,
         }
@@ -214,14 +219,8 @@ impl FastConfirmationRule {
         self.head_balance_source = balance_source;
     }
 
-    /// Rebuild the head / current / previous balance sources from `state`.
-    ///
-    /// Each source keeps its own cache key and is rebuilt only when stale (the previous
-    /// `rebuild_head_balance_source` + `update_balance_sources`). When more than one is stale —
-    /// e.g. at an epoch boundary — they are built from a **single** validator-set pass
-    /// (`build_for_epochs`) instead of one O(V) iteration per source. The head and current
-    /// sources usually resolve to the same epoch, so their per-validator data is computed once
-    /// and shared. Per-source semantics are unchanged.
+    /// Rebuild the head balance source when its dependent root changed. Current/previous are
+    /// rebuilt at the rotation, not here.
     fn rebuild_balance_sources<E: EthSpec>(
         &mut self,
         state: &BeaconState<E>,
@@ -229,12 +228,8 @@ impl FastConfirmationRule {
     ) -> Result<(), Error> {
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
 
-        // Head source: keyed on the dependent root (block at the last slot of the previous
-        // epoch). Two chains share the same validator-set view at `current_epoch` iff they
-        // share this root, so it is the right chain-identity cache key. A re-org that pivots
-        // before the previous-epoch boundary changes it, forcing a rebuild.
-        // Last slot of the previous epoch; clamps to genesis (slot 0) at epoch 0, which has no
-        // previous epoch.
+        // Head source is keyed on the dependent root (last block of the previous epoch) — the
+        // chain-identity that fixes the validator-set view, so a reorg past that boundary rebuilds.
         let head_dependent_slot =
             compute_start_slot_at_epoch::<E>(current_epoch).saturating_sub(1u64);
         let head_checkpoint = Checkpoint {
@@ -250,14 +245,11 @@ impl FastConfirmationRule {
         } else {
             state.current_epoch()
         };
-        // Only the head source is rebuilt here. The current/previous observed-justified sources are
-        // built together with their checkpoints at the epoch-boundary rotation in
-        // `update_fast_confirmation_variables`, so they are never stale between rebuilds.
         let head_stale = self.head_balance_source.checkpoint != head_checkpoint
             || self.head_balance_source.effective_balances.is_empty();
         if head_stale {
             self.head_balance_source =
-                BalanceSourceData::for_epoch(state, head_epoch, head_checkpoint)?;
+                BalanceSourceData::for_epoch(state, head_epoch, head_checkpoint);
         }
 
         Ok(())
@@ -357,19 +349,16 @@ impl FastConfirmationRule {
                     *unrealized_justified_checkpoint;
             }
 
-            // At first slot of epoch: rotate observed justified checkpoints together with their
-            // balances. `previous` adopts `current`'s snapshot — spec's
-            // `previous_balance_source = checkpoint_states[previous_cp]` and `previous_cp` becomes
-            // the old `current_cp`, so they are equal by definition (carrying it over avoids an O(V)
-            // re-derive). `current` is rebuilt for the new observed-justified checkpoint in one step,
-            // so the (checkpoint, balances) pair is always coherent.
+            // At first slot of epoch: rotate the (checkpoint, balances) pairs. `previous` takes
+            // `current`'s snapshot (spec-equal, no O(V) re-derive); `current` is rebuilt for the new
+            // checkpoint in one step so the pair stays coherent.
             if is_start_slot_at_epoch::<E>(current_slot) {
                 let new_current_cp = self.previous_epoch_greatest_unrealized_checkpoint;
                 self.previous_epoch_observed_justified =
                     self.current_epoch_observed_justified.clone();
                 self.current_epoch_observed_justified = CheckpointAndBalance::new(
                     new_current_cp,
-                    BalanceSourceData::for_epoch(state, state.current_epoch(), new_current_cp)?,
+                    BalanceSourceData::for_epoch(state, state.current_epoch(), new_current_cp),
                 );
             }
 
