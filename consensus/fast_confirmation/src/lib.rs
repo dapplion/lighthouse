@@ -219,42 +219,6 @@ impl FastConfirmationRule {
         self.head_balance_source = balance_source;
     }
 
-    /// Rebuild the head balance source when its dependent root changed. Current/previous are
-    /// rebuilt at the rotation, not here.
-    fn rebuild_balance_sources<E: EthSpec>(
-        &mut self,
-        state: &BeaconState<E>,
-        current_slot: Slot,
-    ) -> Result<(), Error> {
-        let current_epoch = current_slot.epoch(E::slots_per_epoch());
-
-        // Head source is keyed on the dependent root (last block of the previous epoch) — the
-        // chain-identity that fixes the validator-set view, so a reorg past that boundary rebuilds.
-        let head_dependent_slot =
-            compute_start_slot_at_epoch::<E>(current_epoch).saturating_sub(1u64);
-        let head_checkpoint = Checkpoint {
-            epoch: current_epoch,
-            root: *state
-                .get_block_root(head_dependent_slot)
-                .map_err(|e| Error::CommitteeCache(format!("dep_root lookup: {e:?}")))?,
-        };
-        let head_epoch = if state.current_epoch() < current_epoch {
-            state
-                .next_epoch()
-                .map_err(|e| Error::CommitteeCache(format!("{e:?}")))?
-        } else {
-            state.current_epoch()
-        };
-        let head_stale = self.head_balance_source.checkpoint != head_checkpoint
-            || self.head_balance_source.effective_balances.is_empty();
-        if head_stale {
-            self.head_balance_source =
-                BalanceSourceData::for_epoch(state, head_epoch, head_checkpoint);
-        }
-
-        Ok(())
-    }
-
     /// Top-level entry point. Spec: `on_fast_confirmation(fcr_store)`.
     ///
     /// Called after head selection, while the fork-choice read lock is held.
@@ -332,9 +296,29 @@ impl FastConfirmationRule {
                 let _span = debug_span!("fcr_rebuild_assignments").entered();
                 self.head_assignments.rebuild::<E>(state, current_slot)?;
             }
-            {
+
+            // Head balance source is keyed on the dependent root (last block of the previous
+            // epoch); rebuild it when a reorg past that boundary changes it.
+            let current_epoch = current_slot.epoch(E::slots_per_epoch());
+            let head_dependent_slot =
+                compute_start_slot_at_epoch::<E>(current_epoch).saturating_sub(1u64);
+            let head_checkpoint = Checkpoint {
+                epoch: current_epoch,
+                root: *state
+                    .get_block_root(head_dependent_slot)
+                    .map_err(|e| Error::CommitteeCache(format!("dep_root lookup: {e:?}")))?,
+            };
+            if self.head_balance_source.checkpoint != head_checkpoint {
                 let _span = debug_span!("fcr_rebuild_balances").entered();
-                self.rebuild_balance_sources::<E>(state, current_slot)?;
+                let head_epoch = if state.current_epoch() < current_epoch {
+                    state
+                        .next_epoch()
+                        .map_err(|e| Error::CommitteeCache(format!("{e:?}")))?
+                } else {
+                    state.current_epoch()
+                };
+                self.head_balance_source =
+                    BalanceSourceData::for_epoch(state, head_epoch, head_checkpoint);
             }
         }
 
