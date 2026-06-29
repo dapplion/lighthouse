@@ -634,17 +634,17 @@ impl FastConfirmationRule {
                 let block_epoch = get_block_epoch::<E>(*block_root, proto_array)?;
                 let tentative_epoch = get_block_epoch::<E>(tentative_confirmed_root, proto_array)?;
 
-                if block_epoch > tentative_epoch {
-                    if !self.will_current_target_be_justified::<E>(
+                if block_epoch > tentative_epoch
+                    && !self.will_current_target_be_justified::<E>(
                         head_root,
                         current_slot,
                         proto_array,
                         votes,
                         equivocating_indices,
                         &mut honest_ffg_support,
-                    )? {
-                        break;
-                    }
+                    )?
+                {
+                    break;
                 }
 
                 let attestation_scores = self.current_balance_attestation_scores(
@@ -1530,7 +1530,7 @@ struct NotOneConfirmed {
 
 /// Spec: `is_start_slot_at_epoch`.
 fn is_start_slot_at_epoch<E: EthSpec>(slot: Slot) -> bool {
-    slot.as_u64() % E::slots_per_epoch() == 0
+    slot.as_u64().is_multiple_of(E::slots_per_epoch())
 }
 
 /// Spec: `compute_start_slot_at_epoch`.
@@ -1552,7 +1552,7 @@ fn is_full_validator_set_covered<E: EthSpec>(start_slot: Slot, end_slot: Slot) -
 /// conservatively over-estimate committee weight; flooring would under-estimate and
 /// weaken the safety threshold.
 fn adjust_committee_weight_estimate_to_ensure_safety(estimate: u64) -> u64 {
-    let ceil = (estimate + 999) / 1000;
+    let ceil = estimate.div_ceil(1000);
     ceil * (1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR)
 }
 
