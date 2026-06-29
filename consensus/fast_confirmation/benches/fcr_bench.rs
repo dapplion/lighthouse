@@ -281,7 +281,8 @@ fn build_chain(num_validators: usize) -> BenchData {
     }
 }
 
-const VALIDATOR_SET_SIZES: [usize; 5] = [64, 16_000, 100_000, 500_000, 1_000_000];
+/// Real networks start around 100k validators; 16k is kept only as a sub-floor scaling reference.
+const VALIDATOR_SET_SIZES: [usize; 4] = [16_000, 100_000, 500_000, 1_000_000];
 
 /// A representative chain head + slot for the slot-agnostic building-block benchmarks below
 /// (the `epoch_catch_up` configuration, where the FFG sweep is live).
