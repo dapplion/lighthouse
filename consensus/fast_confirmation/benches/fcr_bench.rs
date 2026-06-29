@@ -190,7 +190,7 @@ fn build_chain(num_validators: usize) -> BenchData {
 fn bench_get_current_target_score(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_current_target_score");
 
-    for &n in &[64, 16_000, 100_000, 500_000] {
+    for &n in &[64, 16_000, 100_000, 500_000, 1_000_000] {
         let data = build_chain(n);
 
         if n >= 100_000 {
@@ -216,7 +216,7 @@ fn bench_get_current_target_score(c: &mut Criterion) {
 fn bench_precompute_chain_scores(c: &mut Criterion) {
     let mut group = c.benchmark_group("precompute_chain_scores");
 
-    for &n in &[64, 16_000, 100_000, 500_000] {
+    for &n in &[64, 16_000, 100_000, 500_000, 1_000_000] {
         let data = build_chain(n);
         let genesis_root = data.block_roots[0];
         // `block_roots[1..]` is exactly `get_ancestor_roots(head, genesis)` for this linear chain.
@@ -249,7 +249,7 @@ fn bench_precompute_chain_scores(c: &mut Criterion) {
 fn bench_get_latest_confirmed(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_latest_confirmed");
 
-    for &n in &[64, 16_000, 100_000, 500_000] {
+    for &n in &[64, 16_000, 100_000, 500_000, 1_000_000] {
         let data = build_chain(n);
 
         if n >= 100_000 {
