@@ -293,15 +293,8 @@ impl FastConfirmationRule {
 
             if self.head_balance_source.dependent_root != head_dependent_root {
                 let _span = debug_span!("fcr_rebuild_head_balance").entered();
-                let head_epoch = if state.current_epoch() < current_epoch {
-                    state
-                        .next_epoch()
-                        .map_err(|e| Error::CommitteeCache(format!("{e:?}")))?
-                } else {
-                    state.current_epoch()
-                };
                 self.head_balance_source =
-                    BalanceSourceData::for_epoch(state, head_epoch, head_dependent_root);
+                    BalanceSourceData::for_epoch(state, current_epoch, head_dependent_root);
             }
         }
 
