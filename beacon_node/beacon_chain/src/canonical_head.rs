@@ -285,7 +285,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         head_payload_status: proto_array::PayloadStatus,
         fast_confirmation: FastConfirmationMode,
         spec: &ChainSpec,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         let fork_choice_view = fork_choice.cached_fork_choice_view();
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
         let fcr = if fast_confirmation.is_enabled() {
@@ -296,7 +296,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                     spec.confirmation_byzantine_threshold,
                     spec.proposer_score_boost,
                 )
-                .expect("FCR initialization from head state"),
+                .map_err(|e| Error::FastConfirmationError(format!("{e:?}")))?,
             ))
         } else {
             None
@@ -312,12 +312,12 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             finalized_hash: forkchoice_update_params.finalized_hash,
         };
 
-        Self {
+        Ok(Self {
             fork_choice: CanonicalHeadRwLock::new(fork_choice),
             cached_head: CanonicalHeadRwLock::new(cached_head),
             recompute_head_lock: Mutex::new(()),
             fast_confirmation: fcr,
-        }
+        })
     }
 
     /// Load a persisted version of `BeaconForkChoice` from the `store` and restore `self` to that
@@ -391,7 +391,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 spec.confirmation_byzantine_threshold,
                 spec.proposer_score_boost,
             )
-            .expect("FCR initialization from restored head state");
+            .map_err(|e| Error::FastConfirmationError(format!("{e:?}")))?;
         }
 
         Ok(())
@@ -841,12 +841,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             ));
                         }
                     }
-                    let balance_epoch = fcr.current_epoch_observed_justified.checkpoint().epoch;
-                    let current_epoch = current_slot.epoch(T::EthSpec::slots_per_epoch());
-                    let age = current_epoch
-                        .as_u64()
-                        .saturating_sub(balance_epoch.as_u64());
-                    metrics::set_gauge(&fcr_metrics::FCR_BALANCE_SOURCE_AGE_EPOCHS, age as i64);
                 }
             }
         }
@@ -1049,7 +1043,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         slot: Slot,
     ) -> Result<Option<BeaconState<T::EthSpec>>, Error> {
         let current_epoch = slot.epoch(T::EthSpec::slots_per_epoch());
-        let epoch_start = current_epoch.start_slot(T::EthSpec::slots_per_epoch());
         let Some((state_root, mut state)) = self
             .store
             .get_advanced_hot_state_from_cache(head_root, slot)
@@ -1060,6 +1053,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // A previous-epoch head is pulled up to the current epoch boundary; a current-epoch
         // head is already pulled up, so leave it as-is.
         if state.current_epoch() < current_epoch {
+            let epoch_start = current_epoch.start_slot(T::EthSpec::slots_per_epoch());
             complete_state_advance(&mut state, Some(state_root), epoch_start, &self.spec)?;
         }
         state.build_all_caches(&self.spec)?;

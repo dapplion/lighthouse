@@ -57,6 +57,7 @@ pub enum BeaconChainError {
     NoBlockForSlot(Slot),
     BeaconStateError(BeaconStateError),
     EpochCacheError(EpochCacheError),
+    FastConfirmationError(String),
     DBInconsistent(String),
     DBError(store::Error),
     ForkChoiceError(ForkChoiceError),
