@@ -181,7 +181,10 @@ pub fn precompute_chain_attestation_scores(
             continue;
         }
         if let Some(pos) = projector.project(vote_root) {
-            score_at_position[pos] = score_at_position[pos].safe_add(balance)?;
+            let score = score_at_position
+                .get_mut(pos)
+                .ok_or(Error::IndexOutOfBounds(pos))?;
+            *score = score.safe_add(balance)?;
         }
     }
 

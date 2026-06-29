@@ -154,8 +154,14 @@ impl SlotAssignments {
             for val_idx in 0..validator_count {
                 for (old_col, old_epoch) in self.epochs.iter().enumerate() {
                     if let Some(new_col) = desired_epochs.iter().position(|e| e == old_epoch) {
-                        new_slots[val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(new_col)?] =
-                            self.slots[val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(old_col)?];
+                        let new_idx = val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(new_col)?;
+                        let old_idx = val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(old_col)?;
+                        *new_slots
+                            .get_mut(new_idx)
+                            .ok_or(Error::IndexOutOfBounds(new_idx))? = *self
+                            .slots
+                            .get(old_idx)
+                            .ok_or(Error::IndexOutOfBounds(old_idx))?;
                     }
                 }
             }
@@ -204,7 +210,8 @@ impl SlotAssignments {
                 let slot_offset = committee_index.safe_div(committees_per_slot)?;
                 let slot = epoch_start.safe_add(slot_offset as u64)?;
                 if val_idx < validator_count {
-                    new_slots[val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(col)?] = slot;
+                    let idx = val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(col)?;
+                    *new_slots.get_mut(idx).ok_or(Error::IndexOutOfBounds(idx))? = slot;
                 }
             }
         }

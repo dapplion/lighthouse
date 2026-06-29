@@ -81,6 +81,8 @@ pub enum Error {
         current_slot_epoch: Epoch,
         state_epoch: Epoch,
     },
+    /// A computed index was out of bounds. Indicates a broken internal invariant, not bad input.
+    IndexOutOfBounds(usize),
     ArithError(ArithError),
 }
 
@@ -321,7 +323,7 @@ impl FastConfirmationRule {
         let (slashed, per_epoch) = BalanceSourceData::build_for_epochs(state, &epochs)?;
 
         if let Some(i) = head_i {
-            let eb = &per_epoch[i];
+            let eb = per_epoch.get(i).ok_or(Error::IndexOutOfBounds(i))?;
             self.head_balance_source = BalanceSourceData::from_parts(
                 head_checkpoint,
                 eb.effective_balances.clone(),
@@ -330,7 +332,7 @@ impl FastConfirmationRule {
             );
         }
         if let Some(i) = current_i {
-            let eb = &per_epoch[i];
+            let eb = per_epoch.get(i).ok_or(Error::IndexOutOfBounds(i))?;
             self.current_balance_source = BalanceSourceData::from_parts(
                 current_cp,
                 eb.effective_balances.clone(),
@@ -339,7 +341,7 @@ impl FastConfirmationRule {
             );
         }
         if let Some(i) = previous_i {
-            let eb = &per_epoch[i];
+            let eb = per_epoch.get(i).ok_or(Error::IndexOutOfBounds(i))?;
             self.previous_balance_source = BalanceSourceData::from_parts(
                 previous_cp,
                 eb.effective_balances.clone(),
