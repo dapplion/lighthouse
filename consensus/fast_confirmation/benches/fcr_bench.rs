@@ -1,11 +1,12 @@
 //! Benchmarks for the Fast Confirmation Rule (FCR).
 //!
-//! Measures performance of the core FCR algorithms at various validator set sizes
-//! using a synthetic linear chain built via `ProtoArrayForkChoice`.
+//! Measures performance of the core FCR algorithms at various validator set sizes using a
+//! synthetic linear chain built via `ProtoArrayForkChoice`.
 //!
-//! All benchmarks run on `MainnetEthSpec` (32 slots/epoch). The chain spans two epochs so the
-//! FCR state machine has a real epoch boundary to act on, and `get_latest_confirmed` is measured
-//! at both an epoch-boundary slot and a mid-epoch slot (see `bench_get_latest_confirmed`).
+//! All benchmarks run on `MainnetEthSpec` (32 slots/epoch). The chain spans three epochs so the
+//! FCR state machine has a real epoch boundary and a fully-populated previous epoch to act on.
+//! `get_latest_confirmed` is measured across a table of realistic (chain position, FCR run slot)
+//! scenarios — see `SCENARIOS`.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -22,46 +23,105 @@ type E = MainnetEthSpec;
 const GWEI_PER_ETH: u64 = 1_000_000_000;
 const BALANCE: u64 = 32 * GWEI_PER_ETH;
 
-/// Last block in the chain (epoch 1 for MainnetEthSpec). The chain is linear: slots 0..=HEAD_SLOT.
-const HEAD_SLOT: u64 = 63;
-/// Epoch-1 boundary block; the FCR's current-epoch observed-justified checkpoint points here.
+/// Linear chain spans slots 0..=CHAIN_TIP_SLOT, i.e. epochs 0, 1 and into epoch 2.
+const CHAIN_TIP_SLOT: u64 = 69;
+/// Epoch-1 boundary block; the FCR's current-epoch observed-justified checkpoint points here, so
+/// every scenario below runs with `current_epoch == 2`.
 const OBSERVED_JUSTIFIED_SLOT: u64 = 32;
-/// Recent already-confirmed block (epoch 1), so `get_latest_confirmed` runs the full precompute
-/// path (`get_block_epoch(confirmed) + 1 >= current_epoch`) instead of reverting to finalized.
-const CONFIRMED_SLOT: u64 = 40;
 
-/// `current_slot` at the start of epoch 2: drives the epoch-boundary branches of
-/// `get_latest_confirmed` (`is_confirmed_chain_safe`, restart-from-justified).
-const EPOCH_BOUNDARY_SLOT: u64 = 64;
-/// `current_slot` mid epoch 2: drives the FFG sweep (`will_no_conflicting_checkpoint_be_justified`
-/// → `get_current_target_score`), which the epoch-boundary slot short-circuits.
-const MID_EPOCH_SLOT: u64 = 66;
+/// A realistic FCR evaluation: where the chain head and last-confirmed block sit, and the
+/// wall-clock slot at which FCR runs. All scenarios sit in epoch 2 (current_epoch = 2).
+struct Scenario {
+    /// Short, descriptive name used in the benchmark id.
+    name: &'static str,
+    /// Slot of the fork-choice head block (where the chain is).
+    head_slot: u64,
+    /// Wall-clock slot at which FCR runs (where we run the FCR).
+    current_slot: u64,
+    /// Slot of the latest already-confirmed block.
+    confirmed_slot: u64,
+}
+
+/// Realistic spectrum, cheapest → most expensive. The FFG sweep (`get_current_target_score`) is
+/// the dominant cost and only runs at a non-boundary slot while the confirmed block still lags in
+/// the previous epoch.
+const SCENARIOS: &[Scenario] = &[
+    // Healthy steady state: head and confirmation both deep in the current epoch. Confirmed is in
+    // the current epoch, so the FFG sweep is gated off and the precompute walk is short — the
+    // common ~97% case.
+    Scenario {
+        name: "steady_mid_epoch",
+        head_slot: 69,
+        current_slot: 70,
+        confirmed_slot: 66,
+    },
+    // First slot of the epoch: confirmation is still a full epoch behind, but the boundary slot
+    // short-circuits the FFG sweep, so this runs the precompute + is_confirmed_chain_safe only.
+    Scenario {
+        name: "epoch_first_slot",
+        head_slot: 63,
+        current_slot: 64,
+        confirmed_slot: 40,
+    },
+    // A couple slots into the epoch, confirmation catching up: the FFG sweep fires — the worst
+    // case that occurs every epoch on a healthy network.
+    Scenario {
+        name: "epoch_catch_up",
+        head_slot: 65,
+        current_slot: 66,
+        confirmed_slot: 40,
+    },
+    // First slots of the epoch missed (no current-epoch block yet, head still in the previous
+    // epoch): the FFG-sweep window is extended several slots past the boundary.
+    Scenario {
+        name: "missed_epoch_start",
+        head_slot: 63,
+        current_slot: 68,
+        confirmed_slot: 40,
+    },
+];
 
 /// Deterministic block root for a given slot (linear chain): slot `s` → `s + 1`.
 fn block_root_at(slot: u64) -> Hash256 {
     Hash256::from_low_u64_be(slot + 1)
 }
 
-/// All data needed to run an FCR benchmark iteration.
+/// Shared chain + FCR state for a given validator-set size. The FCR's per-scenario fields
+/// (confirmed root, slot heads) are set by `apply_scenario` before each measurement.
 struct BenchData {
     proto_array: ProtoArray,
     votes: Vec<VoteTracker>,
     balance_source: BalanceSourceData,
     fcr: FastConfirmationRule,
-    head_root: Hash256,
     finalized_checkpoint: Checkpoint,
+    /// Head's unrealized justification — the epoch-1 boundary, shared by all scenarios.
     unrealized_justified_checkpoint: Checkpoint,
+    observed_justified_checkpoint: Checkpoint,
+    genesis_checkpoint: Checkpoint,
     equivocating_indices: BTreeSet<u64>,
     block_roots: Vec<Hash256>,
 }
 
-/// Build a synthetic two-epoch linear chain with `num_validators` voting for scattered recent
-/// blocks, and an FCR seeded so `get_latest_confirmed` exercises the full per-slot work.
-///
-/// Chain layout (MainnetEthSpec, 32 slots/epoch):
-///   genesis(slot 0) → block_1(slot 1) → ... → block_63(slot 63), head = slot 63 (epoch 1)
-///   finalized = justified = genesis; current-epoch observed-justified = epoch-1 boundary (slot 32)
-///   confirmed = slot 40 (epoch 1). FCR is evaluated at current slots in epoch 2.
+impl BenchData {
+    /// Point the FCR's confirmed root and head-tracking variables at a scenario's chain position.
+    /// `get_latest_confirmed` is `&self`, so this is the only mutation and it happens between
+    /// measurements.
+    fn apply_scenario(&mut self, scenario: &Scenario) {
+        let head_root = block_root_at(scenario.head_slot);
+        self.fcr.previous_slot_head = head_root;
+        self.fcr.current_slot_head = head_root;
+        self.fcr.confirmed_root = block_root_at(scenario.confirmed_slot);
+        self.fcr.current_epoch_observed_justified = CheckpointAndBalance::new(
+            self.observed_justified_checkpoint,
+            self.balance_source.clone(),
+        );
+        self.fcr.previous_epoch_observed_justified =
+            CheckpointAndBalance::new(self.genesis_checkpoint, self.balance_source.clone());
+    }
+}
+
+/// Build the synthetic chain (slots 0..=CHAIN_TIP_SLOT) with `num_validators` voting for scattered
+/// recent blocks, plus an FCR seeded with the shared balances/checkpoints.
 fn build_chain(num_validators: usize) -> BenchData {
     let spec = E::default_spec();
     let slots_per_epoch = E::slots_per_epoch();
@@ -98,14 +158,14 @@ fn build_chain(num_validators: usize) -> BenchData {
 
     let mut block_roots = vec![genesis_root];
 
-    for slot_u in 1..=HEAD_SLOT {
+    for slot_u in 1..=CHAIN_TIP_SLOT {
         let slot = Slot::new(slot_u);
         let epoch = slot.epoch(slots_per_epoch);
         let root = block_root_at(slot_u);
         let parent_root = block_roots[(slot_u - 1) as usize];
         // Target is the block at the first slot of this block's epoch.
         let target_root = block_root_at(epoch.as_u64() * slots_per_epoch);
-        // Epoch-0 blocks have nothing justified beyond genesis; epoch-1 blocks see the epoch-1
+        // Epoch-0 blocks have nothing justified beyond genesis; later blocks see the epoch-1
         // boundary as unrealized-justified, matching the FCR's observed-justified checkpoint.
         let unrealized_justified_checkpoint = if epoch == Epoch::new(0) {
             genesis_checkpoint
@@ -138,8 +198,6 @@ fn build_chain(num_validators: usize) -> BenchData {
         block_roots.push(root);
     }
 
-    let head_root = block_root_at(HEAD_SLOT);
-
     // Model mainnet: each validator last attested in a different recent slot, so validators vote
     // for different recent block roots, scattered by validator index. This defeats a single-entry
     // vote-root cache (the realistic case), unlike an all-vote-for-head trivial best case.
@@ -160,7 +218,7 @@ fn build_chain(num_validators: usize) -> BenchData {
         &balances,
         Hash256::zero(), // no proposer boost
         &BTreeSet::new(),
-        Slot::new(EPOCH_BOUNDARY_SLOT),
+        Slot::new(CHAIN_TIP_SLOT),
         &spec,
     )
     .expect("find head");
@@ -176,9 +234,9 @@ fn build_chain(num_validators: usize) -> BenchData {
         slashed: vec![false; num_validators],
     };
 
-    // Build FCR state. `new` builds head assignments/balances from the state; the bench overwrites
-    // balances and the slot-tracking variables below, so a small committee-cache-ready state
-    // suffices (its assignments aren't on the O(V) cost path).
+    // `new` builds head assignments/balances from the state; the bench overwrites balances and
+    // slot-tracking variables, so a small committee-cache-ready state suffices (its assignments
+    // aren't on the O(V) cost path).
     let mut seed_state = BeaconState::<E>::new(0, Default::default(), &spec);
     for _ in 0..E::slots_per_epoch() {
         seed_state
@@ -207,29 +265,28 @@ fn build_chain(num_validators: usize) -> BenchData {
     }
     let mut fcr = FastConfirmationRule::new(finalized_checkpoint, &seed_state, 25, 40)
         .expect("fcr initialization");
-    fcr.previous_slot_head = head_root;
-    fcr.current_slot_head = head_root;
-    fcr.confirmed_root = block_root_at(CONFIRMED_SLOT);
     fcr.test_set_head_balance_source(balance_source.clone());
-    fcr.current_epoch_observed_justified =
-        CheckpointAndBalance::new(observed_justified_checkpoint, balance_source.clone());
-    fcr.previous_epoch_observed_justified =
-        CheckpointAndBalance::new(genesis_checkpoint, balance_source.clone());
 
     BenchData {
         proto_array,
         votes,
         balance_source,
         fcr,
-        head_root,
         finalized_checkpoint,
         unrealized_justified_checkpoint: observed_justified_checkpoint,
+        observed_justified_checkpoint,
+        genesis_checkpoint,
         equivocating_indices: BTreeSet::new(),
         block_roots,
     }
 }
 
 const VALIDATOR_SET_SIZES: [usize; 5] = [64, 16_000, 100_000, 500_000, 1_000_000];
+
+/// A representative chain head + slot for the slot-agnostic building-block benchmarks below
+/// (the `epoch_catch_up` configuration, where the FFG sweep is live).
+const REPRESENTATIVE_HEAD_SLOT: u64 = 65;
+const REPRESENTATIVE_CURRENT_SLOT: u64 = 66;
 
 // ---------------------------------------------------------------------------
 // Benchmarks
@@ -250,8 +307,8 @@ fn bench_get_current_target_score(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 data.fcr.get_current_target_score::<E>(
-                    data.head_root,
-                    Slot::new(EPOCH_BOUNDARY_SLOT),
+                    block_root_at(REPRESENTATIVE_HEAD_SLOT),
+                    Slot::new(REPRESENTATIVE_CURRENT_SLOT),
                     &data.proto_array,
                     &data.votes,
                     &data.equivocating_indices,
@@ -296,31 +353,31 @@ fn bench_precompute_chain_scores(c: &mut Criterion) {
     group.finish();
 }
 
-/// Full confirmation algorithm (the complete production code path), measured at both an
-/// epoch-boundary current slot and a mid-epoch current slot. The boundary slot drives
-/// `is_confirmed_chain_safe`/restart-from-justified while short-circuiting the FFG sweep; the
-/// mid-epoch slot drives the FFG sweep instead. Both run the O(V × depth) precompute.
+/// Full confirmation algorithm (the complete production code path), measured across the realistic
+/// (chain position, FCR run slot) scenarios in `SCENARIOS`. Benchmark ids are
+/// `get_latest_confirmed/{scenario}/{n}`.
 fn bench_get_latest_confirmed(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_latest_confirmed");
 
     for &n in &VALIDATOR_SET_SIZES {
-        let data = build_chain(n);
+        let mut data = build_chain(n);
 
         if n >= 100_000 {
             group.sample_size(10);
         }
 
-        for (slot_context, current_slot) in [
-            ("epoch_boundary", EPOCH_BOUNDARY_SLOT),
-            ("mid_epoch", MID_EPOCH_SLOT),
-        ] {
-            group.bench_with_input(BenchmarkId::new(slot_context, n), &n, |b, _| {
+        for scenario in SCENARIOS {
+            data.apply_scenario(scenario);
+            let head_root = block_root_at(scenario.head_slot);
+            let current_slot = Slot::new(scenario.current_slot);
+
+            group.bench_with_input(BenchmarkId::new(scenario.name, n), &n, |b, _| {
                 b.iter(|| {
                     data.fcr.get_latest_confirmed::<E>(
-                        data.head_root,
+                        head_root,
                         &data.finalized_checkpoint,
                         &data.unrealized_justified_checkpoint,
-                        Slot::new(current_slot),
+                        current_slot,
                         &data.proto_array,
                         &data.votes,
                         &data.equivocating_indices,
