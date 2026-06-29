@@ -72,7 +72,7 @@ impl SlotAssignments {
         ] {
             let committee_cache = state
                 .committee_cache(relative_epoch)
-                .map_err(|e| Error::CommitteeCache(format!("{e:?}")))?;
+                .map_err(|e| Error::CommitteeCacheUninitialized(format!("{e:?}")))?;
 
             let shuffling = committee_cache.shuffling();
             let committees_per_slot = committee_cache.committees_per_slot() as usize;

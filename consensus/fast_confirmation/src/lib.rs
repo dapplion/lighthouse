@@ -75,8 +75,8 @@ pub enum Error {
     },
     MissingPrecomputedScore(Hash256),
     BlockEpochNone(Hash256),
-    CommitteeCache(String),
-    UnsetSlotAssignment(usize),
+    CommitteeCacheUninitialized(String),
+    BlockRootsOutOfBounds(String),
     /// A computed index was out of bounds. Indicates a broken internal invariant, not bad input.
     IndexOutOfBounds(usize),
     ArithError(ArithError),
@@ -1286,7 +1286,9 @@ fn get_attestation_score(
     block_root: Hash256,
     attestation_scores: &AttestationScoreCache,
 ) -> Result<u64, Error> {
-    attestation_scores.get_attestation_score(block_root)
+    attestation_scores
+        .get_attestation_score(block_root)
+        .ok_or(Error::MissingPrecomputedScore(block_root))
 }
 
 struct OneConfirmation {
@@ -1351,7 +1353,7 @@ pub(crate) fn dependent_root<E: EthSpec>(
     let slot = compute_start_slot_at_epoch::<E>(epoch).safe_sub(1)?;
     Ok(*state
         .get_block_root(slot)
-        .map_err(|e| Error::CommitteeCache(format!("dep_root lookup: {e:?}")))?)
+        .map_err(|e| Error::BlockRootsOutOfBounds(format!("dep_root lookup: {e:?}")))?)
 }
 
 /// Spec: `is_full_validator_set_covered`.

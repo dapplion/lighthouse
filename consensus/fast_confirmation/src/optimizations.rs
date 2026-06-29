@@ -69,11 +69,8 @@ impl AttestationScoreCache {
         })
     }
 
-    pub(crate) fn get_attestation_score(&self, block_root: Hash256) -> Result<u64, Error> {
-        self.scores
-            .get(&block_root)
-            .copied()
-            .ok_or(Error::MissingPrecomputedScore(block_root))
+    pub(crate) fn get_attestation_score(&self, block_root: Hash256) -> Option<u64> {
+        self.scores.get(&block_root).copied()
     }
 }
 
