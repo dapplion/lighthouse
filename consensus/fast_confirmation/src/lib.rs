@@ -134,13 +134,8 @@ pub struct FastConfirmationRule {
     head_assignments: SlotAssignments,
 
     // === FFG data from the head state ===
-    /// Built from the spec's `get_pulled_up_head_state`: the current head's state advanced
-    /// to the current slot, so epoch-boundary activations/exits/slashings are reflected.
-    ///
-    /// `checkpoint.root` is repurposed here to carry the **dependent root** of
-    /// the cached epoch (the block at the previous epoch's last slot), used as
-    /// the chain-identity component of the cache key — *not* a justified-block
-    /// root like the anchored snapshots' `checkpoint.root`.
+    /// Built from the spec's `get_pulled_up_head_state`. Keyed (via `BalanceSourceData.dependent_root`)
+    /// on the head's dependent root, so a reorg past the previous-epoch boundary rebuilds it.
     head_balance_source: BalanceSourceData,
 
     // === Internal bookkeeping ===
@@ -176,11 +171,19 @@ impl FastConfirmationRule {
             confirmed_root: finalized_checkpoint.root,
             previous_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
-                BalanceSourceData::for_epoch(state, state.previous_epoch(), finalized_checkpoint),
+                BalanceSourceData::for_epoch(
+                    state,
+                    state.previous_epoch(),
+                    finalized_checkpoint.root,
+                ),
             ),
             current_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
-                BalanceSourceData::for_epoch(state, state.current_epoch(), finalized_checkpoint),
+                BalanceSourceData::for_epoch(
+                    state,
+                    state.current_epoch(),
+                    finalized_checkpoint.root,
+                ),
             ),
             previous_epoch_greatest_unrealized_checkpoint: finalized_checkpoint,
             previous_slot_head: finalized_checkpoint.root,
@@ -191,7 +194,7 @@ impl FastConfirmationRule {
             head_balance_source: BalanceSourceData::for_epoch(
                 state,
                 state.current_epoch(),
-                finalized_checkpoint,
+                finalized_checkpoint.root,
             ),
             last_update_slot: None,
             spec_test_mode: false,
@@ -297,18 +300,11 @@ impl FastConfirmationRule {
                 self.head_assignments.rebuild::<E>(state, current_slot)?;
             }
 
-            // Head balance source is keyed on the dependent root (last block of the previous
-            // epoch); rebuild it when a reorg past that boundary changes it.
+            // Head balance source is keyed on the dependent root; rebuild it when a reorg past the
+            // previous-epoch boundary changes it.
             let current_epoch = current_slot.epoch(E::slots_per_epoch());
-            let head_dependent_slot =
-                compute_start_slot_at_epoch::<E>(current_epoch).saturating_sub(1u64);
-            let head_checkpoint = Checkpoint {
-                epoch: current_epoch,
-                root: *state
-                    .get_block_root(head_dependent_slot)
-                    .map_err(|e| Error::CommitteeCache(format!("dep_root lookup: {e:?}")))?,
-            };
-            if self.head_balance_source.checkpoint != head_checkpoint {
+            let head_dependent_root = dependent_root::<E>(state, current_epoch)?;
+            if self.head_balance_source.dependent_root != head_dependent_root {
                 let _span = debug_span!("fcr_rebuild_balances").entered();
                 let head_epoch = if state.current_epoch() < current_epoch {
                     state
@@ -318,7 +314,7 @@ impl FastConfirmationRule {
                     state.current_epoch()
                 };
                 self.head_balance_source =
-                    BalanceSourceData::for_epoch(state, head_epoch, head_checkpoint);
+                    BalanceSourceData::for_epoch(state, head_epoch, head_dependent_root);
             }
         }
 
@@ -336,11 +332,12 @@ impl FastConfirmationRule {
             // checkpoint in one step so the pair stays coherent.
             if is_start_slot_at_epoch::<E>(current_slot) {
                 let new_current_cp = self.previous_epoch_greatest_unrealized_checkpoint;
+                let dep_root = dependent_root::<E>(state, state.current_epoch())?;
                 self.previous_epoch_observed_justified =
                     self.current_epoch_observed_justified.clone();
                 self.current_epoch_observed_justified = CheckpointAndBalance::new(
                     new_current_cp,
-                    BalanceSourceData::for_epoch(state, state.current_epoch(), new_current_cp),
+                    BalanceSourceData::for_epoch(state, state.current_epoch(), dep_root),
                 );
             }
 
@@ -1374,6 +1371,18 @@ fn is_start_slot_at_epoch<E: EthSpec>(slot: Slot) -> bool {
 /// Spec: `compute_start_slot_at_epoch`.
 fn compute_start_slot_at_epoch<E: EthSpec>(epoch: Epoch) -> Slot {
     epoch.start_slot(E::slots_per_epoch())
+}
+
+/// Shuffling/validator-set decision root for `epoch`: the block at the last slot of the previous
+/// epoch. Genesis has no previous epoch, so it is identified by the zero root.
+fn dependent_root<E: EthSpec>(state: &BeaconState<E>, epoch: Epoch) -> Result<Hash256, Error> {
+    if epoch == 0 {
+        return Ok(Hash256::ZERO);
+    }
+    let slot = compute_start_slot_at_epoch::<E>(epoch).safe_sub(1)?;
+    Ok(*state
+        .get_block_root(slot)
+        .map_err(|e| Error::CommitteeCache(format!("dep_root lookup: {e:?}")))?)
 }
 
 /// Spec: `is_full_validator_set_covered`.

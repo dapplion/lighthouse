@@ -1,14 +1,14 @@
-//! Per-checkpoint snapshot of validator balances used by the Fast Confirmation Rule.
+//! Validator-balance snapshot used by the Fast Confirmation Rule.
 
-use types::{BeaconState, Checkpoint, Epoch, EthSpec};
+use types::{BeaconState, Epoch, EthSpec, Hash256};
 
-/// Snapshot of a checkpoint state's balances and committee assignments.
+/// Snapshot of a validator set's effective balances for one epoch.
 ///
-/// FCR needs two of these simultaneously: one for new confirmations (current epoch
-/// observed justified) and one for reconfirmation at epoch boundaries (previous).
+/// `dependent_root` (the block at the last slot of the previous epoch) is the chain-identity that
+/// fixes this snapshot — two chains sharing it have the same view — and is used as the cache key.
 #[derive(Clone, Debug)]
 pub struct BalanceSourceData {
-    pub checkpoint: Checkpoint,
+    pub dependent_root: Hash256,
     pub total_active_balance: u64,
     /// Effective balance per validator index. 0 for inactive.
     pub effective_balances: Vec<u64>,
@@ -18,15 +18,15 @@ pub struct BalanceSourceData {
 }
 
 impl BalanceSourceData {
-    /// Build a balance source for a single `epoch`, anchored to `checkpoint`, in one pass over the
-    /// validator set. Effective balance is counted for active validators regardless of slashed
+    /// Build a balance source for a single `epoch`, tagged with `dependent_root`, in one pass over
+    /// the validator set. Effective balance is counted for active validators regardless of slashed
     /// status (matching the spec's `get_total_active_balance`); `slashed` is recorded separately
     /// for the slashed-filtering used by `get_block_support_between_slots`. The total uses a
     /// saturating add — it is a sum of effective balances and cannot realistically overflow `u64`.
     pub(crate) fn for_epoch<E: EthSpec>(
         state: &BeaconState<E>,
         epoch: Epoch,
-        checkpoint: Checkpoint,
+        dependent_root: Hash256,
     ) -> Self {
         let validators = state.validators();
         let mut effective_balances = Vec::with_capacity(validators.len());
@@ -45,7 +45,7 @@ impl BalanceSourceData {
         }
 
         Self {
-            checkpoint,
+            dependent_root,
             total_active_balance,
             effective_balances,
             slashed,

@@ -138,7 +138,7 @@ fn build_chain(num_validators: usize) -> BenchData {
     // Build balance source.
     let total_active_balance = BALANCE.saturating_mul(num_validators as u64);
     let balance_source = BalanceSourceData {
-        checkpoint: justified_checkpoint,
+        dependent_root: justified_checkpoint.root,
         total_active_balance,
         effective_balances: vec![BALANCE; num_validators],
         slashed: vec![false; num_validators],
