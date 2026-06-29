@@ -301,8 +301,11 @@ impl FastConfirmationRule {
             let current_epoch = current_slot.epoch(E::slots_per_epoch());
             let head_dependent_root = dependent_root::<E>(state, current_epoch)?;
             if self.head_balance_source.dependent_root != head_dependent_root {
-                let _span = debug_span!("fcr_rebuild_head_caches").entered();
-                self.head_assignments = SlotAssignments::for_state::<E>(state, current_slot)?;
+                // Two distinct O(V) builds — span each so the cost is individually attributable.
+                self.head_assignments = {
+                    let _span = debug_span!("fcr_rebuild_assignments").entered();
+                    SlotAssignments::for_state::<E>(state, current_slot)?
+                };
                 let head_epoch = if state.current_epoch() < current_epoch {
                     state
                         .next_epoch()
@@ -310,8 +313,10 @@ impl FastConfirmationRule {
                 } else {
                     state.current_epoch()
                 };
-                self.head_balance_source =
-                    BalanceSourceData::for_epoch(state, head_epoch, head_dependent_root);
+                self.head_balance_source = {
+                    let _span = debug_span!("fcr_rebuild_head_balance").entered();
+                    BalanceSourceData::for_epoch(state, head_epoch, head_dependent_root)
+                };
             }
         }
 
@@ -332,10 +337,11 @@ impl FastConfirmationRule {
                 let dep_root = dependent_root::<E>(state, state.current_epoch())?;
                 self.previous_epoch_observed_justified =
                     self.current_epoch_observed_justified.clone();
-                self.current_epoch_observed_justified = CheckpointAndBalance::new(
-                    new_current_cp,
-                    BalanceSourceData::for_epoch(state, state.current_epoch(), dep_root),
-                );
+                self.current_epoch_observed_justified =
+                    CheckpointAndBalance::new(new_current_cp, {
+                        let _span = debug_span!("fcr_rebuild_current_balance").entered();
+                        BalanceSourceData::for_epoch(state, state.current_epoch(), dep_root)
+                    });
             }
 
             self.last_update_slot = Some(current_slot);
