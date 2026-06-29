@@ -1,5 +1,7 @@
 //! Per-checkpoint snapshot of validator balances used by the Fast Confirmation Rule.
 
+use crate::Error;
+use safe_arith::SafeArith;
 use tracing::{debug, debug_span};
 use types::{BeaconState, Checkpoint, Epoch, EthSpec};
 
@@ -63,7 +65,7 @@ impl BalanceSourceData {
     pub(crate) fn build_for_epochs<E: EthSpec>(
         state: &BeaconState<E>,
         epochs: &[Epoch],
-    ) -> (Vec<bool>, Vec<EpochBalances>) {
+    ) -> Result<(Vec<bool>, Vec<EpochBalances>), Error> {
         let _span = debug_span!("fcr_build_balance_source", epochs = epochs.len()).entered();
 
         let validator_count = state.validators().len();
@@ -82,14 +84,16 @@ impl BalanceSourceData {
             for (i, &epoch) in epochs.iter().enumerate() {
                 if validator.is_active_at(epoch) {
                     per_epoch[i].effective_balances.push(effective_balance);
-                    per_epoch[i].total_active_balance += effective_balance;
+                    per_epoch[i].total_active_balance = per_epoch[i]
+                        .total_active_balance
+                        .safe_add(effective_balance)?;
                 } else {
                     per_epoch[i].effective_balances.push(0);
                 }
             }
         }
 
-        (slashed, per_epoch)
+        Ok((slashed, per_epoch))
     }
 
     pub(crate) fn balance(&self, val_idx: usize) -> u64 {

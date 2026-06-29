@@ -4,8 +4,9 @@
 //! per-block `get_attestation_score`) via a faster algorithm. They are deliberately kept out of
 //! `lib.rs` so that module reads as the spec algorithm.
 
-use crate::BalanceSourceData;
+use crate::{BalanceSourceData, Error};
 use proto_array::core::{ProtoArray, VoteTracker};
+use safe_arith::SafeArith;
 use std::collections::{BTreeSet, HashMap};
 use types::{Epoch, Hash256, Slot};
 
@@ -165,7 +166,7 @@ pub fn precompute_chain_attestation_scores(
     balance_source: &BalanceSourceData,
     votes: &[VoteTracker],
     equivocating_indices: &BTreeSet<u64>,
-) -> HashMap<Hash256, u64> {
+) -> Result<HashMap<Hash256, u64>, Error> {
     let chain_len = chain.len();
     let mut score_at_position = vec![0u64; chain_len];
     let mut projector = ChainProjector::new(proto_array, chain, terminal_slot);
@@ -180,7 +181,7 @@ pub fn precompute_chain_attestation_scores(
             continue;
         }
         if let Some(pos) = projector.project(vote_root) {
-            score_at_position[pos] += balance;
+            score_at_position[pos] = score_at_position[pos].safe_add(balance)?;
         }
     }
 
@@ -188,8 +189,8 @@ pub fn precompute_chain_attestation_scores(
     let mut scores = HashMap::with_capacity(chain_len);
     let mut running = 0u64;
     for i in (0..chain_len).rev() {
-        running += score_at_position[i];
+        running = running.safe_add(score_at_position[i])?;
         scores.insert(chain[i], running);
     }
-    scores
+    Ok(scores)
 }

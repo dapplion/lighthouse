@@ -1,6 +1,7 @@
 //! Per-validator committee slot assignment table used by the Fast Confirmation Rule.
 
 use crate::Error;
+use safe_arith::SafeArith;
 use types::{BeaconState, Epoch, EthSpec, RelativeEpoch, Slot};
 
 /// Per-validator committee slot assignments across a 3-epoch window.
@@ -54,7 +55,12 @@ impl SlotAssignments {
 
     /// Get the assigned slot for a validator in a given column (0, 1, or 2).
     fn get(&self, val_idx: usize, col: usize) -> Option<Slot> {
-        self.slots.get(val_idx * NUM_EPOCH_COLUMNS + col).copied()
+        let idx = val_idx
+            .safe_mul(NUM_EPOCH_COLUMNS)
+            .ok()?
+            .safe_add(col)
+            .ok()?;
+        self.slots.get(idx).copied()
     }
 
     /// Check if a validator is assigned to any committee in the slot range `[start, end]`.
@@ -134,21 +140,22 @@ impl SlotAssignments {
         let state_prev = state.previous_epoch();
         let desired_epochs = [state_prev, state_current, state_next];
 
+        let total_columns = validator_count.safe_mul(NUM_EPOCH_COLUMNS)?;
+
         // Fast path: skip if epoch window and validator count are unchanged.
-        if self.epochs == desired_epochs && self.slots.len() == validator_count * NUM_EPOCH_COLUMNS
-        {
+        if self.epochs == desired_epochs && self.slots.len() == total_columns {
             return Ok(());
         }
 
-        let mut new_slots = vec![UNSET_SLOT; validator_count * NUM_EPOCH_COLUMNS];
+        let mut new_slots = vec![UNSET_SLOT; total_columns];
 
         // Preserve old assignments that overlap the new epoch window.
-        if self.slots.len() == validator_count * NUM_EPOCH_COLUMNS {
+        if self.slots.len() == total_columns {
             for val_idx in 0..validator_count {
                 for (old_col, old_epoch) in self.epochs.iter().enumerate() {
                     if let Some(new_col) = desired_epochs.iter().position(|e| e == old_epoch) {
-                        new_slots[val_idx * NUM_EPOCH_COLUMNS + new_col] =
-                            self.slots[val_idx * NUM_EPOCH_COLUMNS + old_col];
+                        new_slots[val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(new_col)?] =
+                            self.slots[val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(old_col)?];
                     }
                 }
             }
@@ -187,15 +194,17 @@ impl SlotAssignments {
             // Each position in the shuffled list maps to a committee, which maps to a slot.
             // committee_index_in_epoch = position * total_committees / shuffling_len
             // slot_offset = committee_index_in_epoch / committees_per_slot
-            let total_committees = committees_per_slot * slots_per_epoch as usize;
+            let total_committees = committees_per_slot.safe_mul(slots_per_epoch as usize)?;
             let shuffling_len = shuffling.len();
 
             for (position, &val_idx) in shuffling.iter().enumerate() {
-                let committee_index = position * total_committees / shuffling_len;
-                let slot_offset = committee_index / committees_per_slot;
-                let slot = epoch_start + slot_offset as u64;
+                let committee_index = position
+                    .safe_mul(total_committees)?
+                    .safe_div(shuffling_len)?;
+                let slot_offset = committee_index.safe_div(committees_per_slot)?;
+                let slot = epoch_start.safe_add(slot_offset as u64)?;
                 if val_idx < validator_count {
-                    new_slots[val_idx * NUM_EPOCH_COLUMNS + col] = slot;
+                    new_slots[val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(col)?] = slot;
                 }
             }
         }

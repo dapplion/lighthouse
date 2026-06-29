@@ -50,6 +50,7 @@ use slot_assignments::SlotAssignments;
 pub use slot_assignments::UNSET_SLOT;
 
 use proto_array::core::{ProtoArray, VoteTracker};
+use safe_arith::{ArithError, SafeArith};
 use std::collections::{BTreeSet, HashMap};
 use tracing::{debug, debug_span};
 use types::{BeaconState, Checkpoint, Epoch, EthSpec, Hash256, Slot};
@@ -79,6 +80,13 @@ pub enum Error {
         current_slot_epoch: Epoch,
         state_epoch: Epoch,
     },
+    ArithError(ArithError),
+}
+
+impl From<ArithError> for Error {
+    fn from(e: ArithError) -> Self {
+        Error::ArithError(e)
+    }
 }
 
 /// Per-mille adjustment factor for committee weight estimates that don't cover a full epoch.
@@ -90,8 +98,9 @@ fn dedup_epoch_index(epochs: &mut Vec<Epoch>, e: Epoch) -> usize {
     match epochs.iter().position(|x| *x == e) {
         Some(i) => i,
         None => {
+            let index = epochs.len();
             epochs.push(e);
-            epochs.len() - 1
+            index
         }
     }
 }
@@ -113,8 +122,8 @@ impl AttestationScoreCache {
         balance_source: &BalanceSourceData,
         votes: &[VoteTracker],
         equivocating_indices: &BTreeSet<u64>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, Error> {
+        Ok(Self {
             scores: optimizations::precompute_chain_attestation_scores(
                 proto_array,
                 chain,
@@ -122,8 +131,8 @@ impl AttestationScoreCache {
                 balance_source,
                 votes,
                 equivocating_indices,
-            ),
-        }
+            )?,
+        })
     }
 
     fn get_attestation_score(&self, block_root: Hash256) -> Result<u64, Error> {
@@ -270,7 +279,7 @@ impl FastConfirmationRule {
         let head_dependent_slot = if current_epoch == Epoch::new(0) {
             compute_start_slot_at_epoch::<E>(current_epoch)
         } else {
-            compute_start_slot_at_epoch::<E>(current_epoch) - 1
+            compute_start_slot_at_epoch::<E>(current_epoch).safe_sub(1)?
         };
         let head_checkpoint = Checkpoint {
             epoch: current_epoch,
@@ -308,7 +317,7 @@ impl FastConfirmationRule {
         let previous_i =
             previous_stale.then(|| dedup_epoch_index(&mut epochs, state.previous_epoch()));
 
-        let (slashed, per_epoch) = BalanceSourceData::build_for_epochs(state, &epochs);
+        let (slashed, per_epoch) = BalanceSourceData::build_for_epochs(state, &epochs)?;
 
         if let Some(i) = head_i {
             let eb = &per_epoch[i];
@@ -364,7 +373,7 @@ impl FastConfirmationRule {
             head_root,
             unrealized_justified_checkpoint,
             current_slot,
-        );
+        )?;
 
         // Rebuild committee assignments from the head state.
         {
@@ -417,7 +426,7 @@ impl FastConfirmationRule {
         head_root: Hash256,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
-    ) {
+    ) -> Result<(), Error> {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
 
         // Spec: update_fast_confirmation_variables is called once per slot,
@@ -428,7 +437,7 @@ impl FastConfirmationRule {
             self.current_slot_head = head_root;
 
             // At last slot of epoch: snapshot greatest unrealized justified.
-            if is_start_slot_at_epoch::<E>(current_slot + 1) {
+            if is_start_slot_at_epoch::<E>(current_slot.safe_add(1)?) {
                 self.previous_epoch_greatest_unrealized_checkpoint =
                     *unrealized_justified_checkpoint;
             }
@@ -443,6 +452,8 @@ impl FastConfirmationRule {
 
             self.last_update_slot = Some(current_slot);
         }
+
+        Ok(())
     }
 
     /// Spec: get_latest_confirmed
@@ -463,7 +474,7 @@ impl FastConfirmationRule {
 
         // Revert to finalized block if either of the following is true:
         let should_revert_to_finalized_reason =
-            if get_block_epoch::<E>(confirmed_root, proto_array)? + 1 < current_epoch {
+            if get_block_epoch::<E>(confirmed_root, proto_array)?.safe_add(1)? < current_epoch {
                 // 1) the latest confirmed block's epoch is older than the previous epoch,
                 Some("epoch_too_old")
             } else if !is_ancestor(head_root, confirmed_root, proto_array)? {
@@ -503,8 +514,10 @@ impl FastConfirmationRule {
             proto_array,
         )?;
         // 2) epoch of fcr_store.current_epoch_observed_justified_checkpoint.root equals to the previous epoch,
-        let is_observed_justified_block_epoch_ok =
-            observed_justified_block_slot.epoch(E::slots_per_epoch()) + 1 == current_epoch;
+        let is_observed_justified_block_epoch_ok = observed_justified_block_slot
+            .epoch(E::slots_per_epoch())
+            .safe_add(1)?
+            == current_epoch;
         // 3) fcr_store.current_epoch_observed_justified_checkpoint equals to unrealized justification of the head,
         let is_head_unrealized_justified_ok = self.current_epoch_observed_justified_checkpoint
             == unrealized_justification_of(head_root, proto_array)?;
@@ -527,7 +540,7 @@ impl FastConfirmationRule {
         }
 
         // Attempt to further advance the latest confirmed block
-        if get_block_epoch::<E>(confirmed_root, proto_array)? + 1 >= current_epoch {
+        if get_block_epoch::<E>(confirmed_root, proto_array)?.safe_add(1)? >= current_epoch {
             confirmed_root = self.find_latest_confirmed_descendant::<E>(
                 confirmed_root,
                 head_root,
@@ -565,8 +578,9 @@ impl FastConfirmationRule {
         let mut honest_ffg_support = None;
         let mut no_conflicting_checkpoint = None;
 
-        if get_block_epoch::<E>(confirmed_root, proto_array)? + 1 == current_epoch
-            && get_voting_source_epoch::<E>(self.previous_slot_head, current_slot, proto_array)? + 2
+        if get_block_epoch::<E>(confirmed_root, proto_array)?.safe_add(1)? == current_epoch
+            && get_voting_source_epoch::<E>(self.previous_slot_head, current_slot, proto_array)?
+                .safe_add(2)?
                 >= current_epoch
             && (is_start_slot_at_epoch::<E>(current_slot)
                 || (self.will_no_conflicting_checkpoint_be_justified_cached::<E>(
@@ -580,9 +594,11 @@ impl FastConfirmationRule {
                     &mut no_conflicting_checkpoint,
                 )? && (unrealized_justification_of(self.previous_slot_head, proto_array)?
                     .epoch
-                    + 1
+                    .safe_add(1)?
                     >= current_epoch
-                    || unrealized_justification_of(head_root, proto_array)?.epoch + 1
+                    || unrealized_justification_of(head_root, proto_array)?
+                        .epoch
+                        .safe_add(1)?
                         >= current_epoch)))
         {
             let _s = debug_span!("fcr_loop1").entered();
@@ -623,7 +639,10 @@ impl FastConfirmationRule {
         }
 
         if is_start_slot_at_epoch::<E>(current_slot)
-            || unrealized_justification_of(head_root, proto_array)?.epoch + 1 >= current_epoch
+            || unrealized_justification_of(head_root, proto_array)?
+                .epoch
+                .safe_add(1)?
+                >= current_epoch
         {
             let _s = debug_span!("fcr_loop2").entered();
             let canonical_roots = get_ancestor_roots(head_root, confirmed_root, proto_array)?;
@@ -674,7 +693,8 @@ impl FastConfirmationRule {
                     tentative_confirmed_root,
                     current_slot,
                     proto_array,
-                )? + 2
+                )?
+                .safe_add(2)?
                     >= current_epoch
                     && (is_start_slot_at_epoch::<E>(current_slot)
                         || self.will_no_conflicting_checkpoint_be_justified_cached::<E>(
@@ -728,27 +748,31 @@ impl FastConfirmationRule {
         }
 
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
-        let start_root_exclusive =
-            if self.current_epoch_observed_justified_checkpoint.epoch + 1 >= current_epoch {
-                self.current_epoch_observed_justified_checkpoint.root
+        let start_root_exclusive = if self
+            .current_epoch_observed_justified_checkpoint
+            .epoch
+            .safe_add(1)?
+            >= current_epoch
+        {
+            self.current_epoch_observed_justified_checkpoint.root
+        } else {
+            // Limit reconfirmation to the first block of the previous epoch.
+            // If successful, reconfirmation of ancestors is implied.
+            let ancestor_at_previous_epoch_start = get_ancestor(
+                confirmed_root,
+                compute_start_slot_at_epoch::<E>(current_epoch.safe_sub(1)?),
+                proto_array,
+            )?;
+            if get_block_epoch::<E>(ancestor_at_previous_epoch_start, proto_array)?.safe_add(1)?
+                == current_epoch
+            {
+                // The parent of the first block of the previous epoch.
+                parent_root(ancestor_at_previous_epoch_start, proto_array)?
             } else {
-                // Limit reconfirmation to the first block of the previous epoch.
-                // If successful, reconfirmation of ancestors is implied.
-                let ancestor_at_previous_epoch_start = get_ancestor(
-                    confirmed_root,
-                    compute_start_slot_at_epoch::<E>(current_epoch - 1),
-                    proto_array,
-                )?;
-                if get_block_epoch::<E>(ancestor_at_previous_epoch_start, proto_array)? + 1
-                    == current_epoch
-                {
-                    // The parent of the first block of the previous epoch.
-                    parent_root(ancestor_at_previous_epoch_start, proto_array)?
-                } else {
-                    // The last block of the epoch before the previous one.
-                    ancestor_at_previous_epoch_start
-                }
-            };
+                // The last block of the epoch before the previous one.
+                ancestor_at_previous_epoch_start
+            }
+        };
 
         let chain_roots = get_ancestor_roots(confirmed_root, start_root_exclusive, proto_array)?;
         let terminal_slot = get_block_slot(start_root_exclusive, proto_array)?;
@@ -759,7 +783,7 @@ impl FastConfirmationRule {
             self.get_previous_balance_source(),
             votes,
             equivocating_indices,
-        );
+        )?;
 
         for root in &chain_roots {
             let one_confirmation = self.one_confirmation::<E>(
@@ -812,7 +836,7 @@ impl FastConfirmationRule {
                 && vote.current_root() == block_root
                 && !equivocating_indices.contains(&(val_idx as u64))
             {
-                score += balance;
+                score = score.safe_add(balance)?;
             }
         }
         Ok(score)
@@ -821,9 +845,16 @@ impl FastConfirmationRule {
     /// Spec: `compute_proposer_score(balance_source)`.
     /// Uses `(committee_weight * proposer_score_boost) // 100` (multiply-first) to match
     /// the spec and avoid precision loss from divide-first ordering.
-    fn compute_proposer_score<E: EthSpec>(&self, balance_source: &BalanceSourceData) -> u64 {
-        let committee_weight = balance_source.total_active_balance / E::slots_per_epoch();
-        committee_weight * self.proposer_score_boost / 100
+    fn compute_proposer_score<E: EthSpec>(
+        &self,
+        balance_source: &BalanceSourceData,
+    ) -> Result<u64, Error> {
+        let committee_weight = balance_source
+            .total_active_balance
+            .safe_div(E::slots_per_epoch())?;
+        Ok(committee_weight
+            .safe_mul(self.proposer_score_boost)?
+            .safe_div(100)?)
     }
 
     /// Spec: `compute_empty_slot_support_discount`.
@@ -839,28 +870,28 @@ impl FastConfirmationRule {
         let parent_root = parent_root(block_root, proto_array)?;
         let parent_slot = get_block_slot(parent_root, proto_array)?;
 
-        if parent_slot + 1 == block_slot {
+        if parent_slot.safe_add(1)? == block_slot {
             return Ok(0);
         }
 
         let parent_support_in_empty_slots = self.get_block_support_between_slots(
             balance_source,
             parent_root,
-            parent_slot + 1,
-            block_slot - 1,
+            parent_slot.safe_add(1)?,
+            block_slot.safe_sub(1)?,
             votes,
             equivocating_indices,
         )?;
 
         let adversarial_weight = self.compute_adversarial_weight::<E>(
             balance_source,
-            parent_slot + 1,
-            block_slot - 1,
+            parent_slot.safe_add(1)?,
+            block_slot.safe_sub(1)?,
             equivocating_indices,
         )?;
 
         if parent_support_in_empty_slots > adversarial_weight {
-            Ok(parent_support_in_empty_slots - adversarial_weight)
+            Ok(parent_support_in_empty_slots.safe_sub(adversarial_weight)?)
         } else {
             Ok(0)
         }
@@ -898,12 +929,12 @@ impl FastConfirmationRule {
         let parent_slot = get_block_slot(parent_root, proto_array)?;
 
         let total_active_balance = balance_source.total_active_balance;
-        let proposer_score = self.compute_proposer_score::<E>(balance_source);
+        let proposer_score = self.compute_proposer_score::<E>(balance_source)?;
         let maximum_support = estimate_committee_weight_between_slots::<E>(
             total_active_balance,
-            parent_slot + 1,
-            current_slot - 1,
-        );
+            parent_slot.safe_add(1)?,
+            current_slot.safe_sub(1)?,
+        )?;
         let support_discount = self.get_support_discount::<E>(
             balance_source,
             block_root,
@@ -919,8 +950,13 @@ impl FastConfirmationRule {
             equivocating_indices,
         )?;
 
-        if support_discount < maximum_support + proposer_score + 2 * adversarial_weight {
-            Ok((maximum_support + proposer_score + 2 * adversarial_weight - support_discount) / 2)
+        let threshold_numerator = maximum_support
+            .safe_add(proposer_score)?
+            .safe_add(adversarial_weight.safe_mul(2)?)?;
+        if support_discount < threshold_numerator {
+            Ok(threshold_numerator
+                .safe_sub(support_discount)?
+                .safe_div(2)?)
         } else {
             Ok(0)
         }
@@ -943,14 +979,14 @@ impl FastConfirmationRule {
             self.compute_adversarial_weight::<E>(
                 balance_source,
                 compute_start_slot_at_epoch::<E>(block_epoch),
-                current_slot - 1,
+                current_slot.safe_sub(1)?,
                 equivocating_indices,
             )
         } else {
             self.compute_adversarial_weight::<E>(
                 balance_source,
                 block_slot,
-                current_slot - 1,
+                current_slot.safe_sub(1)?,
                 equivocating_indices,
             )
         }
@@ -970,8 +1006,10 @@ impl FastConfirmationRule {
             total_active_balance,
             start_slot,
             end_slot,
-        );
-        let max_adversarial_weight = maximum_weight / 100 * self.byzantine_threshold;
+        )?;
+        let max_adversarial_weight = maximum_weight
+            .safe_div(100)?
+            .safe_mul(self.byzantine_threshold)?;
 
         let equivocation_score = self.get_equivocation_score(
             balance_source,
@@ -981,7 +1019,7 @@ impl FastConfirmationRule {
         )?;
 
         if max_adversarial_weight > equivocation_score {
-            Ok(max_adversarial_weight - equivocation_score)
+            Ok(max_adversarial_weight.safe_sub(equivocation_score)?)
         } else {
             Ok(0)
         }
@@ -1004,7 +1042,7 @@ impl FastConfirmationRule {
                     .head_assignments
                     .is_in_range(idx, start_slot, end_slot)?
             {
-                score += balance_source.balance(idx);
+                score = score.safe_add(balance_source.balance(idx))?;
             }
         }
         Ok(score)
@@ -1105,7 +1143,7 @@ impl FastConfirmationRule {
                     get_checkpoint_for_block::<E>(vote_root, vote_epoch, proto_array)
                 })? == target
             } {
-                score += self.head_balance_source.balance(val_idx);
+                score = score.safe_add(self.head_balance_source.balance(val_idx))?;
             }
         }
         Ok(score)
@@ -1135,24 +1173,27 @@ impl FastConfirmationRule {
         let ffg_weight_till_now = estimate_committee_weight_between_slots::<E>(
             total_active_balance,
             compute_start_slot_at_epoch::<E>(current_epoch),
-            current_slot - 1,
-        );
+            current_slot.safe_sub(1)?,
+        )?;
 
-        let remaining_ffg_weight = total_active_balance - ffg_weight_till_now;
-        let remaining_honest_ffg_weight =
-            remaining_ffg_weight / 100 * (100 - self.byzantine_threshold);
+        let remaining_ffg_weight = total_active_balance.safe_sub(ffg_weight_till_now)?;
+        let remaining_honest_ffg_weight = remaining_ffg_weight
+            .safe_div(100)?
+            .safe_mul(100u64.safe_sub(self.byzantine_threshold)?)?;
 
         // Compute potential adversarial weight (accounts for slashed validators).
         let adversarial_weight = self.compute_adversarial_weight::<E>(
             balance_source,
             compute_start_slot_at_epoch::<E>(current_epoch),
-            current_slot - 1,
+            current_slot.safe_sub(1)?,
             equivocating_indices,
         )?;
-        let min_honest_ffg_support = ffg_support_for_checkpoint
-            - std::cmp::min(adversarial_weight, ffg_support_for_checkpoint);
+        let min_honest_ffg_support = ffg_support_for_checkpoint.safe_sub(std::cmp::min(
+            adversarial_weight,
+            ffg_support_for_checkpoint,
+        ))?;
 
-        Ok(min_honest_ffg_support + remaining_honest_ffg_weight)
+        Ok(min_honest_ffg_support.safe_add(remaining_honest_ffg_weight)?)
     }
 
     /// Spec: `is_one_confirmed`.
@@ -1206,7 +1247,7 @@ impl FastConfirmationRule {
                 self.get_current_balance_source(),
                 votes,
                 equivocating_indices,
-            ));
+            )?);
         }
         Ok(cache
             .as_ref()
@@ -1539,11 +1580,14 @@ fn compute_start_slot_at_epoch<E: EthSpec>(epoch: Epoch) -> Slot {
 }
 
 /// Spec: `is_full_validator_set_covered`.
-fn is_full_validator_set_covered<E: EthSpec>(start_slot: Slot, end_slot: Slot) -> bool {
+fn is_full_validator_set_covered<E: EthSpec>(
+    start_slot: Slot,
+    end_slot: Slot,
+) -> Result<bool, Error> {
     let spe = E::slots_per_epoch();
-    let start_full_epoch = (start_slot + (spe - 1)).epoch(spe);
-    let end_full_epoch = (end_slot + 1).epoch(spe);
-    start_full_epoch < end_full_epoch
+    let start_full_epoch = start_slot.safe_add(spe.safe_sub(1)?)?.epoch(spe);
+    let end_full_epoch = end_slot.safe_add(1)?.epoch(spe);
+    Ok(start_full_epoch < end_full_epoch)
 }
 
 /// Spec: `adjust_committee_weight_estimate_to_ensure_safety`.
@@ -1551,9 +1595,9 @@ fn is_full_validator_set_covered<E: EthSpec>(start_slot: Slot, end_slot: Slot) -
 /// Spec uses ceiling division: `(estimate + 999) // 1000`. The function exists to
 /// conservatively over-estimate committee weight; flooring would under-estimate and
 /// weaken the safety threshold.
-fn adjust_committee_weight_estimate_to_ensure_safety(estimate: u64) -> u64 {
+fn adjust_committee_weight_estimate_to_ensure_safety(estimate: u64) -> Result<u64, Error> {
     let ceil = estimate.div_ceil(1000);
-    ceil * (1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR)
+    Ok(ceil.safe_mul(1000u64.safe_add(COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR)?)?)
 }
 
 /// Spec: `estimate_committee_weight_between_slots`.
@@ -1561,40 +1605,49 @@ fn estimate_committee_weight_between_slots<E: EthSpec>(
     total_active_balance: u64,
     start_slot: Slot,
     end_slot: Slot,
-) -> u64 {
+) -> Result<u64, Error> {
     let spe = E::slots_per_epoch();
 
     if start_slot > end_slot {
-        return 0;
+        return Ok(0);
     }
 
-    if is_full_validator_set_covered::<E>(start_slot, end_slot) {
-        return total_active_balance;
+    if is_full_validator_set_covered::<E>(start_slot, end_slot)? {
+        return Ok(total_active_balance);
     }
 
-    let start_epoch = start_slot.as_u64() / spe;
-    let end_epoch = end_slot.as_u64() / spe;
+    let start_epoch = start_slot.as_u64().safe_div(spe)?;
+    let end_epoch = end_slot.as_u64().safe_div(spe)?;
 
     if start_epoch == end_epoch {
-        let num_slots = end_slot.as_u64() - start_slot.as_u64() + 1;
-        return (total_active_balance / spe) * num_slots;
+        let num_slots = end_slot
+            .as_u64()
+            .safe_sub(start_slot.as_u64())?
+            .safe_add(1)?;
+        return Ok(total_active_balance.safe_div(spe)?.safe_mul(num_slots)?);
     }
 
     // Cross-epoch boundary but not covering a full epoch.
-    let slots_since_start_epoch = start_slot.as_u64() % spe;
-    let num_slots_in_start_epoch = spe - slots_since_start_epoch;
+    let slots_since_start_epoch = start_slot.as_u64().safe_rem(spe)?;
+    let num_slots_in_start_epoch = spe.safe_sub(slots_since_start_epoch)?;
 
-    let slots_since_end_epoch = end_slot.as_u64() % spe;
-    let num_slots_in_end_epoch = slots_since_end_epoch + 1;
-    let remaining_slots_in_end_epoch = spe - num_slots_in_end_epoch;
+    let slots_since_end_epoch = end_slot.as_u64().safe_rem(spe)?;
+    let num_slots_in_end_epoch = slots_since_end_epoch.safe_add(1)?;
+    let remaining_slots_in_end_epoch = spe.safe_sub(num_slots_in_end_epoch)?;
 
-    let start_epoch_weight = (total_active_balance / spe) * num_slots_in_start_epoch;
-    let end_epoch_weight = (total_active_balance / spe) * num_slots_in_end_epoch;
+    let start_epoch_weight = total_active_balance
+        .safe_div(spe)?
+        .safe_mul(num_slots_in_start_epoch)?;
+    let end_epoch_weight = total_active_balance
+        .safe_div(spe)?
+        .safe_mul(num_slots_in_end_epoch)?;
 
-    let start_epoch_weight_pro_rated = (start_epoch_weight / spe) * remaining_slots_in_end_epoch;
+    let start_epoch_weight_pro_rated = start_epoch_weight
+        .safe_div(spe)?
+        .safe_mul(remaining_slots_in_end_epoch)?;
 
     adjust_committee_weight_estimate_to_ensure_safety(
-        start_epoch_weight_pro_rated + end_epoch_weight,
+        start_epoch_weight_pro_rated.safe_add(end_epoch_weight)?,
     )
 }
 
@@ -1616,36 +1669,26 @@ mod tests {
     #[test]
     fn test_is_full_validator_set_covered() {
         // 32 slots = full epoch
-        assert!(is_full_validator_set_covered::<E>(
-            Slot::new(0),
-            Slot::new(31)
-        ));
+        assert!(is_full_validator_set_covered::<E>(Slot::new(0), Slot::new(31)).unwrap());
         // 33 slots crossing boundary
-        assert!(is_full_validator_set_covered::<E>(
-            Slot::new(0),
-            Slot::new(32)
-        ));
+        assert!(is_full_validator_set_covered::<E>(Slot::new(0), Slot::new(32)).unwrap());
         // Single slot — not full
-        assert!(!is_full_validator_set_covered::<E>(
-            Slot::new(0),
-            Slot::new(0)
-        ));
+        assert!(!is_full_validator_set_covered::<E>(Slot::new(0), Slot::new(0)).unwrap());
         // 31 slots — not full
-        assert!(!is_full_validator_set_covered::<E>(
-            Slot::new(1),
-            Slot::new(31)
-        ));
+        assert!(!is_full_validator_set_covered::<E>(Slot::new(1), Slot::new(31)).unwrap());
     }
 
     #[test]
     fn test_estimate_committee_weight_same_epoch() {
         let total = 32_000_000_000u64; // 32B gwei
         // 1 slot out of 32 => total/32 = 1B
-        let w = estimate_committee_weight_between_slots::<E>(total, Slot::new(0), Slot::new(0));
+        let w = estimate_committee_weight_between_slots::<E>(total, Slot::new(0), Slot::new(0))
+            .unwrap();
         assert_eq!(w, 1_000_000_000);
 
         // Full epoch => total
-        let w = estimate_committee_weight_between_slots::<E>(total, Slot::new(0), Slot::new(31));
+        let w = estimate_committee_weight_between_slots::<E>(total, Slot::new(0), Slot::new(31))
+            .unwrap();
         assert_eq!(w, total);
     }
 
@@ -1655,7 +1698,8 @@ mod tests {
             32_000_000_000,
             Slot::new(10),
             Slot::new(5),
-        );
+        )
+        .unwrap();
         assert_eq!(w, 0);
     }
 
@@ -1663,17 +1707,23 @@ mod tests {
     fn test_adjustment_factor() {
         // Ceiling division: ceil(1000/1000) * 1005 = 1 * 1005 = 1005
         assert_eq!(
-            adjust_committee_weight_estimate_to_ensure_safety(1000),
+            adjust_committee_weight_estimate_to_ensure_safety(1000).unwrap(),
             1005
         );
         // Ceiling division: ceil(999/1000) * 1005 = 1 * 1005 = 1005 (NOT 0)
-        assert_eq!(adjust_committee_weight_estimate_to_ensure_safety(999), 1005);
+        assert_eq!(
+            adjust_committee_weight_estimate_to_ensure_safety(999).unwrap(),
+            1005
+        );
         // Ceiling division: ceil(1500/1000) * 1005 = 2 * 1005 = 2010
         assert_eq!(
-            adjust_committee_weight_estimate_to_ensure_safety(1500),
+            adjust_committee_weight_estimate_to_ensure_safety(1500).unwrap(),
             2010
         );
         // Edge case: 0 -> ceil(0/1000) = 0
-        assert_eq!(adjust_committee_weight_estimate_to_ensure_safety(0), 0);
+        assert_eq!(
+            adjust_committee_weight_estimate_to_ensure_safety(0).unwrap(),
+            0
+        );
     }
 }
