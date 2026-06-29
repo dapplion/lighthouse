@@ -149,6 +149,7 @@ fn build_chain(num_validators: usize) -> BenchData {
     let mut fcr = FastConfirmationRule::new(finalized_checkpoint, 25, 40);
     fcr.previous_slot_head = head_root;
     fcr.current_slot_head = head_root;
+    fcr.test_set_head_balance_source(balance_source.clone());
     fcr.current_balance_source = balance_source.clone();
     fcr.previous_balance_source = balance_source.clone();
     fcr.current_epoch_observed_justified_checkpoint = justified_checkpoint;

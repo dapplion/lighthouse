@@ -243,6 +243,11 @@ impl FastConfirmationRule {
         self.head_assignments.test_set_from(assignments);
     }
 
+    /// Directly set head balances for synthetic-data benchmarks; not used in production.
+    pub fn test_set_head_balance_source(&mut self, balance_source: BalanceSourceData) {
+        self.head_balance_source = balance_source;
+    }
+
     /// Rebuild the head / current / previous balance sources from `state`.
     ///
     /// Each source keeps its own cache key and is rebuilt only when stale (the previous
