@@ -289,12 +289,15 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let fork_choice_view = fork_choice.cached_fork_choice_view();
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
         let fcr = if fast_confirmation.is_enabled() {
-            Some(Mutex::new(FastConfirmationRule::new(
-                fork_choice_view.finalized_checkpoint,
-                &snapshot.beacon_state,
-                spec.confirmation_byzantine_threshold,
-                spec.proposer_score_boost,
-            )))
+            Some(Mutex::new(
+                FastConfirmationRule::new(
+                    fork_choice_view.finalized_checkpoint,
+                    &snapshot.beacon_state,
+                    spec.confirmation_byzantine_threshold,
+                    spec.proposer_score_boost,
+                )
+                .expect("FCR initialization from head state"),
+            ))
         } else {
             None
         };
@@ -387,7 +390,8 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 &self.cached_head.read().snapshot.beacon_state,
                 spec.confirmation_byzantine_threshold,
                 spec.proposer_score_boost,
-            );
+            )
+            .expect("FCR initialization from restored head state");
         }
 
         Ok(())
@@ -781,11 +785,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     // provide current-epoch committee assignments; FCR skips those ticks. These
                     // are expected transients (never seen in steady state), so log them at debug
                     // and don't count them as FCR errors.
-                    if matches!(
-                        e,
-                        fast_confirmation::Error::StaleStateForAssignments { .. }
-                            | fast_confirmation::Error::CommitteeCache(_)
-                    ) {
+                    if matches!(e, fast_confirmation::Error::CommitteeCache(_)) {
                         debug!(error = ?e, "FCR: head state not ready, skipping tick");
                     } else {
                         error!(error = ?e, "Fast Confirmation Rule error, continuing without FCR");

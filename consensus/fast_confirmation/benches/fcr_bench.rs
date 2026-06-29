@@ -144,11 +144,21 @@ fn build_chain(num_validators: usize) -> BenchData {
         slashed: vec![false; num_validators],
     };
 
-    // Build FCR state. `new` needs a state to seed balances; the bench overwrites them below, so an
-    // empty genesis state suffices.
+    // Build FCR state. `new` builds head assignments/balances from the state; the bench overwrites
+    // balances below, so a committee-cache-ready empty state suffices.
     let unrealized_justified_checkpoint = justified_checkpoint;
-    let empty_state = BeaconState::<E>::new(0, Default::default(), &spec);
-    let mut fcr = FastConfirmationRule::new(finalized_checkpoint, &empty_state, 25, 40);
+    let mut seed_state = BeaconState::<E>::new(0, Default::default(), &spec);
+    for relative_epoch in [
+        RelativeEpoch::Previous,
+        RelativeEpoch::Current,
+        RelativeEpoch::Next,
+    ] {
+        seed_state
+            .build_committee_cache(relative_epoch, &spec)
+            .expect("committee cache");
+    }
+    let mut fcr = FastConfirmationRule::new(finalized_checkpoint, &seed_state, 25, 40)
+        .expect("fcr initialization");
     fcr.previous_slot_head = head_root;
     fcr.current_slot_head = head_root;
     fcr.test_set_head_balance_source(balance_source.clone());
@@ -156,19 +166,6 @@ fn build_chain(num_validators: usize) -> BenchData {
         CheckpointAndBalance::new(justified_checkpoint, balance_source.clone());
     fcr.previous_epoch_observed_justified =
         CheckpointAndBalance::new(justified_checkpoint, balance_source.clone());
-
-    // Synthetic committee slot assignments: spread validators across the epoch.
-    // Canonical 3-column layout: column 0 (previous epoch) is left UNSET because
-    // the bench scenario runs entirely within epoch 0; columns 1 and 2 (current
-    // and next) hold the validator's slot.
-    let spe = E::slots_per_epoch() as usize;
-    let mut assignments = vec![fast_confirmation::UNSET_SLOT; num_validators * 3];
-    for val_idx in 0..num_validators {
-        let slot = Slot::new((val_idx % spe) as u64);
-        assignments[val_idx * 3 + 1] = slot;
-        assignments[val_idx * 3 + 2] = slot;
-    }
-    fcr.test_set_head_slot_assignments(assignments);
 
     BenchData {
         proto_array,

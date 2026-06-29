@@ -77,13 +77,6 @@ pub enum Error {
     BlockEpochNone(Hash256),
     CommitteeCache(String),
     UnsetSlotAssignment(usize),
-    /// The state's epoch window does not cover `current_slot`'s epoch.
-    /// This means the state is too stale to provide committee assignments for the
-    /// slots FCR needs to query.
-    StaleStateForAssignments {
-        current_slot_epoch: Epoch,
-        state_epoch: Epoch,
-    },
     /// A computed index was out of bounds. Indicates a broken internal invariant, not bad input.
     IndexOutOfBounds(usize),
     ArithError(ArithError),
@@ -157,17 +150,18 @@ impl FastConfirmationRule {
     /// Maximum valid value for `byzantine_threshold` (25%).
     const MAX_BYZANTINE_THRESHOLD: u64 = 25;
 
-    /// Initialize FCR from the finalized checkpoint and head `state`, building all three balance
-    /// sources up front. Head is anchored to `finalized_checkpoint` as a placeholder and re-anchored
-    /// to its dependent root on the first tick. `byzantine_threshold` is clamped to [0, 25].
+    /// Initialize FCR from the finalized checkpoint and head `state`, building the balance sources
+    /// and committee assignments up front. The head-derived caches are anchored to
+    /// `finalized_checkpoint.root` as a placeholder and re-anchored to the head's dependent root on
+    /// the first tick. `byzantine_threshold` is clamped to [0, 25].
     pub fn new<E: EthSpec>(
         finalized_checkpoint: Checkpoint,
         state: &BeaconState<E>,
         byzantine_threshold: u64,
         proposer_score_boost: u64,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         let byzantine_threshold = byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD);
-        Self {
+        Ok(Self {
             confirmed_root: finalized_checkpoint.root,
             previous_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
@@ -190,7 +184,7 @@ impl FastConfirmationRule {
             current_slot_head: finalized_checkpoint.root,
             byzantine_threshold,
             proposer_score_boost,
-            head_assignments: SlotAssignments::new(),
+            head_assignments: SlotAssignments::new(state, finalized_checkpoint.root)?,
             head_balance_source: BalanceSourceData::for_epoch(
                 state,
                 state.current_epoch(),
@@ -198,7 +192,7 @@ impl FastConfirmationRule {
             ),
             last_update_slot: None,
             spec_test_mode: false,
-        }
+        })
     }
 
     /// Enable spec test mode: `on_fast_confirmation` still tracks variables but
@@ -206,15 +200,6 @@ impl FastConfirmationRule {
     /// when the test needs the confirmation result.
     pub fn set_spec_test_mode(&mut self, enabled: bool) {
         self.spec_test_mode = enabled;
-    }
-
-    /// Directly set committee slot assignments. Intended for synthetic-data benchmarks
-    /// that lack a real `BeaconState`; not used in production.
-    ///
-    /// `assignments` must be in the canonical 3-column layout
-    /// (`validator_count * 3`). Use `UNSET_SLOT` for columns with no assignment.
-    pub fn test_set_head_slot_assignments(&mut self, assignments: Vec<Slot>) {
-        self.head_assignments.test_set_from(assignments);
     }
 
     /// Directly set head balances for synthetic-data benchmarks; not used in production.
@@ -295,17 +280,19 @@ impl FastConfirmationRule {
             self.previous_slot_head = self.current_slot_head;
             self.current_slot_head = head_root;
 
-            // The head-derived caches (committee assignments + head balance source) are keyed on the
-            // dependent root; rebuild both from scratch when a reorg past the previous-epoch boundary
-            // (or a new epoch) changes it.
+            // The head-derived caches (committee assignments + head balance source) are each keyed on
+            // the head's dependent root; rebuild each from scratch, independently, when its own
+            // dependent root is stale (a reorg past the previous-epoch boundary, or a new epoch).
             let current_epoch = current_slot.epoch(E::slots_per_epoch());
             let head_dependent_root = dependent_root::<E>(state, current_epoch)?;
+
+            if self.head_assignments.dependent_root() != head_dependent_root {
+                let _span = debug_span!("fcr_rebuild_assignments").entered();
+                self.head_assignments = SlotAssignments::new::<E>(state, head_dependent_root)?;
+            }
+
             if self.head_balance_source.dependent_root != head_dependent_root {
-                // Two distinct O(V) builds — span each so the cost is individually attributable.
-                self.head_assignments = {
-                    let _span = debug_span!("fcr_rebuild_assignments").entered();
-                    SlotAssignments::for_state::<E>(state, current_slot)?
-                };
+                let _span = debug_span!("fcr_rebuild_head_balance").entered();
                 let head_epoch = if state.current_epoch() < current_epoch {
                     state
                         .next_epoch()
@@ -313,10 +300,8 @@ impl FastConfirmationRule {
                 } else {
                     state.current_epoch()
                 };
-                self.head_balance_source = {
-                    let _span = debug_span!("fcr_rebuild_head_balance").entered();
-                    BalanceSourceData::for_epoch(state, head_epoch, head_dependent_root)
-                };
+                self.head_balance_source =
+                    BalanceSourceData::for_epoch(state, head_epoch, head_dependent_root);
             }
         }
 
