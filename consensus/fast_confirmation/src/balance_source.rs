@@ -1,6 +1,5 @@
 //! Per-checkpoint snapshot of validator balances used by the Fast Confirmation Rule.
 
-use tracing::{debug, debug_span};
 use types::{BeaconState, Checkpoint, Epoch, EthSpec};
 
 /// Snapshot of a checkpoint state's balances and committee assignments.
@@ -19,27 +18,6 @@ pub struct BalanceSourceData {
 }
 
 impl BalanceSourceData {
-    /// Assemble a `BalanceSourceData` from already-computed parts.
-    pub(crate) fn from_parts(
-        checkpoint: Checkpoint,
-        effective_balances: Vec<u64>,
-        total_active_balance: u64,
-        slashed: Vec<bool>,
-    ) -> Self {
-        debug!(
-            validators = effective_balances.len(),
-            active_balance = total_active_balance,
-            epoch = %checkpoint.epoch,
-            "FCR balance source built"
-        );
-        Self {
-            checkpoint,
-            total_active_balance,
-            effective_balances,
-            slashed,
-        }
-    }
-
     /// Build a balance source for a single `epoch`, anchored to `checkpoint`, in one pass over the
     /// validator set. Effective balance is counted for active validators regardless of slashed
     /// status (matching the spec's `get_total_active_balance`); `slashed` is recorded separately
@@ -50,8 +28,6 @@ impl BalanceSourceData {
         epoch: Epoch,
         checkpoint: Checkpoint,
     ) -> Self {
-        let _span = debug_span!("fcr_build_balance_source", epoch = %epoch).entered();
-
         let validators = state.validators();
         let mut effective_balances = Vec::with_capacity(validators.len());
         let mut slashed = Vec::with_capacity(validators.len());
@@ -68,12 +44,12 @@ impl BalanceSourceData {
             }
         }
 
-        Self::from_parts(
+        Self {
             checkpoint,
-            effective_balances,
             total_active_balance,
+            effective_balances,
             slashed,
-        )
+        }
     }
 
     pub(crate) fn balance(&self, val_idx: usize) -> u64 {
