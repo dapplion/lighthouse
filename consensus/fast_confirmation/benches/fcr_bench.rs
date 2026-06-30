@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use ethereum_hashing::hash_fixed;
 use fast_confirmation::{BalanceSourceData, CheckpointAndBalance, FastConfirmationRule};
 use fixed_bytes::FixedBytesExtended;
 use proto_array::core::{ProtoArray, VoteTracker};
@@ -81,9 +82,15 @@ const SCENARIOS: &[Scenario] = &[
     },
 ];
 
-/// Deterministic block root for a given slot (linear chain): slot `s` → `s + 1`.
+/// Deterministic, hash-like block root for a given slot.
+///
+/// Do not use `Hash256::from_low_u64_*` here: FCR's vote aggregation intentionally hashes on a
+/// root-byte prefix, and low-u64 synthetic roots put all entropy at the end of the root.
 fn block_root_at(slot: u64) -> Hash256 {
-    Hash256::from_low_u64_be(slot + 1)
+    let mut preimage = [0u8; 16];
+    preimage[..8].copy_from_slice(b"fcr-root");
+    preimage[8..].copy_from_slice(&(slot + 1).to_le_bytes());
+    Hash256::from_slice(&hash_fixed(&preimage))
 }
 
 /// Shared chain + FCR state for a given validator-set size. The FCR's per-scenario fields
