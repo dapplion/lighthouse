@@ -747,17 +747,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             let votes = fork_choice_read_lock.proto_array().votes();
             let equivocating_indices = fork_choice_read_lock.fc_store().equivocating_indices();
 
-            // FCR's spec runs once per slot at the *current* (wall-clock) slot. The
-            // state-advance timer drives `recompute_head_at_slot(next_slot = S+1)` near the
-            // end of wall-clock slot S, so the recompute's `current_slot` is one slot ahead.
-            // Feeding that to FCR rotates its tracking variables a slot early, skewing the
-            // epoch-boundary observed-justified snapshot and preventing bootstrap. Use the
-            // wall-clock slot instead.
-            let fcr_current_slot = self.slot().unwrap_or(current_slot);
-
-            // The current head's pulled-up state (spec `get_pulled_up_head_state`). FCR errors
-            // must never affect consensus, so on failure we log and skip it this tick.
-            let fcr_head_state = match self.fcr_pulled_up_head_state(head_root, fcr_current_slot) {
+            // Use `current_slot` — the slot the fork-choice head and proto_array were just computed
+            // for, with this slot's queued attestations applied — so FCR observes the same view it
+            // was handed rather than re-reading the wall clock.
+            //
+            // The current head's pulled-up state (spec `get_pulled_up_head_state`). FCR errors must
+            // never affect consensus, so on failure we log and skip it this tick.
+            let fcr_head_state = match self.fcr_pulled_up_head_state(head_root, current_slot) {
                 Ok(Some(state)) => Some(state),
                 Ok(None) => {
                     warn!("FCR: no head state cached, skipping tick");
@@ -775,7 +771,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     head_root,
                     &finalized_cp,
                     &unrealized_justified_cp,
-                    fcr_current_slot,
+                    current_slot,
                     proto_array,
                     votes,
                     equivocating_indices,
@@ -828,7 +824,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                                 SseFastConfirmation {
                                     block: fcr.confirmed_root,
                                     slot: confirmed_slot,
-                                    current_slot: fcr_current_slot,
+                                    current_slot,
                                 },
                             ));
                         }
