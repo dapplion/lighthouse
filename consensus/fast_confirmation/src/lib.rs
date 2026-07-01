@@ -644,7 +644,7 @@ impl FastConfirmationRule {
         )?;
 
         for root in &chain_roots {
-            if self.is_one_confirmed::<E>(
+            if !self.is_one_confirmed::<E>(
                 self.get_previous_balance_source(),
                 *root,
                 &attestation_scores,
@@ -653,28 +653,30 @@ impl FastConfirmationRule {
                 votes,
                 equivocating_indices,
             )? {
-                continue;
+                // `root` is not confirmed. Figure out why for debugging purposes. Duplicates code
+                // of `is_one_confirmed` to keep the original function spec identical. This block
+                // just needs to return `Some(_)` to match spec logic.
+                if is_optimistic_or_invalid(*root, proto_array)? {
+                    return Ok(Some("unconfirmed_optimistic"));
+                } else {
+                    let support = get_attestation_score(*root, &attestation_scores)?;
+                    let safety_threshold = self.compute_safety_threshold::<E>(
+                        self.get_previous_balance_source(),
+                        *root,
+                        current_slot,
+                        proto_array,
+                        votes,
+                        equivocating_indices,
+                    )?;
+                    if safety_threshold > 0 {
+                        metrics::observe(
+                            &metrics::FCR_UNCONFIRMED_SUPPORT_RATIO,
+                            support as f64 / safety_threshold as f64,
+                        );
+                    }
+                    return Ok(Some("unconfirmed_below_threshold"));
+                }
             }
-            // Not confirmed: record the reason for the FCR_REVERT_TO_FINALIZED label.
-            if is_optimistic_or_invalid(*root, proto_array)? {
-                return Ok(Some("unconfirmed_optimistic"));
-            }
-            let support = get_attestation_score(*root, &attestation_scores)?;
-            let safety_threshold = self.compute_safety_threshold::<E>(
-                self.get_previous_balance_source(),
-                *root,
-                current_slot,
-                proto_array,
-                votes,
-                equivocating_indices,
-            )?;
-            if safety_threshold > 0 {
-                metrics::observe(
-                    &metrics::FCR_UNCONFIRMED_SUPPORT_RATIO,
-                    support as f64 / safety_threshold as f64,
-                );
-            }
-            return Ok(Some("unconfirmed_below_threshold"));
         }
         Ok(None)
     }
