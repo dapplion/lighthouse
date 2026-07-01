@@ -1341,7 +1341,7 @@ fn is_full_validator_set_covered<E: EthSpec>(
 /// conservatively over-estimate committee weight; flooring would under-estimate and
 /// weaken the safety threshold.
 fn adjust_committee_weight_estimate_to_ensure_safety(estimate: u64) -> Result<u64, Error> {
-    let ceil = estimate.div_ceil(1000);
+    let ceil = estimate.safe_add(999)?.safe_div(1000)?;
     Ok(ceil.safe_mul(1000u64.safe_add(COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR)?)?)
 }
 
