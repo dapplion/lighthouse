@@ -98,7 +98,7 @@ const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
 ///
 /// Lives as an `Option<FastConfirmationRule>` on `BeaconChain`.
 /// `None` = FCR disabled.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct FastConfirmationRule {
     // === Output ===
     /// The latest confirmed block root. Fed into `safe_block_hash` for the EL.
