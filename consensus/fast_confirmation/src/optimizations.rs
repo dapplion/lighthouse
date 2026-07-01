@@ -189,14 +189,14 @@ impl<K: RootKey> RootBalanceMap<K> {
 /// ```text
 ///   segment (terminal T excluded), positions A=0, B=1, C=2 (C = tip):
 ///
-///       T ── A ── B ── C
-///                 \
-///                  X ── Y      (side branch off B)
+///       Z ── T ── [ A ── B ── C ] ── D
+///                        \
+///                         X ── Y   (X ── Y = side branch off B; D = child of tip C)
 ///
 ///   project(C) -> 2     C is on the segment
 ///   project(Y) -> 1     walk Y → X → B; B is the deepest on-segment ancestor
-///   project(D) -> 2     D (a child of tip C, off-segment) walks up to the tip C
-///   project(Z) -> None  Z below the terminal T covers nothing on the segment
+///   project(D) -> 2     D (deeper than the tip) walks up to the tip C
+///   project(Z) -> None  Z is below the terminal T; covers nothing on the segment
 /// ```
 struct ChainProjector<'a> {
     proto_array: &'a ProtoArray,
