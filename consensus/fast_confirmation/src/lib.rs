@@ -4,21 +4,16 @@
 //! observer of fork-choice state that computes a `confirmed_root` — a block guaranteed
 //! to remain canonical under standard assumptions (synchrony + <25% Byzantine).
 //!
-//! This module has **zero dependency on fork-choice internals**. It reads proto_array,
-//! votes, and checkpoints via shared references and writes only its own state.
+//! This module just reads proto_array, votes, and checkpoints via shared references and writes
+//! only its own state.
 //!
 //! ## Spec divergences (performance optimizations)
-//!
-//! The spec's `is_one_confirmed` calls `get_attestation_score` per block, each of which
-//! iterates all validators and walks ancestors — O(B × V × depth) total. This is too
-//! expensive at mainnet scale (500k+ validators).
 //!
 //! We diverge in several ways, all behaviorally equivalent:
 //!
 //! 1. **Batch score precomputation** (`precompute_chain_attestation_scores`): iterates
 //!    validators once, walks each vote to the deepest canonical chain block, then builds
-//!    a suffix-sum score array. Reduces cost from O(B × V × depth) to O(V × depth + B).
-//!    Used by `find_latest_confirmed_descendant` and `is_confirmed_chain_safe`.
+//!    a suffix-sum score array.
 //!
 //! 2. **Cached spec helpers**: `is_one_confirmed` still reads as
 //!    `support > compute_safety_threshold`, but `get_attestation_score` is backed by a
@@ -54,7 +49,7 @@ pub use slot_assignments::UNSET_SLOT;
 
 use proto_array::core::{ProtoArray, VoteTracker};
 use safe_arith::{ArithError, SafeArith};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, u64};
 use tracing::{debug, debug_span};
 use types::{BeaconState, Checkpoint, Epoch, EthSpec, Hash256, Slot};
 
@@ -65,20 +60,14 @@ pub enum Error {
     NodeHasNoBlockHash(Hash256),
     ParentRootNotFound(Hash256),
     UnableToObtainHeadState(String),
-    AncestorNotFound {
-        block: Hash256,
-        slot: Slot,
-    },
+    AncestorNotFound { block: Hash256, slot: Slot },
     UnrealizedJustificationNotFound(Hash256),
-    CheckpointBlockNotFound {
-        block: Hash256,
-        epoch: types::Epoch,
-    },
+    CheckpointBlockNotFound { block: Hash256, epoch: types::Epoch },
+    HeadCheckpointNotFound(Hash256),
     MissingPrecomputedScore(Hash256),
     BlockEpochNone(Hash256),
     CommitteeCacheUninitialized(String),
     BlockRootsOutOfBounds(String),
-    /// A computed index was out of bounds. Indicates a broken internal invariant, not bad input.
     IndexOutOfBounds(usize),
     ArithError(ArithError),
 }
@@ -89,17 +78,14 @@ impl From<ArithError> for Error {
     }
 }
 
-/// Per-mille adjustment factor for committee weight estimates that don't cover a full epoch.
 const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
 
-// ---------------------------------------------------------------------------
-// Data types
-// ---------------------------------------------------------------------------
+const NO_CHECKPOINT: Checkpoint = Checkpoint {
+    epoch: Epoch::new(u64::MAX),
+    root: Hash256::ZERO,
+};
 
-/// The Fast Confirmation Rule state machine.
-///
-/// Lives as an `Option<FastConfirmationRule>` on `BeaconChain`.
-/// `None` = FCR disabled.
+/// The Fast Confirmation Rule state
 #[derive(Debug)]
 pub struct FastConfirmationRule {
     // === Output ===
@@ -598,7 +584,8 @@ impl FastConfirmationRule {
                 confirmed_root,
                 self.current_epoch_observed_justified.checkpoint().epoch,
                 proto_array,
-            )?
+            )
+            .unwrap_or(NO_CHECKPOINT)
         {
             return Ok(Some("off_justified_chain"));
         }
@@ -850,9 +837,11 @@ impl FastConfirmationRule {
         let block_epoch = get_block_epoch::<E>(block_root, proto_array)?;
 
         if block_epoch > get_block_epoch::<E>(parent_root, proto_array)? {
+            let start_slot =
+                compute_start_slot_at_epoch::<E>(get_block_epoch::<E>(block_root, proto_array)?);
             self.compute_adversarial_weight::<E>(
                 balance_source,
-                compute_start_slot_at_epoch::<E>(block_epoch),
+                start_slot,
                 current_slot.safe_sub(1)?,
                 equivocating_indices,
             )
@@ -1025,7 +1014,10 @@ impl FastConfirmationRule {
         for ((vote_root, vote_epoch), balance) in balance_by_vote_checkpoint.iter() {
             // Spec: get_checkpoint_for_block(store, latest_messages[i].root,
             //        get_latest_message_epoch(latest_messages[i])).
-            if get_checkpoint_for_block::<E>(vote_root, vote_epoch, proto_array)? == target {
+            if get_checkpoint_for_block::<E>(vote_root, vote_epoch, proto_array)
+                .unwrap_or(NO_CHECKPOINT)
+                == target
+            {
                 score = score.safe_add(balance)?;
             }
         }
@@ -1253,34 +1245,33 @@ fn get_current_target<E: EthSpec>(
 ) -> Result<Checkpoint, Error> {
     let current_epoch = current_slot.epoch(E::slots_per_epoch());
     get_checkpoint_for_block::<E>(head_root, current_epoch, proto_array)
+        .ok_or(Error::HeadCheckpointNotFound(head_root))
 }
 
 /// Spec: `get_checkpoint_for_block`.
+/// Returns None, if `block_root` or it's checkpoint block is not known to fork-choice
 fn get_checkpoint_for_block<E: EthSpec>(
     block_root: Hash256,
     epoch: types::Epoch,
     proto_array: &ProtoArray,
-) -> Result<Checkpoint, Error> {
-    Ok(Checkpoint {
+) -> Option<Checkpoint> {
+    Some(Checkpoint {
         epoch,
         root: get_checkpoint_block_root::<E>(block_root, epoch, proto_array)?,
     })
 }
 
 /// Spec: `get_checkpoint_block`.
+/// Returns None, if `block_root` or it's checkpoint block is not known to fork-choice
 fn get_checkpoint_block_root<E: EthSpec>(
     block_root: Hash256,
     epoch: types::Epoch,
     proto_array: &ProtoArray,
-) -> Result<Hash256, Error> {
+) -> Option<Hash256> {
     proto_array
         .iter_block_roots(&block_root)
         .find(|(_, slot)| *slot <= compute_start_slot_at_epoch::<E>(epoch))
         .map(|(root, _)| root)
-        .ok_or(Error::CheckpointBlockNotFound {
-            block: block_root,
-            epoch,
-        })
 }
 
 /// Spec: `get_attestation_score`.
