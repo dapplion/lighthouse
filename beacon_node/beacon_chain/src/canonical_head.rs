@@ -304,6 +304,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 FastConfirmationRule::new(
                     fork_choice_view.finalized_checkpoint,
                     &snapshot.beacon_state,
+                    spec,
                     spec.confirmation_byzantine_threshold,
                     spec.proposer_score_boost,
                 )
@@ -399,6 +400,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             *fcr_mutex.lock() = FastConfirmationRule::new(
                 fork_choice_view.finalized_checkpoint,
                 &self.cached_head.read().snapshot.beacon_state,
+                spec,
                 spec.confirmation_byzantine_threshold,
                 spec.proposer_score_boost,
             )
@@ -1030,6 +1032,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             votes,
             equivocating_indices,
             &state,
+            &store.spec,
         )?;
 
         let confirmed_node = fork_choice

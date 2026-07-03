@@ -51,7 +51,7 @@ use proto_array::core::{ProtoArray, VoteTracker};
 use safe_arith::{ArithError, SafeArith};
 use std::collections::BTreeSet;
 use tracing::{debug, debug_span};
-use types::{BeaconState, Checkpoint, Epoch, EthSpec, Hash256, Slot};
+use types::{BeaconState, ChainSpec, Checkpoint, Epoch, EthSpec, Hash256, Slot};
 
 #[derive(Debug, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -104,7 +104,7 @@ pub struct FastConfirmationRule {
     proposer_score_boost: u64,
 
     // === Committee data from head state ===
-    /// Per-validator committee slot assignments across the last 3 epochs.
+    /// Per-validator committee slot assignments across the FCR support window.
     /// Used by `get_block_support_between_slots` and `compute_adversarial_weight`.
     head_assignments: SlotAssignments,
 
@@ -138,6 +138,7 @@ impl FastConfirmationRule {
     pub fn new<E: EthSpec>(
         finalized_checkpoint: Checkpoint,
         state: &BeaconState<E>,
+        spec: &ChainSpec,
         byzantine_threshold: u64,
         proposer_score_boost: u64,
     ) -> Result<Self, Error> {
@@ -157,7 +158,7 @@ impl FastConfirmationRule {
             current_slot_head: finalized_checkpoint.root,
             byzantine_threshold,
             proposer_score_boost,
-            head_assignments: SlotAssignments::new(state)?,
+            head_assignments: SlotAssignments::new(state, spec)?,
             head_balance_source: BalanceSourceData::for_epoch(state, state.current_epoch())?,
             last_update_slot: None,
             spec_test_mode: false,
@@ -192,6 +193,7 @@ impl FastConfirmationRule {
         votes: &[VoteTracker],
         equivocating_indices: &BTreeSet<u64>,
         state: &BeaconState<E>,
+        spec: &ChainSpec,
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_on_fast_confirmation", slot = %current_slot).entered();
 
@@ -200,6 +202,7 @@ impl FastConfirmationRule {
             unrealized_justified_checkpoint,
             current_slot,
             state,
+            spec,
         )?;
 
         if !self.spec_test_mode {
@@ -241,6 +244,7 @@ impl FastConfirmationRule {
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
         state: &BeaconState<E>,
+        spec: &ChainSpec,
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
@@ -254,7 +258,7 @@ impl FastConfirmationRule {
 
             if self.head_assignments.dependent_root() != head_dependent_root {
                 let _span = debug_span!("fcr_rebuild_assignments").entered();
-                self.head_assignments = SlotAssignments::new::<E>(state)?;
+                self.head_assignments = SlotAssignments::new::<E>(state, spec)?;
             }
 
             if self.head_balance_source.dependent_root != head_dependent_root {
