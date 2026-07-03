@@ -209,7 +209,9 @@ async fn state_advance_timer<T: BeaconChainTypes>(
                 }
 
                 // Re-compute the head, dequeuing attestations for the current slot early.
-                beacon_chain.recompute_head_at_slot(next_slot).await;
+                beacon_chain
+                    .recompute_head_at_slot_without_fcr(next_slot)
+                    .await;
 
                 // Prepare proposers so that the node can send payload attributes in the case where
                 // it decides to abandon a proposer boost re-org.

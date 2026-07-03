@@ -245,22 +245,17 @@ impl FastConfirmationRule {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
 
-        // Rebuild the head-derived caches when the head changes (including within a slot, e.g. a
-        // late block or reorg). Each cache is keyed on the head's dependent root; rebuild it from
-        // scratch, independently, when its own dependent root is stale (a reorg past the
-        // previous-epoch boundary, or a new epoch).
-        if self.current_slot_head != head_root {
-            let head_dependent_root = dependent_root::<E>(state, current_epoch)?;
+        // Rebuild the head-derived caches when their own dependent root is stale.
+        let head_dependent_root = dependent_root::<E>(state, current_epoch)?;
 
-            if self.head_assignments.dependent_root() != head_dependent_root {
-                let _span = debug_span!("fcr_rebuild_assignments").entered();
-                self.head_assignments = SlotAssignments::new::<E>(state)?;
-            }
+        if self.head_assignments.dependent_root() != head_dependent_root {
+            let _span = debug_span!("fcr_rebuild_assignments").entered();
+            self.head_assignments = SlotAssignments::new::<E>(state)?;
+        }
 
-            if self.head_balance_source.dependent_root != head_dependent_root {
-                let _span = debug_span!("fcr_rebuild_head_balance").entered();
-                self.head_balance_source = BalanceSourceData::for_epoch(state, current_epoch)?;
-            }
+        if self.head_balance_source.dependent_root != head_dependent_root {
+            let _span = debug_span!("fcr_rebuild_head_balance").entered();
+            self.head_balance_source = BalanceSourceData::for_epoch(state, current_epoch)?;
         }
 
         // Spec: update_fast_confirmation_variables must be called at most once per slot.
@@ -313,26 +308,30 @@ impl FastConfirmationRule {
 
         // Revert to finalized block if either of the following is true:
         let should_revert_to_finalized_reason =
-            if get_block_epoch::<E>(confirmed_root, proto_array)?.safe_add(1)? < current_epoch {
-                // 1) the latest confirmed block's epoch is older than the previous epoch,
-                Some("epoch_too_old")
-            } else if !is_ancestor(head_root, confirmed_root, proto_array)? {
-                // 2) the latest confirmed block does not belong to the canonical chain,
-                Some("not_ancestor")
-            } else if is_epoch_start
-                && let Some(chain_unsafe_reason) = self.is_confirmed_chain_safe::<E>(
-                    // 3) the confirmed chain starting from the current epoch observed justified
-                    //    checkpoint cannot be re-confirmed at the start of the current epoch.
-                    confirmed_root,
-                    current_slot,
-                    proto_array,
-                    votes,
-                    equivocating_indices,
-                )?
-            {
-                Some(chain_unsafe_reason)
+            if let Ok(confirmed_epoch) = get_block_epoch::<E>(confirmed_root, proto_array) {
+                if confirmed_epoch.safe_add(1)? < current_epoch {
+                    // 1) the latest confirmed block's epoch is older than the previous epoch,
+                    Some("epoch_too_old")
+                } else if !is_ancestor(head_root, confirmed_root, proto_array)? {
+                    // 2) the latest confirmed block does not belong to the canonical chain,
+                    Some("not_ancestor")
+                } else if is_epoch_start
+                    && let Some(chain_unsafe_reason) = self.is_confirmed_chain_safe::<E>(
+                        // 3) the confirmed chain starting from the current epoch observed justified
+                        //    checkpoint cannot be re-confirmed at the start of the current epoch.
+                        confirmed_root,
+                        current_slot,
+                        proto_array,
+                        votes,
+                        equivocating_indices,
+                    )?
+                {
+                    Some(chain_unsafe_reason)
+                } else {
+                    None
+                }
             } else {
-                None
+                Some("unknown")
             };
         if let Some(reason) = should_revert_to_finalized_reason {
             debug!(
