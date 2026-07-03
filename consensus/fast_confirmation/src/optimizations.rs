@@ -223,6 +223,9 @@ impl<'a> ChainProjector<'a> {
     /// The deepest canonical position `vote_root` descends from, or `None` if it covers no block
     /// on the segment.
     fn project(&self, vote_root: Hash256) -> Option<usize> {
+        if is_invalid_or_descendant(self.proto_array, vote_root) {
+            return None;
+        }
         let &start_idx = self.proto_array.indices.get(&vote_root)?;
         let mut idx = start_idx;
         loop {
@@ -279,6 +282,28 @@ pub fn precompute_chain_attestation_scores(
         scores.insert(chain[i], running);
     }
     Ok(scores)
+}
+
+pub(crate) fn is_invalid_or_descendant(proto_array: &ProtoArray, root: Hash256) -> bool {
+    let Some(&start_idx) = proto_array.indices.get(&root) else {
+        return false;
+    };
+    let mut idx = start_idx;
+    loop {
+        let Some(node) = proto_array.nodes.get(idx) else {
+            return false;
+        };
+        if node
+            .execution_status()
+            .is_ok_and(|status| status.is_invalid())
+        {
+            return true;
+        }
+        let Some(parent_idx) = node.parent() else {
+            return false;
+        };
+        idx = parent_idx;
+    }
 }
 
 /// Sum unslashed balances by LMD vote root (skipping zero and equivocating votes), so the ancestor

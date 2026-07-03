@@ -1042,7 +1042,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let confirmed_block_hash = confirmed_node
             .execution_status
             .block_hash()
-            .or(confirmed_node.execution_payload_block_hash)
+            .or(confirmed_node.execution_payload_parent_hash)
             .ok_or(FastConfirnmationError::NodeHasNoBlockHash(
                 fcr.confirmed_root,
             ))?;
