@@ -57,8 +57,23 @@ pub fn upgrade_to_v29<T: BeaconChainTypes>(
         .proto_array_v28
         .previous_proposer_boost;
 
-    // Convert to v29.
-    let mut persisted_v29 = PersistedForkChoiceV29::from(persisted_v28);
+    let PersistedForkChoiceV28 {
+        fork_choice_v28,
+        fork_choice_store,
+    } = persisted_v28;
+    let fork_choice::PersistedForkChoiceV28 {
+        proto_array_v28,
+        queued_attestations_v28: _,
+    } = fork_choice_v28;
+    let mut persisted_v29 = PersistedForkChoiceV29 {
+        fork_choice: fork_choice::PersistedForkChoiceV29 {
+            proto_array: proto_array::core::SszContainerV29::from_v28_with_slots_per_epoch(
+                proto_array_v28,
+                T::EthSpec::slots_per_epoch(),
+            ),
+        },
+        fork_choice_store,
+    };
 
     // Subtract the proposer boost from the boosted node and all its ancestors.
     //

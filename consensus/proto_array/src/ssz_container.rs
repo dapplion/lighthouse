@@ -53,6 +53,27 @@ impl SszContainerV29 {
             indices: proto_array.indices.iter().map(|(k, v)| (*k, *v)).collect(),
         }
     }
+
+    pub fn from_v28_with_slots_per_epoch(v28: SszContainerV28, slots_per_epoch: u64) -> Self {
+        Self {
+            votes: v28
+                .votes_v28
+                .into_iter()
+                .map(|vote| vote.into_v29_with_slots_per_epoch(slots_per_epoch))
+                .collect(),
+            prune_threshold: v28.prune_threshold,
+            nodes: v28
+                .nodes
+                .into_iter()
+                .map(|mut node| {
+                    node.best_child = None;
+                    node.best_descendant = None;
+                    ProtoNode::V17(node)
+                })
+                .collect(),
+            indices: v28.indices,
+        }
+    }
 }
 
 impl TryFrom<(SszContainerV29, JustifiedBalances)> for ProtoArrayForkChoice {

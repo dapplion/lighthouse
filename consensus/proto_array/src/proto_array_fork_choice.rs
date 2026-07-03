@@ -53,6 +53,30 @@ impl VoteTracker {
     }
 }
 
+impl VoteTrackerV28 {
+    pub fn into_v29_with_slots_per_epoch(self, slots_per_epoch: u64) -> VoteTracker {
+        let next_slot = if self.next_root.is_zero() {
+            Slot::new(0)
+        } else {
+            self.next_epoch.start_slot(slots_per_epoch)
+        };
+        let current_slot = if self.current_root == self.next_root {
+            next_slot
+        } else {
+            Slot::new(0)
+        };
+
+        VoteTracker {
+            current_root: self.current_root,
+            next_root: self.next_root,
+            current_slot,
+            next_slot,
+            current_payload_present: false,
+            next_payload_present: false,
+        }
+    }
+}
+
 // This impl is only used upon upgrade from pre-Gloas to Gloas with all pre-Gloas nodes.
 // The payload status is `false` for pre-Gloas nodes.
 impl From<VoteTrackerV28> for VoteTracker {
@@ -1345,6 +1369,37 @@ mod test_compute_deltas {
 
     fn test_node_slots(count: usize) -> Vec<Slot> {
         vec![Slot::new(0); count]
+    }
+
+    #[test]
+    fn v28_vote_conversion_preserves_latest_message_epoch() {
+        let root = hash_from_index(1);
+        let vote = VoteTrackerV28 {
+            current_root: root,
+            next_root: root,
+            next_epoch: Epoch::new(2),
+        };
+
+        let converted = vote.into_v29_with_slots_per_epoch(MainnetEthSpec::slots_per_epoch());
+
+        assert_eq!(converted.current_root, root);
+        assert_eq!(converted.next_root, root);
+        assert_eq!(converted.current_slot, Slot::new(64));
+        assert_eq!(converted.next_slot, Slot::new(64));
+    }
+
+    #[test]
+    fn v28_vote_conversion_only_sets_next_slot_for_pending_vote() {
+        let vote = VoteTrackerV28 {
+            current_root: hash_from_index(1),
+            next_root: hash_from_index(2),
+            next_epoch: Epoch::new(2),
+        };
+
+        let converted = vote.into_v29_with_slots_per_epoch(MainnetEthSpec::slots_per_epoch());
+
+        assert_eq!(converted.current_slot, Slot::new(0));
+        assert_eq!(converted.next_slot, Slot::new(64));
     }
 
     #[test]
