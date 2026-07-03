@@ -2,7 +2,7 @@
 
 use crate::Error;
 use safe_arith::SafeArith;
-use types::{BeaconState, EthSpec, Hash256, RelativeEpoch, Slot};
+use types::{BeaconState, EthSpec, Hash256, RelativeEpoch, Slot, compute_committee_range_in_epoch};
 
 /// Per-validator committee slot assignments across a 3-epoch window.
 ///
@@ -74,25 +74,27 @@ impl SlotAssignments {
                 .committee_cache(relative_epoch)
                 .map_err(|e| Error::CommitteeCacheUninitialized(format!("{e:?}")))?;
 
-            let shuffling = committee_cache.shuffling();
             let committees_per_slot = committee_cache.committees_per_slot() as usize;
             let epoch_start = epoch.start_slot(E::slots_per_epoch());
+            let epoch_committee_count = committee_cache.epoch_committee_count()?;
 
-            // Each position in the shuffled list maps to a committee, which maps to a slot.
-            // committee_index_in_epoch = position * total_committees / shuffling_len
-            // slot_offset = committee_index_in_epoch / committees_per_slot
-            let total_committees = committees_per_slot.safe_mul(E::slots_per_epoch() as usize)?;
-            let shuffling_len = shuffling.len();
-
-            for (position, &val_idx) in shuffling.iter().enumerate() {
-                let committee_index = position
-                    .safe_mul(total_committees)?
-                    .safe_div(shuffling_len)?;
+            for committee_index in 0..epoch_committee_count {
+                let Some(range) = compute_committee_range_in_epoch(
+                    epoch_committee_count,
+                    committee_index,
+                    committee_cache.shuffling().len(),
+                )?
+                else {
+                    continue;
+                };
                 let slot_offset = committee_index.safe_div(committees_per_slot)?;
                 let slot = epoch_start.safe_add(slot_offset as u64)?;
-                if val_idx < validator_count {
-                    let idx = val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(col)?;
-                    *new_slots.get_mut(idx).ok_or(Error::IndexOutOfBounds(idx))? = slot;
+
+                for &val_idx in &committee_cache.shuffling()[range] {
+                    if val_idx < validator_count {
+                        let idx = val_idx.safe_mul(NUM_EPOCH_COLUMNS)?.safe_add(col)?;
+                        *new_slots.get_mut(idx).ok_or(Error::IndexOutOfBounds(idx))? = slot;
+                    }
                 }
             }
         }
@@ -262,6 +264,23 @@ mod tests {
                 !sa.is_in_range(val_idx, far_slot, far_slot).unwrap(),
                 "validator {val_idx} should NOT be in range for epoch 5"
             );
+        }
+    }
+
+    #[test]
+    fn assignments_match_committee_cache_boundaries() {
+        let (state, _spec) = genesis_state(65);
+        let sa = SlotAssignments::new::<E>(&state).expect("should build");
+        let committee_cache = state
+            .committee_cache(RelativeEpoch::Current)
+            .expect("committee cache");
+
+        for val_idx in 0..state.validators().len() {
+            let duty = committee_cache
+                .get_attestation_duties(val_idx)
+                .expect("duty lookup")
+                .expect("active validator duty");
+            assert_eq!(sa.get(val_idx, 1), Some(duty.slot));
         }
     }
 }

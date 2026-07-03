@@ -1016,7 +1016,9 @@ impl FastConfirmationRule {
         for ((vote_root, vote_epoch), balance) in balance_by_vote_checkpoint.iter() {
             // Spec: get_checkpoint_for_block(store, latest_messages[i].root,
             //        get_latest_message_epoch(latest_messages[i])).
-            if get_checkpoint_for_block::<E>(vote_root, vote_epoch, proto_array) == Some(target) {
+            if !optimizations::is_invalid_or_descendant(proto_array, vote_root)
+                && get_checkpoint_for_block::<E>(vote_root, vote_epoch, proto_array) == Some(target)
+            {
                 score = score.safe_add(balance)?;
             }
         }
