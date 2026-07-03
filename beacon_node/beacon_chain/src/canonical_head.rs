@@ -609,13 +609,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// can't abort block import because an error is returned here.
     #[instrument(name = "lh_recompute_head_at_slot", skip(self), level = "info", fields(slot = %current_slot))]
     pub async fn recompute_head_at_slot(self: &Arc<Self>, current_slot: Slot) {
+        self.recompute_head_at_slot_with_fcr(current_slot, true)
+            .await;
+    }
+
+    #[instrument(name = "lh_recompute_head_at_slot_without_fcr", skip(self), level = "info", fields(slot = %current_slot))]
+    pub async fn recompute_head_at_slot_without_fcr(self: &Arc<Self>, current_slot: Slot) {
+        self.recompute_head_at_slot_with_fcr(current_slot, false)
+            .await;
+    }
+
+    async fn recompute_head_at_slot_with_fcr(self: &Arc<Self>, current_slot: Slot, run_fcr: bool) {
         metrics::inc_counter(&metrics::FORK_CHOICE_REQUESTS);
         let _timer = metrics::start_timer(&metrics::FORK_CHOICE_TIMES);
 
         let chain = self.clone();
         match self
             .spawn_blocking_handle(
-                move || chain.recompute_head_at_slot_internal(current_slot),
+                move || chain.recompute_head_at_slot_internal(current_slot, run_fcr),
                 "recompute_head_internal",
             )
             .await
@@ -664,6 +675,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     fn recompute_head_at_slot_internal(
         self: &Arc<Self>,
         current_slot: Slot,
+        run_fcr: bool,
     ) -> Result<Option<JoinHandle<Option<()>>>, Error> {
         let recompute_head_lock = self.canonical_head.recompute_head_lock.lock();
 
@@ -746,7 +758,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // Skip FCR while the head is more than `MAX_ADVANCE_DISTANCE` behind wall-clock (deep
         // sync): the state-advance timer won't have cached the head state FCR needs, so running
         // it would force an expensive load+advance under the fork-choice lock.
-        if let Some(ref fcr_mutex) = self.canonical_head.fast_confirmation
+        if run_fcr
+            && let Some(ref fcr_mutex) = self.canonical_head.fast_confirmation
             && new_head_proto_block.slot.as_u64() + MAX_ADVANCE_DISTANCE >= current_slot.as_u64()
         {
             let mut fcr = fcr_mutex.lock();
