@@ -18,8 +18,9 @@
 //! 2. **Cached spec helpers**: `is_one_confirmed` still reads as
 //!    `support > compute_safety_threshold`, but `get_attestation_score` is backed by a
 //!    precomputed chain score cache. The FFG predicates compute `compute_honest_ffg_support`
-//!    internally; their call sites are short-circuited, so the O(V) FFG sweep only runs near
-//!    epoch boundaries (and at most a couple of times) rather than every slot.
+//!    internally; their call sites short-circuit on most slots, so the O(V) sweep runs only in the
+//!    first slots after an epoch boundary (while the confirmed block still trails the previous
+//!    epoch), and at most once per `get_latest_confirmed` call (memoized), not every slot.
 //!
 //! 3. **Vote-root balance aggregation** (`optimizations::RootBalanceMap`): before ancestor
 //!    lookups, validators with the same vote root (or root+epoch) are collapsed into one

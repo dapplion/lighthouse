@@ -85,7 +85,7 @@ const SCENARIOS: &[Scenario] = &[
 fn block_root_at(slot: u64) -> Hash256 {
     let mut preimage = [0u8; 16];
     preimage[..8].copy_from_slice(b"fcr-root");
-    preimage[8..].copy_from_slice(&(slot + 1).to_le_bytes());
+    preimage[8..].copy_from_slice(&slot.to_le_bytes());
     Hash256::from_slice(&hash_fixed(&preimage))
 }
 
