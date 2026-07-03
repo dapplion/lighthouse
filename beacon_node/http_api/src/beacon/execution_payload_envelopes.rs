@@ -11,6 +11,7 @@ use beacon_chain::payload_envelope_verification::EnvelopeError;
 use beacon_chain::{
     AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes, NotifyExecutionLayer,
 };
+use beacon_processor::{Work, WorkEvent, work_reprocessing_queue::ReprocessQueueMessage};
 use bytes::Bytes;
 use eth2::types as api_types;
 use lighthouse_network::PubsubMessage;
@@ -20,7 +21,7 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
-use types::{BlockImportSource, EthSpec, SignedExecutionPayloadEnvelope};
+use types::{BlockImportSource, EthSpec, Hash256, SignedExecutionPayloadEnvelope};
 use warp::{
     Filter, Rejection,
     http::response::Builder,
@@ -47,13 +48,20 @@ pub(crate) fn post_beacon_execution_payload_envelopes_ssz<T: BeaconChainTypes>(
              task_spawner: TaskSpawner<T::EthSpec>,
              chain: Arc<BeaconChain<T>>,
              network_tx: UnboundedSender<NetworkMessage<T::EthSpec>>| {
+                let reprocess_task_spawner = task_spawner.clone();
                 task_spawner.spawn_async_with_rejection(Priority::P0, async move {
                     let envelope =
                         SignedExecutionPayloadEnvelope::<T::EthSpec>::from_ssz_bytes(&body_bytes)
                             .map_err(|e| {
                             warp_utils::reject::custom_bad_request(format!("invalid SSZ: {e:?}"))
                         })?;
-                    publish_execution_payload_envelope(envelope, chain, &network_tx).await
+                    publish_execution_payload_envelope(
+                        envelope,
+                        chain,
+                        &network_tx,
+                        &reprocess_task_spawner,
+                    )
+                    .await
                 })
             },
         )
@@ -80,8 +88,15 @@ pub(crate) fn post_beacon_execution_payload_envelopes<T: BeaconChainTypes>(
              task_spawner: TaskSpawner<T::EthSpec>,
              chain: Arc<BeaconChain<T>>,
              network_tx: UnboundedSender<NetworkMessage<T::EthSpec>>| {
+                let reprocess_task_spawner = task_spawner.clone();
                 task_spawner.spawn_async_with_rejection(Priority::P0, async move {
-                    publish_execution_payload_envelope(envelope, chain, &network_tx).await
+                    publish_execution_payload_envelope(
+                        envelope,
+                        chain,
+                        &network_tx,
+                        &reprocess_task_spawner,
+                    )
+                    .await
                 })
             },
         )
@@ -94,6 +109,7 @@ pub async fn publish_execution_payload_envelope<T: BeaconChainTypes>(
     envelope: SignedExecutionPayloadEnvelope<T::EthSpec>,
     chain: Arc<BeaconChain<T>>,
     network_tx: &UnboundedSender<NetworkMessage<T::EthSpec>>,
+    task_spawner: &TaskSpawner<T::EthSpec>,
 ) -> Result<Response, Rejection> {
     let slot = envelope.slot();
     let beacon_block_root = envelope.message.beacon_block_root;
@@ -163,9 +179,9 @@ pub async fn publish_execution_payload_envelope<T: BeaconChainTypes>(
         )
         .await;
 
-    let mut envelope_imported = match &import_result {
-        Ok(AvailabilityProcessingStatus::Imported(_, _)) => true,
-        Ok(AvailabilityProcessingStatus::MissingComponents(_, _)) => false,
+    let mut imported_block_root = match &import_result {
+        Ok(AvailabilityProcessingStatus::Imported(_, block_root)) => Some(*block_root),
+        Ok(AvailabilityProcessingStatus::MissingComponents(_, _)) => None,
         Err(e) => {
             warn!(%slot, error = ?e, "Failed to import execution payload envelope");
             return Err(warp_utils::reject::custom_server_error(format!(
@@ -211,7 +227,9 @@ pub async fn publish_execution_payload_envelope<T: BeaconChainTypes>(
             if !sampling_columns.is_empty() {
                 match Box::pin(chain.process_gossip_data_columns(sampling_columns, || Ok(()))).await
                 {
-                    Ok(AvailabilityProcessingStatus::Imported(_, _)) => envelope_imported = true,
+                    Ok(AvailabilityProcessingStatus::Imported(_, block_root)) => {
+                        imported_block_root = Some(block_root);
+                    }
                     Ok(AvailabilityProcessingStatus::MissingComponents(_, _)) => {}
                     Err(e) => {
                         error!(
@@ -225,11 +243,31 @@ pub async fn publish_execution_payload_envelope<T: BeaconChainTypes>(
         }
     }
 
-    if envelope_imported {
+    if let Some(block_root) = imported_block_root {
         chain.recompute_head_at_current_slot().await;
+        notify_payload_envelope_imported(task_spawner, block_root);
     }
 
     Ok(warp::reply().into_response())
+}
+
+fn notify_payload_envelope_imported<E: EthSpec>(
+    task_spawner: &TaskSpawner<E>,
+    block_root: Hash256,
+) {
+    if task_spawner
+        .try_send(WorkEvent {
+            drop_during_sync: false,
+            work: Work::Reprocess(ReprocessQueueMessage::PayloadEnvelopeImported { block_root }),
+        })
+        .is_err()
+    {
+        error!(
+            source = "http_api",
+            ?block_root,
+            "Failed to inform payload envelope import"
+        );
+    }
 }
 
 fn spawn_build_gloas_data_columns_task<T: BeaconChainTypes>(
