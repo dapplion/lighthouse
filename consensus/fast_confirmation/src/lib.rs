@@ -1271,10 +1271,7 @@ fn get_checkpoint_block_root<E: EthSpec>(
     epoch: types::Epoch,
     proto_array: &ProtoArray,
 ) -> Option<Hash256> {
-    proto_array
-        .iter_block_roots(&block_root)
-        .find(|(_, slot)| *slot <= compute_start_slot_at_epoch::<E>(epoch))
-        .map(|(root, _)| root)
+    proto_array.ancestor_at_slot(block_root, compute_start_slot_at_epoch::<E>(epoch))
 }
 
 /// Spec: `get_attestation_score`.
