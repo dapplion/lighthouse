@@ -833,11 +833,9 @@ impl FastConfirmationRule {
         let block_epoch = get_block_epoch::<E>(block_root, proto_array)?;
 
         if block_epoch > get_block_epoch::<E>(parent_root, proto_array)? {
-            let start_slot =
-                compute_start_slot_at_epoch::<E>(get_block_epoch::<E>(block_root, proto_array)?);
             self.compute_adversarial_weight::<E>(
                 balance_source,
-                start_slot,
+                compute_start_slot_at_epoch::<E>(block_epoch),
                 current_slot.safe_sub(1)?,
                 equivocating_indices,
             )
