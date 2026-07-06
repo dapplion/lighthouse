@@ -1848,13 +1848,6 @@ impl ProtoArray {
             .map(|(r, _)| r)
     }
 
-    /// Execution status of `root`, or `None` if `root` is unknown or its node variant carries no
-    /// execution status.
-    pub fn execution_status_of(&self, root: Hash256) -> Option<ExecutionStatus> {
-        self.get_block(root)
-            .and_then(|node| node.execution_status().ok())
-    }
-
     /// Returns `true` if `root` is equal to or a descendant of
     /// `self.finalized_checkpoint`.
     ///
