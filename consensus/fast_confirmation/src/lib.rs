@@ -279,14 +279,15 @@ impl FastConfirmationRule {
             // `current`'s snapshot (spec-equal, no O(V) re-derive); `current` is rebuilt for the new
             // checkpoint in one step so the pair stays coherent.
             if is_start_slot_at_epoch::<E>(current_slot) {
-                let new_current_cp = self.previous_epoch_greatest_unrealized_checkpoint;
-                self.previous_epoch_observed_justified =
-                    self.current_epoch_observed_justified.clone();
-                self.current_epoch_observed_justified =
-                    CheckpointAndBalance::new(new_current_cp, {
+                let new_current = CheckpointAndBalance::new(
+                    self.previous_epoch_greatest_unrealized_checkpoint,
+                    {
                         let _span = debug_span!("fcr_rebuild_current_balance").entered();
                         BalanceSourceData::for_epoch(state, current_epoch)?
-                    });
+                    },
+                );
+                self.previous_epoch_observed_justified =
+                    std::mem::replace(&mut self.current_epoch_observed_justified, new_current);
             }
 
             self.last_update_slot = Some(current_slot);
