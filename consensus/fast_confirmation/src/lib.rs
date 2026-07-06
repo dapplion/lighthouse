@@ -1247,7 +1247,7 @@ fn get_current_target<E: EthSpec>(
 }
 
 /// Spec: `get_checkpoint_for_block`.
-/// Returns None, if `block_root` or it's checkpoint block is not known to fork-choice
+/// Returns None, if `block_root` or its checkpoint block is not known to fork-choice
 fn get_checkpoint_for_block<E: EthSpec>(
     block_root: Hash256,
     epoch: types::Epoch,
@@ -1260,7 +1260,7 @@ fn get_checkpoint_for_block<E: EthSpec>(
 }
 
 /// Spec: `get_checkpoint_block`.
-/// Returns None, if `block_root` or it's checkpoint block is not known to fork-choice
+/// Returns None, if `block_root` or its checkpoint block is not known to fork-choice
 fn get_checkpoint_block_root<E: EthSpec>(
     block_root: Hash256,
     epoch: types::Epoch,
