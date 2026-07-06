@@ -1015,7 +1015,7 @@ impl FastConfirmationRule {
             // Spec: get_checkpoint_for_block(store, latest_messages[i].root,
             //        get_latest_message_epoch(latest_messages[i])).
             if get_checkpoint_for_block::<E>(vote_root, vote_epoch, proto_array) == Some(target) {
-                score = score.safe_add(balance)?;
+                score.safe_add_assign(balance)?;
             }
         }
         Ok(score)
