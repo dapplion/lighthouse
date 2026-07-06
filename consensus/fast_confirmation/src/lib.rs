@@ -1202,7 +1202,10 @@ fn get_ancestor_roots(
         roots.push(root);
     }
 
-    Ok(Vec::new())
+    // Only reached when `iter_block_roots` yields nothing, i.e. `block_root` is not in fork choice
+    // (for a known root the loop always returns once slots descend to `<= terminal_slot`). The spec
+    // raises here rather than returning an empty segment.
+    Err(Error::NodeNotFound(block_root))
 }
 
 fn unrealized_justification_of(
