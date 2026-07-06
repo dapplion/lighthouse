@@ -1159,7 +1159,8 @@ fn is_ancestor(
     let ancestor_slot = get_block_slot(ancestor_root, proto_array)?;
     Ok(proto_array
         .iter_block_roots(&block_root)
-        .any(|(root, slot)| slot <= ancestor_slot && root == ancestor_root))
+        .take_while(|(_, slot)| *slot >= ancestor_slot)
+        .any(|(root, _)| root == ancestor_root))
 }
 
 /// Spec: `get_ancestor`.
