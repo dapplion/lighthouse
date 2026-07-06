@@ -78,15 +78,18 @@ impl SlotAssignments {
             let committees_per_slot = committee_cache.committees_per_slot() as usize;
             let epoch_start = epoch.start_slot(E::slots_per_epoch());
 
-            // Each position in the shuffled list maps to a committee, which maps to a slot.
-            // committee_index_in_epoch = position * total_committees / shuffling_len
-            // slot_offset = committee_index_in_epoch / committees_per_slot
+            // Each shuffled position maps to a committee, which maps to a slot. The spec's
+            // `compute_committee` gives committee `index` the positions
+            // `[len*index/count, len*(index+1)/count)`; inverting that boundary, the committee for a
+            // position is `(position * total_committees + total_committees - 1) / shuffling_len`.
+            // slot_offset = committee_index / committees_per_slot
             let total_committees = committees_per_slot.safe_mul(E::slots_per_epoch() as usize)?;
             let shuffling_len = shuffling.len();
 
             for (position, &val_idx) in shuffling.iter().enumerate() {
                 let committee_index = position
                     .safe_mul(total_committees)?
+                    .safe_add(total_committees.safe_sub(1)?)?
                     .safe_div(shuffling_len)?;
                 let slot_offset = committee_index.safe_div(committees_per_slot)?;
                 let slot = epoch_start.safe_add(slot_offset as u64)?;
