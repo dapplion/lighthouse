@@ -106,7 +106,7 @@ pub struct FastConfirmationRule {
     // === Committee data from head state ===
     /// Per-validator committee slot assignments across the last 3 epochs.
     /// Used by `get_block_support_between_slots` and `compute_adversarial_weight`.
-    head_assignments: SlotAssignments,
+    slot_assignments: SlotAssignments,
 
     // === FFG data from the head state ===
     /// Built from the spec's `get_pulled_up_head_state`. Keyed (via `BalanceSourceData.dependent_root`)
@@ -157,7 +157,7 @@ impl FastConfirmationRule {
             current_slot_head: finalized_checkpoint.root,
             byzantine_threshold,
             proposer_score_boost,
-            head_assignments: SlotAssignments::new(state)?,
+            slot_assignments: SlotAssignments::new(state)?,
             head_balance_source: BalanceSourceData::for_epoch(state, state.current_epoch())?,
             last_update_slot: None,
             spec_test_mode: false,
@@ -252,9 +252,9 @@ impl FastConfirmationRule {
         if self.current_slot_head != head_root {
             let head_dependent_root = dependent_root::<E>(state, current_epoch)?;
 
-            if self.head_assignments.dependent_root() != head_dependent_root {
+            if self.slot_assignments.dependent_root() != head_dependent_root {
                 let _span = debug_span!("fcr_rebuild_assignments").entered();
-                self.head_assignments = SlotAssignments::new::<E>(state)?;
+                self.slot_assignments = SlotAssignments::new::<E>(state)?;
             }
 
             if self.head_balance_source.dependent_root != head_dependent_root {
@@ -689,7 +689,7 @@ impl FastConfirmationRule {
             };
             if balance > 0
                 && self
-                    .head_assignments
+                    .slot_assignments
                     .is_in_range(val_idx, start_slot, end_slot)?
                 && vote.current_root() == block_root
                 && !equivocating_indices.contains(&(val_idx as u64))
@@ -900,7 +900,7 @@ impl FastConfirmationRule {
         for &idx in equivocating_indices {
             let idx = idx as usize;
             if self
-                .head_assignments
+                .slot_assignments
                 .is_in_range(idx, start_slot, end_slot)?
             {
                 score = score.safe_add(balance_source.balance(idx))?;
