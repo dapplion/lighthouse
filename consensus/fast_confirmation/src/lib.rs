@@ -885,6 +885,10 @@ impl FastConfirmationRule {
     /// Spec: `get_equivocation_score`.
     /// Equivalent to the spec's `active_equivocating_indices`, but tests committee membership
     /// with precomputed head assignments instead of materializing all committee participants.
+    ///
+    /// Assumes `balance_source` was built for the current epoch: the spec's explicit
+    /// `is_active_validator(..., current_epoch)` check is omitted because inactive validators have
+    /// a 0 balance in that snapshot and so contribute nothing.
     fn get_equivocation_score(
         &self,
         balance_source: &BalanceSourceData,
