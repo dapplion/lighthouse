@@ -157,33 +157,47 @@ impl FastConfirmationRule {
     /// Maximum valid value for `byzantine_threshold` (25%).
     const MAX_BYZANTINE_THRESHOLD: u64 = 25;
 
-    /// Initialize FCR from the finalized checkpoint and head `state`, building the balance sources
-    /// and committee assignments up front (each tagged with its own dependent root derived from the
-    /// state). `byzantine_threshold` is clamped to [0, 25].
+    /// Initialize FCR from the finalized checkpoint, its checkpoint state and the head state,
+    /// building the balance sources and committee assignments up front (each tagged with its own
+    /// dependent root derived from the state). The spec seeds both observed-justified checkpoints
+    /// with the finalized checkpoint, so both balance sources come from `checkpoint_state`
+    /// (spec: `store.checkpoint_states[finalized_checkpoint]`); the head-derived caches come from
+    /// `head_state`. `byzantine_threshold` is clamped to [0, 25].
     pub fn new<E: EthSpec>(
         finalized_checkpoint: Checkpoint,
-        state: &BeaconState<E>,
+        checkpoint_state: &BeaconState<E>,
+        head_state: &BeaconState<E>,
         byzantine_threshold: u64,
         proposer_score_boost: u64,
     ) -> Result<Self, Error> {
         let byzantine_threshold = byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD);
+        // Sanity: the supplied state must be the checkpoint's state, advanced to the
+        // checkpoint's epoch.
+        if checkpoint_state.current_epoch() != finalized_checkpoint.epoch {
+            return Err(Error::MissingCheckpointState(finalized_checkpoint));
+        }
+        let checkpoint_balance =
+            BalanceSourceData::for_epoch(checkpoint_state, finalized_checkpoint.epoch)?;
         Ok(Self {
             confirmed_root: finalized_checkpoint.root,
             previous_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
-                BalanceSourceData::for_epoch(state, state.previous_epoch())?,
+                checkpoint_balance.clone(),
             ),
             current_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
-                BalanceSourceData::for_epoch(state, state.current_epoch())?,
+                checkpoint_balance,
             ),
             previous_epoch_greatest_unrealized_checkpoint: finalized_checkpoint,
             previous_slot_head: finalized_checkpoint.root,
             current_slot_head: finalized_checkpoint.root,
             byzantine_threshold,
             proposer_score_boost,
-            slot_assignments: SlotAssignments::new(state)?,
-            head_balance_source: BalanceSourceData::for_epoch(state, state.current_epoch())?,
+            slot_assignments: SlotAssignments::new(head_state)?,
+            head_balance_source: BalanceSourceData::for_epoch(
+                head_state,
+                head_state.current_epoch(),
+            )?,
             last_update_slot: None,
             spec_test_mode: false,
         })
