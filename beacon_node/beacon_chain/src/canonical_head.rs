@@ -1111,6 +1111,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .as_ref()
                 .unwrap_or(&snapshot.beacon_state),
             &snapshot.beacon_state,
+            snapshot.beacon_block_root,
             spec.confirmation_byzantine_threshold,
             spec.proposer_score_boost,
         )
