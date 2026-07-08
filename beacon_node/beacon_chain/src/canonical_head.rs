@@ -50,7 +50,8 @@ use eth2::types::{
     EventKind, SseChainReorg, SseFastConfirmation, SseFinalizedCheckpoint, SseLateHead,
 };
 use fast_confirmation::{
-    Error as FastConfirnmationError, FastConfirmationRule, metrics as fcr_metrics,
+    CheckpointStateProvider, Error as FastConfirnmationError, FastConfirmationRule,
+    metrics as fcr_metrics,
 };
 use fork_choice::{
     ExecutionStatus, ForkChoiceStore, ForkChoiceView, ForkchoiceUpdateParameters, PayloadStatus,
@@ -285,6 +286,56 @@ pub struct CanonicalHead<T: BeaconChainTypes> {
     /// the fork-choice read lock is still held. The Mutex is only locked briefly during
     /// FCR computation, which is already serialized by `recompute_head_lock`.
     pub fast_confirmation: Option<Mutex<FastConfirmationRule>>,
+}
+
+/// Loads a checkpoint's state (spec `checkpoint_states[checkpoint]`), advanced to its epoch's first
+/// slot, so FCR can derive the observed-justified balance source from the real state. Called once
+/// per epoch-boundary rotation.
+struct CheckpointStateLoader<'a, T: BeaconChainTypes> {
+    store: &'a BeaconStore<T>,
+    fork_choice: &'a BeaconForkChoice<T>,
+}
+
+impl<T: BeaconChainTypes> CheckpointStateProvider<T::EthSpec> for CheckpointStateLoader<'_, T> {
+    fn checkpoint_state(
+        &self,
+        checkpoint: Checkpoint,
+    ) -> Result<BeaconState<T::EthSpec>, FastConfirnmationError> {
+        let block = self
+            .fork_choice
+            .get_block(&checkpoint.root)
+            .ok_or_else(|| {
+                FastConfirnmationError::CheckpointStateLoad(format!(
+                    "checkpoint block {:?} not in fork choice",
+                    checkpoint.root
+                ))
+            })?;
+        let target_slot = checkpoint.epoch.start_slot(T::EthSpec::slots_per_epoch());
+        let (state_root, mut state) = self
+            .store
+            .get_advanced_hot_state(checkpoint.root, target_slot, block.state_root)
+            .map_err(|e| {
+                FastConfirnmationError::CheckpointStateLoad(format!(
+                    "load checkpoint state for {:?}: {e:?}",
+                    checkpoint.root
+                ))
+            })?
+            .ok_or_else(|| {
+                FastConfirnmationError::CheckpointStateLoad(format!(
+                    "checkpoint state for {:?} unavailable",
+                    checkpoint.root
+                ))
+            })?;
+        if state.slot() < target_slot {
+            complete_state_advance(&mut state, Some(state_root), target_slot, &self.store.spec)
+                .map_err(|e| {
+                    FastConfirnmationError::CheckpointStateLoad(format!(
+                        "advance checkpoint state to {target_slot}: {e:?}"
+                    ))
+                })?;
+        }
+        Ok(state)
+    }
 }
 
 impl<T: BeaconChainTypes> CanonicalHead<T> {
@@ -1020,6 +1071,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             ))
         })?;
 
+        let checkpoint_states = CheckpointStateLoader::<T> { store, fork_choice };
         let old_update_slot = fcr.last_update_slot();
         fcr.on_fast_confirmation::<T::EthSpec>(
             head_root,
@@ -1030,6 +1082,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             votes,
             equivocating_indices,
             &state,
+            &checkpoint_states,
         )?;
 
         let confirmed_node = fork_choice

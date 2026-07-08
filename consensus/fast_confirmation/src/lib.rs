@@ -9,11 +9,12 @@
 //!
 //! ## Spec divergences (performance optimizations)
 //!
-//! We diverge in several ways, all behaviorally equivalent:
+//! Each item below computes the *same* quantity as the spec by a cheaper route; none change the
+//! result:
 //!
 //! 1. **Batch score precomputation** (`precompute_chain_attestation_scores`): iterates
 //!    validators once, walks each vote to the deepest canonical chain block, then builds
-//!    a suffix-sum score array.
+//!    a suffix-sum score array. Same per-block `get_attestation_score`, one pass instead of B.
 //!
 //! 2. **Cached spec helpers**: `is_one_confirmed` still reads as
 //!    `support > compute_safety_threshold`, but `get_attestation_score` is backed by a
@@ -25,13 +26,12 @@
 //!    lookups, validators with the same vote root (or root+epoch) are collapsed into one
 //!    balance. Real mainnet votes are scattered by validator index, so caching only the previous
 //!    root thrashes; aggregation turns ~1M per-validator ancestor/checkpoint lookups into one
-//!    lookup per distinct vote. This is a readability deviation from the spec loop, but is kept
-//!    because the 1M-validator `get_latest_confirmed` benches improve by ~28-82%.
+//!    lookup per distinct vote. Same sum (addition is associative), kept because the 1M-validator
+//!    `get_latest_confirmed` benches improve by ~28-82%.
 //!
-//! 4. **Snapshot balance sources** (`BalanceSourceData`): the current/previous observed-justified
-//!    sources are rebuilt only at the epoch-boundary rotation (bundled with their checkpoint in
-//!    `CheckpointAndBalance`), and the head source only when its dependent root changes — instead
-//!    of re-scanning the validator set every slot.
+//! Exact reshapes, not approximations. Balance sources use the spec's own states: observed-justified
+//! from their checkpoint states via `CheckpointStateProvider` (spec `checkpoint_states[checkpoint]`),
+//! the head source from the pulled-up head state (spec `get_pulled_up_head_state`).
 //!
 //! The visible algorithm deliberately keeps the spec function names and control-flow shape;
 //! the caches are implementation details behind those helpers.
@@ -60,15 +60,23 @@ pub enum Error {
     NodeHasNoBlockHash(Hash256),
     ParentRootNotFound(Hash256),
     UnableToObtainHeadState(String),
-    AncestorNotFound { block: Hash256, slot: Slot },
+    AncestorNotFound {
+        block: Hash256,
+        slot: Slot,
+    },
     UnrealizedJustificationNotFound(Hash256),
-    CheckpointBlockNotFound { block: Hash256, epoch: types::Epoch },
+    CheckpointBlockNotFound {
+        block: Hash256,
+        epoch: types::Epoch,
+    },
     HeadCheckpointNotFound(Hash256),
     MissingPrecomputedScore(Hash256),
     BlockEpochNone(Hash256),
     CommitteeCacheUninitialized(String),
     BlockRootsOutOfBounds(String),
     IndexOutOfBounds(usize),
+    CheckpointStateLoad(String),
+    CheckpointStateEpochMismatch { state_epoch: Epoch, checkpoint_epoch: Epoch },
     ArithError(ArithError),
 }
 
@@ -76,6 +84,13 @@ impl From<ArithError> for Error {
     fn from(e: ArithError) -> Self {
         Error::ArithError(e)
     }
+}
+
+/// Loads a checkpoint's state (spec `checkpoint_states[checkpoint]`), advanced to the first slot of
+/// `checkpoint.epoch`. Implemented by the node; called once per epoch-boundary rotation. FCR derives
+/// the balance source from the returned state.
+pub trait CheckpointStateProvider<E: EthSpec> {
+    fn checkpoint_state(&self, checkpoint: Checkpoint) -> Result<BeaconState<E>, Error>;
 }
 
 /// Rich outcome of `is_one_confirmed` to track metrics in case of `BelowThreshold`..
@@ -165,15 +180,18 @@ impl FastConfirmationRule {
         proposer_score_boost: u64,
     ) -> Result<Self, Error> {
         let byzantine_threshold = byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD);
+        // Approximate from the head state: loading the finalized checkpoint state could fail, and
+        // init failure is fatal. The next rotation installs the real checkpoint-state sources.
+        let balances = BalanceSourceData::from_state(state)?;
         Ok(Self {
             confirmed_root: finalized_checkpoint.root,
             previous_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
-                BalanceSourceData::for_epoch(state, state.previous_epoch())?,
+                balances.clone(),
             ),
             current_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
-                BalanceSourceData::for_epoch(state, state.current_epoch())?,
+                balances.clone(),
             ),
             previous_epoch_greatest_unrealized_checkpoint: finalized_checkpoint,
             previous_slot_head: finalized_checkpoint.root,
@@ -181,7 +199,7 @@ impl FastConfirmationRule {
             byzantine_threshold,
             proposer_score_boost,
             slot_assignments: SlotAssignments::new(state)?,
-            head_balance_source: BalanceSourceData::for_epoch(state, state.current_epoch())?,
+            head_balance_source: balances,
             last_update_slot: None,
             spec_test_mode: false,
         })
@@ -215,6 +233,7 @@ impl FastConfirmationRule {
         votes: &[VoteTracker],
         equivocating_indices: &BTreeSet<u64>,
         state: &BeaconState<E>,
+        checkpoint_states: &dyn CheckpointStateProvider<E>,
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_on_fast_confirmation", slot = %current_slot).entered();
 
@@ -223,6 +242,7 @@ impl FastConfirmationRule {
             unrealized_justified_checkpoint,
             current_slot,
             state,
+            checkpoint_states,
         )?;
 
         if !self.spec_test_mode {
@@ -264,6 +284,7 @@ impl FastConfirmationRule {
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
         state: &BeaconState<E>,
+        checkpoint_states: &dyn CheckpointStateProvider<E>,
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
@@ -281,7 +302,7 @@ impl FastConfirmationRule {
 
         if self.head_balance_source.dependent_root != head_dependent_root {
             let _span = debug_span!("fcr_rebuild_head_balance").entered();
-            self.head_balance_source = BalanceSourceData::for_epoch(state, current_epoch)?;
+            self.head_balance_source = BalanceSourceData::from_state(state)?;
         }
 
         // Spec: update_fast_confirmation_variables must be called at most once per slot.
@@ -296,17 +317,31 @@ impl FastConfirmationRule {
                     *unrealized_justified_checkpoint;
             }
 
-            // At first slot of epoch: rotate the (checkpoint, balances) pairs. `previous` takes
-            // `current`'s snapshot (spec-equal, no O(V) re-derive); `current` is rebuilt for the new
-            // checkpoint in one step so the pair stays coherent.
+            // First slot of epoch: rotate `previous <- current`, `current <- new checkpoint`
+            // (spec `get_current_balance_source`). A stalled checkpoint keeps the same state, so
+            // `current` stays put and `previous` just copies it; otherwise reload and swap.
             if is_start_slot_at_epoch::<E>(current_slot) {
                 let new_current_cp = self.previous_epoch_greatest_unrealized_checkpoint;
-                let new_current = CheckpointAndBalance::new(new_current_cp, {
+                if new_current_cp == self.current_epoch_observed_justified.checkpoint() {
+                    self.previous_epoch_observed_justified =
+                        self.current_epoch_observed_justified.clone();
+                } else {
                     let _span = debug_span!("fcr_rebuild_current_balance").entered();
-                    BalanceSourceData::for_epoch(state, current_epoch)?
-                });
-                self.previous_epoch_observed_justified =
-                    std::mem::replace(&mut self.current_epoch_observed_justified, new_current);
+                    let checkpoint_state = checkpoint_states.checkpoint_state(new_current_cp)?;
+                    let state_epoch = checkpoint_state.current_epoch();
+                    if state_epoch != new_current_cp.epoch {
+                        return Err(Error::CheckpointStateEpochMismatch {
+                            state_epoch,
+                            checkpoint_epoch: new_current_cp.epoch,
+                        });
+                    }
+                    let new_current = CheckpointAndBalance::new(
+                        new_current_cp,
+                        BalanceSourceData::from_state(&checkpoint_state)?,
+                    );
+                    self.previous_epoch_observed_justified =
+                        std::mem::replace(&mut self.current_epoch_observed_justified, new_current);
+                }
             }
 
             self.last_update_slot = Some(current_slot);

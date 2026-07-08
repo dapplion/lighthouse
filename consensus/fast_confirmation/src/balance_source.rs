@@ -1,7 +1,7 @@
 //! Validator-balance snapshot used by the Fast Confirmation Rule.
 
 use crate::Error;
-use types::{BeaconState, Epoch, EthSpec, Hash256};
+use types::{BeaconState, EthSpec, Hash256};
 
 /// Snapshot of a validator set's effective balances for one epoch.
 ///
@@ -19,15 +19,11 @@ pub struct BalanceSourceData {
 }
 
 impl BalanceSourceData {
-    /// Build a balance source for a single `epoch` in one pass over the validator set, tagged with
-    /// the epoch's dependent root. Effective balance is counted for active validators regardless of
-    /// slashed status (matching the spec's `get_total_active_balance`); `slashed` is recorded
-    /// separately for the slashed-filtering used by `get_block_support_between_slots`. The total
-    /// uses a saturating add — it is a sum of effective balances and cannot realistically overflow.
-    pub(crate) fn for_epoch<E: EthSpec>(
-        state: &BeaconState<E>,
-        epoch: Epoch,
-    ) -> Result<Self, Error> {
+    /// Effective-balance snapshot at `state.current_epoch()`; the caller supplies a state at the
+    /// epoch it wants. Active validators count regardless of slashed status (spec
+    /// `get_total_active_balance`); `slashed` is kept separately for `get_block_support_between_slots`.
+    pub(crate) fn from_state<E: EthSpec>(state: &BeaconState<E>) -> Result<Self, Error> {
+        let epoch = state.current_epoch();
         let dependent_root = crate::dependent_root::<E>(state, epoch)?;
         let validators = state.validators();
         let mut effective_balances = Vec::with_capacity(validators.len());
