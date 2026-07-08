@@ -1003,7 +1003,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         // The current head's pulled-up state (spec `get_pulled_up_head_state`). FCR errors
         // must never affect consensus, so on failure we log and skip it this tick.
-        let (state_root, mut state) =
+        let (state_root, mut head_state) =
             match store.get_advanced_hot_state(head_root, current_slot, head_state_root) {
                 Ok(Some(state)) => state,
                 Ok(None) => {
@@ -1021,20 +1021,26 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // A previous-epoch head is pulled up to the current epoch boundary; a current-epoch
         // head is already pulled up, so leave it as-is.
         let current_epoch = current_slot.epoch(T::EthSpec::slots_per_epoch());
-        if state.current_epoch() < current_epoch {
+        if head_state.current_epoch() < current_epoch {
             let epoch_start = current_epoch.start_slot(T::EthSpec::slots_per_epoch());
-            complete_state_advance(&mut state, Some(state_root), epoch_start, &store.spec)
+            complete_state_advance(&mut head_state, Some(state_root), epoch_start, &store.spec)
                 .map_err(|e| {
                     FastConfirmationError::UnableToObtainHeadState(format!(
                         "Error advancing head state: {e:?}"
                     ))
                 })?;
         }
-        state.build_all_caches(&store.spec).map_err(|e| {
+        head_state.build_all_caches(&store.spec).map_err(|e| {
             FastConfirmationError::UnableToObtainHeadState(format!(
                 "Error building head caches: {e:?}"
             ))
         })?;
+
+        // Load the checkpoint state if it will be required.
+        let checkpoint_state = fcr
+            .checkpoint_state_needed::<T::EthSpec>(current_slot)
+            .map(|checkpoint| Self::load_fcr_checkpoint_state(store, checkpoint))
+            .transpose()?;
 
         let old_update_slot = fcr.last_update_slot();
         fcr.on_fast_confirmation::<T::EthSpec>(
@@ -1045,7 +1051,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             proto_array,
             votes,
             equivocating_indices,
-            &state,
+            &head_state,
+            checkpoint_state.as_ref(),
         )?;
 
         let confirmed_node = fork_choice
@@ -1069,6 +1076,40 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             new_confirmed_root: fcr.confirmed_root != old_confirmed_root,
             new_update_slot: fcr.last_update_slot() != old_update_slot,
         })
+    }
+
+    /// Load the state for `checkpoint` (spec: `store.checkpoint_states[checkpoint]`) — the
+    /// checkpoint block's post-state advanced to the first slot of `checkpoint.epoch`.
+    ///
+    /// No caches are built: FCR only iterates the validator set and reads `block_roots`
+    /// from this state.
+    fn load_fcr_checkpoint_state(
+        store: &BeaconStore<T>,
+        checkpoint: Checkpoint,
+    ) -> Result<BeaconState<T::EthSpec>, FastConfirmationError> {
+        let block = store
+            .get_blinded_block(&checkpoint.root)
+            .map_err(|e| FastConfirmationError::UnableToObtainCheckpointState(format!("{e:?}")))?
+            .ok_or(FastConfirmationError::CheckpointBlockNotFound {
+                block: checkpoint.root,
+                epoch: checkpoint.epoch,
+            })?;
+        let target_slot = checkpoint.epoch.start_slot(T::EthSpec::slots_per_epoch());
+        let (state_root, mut state) = store
+            .get_advanced_hot_state(checkpoint.root, target_slot, block.state_root())
+            .map_err(|e| FastConfirmationError::UnableToObtainCheckpointState(format!("{e:?}")))?
+            .ok_or_else(|| {
+                FastConfirmationError::UnableToObtainCheckpointState("not found".to_owned())
+            })?;
+        if state.slot() < target_slot {
+            complete_state_advance(&mut state, Some(state_root), target_slot, &store.spec)
+                .map_err(|e| {
+                    FastConfirmationError::UnableToObtainCheckpointState(format!(
+                        "Error advancing checkpoint state: {e:?}"
+                    ))
+                })?;
+        }
+        Ok(state)
     }
 
     /// Perform updates to caches and other components after the canonical head has been changed.

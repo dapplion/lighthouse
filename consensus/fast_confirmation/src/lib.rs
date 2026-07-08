@@ -60,6 +60,8 @@ pub enum Error {
     NodeHasNoBlockHash(Hash256),
     ParentRootNotFound(Hash256),
     UnableToObtainHeadState(String),
+    UnableToObtainCheckpointState(String),
+    MissingCheckpointState(Checkpoint),
     AncestorNotFound { block: Hash256, slot: Slot },
     UnrealizedJustificationNotFound(Hash256),
     CheckpointBlockNotFound { block: Hash256, epoch: types::Epoch },
@@ -202,8 +204,12 @@ impl FastConfirmationRule {
     /// Top-level entry point. Spec: `on_fast_confirmation(fcr_store)`.
     ///
     /// Called after head selection, while the fork-choice read lock is held.
-    /// All parameters are borrowed from fork choice. The `state` is used to
-    /// rebuild balance sources when observed justified checkpoints change.
+    /// All parameters are borrowed from fork choice. The `head_state` is used to
+    /// rebuild the head balance source and committee assignments; `checkpoint_state`
+    /// backs the observed-justified balance source at the epoch-boundary rotation
+    /// (spec: `store.checkpoint_states[checkpoint]`). Callers should obtain the
+    /// required checkpoint via `checkpoint_state_needed` and may pass `None` when
+    /// it returns `None`.
     #[allow(clippy::too_many_arguments)]
     pub fn on_fast_confirmation<E: EthSpec>(
         &mut self,
@@ -214,7 +220,8 @@ impl FastConfirmationRule {
         proto_array: &ProtoArray,
         votes: &[VoteTracker],
         equivocating_indices: &BTreeSet<u64>,
-        state: &BeaconState<E>,
+        head_state: &BeaconState<E>,
+        checkpoint_state: Option<&BeaconState<E>>,
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_on_fast_confirmation", slot = %current_slot).entered();
 
@@ -222,7 +229,8 @@ impl FastConfirmationRule {
             head_root,
             unrealized_justified_checkpoint,
             current_slot,
-            state,
+            head_state,
+            checkpoint_state,
         )?;
 
         if !self.spec_test_mode {
@@ -247,6 +255,25 @@ impl FastConfirmationRule {
         self.last_update_slot
     }
 
+    /// True iff `update_fast_confirmation_variables` will rotate the observed-justified
+    /// checkpoint pairs when run at `current_slot` (once per slot, at the first slot of an
+    /// epoch).
+    fn will_rotate<E: EthSpec>(&self, current_slot: Slot) -> bool {
+        self.last_update_slot.is_none_or(|s| current_slot > s)
+            && is_start_slot_at_epoch::<E>(current_slot)
+    }
+
+    /// The checkpoint whose state (spec: `store.checkpoint_states[checkpoint]`) must be
+    /// supplied to `on_fast_confirmation` at `current_slot`, or `None` if no state is
+    /// required — either no rotation happens this slot, or the rotating checkpoint is
+    /// unchanged so its existing balance snapshot is reused.
+    pub fn checkpoint_state_needed<E: EthSpec>(&self, current_slot: Slot) -> Option<Checkpoint> {
+        (self.will_rotate::<E>(current_slot)
+            && self.previous_epoch_greatest_unrealized_checkpoint
+                != self.current_epoch_observed_justified.checkpoint())
+        .then_some(self.previous_epoch_greatest_unrealized_checkpoint)
+    }
+
     /// Spec: `get_previous_balance_source`.
     fn get_previous_balance_source(&self) -> &BalanceSourceData {
         self.previous_epoch_observed_justified.balances()
@@ -263,7 +290,8 @@ impl FastConfirmationRule {
         head_root: Hash256,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
-        state: &BeaconState<E>,
+        head_state: &BeaconState<E>,
+        checkpoint_state: Option<&BeaconState<E>>,
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
@@ -272,16 +300,16 @@ impl FastConfirmationRule {
         // late block or reorg). Each cache is keyed on the head's dependent root; rebuild it from
         // scratch, independently, when its own dependent root is stale (a reorg past the
         // previous-epoch boundary, or a new epoch).
-        let head_dependent_root = dependent_root::<E>(state, current_epoch)?;
+        let head_dependent_root = dependent_root::<E>(head_state, current_epoch)?;
 
         if self.slot_assignments.dependent_root() != head_dependent_root {
             let _span = debug_span!("fcr_rebuild_assignments").entered();
-            self.slot_assignments = SlotAssignments::new::<E>(state)?;
+            self.slot_assignments = SlotAssignments::new::<E>(head_state)?;
         }
 
         if self.head_balance_source.dependent_root != head_dependent_root {
             let _span = debug_span!("fcr_rebuild_head_balance").entered();
-            self.head_balance_source = BalanceSourceData::for_epoch(state, current_epoch)?;
+            self.head_balance_source = BalanceSourceData::for_epoch(head_state, current_epoch)?;
         }
 
         // Spec: update_fast_confirmation_variables must be called at most once per slot.
@@ -297,14 +325,29 @@ impl FastConfirmationRule {
             }
 
             // At first slot of epoch: rotate the (checkpoint, balances) pairs. `previous` takes
-            // `current`'s snapshot (spec-equal, no O(V) re-derive); `current` is rebuilt for the new
-            // checkpoint in one step so the pair stays coherent.
-            if is_start_slot_at_epoch::<E>(current_slot) {
+            // `current`'s snapshot (spec-equal, no O(V) re-derive); `current` is rebuilt in one
+            // step so the pair stays coherent, with balances from the new checkpoint's state
+            // (spec: `store.checkpoint_states[checkpoint]`) evaluated at the checkpoint's epoch.
+            // The first conjunct of `will_rotate` is always true inside the once-per-slot guard.
+            if self.will_rotate::<E>(current_slot) {
                 let new_current_cp = self.previous_epoch_greatest_unrealized_checkpoint;
-                let new_current = CheckpointAndBalance::new(new_current_cp, {
-                    let _span = debug_span!("fcr_rebuild_current_balance").entered();
-                    BalanceSourceData::for_epoch(state, current_epoch)?
-                });
+                let new_current =
+                    if new_current_cp == self.current_epoch_observed_justified.checkpoint() {
+                        // Same checkpoint keys the same `checkpoint_states` entry — reuse the snapshot.
+                        self.current_epoch_observed_justified.clone()
+                    } else {
+                        let checkpoint_state = checkpoint_state
+                            .ok_or(Error::MissingCheckpointState(new_current_cp))?;
+                        // Sanity: the supplied state must be the checkpoint's state, advanced to the
+                        // checkpoint's epoch.
+                        if checkpoint_state.current_epoch() != new_current_cp.epoch {
+                            return Err(Error::MissingCheckpointState(new_current_cp));
+                        }
+                        CheckpointAndBalance::new(new_current_cp, {
+                            let _span = debug_span!("fcr_rebuild_current_balance").entered();
+                            BalanceSourceData::for_epoch(checkpoint_state, new_current_cp.epoch)?
+                        })
+                    };
                 self.previous_epoch_observed_justified =
                     std::mem::replace(&mut self.current_epoch_observed_justified, new_current);
             }
