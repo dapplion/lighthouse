@@ -45,7 +45,7 @@ mod slot_assignments;
 pub use balance_source::{BalanceSourceData, BalanceSourceKey};
 pub use optimizations::CheckpointAndBalance;
 use optimizations::{AttestationScoreCache, HonestFfgSupportCache};
-use slot_assignments::{SlotAssignments, attestation_shuffling_id};
+use slot_assignments::{SlotAssignments, WindowEpoch, attestation_shuffling_id};
 
 use proto_array::core::{ProtoArray, ProtoNode, VoteTracker};
 use safe_arith::{ArithError, SafeArith};
@@ -72,7 +72,6 @@ pub enum Error {
     BlockRootsOutOfBounds(String),
     SlashingsOutOfBounds(String),
     IndexOutOfBounds(usize),
-    InvalidSlotAssignmentEpoch { epoch: Epoch, state_epoch: Epoch },
     AttestationShufflingIdError(BeaconStateError),
     CommitteeCacheError(BeaconStateError),
     ArithError(ArithError),
@@ -202,7 +201,7 @@ impl FastConfirmationRule {
             current_slot_head: finalized_checkpoint.root,
             byzantine_threshold,
             proposer_score_boost,
-            slot_assignments: SlotAssignments::new(head_state, spec)?,
+            slot_assignments: SlotAssignments::new(head_state, spec, None)?,
             head_balance_source: BalanceSourceData::new(head_state, head_root)?,
             last_update_slot: None,
             spec_test_mode: false,
@@ -317,16 +316,17 @@ impl FastConfirmationRule {
         spec: &ChainSpec,
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_update_variables", slot = %current_slot).entered();
-        let current_epoch = current_slot.epoch(E::slots_per_epoch());
 
         // Rebuild the head-derived caches when the head changes (including within a slot, e.g. a
         // late block or reorg). Each cache is rebuilt from scratch, independently, when its own
         // key is stale.
-        let head_current_epoch_shuffling_id = attestation_shuffling_id(head_state, current_epoch)?;
+        let head_current_epoch_shuffling_id =
+            attestation_shuffling_id(head_state, WindowEpoch::Current)?;
 
         if *self.slot_assignments.key() != head_current_epoch_shuffling_id {
             let _span = debug_span!("fcr_rebuild_assignments").entered();
-            self.slot_assignments.rebuild::<E>(head_state, spec)?;
+            self.slot_assignments =
+                SlotAssignments::new(head_state, spec, Some(&self.slot_assignments))?;
         }
 
         let head_balance_key = BalanceSourceKey::compute(head_state, head_root)?;
