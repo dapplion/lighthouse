@@ -1,33 +1,30 @@
 //! Validator-balance snapshot used by the Fast Confirmation Rule.
 
 use crate::Error;
-use types::{BeaconState, Epoch, EthSpec, Hash256};
+use safe_arith::SafeArith;
+use types::{BeaconState, EthSpec, Hash256};
 
-/// Cache key identifying the validator-set view a [`BalanceSourceData`] was built from.
+/// Cache key identifying the validator-set view a `BalanceSourceData` was built from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BalanceSourceKey {
     /// No slashings have been processed in the epoch (`state.slashings[epoch % E] == 0`): the
-    /// epoch's dependent root (block at the last slot of the previous epoch) pins the effective
+    /// epoch's boundary root (block at the last slot of the previous epoch) pins the effective
     /// balances, activation set and slashed flags for the whole epoch.
     NoSlashings { epoch_boundary_root: Hash256 },
     /// At least one slashing has been processed in the epoch. Slashings flip `Validator.slashed`
-    /// mid-epoch without moving the dependent root, so the snapshot is keyed on its own block
-    /// root instead and every head change rebuilds it for the rest of the epoch (cf. the
-    /// unrealized-checkpoints fix in sigp/lighthouse#9471). A further slashing can only arrive
-    /// via a new block, so the block root also distinguishes different slashing sets.
+    /// mid-epoch without moving the epoch boundary root, so the snapshot is keyed on its own block
+    /// root instead and every head change rebuilds it for the rest of the epoch.
     SlashingsPresent { head_block_root: Hash256 },
 }
 
 impl BalanceSourceKey {
-    /// `block_root` is the root of the block the snapshot's `state` descends from (the head
-    /// root for the head source; the checkpoint root for checkpoint sources).
+    /// Create a key for a specific `block_root` and its state.
     pub(crate) fn compute<E: EthSpec>(
         state: &BeaconState<E>,
-        epoch: Epoch,
         block_root: Hash256,
     ) -> Result<Self, Error> {
         let epoch_slashings = state
-            .get_slashings(epoch)
+            .get_slashings(state.current_epoch())
             .map_err(|e| Error::SlashingsOutOfBounds(format!("slashings lookup: {e:?}")))?;
         if epoch_slashings > 0 {
             Ok(Self::SlashingsPresent {
@@ -35,7 +32,7 @@ impl BalanceSourceKey {
             })
         } else {
             Ok(Self::NoSlashings {
-                epoch_boundary_root: crate::dependent_root::<E>(state, epoch)?,
+                epoch_boundary_root: get_epoch_boundary_root::<E>(state)?,
             })
         }
     }
@@ -57,18 +54,15 @@ pub struct BalanceSourceData {
 }
 
 impl BalanceSourceData {
-    /// Build a balance source for a single `epoch` in one pass over the validator set, tagged with
-    /// its [`BalanceSourceKey`] (computed from `state`, `epoch` and `block_root`). Effective
-    /// balance is counted for active validators regardless of slashed status (matching the spec's
-    /// `get_total_active_balance`); `slashed` is recorded separately for the slashed-filtering
-    /// used by `get_block_support_between_slots`. The total uses a saturating add — it is a sum
-    /// of effective balances and cannot realistically overflow.
-    pub(crate) fn for_epoch<E: EthSpec>(
+    /// Create a balance source for `state` at its current epoch.
+    ///
+    /// The state must be pulled up to the desired epoch prior to calling this function.
+    pub(crate) fn new<E: EthSpec>(
         state: &BeaconState<E>,
-        epoch: Epoch,
         block_root: Hash256,
     ) -> Result<Self, Error> {
-        let key = BalanceSourceKey::compute(state, epoch, block_root)?;
+        let current_epoch = state.current_epoch();
+        let key = BalanceSourceKey::compute(state, block_root)?;
         let validators = state.validators();
         let mut effective_balances = Vec::with_capacity(validators.len());
         let mut slashed = Vec::with_capacity(validators.len());
@@ -76,7 +70,7 @@ impl BalanceSourceData {
 
         for validator in validators.iter() {
             slashed.push(validator.slashed);
-            if validator.is_active_at(epoch) {
+            if validator.is_active_at(current_epoch) {
                 effective_balances.push(validator.effective_balance);
                 total_active_balance =
                     total_active_balance.saturating_add(validator.effective_balance);
@@ -117,4 +111,21 @@ impl BalanceSourceData {
             self.balance(val_idx)
         }
     }
+}
+
+/// Block root at the last slot of the previous epoch.
+///
+/// Used to identify the balance source fields of the `validator` registry in the absence of
+/// slashings.
+fn get_epoch_boundary_root<E: EthSpec>(state: &BeaconState<E>) -> Result<Hash256, Error> {
+    if state.current_epoch() == 0 {
+        return Ok(Hash256::ZERO);
+    }
+    let slot = state
+        .current_epoch()
+        .start_slot(E::slots_per_epoch())
+        .safe_sub(1)?;
+    Ok(*state
+        .get_block_root(slot)
+        .map_err(|e| Error::BlockRootsOutOfBounds(format!("{e:?}")))?)
 }

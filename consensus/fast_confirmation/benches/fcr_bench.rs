@@ -263,10 +263,10 @@ fn build_chain(num_validators: usize) -> BenchData {
         .build_all_committee_caches(&spec)
         .expect("committee caches");
     let mut fcr = FastConfirmationRule::new(
+        finalized_checkpoint.root,
+        &seed_state,
         finalized_checkpoint,
         &seed_state,
-        &seed_state,
-        finalized_checkpoint.root,
         25,
         40,
     )
