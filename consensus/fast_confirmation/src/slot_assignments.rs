@@ -3,75 +3,150 @@
 
 use crate::Error;
 use safe_arith::SafeArith;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use types::{BeaconState, CommitteeCache, Epoch, EthSpec, Hash256, RelativeEpoch, Slot};
+use types::{
+    AttestationShufflingId, BeaconState, ChainSpec, CommitteeCache, Epoch, EthSpec, Hash256,
+    RelativeEpoch, Slot,
+};
 
-/// Epochs covered, oldest to newest: `[current-2, current-1, current, current+1]`.
-const WINDOW: usize = 4;
+#[derive(Debug, Clone)]
+struct SlotAssignment {
+    key: AttestationShufflingId,
+    committee_cache: Arc<CommitteeCache>,
+    /// Start slot of `key.shuffling_epoch` cached for quick access.
+    epoch_start_slot: Slot,
+    /// End slot of `key.shuffling_epoch` cached for quick access.
+    #[allow(dead_code)]
+    epoch_end_slot: Slot,
+}
 
-/// Committee assignments over the FCR epoch window. Shufflings are keyed by their dependent root,
-/// so a rebuild reuses the ones already held (notably `current-2`, which was `current-1` last
-/// epoch) instead of recomputing them.
+pub(crate) fn attestation_shuffling_id<E: EthSpec>(
+    state: &BeaconState<E>,
+    epoch: Epoch,
+) -> Result<AttestationShufflingId, Error> {
+    // Block root is only used for genesis so we use zero.
+    let block_root = Hash256::ZERO;
+
+    if epoch == state.current_epoch() {
+        AttestationShufflingId::new(block_root, state, RelativeEpoch::Current)
+            .map_err(Error::AttestationShufflingIdError)
+    } else if epoch == state.previous_epoch() {
+        AttestationShufflingId::new(block_root, state, RelativeEpoch::Previous)
+            .map_err(Error::AttestationShufflingIdError)
+    } else if epoch == state.previous_epoch().saturating_sub(1u64) {
+        let shuffling_decision_slot = epoch
+            .saturating_sub(1u64)
+            .start_slot(E::slots_per_epoch())
+            .saturating_sub(1u64);
+        let shuffling_decision_root = state
+            .get_block_root(shuffling_decision_slot)
+            .copied()
+            .unwrap_or(block_root);
+        Ok(AttestationShufflingId::from_components(
+            epoch,
+            shuffling_decision_root,
+        ))
+    } else {
+        Err(Error::InvalidSlotAssignmentEpoch {
+            epoch,
+            state_epoch: state.current_epoch(),
+        })
+    }
+}
+
+impl SlotAssignment {
+    fn new<E: EthSpec>(
+        state: &BeaconState<E>,
+        epoch: Epoch,
+        spec: &ChainSpec,
+    ) -> Result<Self, Error> {
+        let (key, committee_cache) = if epoch == state.current_epoch() {
+            let key = attestation_shuffling_id(state, epoch)?;
+            let committee_cache = state
+                .committee_cache(RelativeEpoch::Current)
+                .map_err(Error::CommitteeCacheError)?
+                .clone();
+            (key, committee_cache)
+        } else if epoch == state.previous_epoch() {
+            let key = attestation_shuffling_id(state, epoch)?;
+            let committee_cache = state
+                .committee_cache(RelativeEpoch::Previous)
+                .map_err(Error::CommitteeCacheError)?
+                .clone();
+            (key, committee_cache)
+        } else if epoch == state.previous_epoch().saturating_sub(1u64) {
+            let key = attestation_shuffling_id(state, epoch)?;
+            let committee_cache = state
+                .initialize_committee_cache(epoch, spec)
+                .map_err(Error::CommitteeCacheError)?;
+            (key, committee_cache)
+        } else {
+            return Err(Error::InvalidSlotAssignmentEpoch {
+                epoch,
+                state_epoch: state.current_epoch(),
+            });
+        };
+        let epoch_start_slot = epoch.start_slot(E::slots_per_epoch());
+        let epoch_end_slot = epoch.end_slot(E::slots_per_epoch());
+        Ok(Self {
+            key,
+            committee_cache,
+            epoch_start_slot,
+            epoch_end_slot,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SlotAssignments {
-    /// Shufflings for the readable window epochs, keyed by dependent root so a rebuild reuses them.
-    cache: HashMap<Hash256, Arc<CommitteeCache>>,
-    /// `(shuffling, epoch_start_slot)` per window epoch; `None` when the shuffling isn't yet held
-    /// (e.g. `current-2` right after a cold start).
-    window: [(Option<Arc<CommitteeCache>>, Slot); WINDOW],
-    dependent_root: Hash256,
+    /// Committee caches in epoch ascending order (current - 2, current - 1, current).
+    assignments: [SlotAssignment; 3],
 }
 
 impl SlotAssignments {
-    pub(crate) fn new<E: EthSpec>(state: &BeaconState<E>) -> Result<Self, Error> {
-        let mut assignments = Self {
-            cache: HashMap::new(),
-            window: std::array::from_fn(|_| (None, Slot::new(0))),
-            dependent_root: Hash256::ZERO,
-        };
-        assignments.rebuild(state)?;
-        Ok(assignments)
+    pub(crate) fn new<E: EthSpec>(state: &BeaconState<E>, spec: &ChainSpec) -> Result<Self, Error> {
+        let assignments = [
+            SlotAssignment::new(state, state.previous_epoch().saturating_sub(1u64), spec)?,
+            SlotAssignment::new(state, state.previous_epoch(), spec)?,
+            SlotAssignment::new(state, state.current_epoch(), spec)?,
+        ];
+        Ok(Self { assignments })
     }
 
-    /// Refresh the window for `state`'s current epoch, fetching only shufflings not already held.
-    pub(crate) fn rebuild<E: EthSpec>(&mut self, state: &BeaconState<E>) -> Result<(), Error> {
-        let spe = E::slots_per_epoch();
-        let current = state.current_epoch();
+    /// Refresh the committee caches for `state`'s epochs, building only shufflings not already held.
+    pub(crate) fn rebuild<E: EthSpec>(
+        &mut self,
+        state: &BeaconState<E>,
+        spec: &ChainSpec,
+    ) -> Result<(), Error> {
+        let get_assignment = |epoch: Epoch| {
+            let key = attestation_shuffling_id(state, epoch)?;
 
-        // The previous/current shufflings have readable dependent roots; cache them for reuse.
-        for relative in [RelativeEpoch::Previous, RelativeEpoch::Current] {
-            let root = crate::dependent_root::<E>(state, relative.into_epoch(current))?;
-            if let Entry::Vacant(entry) = self.cache.entry(root) {
-                entry.insert(committee_cache(state, relative)?);
+            // Re-use a previously cached assignment (the common case where we are rotating caches
+            // down one or two epochs).
+            for existing_assignment in &self.assignments {
+                if key == existing_assignment.key {
+                    return Ok(existing_assignment.clone());
+                }
             }
-        }
-        // The next epoch's decision root isn't readable yet, so fetch it fresh each rebuild.
-        let next = committee_cache(state, RelativeEpoch::Next)?;
 
-        let mut window: [(Option<Arc<CommitteeCache>>, Slot); WINDOW] =
-            std::array::from_fn(|_| (None, Slot::new(0)));
-        let mut live = HashSet::new();
-        for (slot, epoch) in window.iter_mut().zip([
-            current.saturating_sub(Epoch::new(2)),
-            current.saturating_sub(Epoch::new(1)),
-            current,
-        ]) {
-            let root = crate::dependent_root::<E>(state, epoch)?;
-            live.insert(root);
-            *slot = (self.cache.get(&root).cloned(), epoch.start_slot(spe));
-        }
-        window[WINDOW - 1] = (Some(next), current.safe_add(1)?.start_slot(spe));
+            // Otherwise rebuild (which is usually quick too, because we just clone a committee
+            // cache from `state`).
+            SlotAssignment::new(state, epoch, spec)
+        };
 
-        self.window = window;
-        self.dependent_root = crate::dependent_root::<E>(state, current)?;
-        self.cache.retain(|root, _| live.contains(root));
+        let new_assignments = [
+            get_assignment(state.previous_epoch().saturating_sub(1u64))?,
+            get_assignment(state.previous_epoch())?,
+            get_assignment(state.current_epoch())?,
+        ];
+
+        self.assignments = new_assignments;
         Ok(())
     }
 
-    pub(crate) fn dependent_root(&self) -> Hash256 {
-        self.dependent_root
+    pub(crate) fn key(&self) -> &AttestationShufflingId {
+        &self.assignments[2].key
     }
 
     /// True if `val_idx` attests in any window epoch at a slot within `[start, end]`.
@@ -81,26 +156,19 @@ impl SlotAssignments {
         start: Slot,
         end: Slot,
     ) -> Result<bool, Error> {
-        for (cache, epoch_start) in &self.window {
-            let Some(cache) = cache else { continue };
-            if assigned_slot(cache, *epoch_start, val_idx)?
-                .is_some_and(|slot| slot >= start && slot <= end)
+        for assignment in &self.assignments {
+            if assigned_slot(
+                &assignment.committee_cache,
+                assignment.epoch_start_slot,
+                val_idx,
+            )?
+            .is_some_and(|slot| slot >= start && slot <= end)
             {
                 return Ok(true);
             }
         }
         Ok(false)
     }
-}
-
-fn committee_cache<E: EthSpec>(
-    state: &BeaconState<E>,
-    relative: RelativeEpoch,
-) -> Result<Arc<CommitteeCache>, Error> {
-    Ok(state
-        .committee_cache(relative)
-        .map_err(|e| Error::CommitteeCacheUninitialized(format!("{e:?}")))?
-        .clone())
 }
 
 /// The committee slot `val_idx` attests in for `cache`'s epoch, or `None` if it has no duty.
@@ -167,8 +235,8 @@ mod tests {
 
     #[test]
     fn builds_from_genesis_state() {
-        let (state, _) = genesis_state(64);
-        SlotAssignments::new::<E>(&state).expect("builds from genesis state");
+        let (state, spec) = genesis_state(64);
+        SlotAssignments::new::<E>(&state, &spec).expect("builds from genesis state");
     }
 
     #[test]
@@ -177,7 +245,7 @@ mod tests {
         let spe = E::slots_per_epoch();
         let start = Slot::new(spe * 2);
         advance_state(&mut state, start, &spec);
-        let sa = SlotAssignments::new::<E>(&state).expect("build");
+        let sa = SlotAssignments::new::<E>(&state, &spec).expect("build");
 
         let end = Slot::new(spe * 2 + spe - 1);
         for val_idx in 0..state.validators().len() {
@@ -190,8 +258,8 @@ mod tests {
 
     #[test]
     fn is_in_range_returns_false_for_uncovered_epochs() {
-        let (state, _) = genesis_state(64);
-        let sa = SlotAssignments::new::<E>(&state).expect("build");
+        let (state, spec) = genesis_state(64);
+        let sa = SlotAssignments::new::<E>(&state, &spec).expect("build");
         let far = Slot::new(E::slots_per_epoch() * 5);
         for val_idx in 0..state.validators().len() {
             assert!(!sa.is_in_range(val_idx, far, far).unwrap());

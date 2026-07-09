@@ -283,6 +283,7 @@ fn build_chain_inner(
         &seed_state,
         25,
         40,
+        &spec,
     )
     .expect("fcr initialization");
     fcr.test_set_head_balance_source(balance_source.clone());
