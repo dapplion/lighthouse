@@ -16,7 +16,6 @@ struct SlotAssignment {
     /// Start slot of `key.shuffling_epoch` cached for quick access.
     epoch_start_slot: Slot,
     /// End slot of `key.shuffling_epoch` cached for quick access.
-    #[allow(dead_code)]
     epoch_end_slot: Slot,
 }
 
@@ -157,6 +156,10 @@ impl SlotAssignments {
         end: Slot,
     ) -> Result<bool, Error> {
         for assignment in &self.assignments {
+            // Skip this epoch's cache if it has no overlap with the requested range.
+            if assignment.epoch_end_slot < start || assignment.epoch_start_slot > end {
+                continue;
+            }
             if assigned_slot(
                 &assignment.committee_cache,
                 assignment.epoch_start_slot,
