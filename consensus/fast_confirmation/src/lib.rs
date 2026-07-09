@@ -46,7 +46,6 @@ pub use balance_source::{BalanceSourceData, BalanceSourceKey};
 pub use optimizations::CheckpointAndBalance;
 use optimizations::{AttestationScoreCache, HonestFfgSupportCache};
 use slot_assignments::SlotAssignments;
-pub use slot_assignments::UNSET_SLOT;
 
 use proto_array::core::{ProtoArray, ProtoNode, VoteTracker};
 use safe_arith::{ArithError, SafeArith};
@@ -318,9 +317,9 @@ impl FastConfirmationRule {
         // key is stale.
         let head_dependent_root = dependent_root::<E>(head_state, current_epoch)?;
 
-        if self.slot_assignments.dependent_root() != head_dependent_root {
+        if self.head_assignments.dependent_root() != head_dependent_root {
             let _span = debug_span!("fcr_rebuild_assignments").entered();
-            self.slot_assignments = SlotAssignments::new::<E>(head_state)?;
+            self.slot_assignments.rebuild::<E>(state)?;
         }
 
         let head_balance_key = BalanceSourceKey::compute(head_state, head_root)?;
