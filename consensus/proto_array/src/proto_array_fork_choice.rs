@@ -858,6 +858,10 @@ impl ProtoArrayForkChoice {
                 .get_mut(node_index)
                 .ok_or("unreachable index out of bounds in proto_array nodes")?;
 
+            if let ProtoNode::V29(node) = node {
+                node.payload_received = false;
+            }
+
             match node.execution_status() {
                 Ok(ExecutionStatus::Invalid(block_hash)) => {
                     if let ProtoNode::V17(node) = node {
@@ -1345,6 +1349,43 @@ mod test_compute_deltas {
 
     fn test_node_slots(count: usize) -> Vec<Slot> {
         vec![Slot::new(0); count]
+    }
+
+    #[test]
+    fn set_all_blocks_to_optimistic_clears_payload_received() {
+        let mut spec = MainnetEthSpec::default_spec();
+        spec.gloas_fork_epoch = Some(Epoch::new(0));
+        let genesis_slot = Slot::new(0);
+        let finalized_root = Hash256::from_low_u64_be(1);
+        let finalized_checkpoint = Checkpoint {
+            epoch: Epoch::new(0),
+            root: finalized_root,
+        };
+        let junk_shuffling_id =
+            AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
+
+        let mut fc = ProtoArrayForkChoice::new::<MainnetEthSpec>(
+            genesis_slot,
+            genesis_slot,
+            Hash256::zero(),
+            finalized_checkpoint,
+            finalized_checkpoint,
+            junk_shuffling_id.clone(),
+            junk_shuffling_id,
+            ExecutionStatus::irrelevant(),
+            Some(ExecutionBlockHash::zero()),
+            Some(ExecutionBlockHash::repeat_byte(1)),
+            0,
+            &spec,
+        )
+        .unwrap();
+
+        fc.on_valid_payload_envelope_received(finalized_root)
+            .unwrap();
+        assert!(fc.is_payload_received(&finalized_root));
+
+        fc.set_all_blocks_to_optimistic::<MainnetEthSpec>().unwrap();
+        assert!(!fc.is_payload_received(&finalized_root));
     }
 
     #[test]
