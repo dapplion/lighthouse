@@ -1160,6 +1160,13 @@ fn fork_choice_payload_data_availability() {
     ForkChoiceHandler::<MainnetEthSpec>::new("payload_data_availability").run();
 }
 
+/// Report-only runner for the fork choice compliance suites. Always passes; prints a summary of
+/// failures grouped by failure signature. The vectors are opt-in: `make test-fc-compliance`.
+#[test]
+fn fork_choice_compliance() {
+    ForkChoiceComplianceHandler::<MinimalEthSpec>::default().run_report();
+}
+
 #[test]
 fn optimistic_sync() {
     OptimisticSyncHandler::<MinimalEthSpec>::default().run();

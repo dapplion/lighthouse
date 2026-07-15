@@ -1,7 +1,8 @@
 use super::*;
 use crate::decode::{ssz_decode_file, ssz_decode_file_with, ssz_decode_state, yaml_decode_file};
 use ::fork_choice::{
-    AttestationFromBlock, ForkChoiceStore, PayloadVerificationStatus, ProposerHeadError,
+    AttestationFromBlock, ForkChoiceStore, PayloadStatus as FcPayloadStatus,
+    PayloadVerificationStatus, ProposerHeadError,
 };
 use beacon_chain::beacon_proposer_cache::compute_proposer_duties_from_head;
 use beacon_chain::block_verification_types::LookupBlock;
@@ -99,6 +100,16 @@ pub struct Checks {
     head_payload_status: Option<u8>,
     payload_timeliness_vote: Option<PayloadVoteCheck>,
     payload_data_availability_vote: Option<PayloadVoteCheck>,
+    // Fork choice compliance tests check the entire set of viable heads and their weights.
+    viable_for_head_roots_and_weights: Option<Vec<RootAndWeight>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootAndWeight {
+    pub root: Hash256,
+    pub weight: u64,
+    pub payload_status: Option<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -152,6 +163,10 @@ pub enum Step<
     },
     AttesterSlashing {
         attester_slashing: TAttesterSlashing,
+        // Compliance tests can assert that an attester slashing is rejected. Defaults to `true`
+        // for the tests that omit it.
+        #[serde(default = "default_true")]
+        valid: bool,
     },
     PowBlock {
         pow_block: TPowBlock,
@@ -183,15 +198,13 @@ fn default_true() -> bool {
     true
 }
 
+// Unknown fields are not denied here: the Gloas fork choice tests carry a `bls_setting` (always
+// `1`, matching our default behaviour) and the fork choice compliance tests carry generator
+// parameters (`seed`, `sm_links`, `block_parents`, `bls_setting: 2`). All are ignorable.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Meta {
     #[serde(default, rename(deserialize = "description"))]
     _description: Option<String>,
-    // Some Gloas fork choice tests carry a `bls_setting` instead of a description. We accept and
-    // ignore it: the value is always `1` (BLS required), which matches our default behaviour.
-    #[serde(default, rename(deserialize = "bls_setting"))]
-    _bls_setting: Option<u8>,
 }
 
 #[derive(Debug)]
@@ -278,16 +291,21 @@ impl<E: EthSpec> LoadCase for ForkChoiceTest<E> {
                         )
                     }
                 }
-                Step::AttesterSlashing { attester_slashing } => {
+                Step::AttesterSlashing {
+                    attester_slashing,
+                    valid,
+                } => {
                     if fork_name.electra_enabled() {
                         ssz_decode_file(&path.join(format!("{}.ssz_snappy", attester_slashing)))
                             .map(|attester_slashing| Step::AttesterSlashing {
                                 attester_slashing: AttesterSlashing::Electra(attester_slashing),
+                                valid,
                             })
                     } else {
                         ssz_decode_file(&path.join(format!("{}.ssz_snappy", attester_slashing)))
                             .map(|attester_slashing| Step::AttesterSlashing {
                                 attester_slashing: AttesterSlashing::Base(attester_slashing),
+                                valid,
                             })
                     }
                 }
@@ -415,7 +433,20 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
                 Step::Attestation { attestation, valid } => {
                     tester.process_attestation(attestation, *valid)?
                 }
-                Step::AttesterSlashing { attester_slashing } => {
+                Step::AttesterSlashing {
+                    attester_slashing,
+                    valid,
+                } => {
+                    // Lighthouse applies attester slashings to fork choice without validating
+                    // them (validation happens upstream during gossip/block processing), so it
+                    // cannot observe a rejection here. Report `valid: false` steps as failures
+                    // rather than silently importing an intentionally-invalid slashing.
+                    if !valid {
+                        return Err(Error::DidntFail(
+                            "attester slashing marked valid=false was applied without validation"
+                                .to_string(),
+                        ));
+                    }
                     tester.process_attester_slashing(attester_slashing.to_ref())
                 }
                 Step::PowBlock { pow_block } => tester.process_pow_block(pow_block),
@@ -449,6 +480,7 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
                         head_payload_status,
                         payload_timeliness_vote,
                         payload_data_availability_vote,
+                        viable_for_head_roots_and_weights,
                     } = checks.as_ref();
 
                     if let Some(expected_head) = head {
@@ -524,6 +556,10 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
 
                     if let Some(expected) = payload_data_availability_vote {
                         tester.check_payload_data_availability_vote(expected)?;
+                    }
+
+                    if let Some(expected) = viable_for_head_roots_and_weights {
+                        tester.check_viable_for_head_roots_and_weights(expected)?;
                     }
                 }
 
@@ -711,14 +747,19 @@ impl<E: EthSpec> Tester<E> {
                 || Ok(()),
             ))?
             .map(|avail: AvailabilityProcessingStatus| avail.try_into());
-        let success = data_column_success && result.as_ref().is_ok_and(|inner| inner.is_ok());
+        // Spec `on_block` is idempotent: re-importing an already-known block is a no-op success.
+        // Lighthouse surfaces this as `BlockError::DuplicateFullyImported`; the compliance tests
+        // re-feed blocks repeatedly, so treat duplicates as success.
+        let is_duplicate = matches!(
+            &result,
+            Err(beacon_chain::BlockError::DuplicateFullyImported(_))
+        );
+        let success = data_column_success
+            && (result.as_ref().is_ok_and(|inner| inner.is_ok()) || is_duplicate);
         if success != valid {
             return Err(Error::DidntFail(format!(
                 "block with root {} was valid={} whilst test expects valid={}. result: {:?}",
-                block_root,
-                result.is_ok(),
-                valid,
-                result
+                block_root, success, valid, result
             )));
         }
 
@@ -823,15 +864,20 @@ impl<E: EthSpec> Tester<E> {
                 || Ok(()),
             ))?
             .map(|avail: AvailabilityProcessingStatus| avail.try_into());
-        let success = blob_success && result.as_ref().is_ok_and(|inner| inner.is_ok());
+        // Spec `on_block` is idempotent: re-importing an already-known block is a no-op success.
+        // Lighthouse surfaces this as `BlockError::DuplicateFullyImported`; the compliance tests
+        // re-feed blocks repeatedly, so treat duplicates as success.
+        let is_duplicate = matches!(
+            &result,
+            Err(beacon_chain::BlockError::DuplicateFullyImported(_))
+        );
+        let success =
+            blob_success && (result.as_ref().is_ok_and(|inner| inner.is_ok()) || is_duplicate);
         // Only assert valid blocks import; blob-DA failure cases are expected to import now.
         if valid && !success {
             return Err(Error::DidntFail(format!(
                 "block with root {} was valid={} whilst test expects valid={}. result: {:?}",
-                block_root,
-                result.is_ok(),
-                valid,
-                result
+                block_root, success, valid, result
             )));
         }
 
@@ -1241,6 +1287,62 @@ impl<E: EthSpec> Tester<E> {
         // PayloadStatus repr: Empty=0, Full=1, Pending=2 (matches spec constants).
         let actual = head.head_payload_status() as u8;
         check_equal("head_payload_status", actual, expected_status)
+    }
+
+    pub fn check_viable_for_head_roots_and_weights(
+        &self,
+        expected: &[RootAndWeight],
+    ) -> Result<(), Error> {
+        // Apply pending vote deltas so weights reflect the latest store state.
+        let _ = self.find_head()?;
+
+        let fork_choice = self.harness.chain.canonical_head.fork_choice_read_lock();
+        let justified = fork_choice.justified_checkpoint();
+        let finalized = fork_choice.finalized_checkpoint();
+        let current_slot = fork_choice.fc_store().get_current_slot();
+        let proposer_boost_root = fork_choice.proposer_boost_root();
+        let justified_balances = fork_choice.fc_store().justified_balances().clone();
+        let actual = fork_choice
+            .proto_array()
+            .core_proto_array()
+            .filtered_block_tree_leaves_and_weights::<E>(
+                &justified.root,
+                current_slot,
+                justified,
+                finalized,
+                proposer_boost_root,
+                &justified_balances,
+                &self.spec,
+            )
+            .map_err(|e| {
+                Error::InternalError(format!(
+                    "filtered_block_tree_leaves_and_weights failed: {e:?}"
+                ))
+            })?;
+        drop(fork_choice);
+
+        let mut actual_sorted: Vec<(Hash256, u8, u64)> = actual
+            .into_iter()
+            .map(|(root, status, weight)| (root, status as u8, weight))
+            .collect();
+        actual_sorted.sort();
+        let mut expected_sorted: Vec<(Hash256, u8, u64)> = expected
+            .iter()
+            .map(|x| {
+                (
+                    x.root,
+                    x.payload_status.unwrap_or(FcPayloadStatus::Pending as u8),
+                    x.weight,
+                )
+            })
+            .collect();
+        expected_sorted.sort();
+
+        check_equal(
+            "viable_for_head_roots_and_weights",
+            actual_sorted,
+            expected_sorted,
+        )
     }
 
     pub fn check_should_override_fcu(

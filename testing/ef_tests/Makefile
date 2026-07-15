@@ -10,9 +10,19 @@ BLS_TEST = bls_tests_yaml
 BLS_OUTPUT_DIR := $(OUTPUT_DIR)/$(BLS_TEST_REPO_NAME)
 BLS_BASE_URL := https://github.com/ethereum/$(BLS_TEST_REPO_NAME)/releases/download/$(BLS_TEST_VERSION)
 
-.PHONY: all clean
+.PHONY: all clean comptests
 
 all: clean $(OUTPUT_DIR) $(BLS_OUTPUT_DIR)
+
+# Fork choice compliance tests. These are opt-in (not part of `all`) because they are large and
+# only used by the report-only `fork_choice_compliance` test. Releases of consensus-specs since
+# v1.7.0-alpha.9 include a `comptests.tar.gz` asset; `nightly` versions are not supported here.
+comptests:
+	mkdir -p $(OUTPUT_DIR)
+	curl --progress-bar --location --remote-name --show-error --retry 3 --retry-all-errors --fail \
+		https://github.com/ethereum/consensus-specs/releases/download/$(CONSENSUS_SPECS_TEST_VERSION)/comptests.tar.gz
+	tar -xzf comptests.tar.gz -C $(OUTPUT_DIR)
+	rm -f comptests.tar.gz
 
 clean:
 	rm -rf *.tar.gz $(OUTPUT_DIR) $(BLS_OUTPUT_DIR)

@@ -93,6 +93,9 @@ excluded_paths = [
     "tests/.*/.*/networking/gossip_blob_sidecar/.*",
     "tests/.*/.*/networking/gossip_data_column_sidecar/.*",
     "tests/.*/.*/networking/gossip_partial_data_column_sidecar/.*",
+    # Fork choice compliance vectors are opt-in (`make -C testing/ef_tests comptests`) and run by
+    # a report-only runner, so they are exempt from the accessed-files check.
+    "tests/.*/.*/fork_choice_compliance/.*",
 ]
 
 
