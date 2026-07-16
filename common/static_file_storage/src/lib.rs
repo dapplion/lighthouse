@@ -4,68 +4,98 @@
 //!
 //! ```text
 //! <root>/
-//!   data_{file_id:05}         # file_id = slot / SLOTS_PER_FILE
-//!   data_{file_id:05}.off     # SLOTS_PER_FILE × u64 LE offsets, 0 = no record
-//!   column.conf               # commit marker, atomic-renamed
-//!   lock                      # exclusive advisory lock held while open
+//!   data_{file_id:05}       # `LHSF` header, then raw payloads; file_id = slot / SLOTS_PER_FILE
+//!   data_{file_id:05}.idx   # SLOTS_PER_FILE entries `offset u64 | len u32 | crc32 u32`,
+//!                           # all-zero = no record; full files gain a seal footer
+//!   meta                    # dual-slot commit marker; also carries the column lock
 //! ```
 //!
-//! # File format
+//! # Commit marker
 //!
-//! Data file: `b"LHSF"`, then records appended as `length[4 LE] | payload`.
+//! `meta` holds two fixed slots. A commit writes the inactive slot
+//! (`magic | version | seq | highest_slot | data_len | crc`) and fsyncs; open
+//! picks the valid slot with the highest seq, so a torn commit self-invalidates
+//! and the previous marker wins. No renames, no directory fsyncs on the
+//! commit path.
 //!
-//! `column.conf`: `b"LHSF" | version u32 LE | highest_slot u64 LE (u64::MAX =
-//! empty) | current_data_len u64 LE`.
-//! Atomic update: write `.tmp`, fsync, rename, fsync dir.
+//! # Write contract
 //!
-//! # Put contract
-//!
-//! Durable on return. Slots arrive ascending **or** are identical-value
-//! re-puts of an already-committed slot (so migration retries after a
-//! mid-loop crash are safe). Previously-skipped slots (offset 0) cannot
-//! be filled — that would break the append-only data file. A failed write
-//! poisons the handle: further writes error until reopen; reads stay live.
+//! Writes go through [`Batch`]: strictly ascending slots, streamed to disk on
+//! `put`, durable when `commit` returns. Order per file: payloads, fsync,
+//! index entries, fsync, seal when moving past a file, then the meta commit.
+//! Re-puts of committed slots are verified against the stored crc and skipped;
+//! skipped slots can't be filled. An I/O error poisons the handle — writes
+//! rejected until reopen, reads stay live. Every read is crc-verified.
 //!
 //! # Recovery on open
 //!
-//! Data file truncated to `current_data_len`; `.off` entries beyond
-//! `highest_slot` cleared; files beyond the committed file removed. The
-//! `column.conf` rename is the commit point.
+//! Heal to the marker: truncate the top data file to `data_len`, zero index
+//! entries beyond `highest_slot`, drop the top file's seal and any files
+//! beyond it. An abandoned uncommitted batch triggers the same healing on the
+//! next batch.
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use std::{
     fmt,
     fs::{self, File, OpenOptions, TryLockError},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
 /// Slots per data file.
 pub const SLOTS_PER_FILE: u64 = 8192;
-type SlotGroup<'a> = (u64, Vec<(u64, &'a [u8])>);
 
-const OFFSET_SIZE: u64 = 8;
-const OFFSET_FILE_LEN: u64 = SLOTS_PER_FILE * OFFSET_SIZE;
-const CONFIG_FILE: &str = "column.conf";
-const CONFIG_TMP_FILE: &str = "column.conf.tmp";
+const ENTRY_LEN: u64 = 16;
+const TABLE_LEN: u64 = SLOTS_PER_FILE * ENTRY_LEN;
+const META_FILE: &str = "meta";
+const META_SLOT_LEN: usize = 64;
 const DATA_FILE_PREFIX: &str = "data_";
-const LOCK_FILE: &str = "lock";
-/// Config file identity. Format revisions bump `FORMAT_VERSION`, not this.
-const CONFIG_MAGIC: &[u8; 4] = b"LHSF";
+const IDX_SUFFIX: &str = ".idx";
+/// File identity. Format revisions bump `FORMAT_VERSION`, not this.
+const MAGIC: &[u8; 4] = b"LHSF";
 /// On-disk format version. Bump on any breaking layout change (implies a rebuild).
-const FORMAT_VERSION: u32 = 1;
-/// Empty-store sentinel for `highest_written_slot` in the per-file config.
+const FORMAT_VERSION: u32 = 2;
+/// Empty-store sentinel for `highest_slot` in the meta slots.
 const EMPTY_SLOT: u64 = u64::MAX;
-/// Header marker, written once at the start of each data file.
-const DATA_FILE_HEADER: [u8; 4] = *b"LHSF";
+/// Sanity cap per record; bounds the read-side allocation.
+const MAX_RECORD_LEN: u64 = 1 << 30;
 
-/// Last durable `column.conf` marker.
+/// Last durable commit marker.
 #[derive(Debug, Clone, Copy)]
 struct CommittedState {
     /// Highest committed slot, or `None` when empty.
     highest_slot: Option<u64>,
     /// Committed end of the file containing `highest_slot`.
     data_len: u64,
+}
+
+/// One index-table entry: where a record lives and how to verify it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Entry {
+    offset: u64,
+    len: u32,
+    crc: u32,
+}
+
+impl Entry {
+    fn serialize(&self) -> [u8; ENTRY_LEN as usize] {
+        let mut b = [0u8; ENTRY_LEN as usize];
+        b[0..8].copy_from_slice(&self.offset.to_le_bytes());
+        b[8..12].copy_from_slice(&self.len.to_le_bytes());
+        b[12..16].copy_from_slice(&self.crc.to_le_bytes());
+        b
+    }
+
+    fn deserialize(b: &[u8; ENTRY_LEN as usize]) -> Option<Self> {
+        if b.iter().all(|&x| x == 0) {
+            return None;
+        }
+        Some(Self {
+            offset: u64::from_le_bytes(b[0..8].try_into().expect("slice length checked")),
+            len: u32::from_le_bytes(b[8..12].try_into().expect("slice length checked")),
+            crc: u32::from_le_bytes(b[12..16].try_into().expect("slice length checked")),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -119,28 +149,29 @@ impl From<io::Error> for Error {
 #[derive(Debug)]
 pub struct StaticFile {
     root_dir: PathBuf,
-    /// Max record size, an OOM guard on reads.
-    max_value_bytes: u64,
-    // Writer holds this across put_batch's fsyncs, so readers block. Accepted:
+    /// Commit marker file; held open for its lock and for commit writes.
+    meta: File,
+    // Writer holds this across a batch's fsyncs, so readers block. Accepted:
     // simplicity over read concurrency.
     state: Mutex<State>,
-    /// Exclusive lock on the column dir, released by the OS on drop.
-    _lock: File,
 }
 
 #[derive(Debug)]
 struct State {
-    /// Highest committed slot and committed data length from `column.conf`.
     committed: CommittedState,
+    /// Seq of the current marker; the next commit writes seq + 1.
+    seq: u64,
     /// Set when a write error leaves on-disk state unverified; further writes
     /// error until reopen. Reads stay safe: `committed` never runs ahead of disk.
     poisoned: bool,
+    /// Set when a batch was dropped uncommitted; the next batch heals first.
+    dirty: bool,
 }
 
 impl StaticFile {
-    /// Open or create a `StaticFile` rooted at `root_dir`. `max_value_bytes` is
-    /// a runtime-only read OOM cap. The column is identified by its directory.
-    pub fn open(root_dir: PathBuf, max_value_bytes: u64) -> Result<Self, Error> {
+    /// Open or create a `StaticFile` rooted at `root_dir`. The column is
+    /// identified by its directory.
+    pub fn open(root_dir: PathBuf) -> Result<Self, Error> {
         fs::create_dir_all(&root_dir)?;
         // Make the column dir's own dirent durable; fsyncs inside it don't.
         if let Some(parent) = root_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -149,12 +180,15 @@ impl StaticFile {
 
         // Lock before touching anything: a second handle would heal
         // destructively under a live writer.
-        let lock = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(root_dir.join(LOCK_FILE))?;
-        match lock.try_lock() {
+        let meta = f_open(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+            &root_dir.join(META_FILE),
+        )?;
+        match meta.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
                 return Err(Error::AlreadyOpen(root_dir));
@@ -162,37 +196,37 @@ impl StaticFile {
             Err(TryLockError::Error(e)) => return Err(e.into()),
         }
 
-        let config_path = root_dir.join(CONFIG_FILE);
-        let tmp_path = root_dir.join(CONFIG_TMP_FILE);
-
-        let committed = if config_path.exists() {
-            deserialize_on_disk_config(&fs::read(&config_path)?)?
-        } else {
-            // A store writes column.conf before any data file, so data files
-            // without a conf mean external damage — don't wipe them.
+        let (seq, committed) = if meta.metadata()?.len() == 0 {
+            // A store writes meta before any data file, so data files without
+            // one mean external damage — don't wipe them.
             if dir_has_static_files(&root_dir)? {
                 return Err(Error::Corrupt(format!(
-                    "column.conf missing but data files exist in {}",
+                    "meta missing but data files exist in {}",
                     root_dir.display()
                 )));
             }
-            atomic_write_config(&config_path, &tmp_path, &root_dir, None, 0)?;
-            CommittedState {
+            let empty = CommittedState {
                 highest_slot: None,
                 data_len: 0,
-            }
+            };
+            write_meta(&meta, 1, empty)?;
+            sync_dir(&root_dir)?;
+            (1, empty)
+        } else {
+            read_meta(&meta)?
         };
 
         let handle = Self {
             root_dir,
-            max_value_bytes,
+            meta,
             state: Mutex::new(State {
                 committed,
+                seq,
                 poisoned: false,
+                dirty: false,
             }),
-            _lock: lock,
         };
-        handle.heal_to_marker(committed.highest_slot, committed.data_len)?;
+        handle.heal_to_marker(committed)?;
         Ok(handle)
     }
 
@@ -202,286 +236,133 @@ impl StaticFile {
         self.state.lock().committed.highest_slot
     }
 
-    /// Read the record at `slot`, if present.
+    /// Read the record at `slot`, if present; crc-verified.
     pub fn get(&self, slot: u64) -> Result<Option<Vec<u8>>, Error> {
         if self.highest_written_slot().is_none_or(|h| slot > h) {
             return Ok(None);
         }
-        self.read_record(slot)
+        let Some(entry) = self.read_entry(slot)? else {
+            return Ok(None);
+        };
+        if u64::from(entry.len) > MAX_RECORD_LEN {
+            return Err(Error::Corrupt(format!(
+                "record length {} at slot {slot} exceeds cap",
+                entry.len
+            )));
+        }
+
+        let mut data = File::open(self.data_path(file_id(slot)))?;
+        data.seek(SeekFrom::Start(entry.offset))?;
+        let mut payload = vec![0; entry.len as usize];
+        data.read_exact(&mut payload)?;
+        if crc32fast::hash(&payload) != entry.crc {
+            return Err(Error::Corrupt(format!("crc mismatch at slot {slot}")));
+        }
+        Ok(Some(payload))
     }
 
     /// `true` if a record exists at `slot`. Cheaper than `get` — only the
-    /// `.off` sidecar is consulted; the data file is not read.
+    /// index is consulted; the payload is not read or verified.
     pub fn contains(&self, slot: u64) -> Result<bool, Error> {
         if self.highest_written_slot().is_none_or(|h| slot > h) {
             return Ok(false);
         }
-        Ok(self.read_offset(file_id(slot), slot)? != 0)
+        Ok(self.read_entry(slot)?.is_some())
     }
 
-    /// Durably store `bytes` at `slot`; single-item [`Self::put_batch`].
+    /// Durably store `bytes` at `slot`; a batch of one.
     pub fn put(&self, slot: u64, bytes: &[u8]) -> Result<(), Error> {
-        self.put_batch(&[(slot, bytes)])
+        let mut batch = self.batch()?;
+        batch.put(slot, bytes)?;
+        batch.commit()
     }
 
-    /// Append `items`, strictly ascending, durable on return; one fsync per
-    /// file rather than per slot. An already-committed prefix is skipped if
-    /// byte-identical, so retrying a crashed batch is safe.
-    pub fn put_batch(&self, items: &[(u64, &[u8])]) -> Result<(), Error> {
-        let Some((last_slot, _)) = items.last() else {
-            return Ok(());
-        };
-        for w in items.windows(2) {
-            if w[1].0 <= w[0].0 {
-                return Err(Error::Invalid(
-                    "put_batch slots must be strictly ascending".into(),
-                ));
-            }
-        }
-        if *last_slot == EMPTY_SLOT {
-            return Err(Error::Invalid("slot u64::MAX is reserved".into()));
-        }
-        // Reject oversized records before any mutation: a caller mistake must
-        // not poison the store.
-        for (slot, value) in items {
-            if (value.len() as u64) > self.max_value_bytes || u32::try_from(value.len()).is_err() {
-                return Err(Error::Invalid(format!(
-                    "record at slot {slot} exceeds size limit"
-                )));
-            }
-        }
-
+    /// Start a write batch. Puts stream to disk; nothing is visible or
+    /// durable until [`Batch::commit`].
+    pub fn batch(&self) -> Result<Batch<'_>, Error> {
         let mut state = self.state.lock();
         if state.poisoned {
             return Err(Error::Poisoned);
         }
-        let start = self.skip_committed_prefix(items, state.committed.highest_slot)?;
-        if start == items.len() {
-            // Avoid rewriting config with no fresh data_len.
-            return Ok(());
-        }
-
-        // One data fsync + one offset fsync per file group, one config commit
-        // per batch. Any error past this point leaves disk state unverified,
-        // so poison writes; open-time healing recovers.
-        let mut last_data_len: u64 = 0;
-        for (target_file_id, group) in group_by_file_id(&items[start..]) {
-            match self.write_group(target_file_id, &group, state.committed) {
-                Ok(data_len) => last_data_len = data_len,
-                Err(e) => {
-                    state.poisoned = true;
-                    return Err(e);
-                }
+        if state.dirty {
+            if let Err(e) = self.heal_to_marker(state.committed) {
+                state.poisoned = true;
+                return Err(e);
             }
+            state.dirty = false;
         }
-
-        if let Err(e) = self.write_config(Some(*last_slot), last_data_len) {
-            state.poisoned = true;
-            return Err(e);
-        }
-        state.committed = CommittedState {
-            highest_slot: Some(*last_slot),
-            data_len: last_data_len,
-        };
-        Ok(())
+        Ok(Batch {
+            store: self,
+            state,
+            cur: None,
+            last_put: None,
+            written: None,
+            done: false,
+        })
     }
 
-    /// Validate already-committed retry items and return the first new item.
-    /// This lets migration retries overlap with the committed prefix without
-    /// rewriting offsets or filling skipped slots.
-    fn skip_committed_prefix(
-        &self,
-        items: &[(u64, &[u8])],
-        highest_written_slot: Option<u64>,
-    ) -> Result<usize, Error> {
-        let Some(highest) = highest_written_slot else {
-            return Ok(0);
+    fn read_entry(&self, slot: u64) -> Result<Option<Entry>, Error> {
+        let mut idx = match File::open(self.idx_path(file_id(slot))) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
         };
-
-        let mut start = 0;
-        while start < items.len() && items[start].0 <= highest {
-            let (slot, value) = &items[start];
-            let existing = self.read_record(*slot)?.ok_or_else(|| {
-                Error::Invalid(format!(
-                    "re-put at slot {slot} <= highest {highest} but no record exists; \
-                     cannot fill a previously-skipped slot"
-                ))
-            })?;
-            if existing.as_slice() != *value {
-                return Err(Error::Invalid(format!(
-                    "re-put at slot {slot} with mismatched value"
-                )));
-            }
-            start += 1;
-        }
-        Ok(start)
+        idx.seek(SeekFrom::Start(entry_position(slot)))?;
+        let mut buf = [0u8; ENTRY_LEN as usize];
+        idx.read_exact(&mut buf)?;
+        Ok(Entry::deserialize(&buf))
     }
 
-    /// Write `group` (all in `target_file_id`) to disk: append records, fsync
-    /// the data file, write all offsets, fsync the offset file. Returns the
-    /// committed data file length. Does NOT update `highest_written_slot` or
-    /// `column.conf` — the caller commits via `write_config` after this.
-    fn write_group(
-        &self,
-        target_file_id: u64,
-        group: &[(u64, &[u8])],
-        committed: CommittedState,
-    ) -> Result<u64, Error> {
-        let data_path = self.data_path(target_file_id);
-        let off_path = self.offset_path(target_file_id);
+    /// Restore files to the marker: truncate the top data file, zero index
+    /// entries beyond `highest_slot`, drop the top seal and files beyond.
+    fn heal_to_marker(&self, committed: CommittedState) -> Result<(), Error> {
+        let Some(highest) = committed.highest_slot else {
+            return self.remove_files_beyond(None);
+        };
+        let top = file_id(highest);
 
-        let mut data_file = OpenOptions::new()
+        let data = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(false) // keep committed records; we seek + overwrite
-            .open(&data_path)?;
-        let cursor = if committed
-            .highest_slot
-            .is_some_and(|slot| file_id(slot) == target_file_id)
-        {
-            committed.data_len
-        } else {
-            // new file: plant header at offset 0, start just past it
-            data_file.seek(SeekFrom::Start(0))?;
-            data_file.write_all(&DATA_FILE_HEADER)?;
-            DATA_FILE_HEADER.len() as u64
-        };
-        let data_len = data_file.metadata()?.len();
-        if data_len < cursor {
+            .open(self.data_path(top))?;
+        let data_len = data.metadata()?.len();
+        if data_len < committed.data_len {
             return Err(Error::Corrupt(
                 "data file shorter than committed length".into(),
             ));
         }
-        if data_len != cursor {
-            data_file.set_len(cursor)?;
+        if data_len != committed.data_len {
+            f_set_len(&data, committed.data_len)?;
+            sync_file(&data)?;
         }
-        data_file.seek(SeekFrom::Start(cursor))?;
 
-        let mut offsets = Vec::with_capacity(group.len());
-        {
-            // 1 MiB batches tiny record writes during imports.
-            let mut writer = std::io::BufWriter::with_capacity(1 << 20, &mut data_file);
-            let mut next_offset = cursor;
-            for &(slot, value) in group {
-                // Sizes pre-validated by put_batch.
-                let payload_len = u32::try_from(value.len())
-                    .map_err(|_| Error::Invalid("record too large".into()))?;
-                offsets.push((slot, next_offset));
-                writer.write_all(&payload_len.to_le_bytes())?; // len[4]
-                next_offset += 4;
-                writer.write_all(value)?; // payload
-                next_offset += value.len() as u64;
-            }
-            writer.flush()?;
-        }
-        let data_len = data_file.seek(SeekFrom::End(0))?;
-        // Data must hit disk before offsets, both before config commit.
-        sync_file(&data_file)?;
-
-        let mut off_file = OpenOptions::new()
+        let idx = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&off_path)?;
-        // Pre-size so skipped slots read as zero offsets.
-        if off_file.metadata()?.len() < OFFSET_FILE_LEN {
-            off_file.set_len(OFFSET_FILE_LEN)?;
+            .open(self.idx_path(top))?;
+        let idx_len = idx.metadata()?.len();
+        if idx_len < TABLE_LEN {
+            return Err(Error::Corrupt("index shorter than its table".into()));
         }
-        for (slot, offset) in &offsets {
-            off_file.seek(SeekFrom::Start(offset_position(*slot)))?;
-            off_file.write_all(&offset.to_le_bytes())?;
+        if idx_len > TABLE_LEN {
+            // Drop an uncommitted seal.
+            f_set_len(&idx, TABLE_LEN)?;
         }
-        sync_file(&off_file)?;
+        let zero_from = entry_position(highest) + ENTRY_LEN;
+        if zero_from < TABLE_LEN {
+            f_write_at(
+                &idx,
+                zero_from,
+                &vec![0u8; (TABLE_LEN - zero_from) as usize],
+            )?;
+        }
+        sync_file(&idx)?;
 
-        Ok(data_len)
+        self.remove_files_beyond(Some(top))
     }
 
-    /// Read the record at `slot`; lock-free — committed bytes are immutable.
-    fn read_record(&self, slot: u64) -> Result<Option<Vec<u8>>, Error> {
-        let file_id = file_id(slot);
-        let offset = self.read_offset(file_id, slot)?;
-        if offset == 0 {
-            return Ok(None);
-        }
-
-        let data_path = self.data_path(file_id);
-        let mut data_file = File::open(&data_path)?;
-        data_file.seek(SeekFrom::Start(offset))?;
-
-        let mut header = [0; 4];
-        data_file.read_exact(&mut header)?;
-        let len = u32::from_le_bytes(header);
-        if u64::from(len) > self.max_value_bytes {
-            return Err(Error::Corrupt("record exceeds size limit".into()));
-        }
-
-        let len = len as usize;
-        let mut payload = vec![0; len];
-        data_file.read_exact(&mut payload)?;
-        Ok(Some(payload))
-    }
-
-    /// Restore files to the committed marker and remove future crash leftovers.
-    fn heal_to_marker(
-        &self,
-        highest_written_slot: Option<u64>,
-        current_data_len: u64,
-    ) -> Result<(), Error> {
-        if let Some(slot) = highest_written_slot {
-            self.heal_current_file(slot, current_data_len)?;
-            self.remove_uncommitted_files(Some(file_id(slot)))
-        } else {
-            self.remove_uncommitted_files(None)
-        }
-    }
-
-    /// Truncate the committed file back to the config marker after a crash.
-    /// Data beyond `current_data_len` and offsets beyond `slot` are uncommitted.
-    fn heal_current_file(&self, slot: u64, current_data_len: u64) -> Result<(), Error> {
-        let file_id = file_id(slot);
-        let data_path = self.data_path(file_id);
-        let data_file = OpenOptions::new().read(true).write(true).open(&data_path)?;
-        let data_len = data_file.metadata()?.len();
-        if data_len < current_data_len {
-            return Err(Error::Corrupt(
-                "data file shorter than committed length".into(),
-            ));
-        }
-        if data_len != current_data_len {
-            data_file.set_len(current_data_len)?;
-            sync_file(&data_file)?;
-        }
-
-        let off_path = self.offset_path(file_id);
-        let mut off_file = OpenOptions::new().read(true).write(true).open(&off_path)?;
-        let required_len = offset_position(slot) + OFFSET_SIZE;
-        let off_len = off_file.metadata()?.len();
-        if off_len < required_len {
-            return Err(Error::Corrupt(
-                "offset file shorter than committed slot".into(),
-            ));
-        }
-        if off_len < OFFSET_FILE_LEN {
-            off_file.set_len(OFFSET_FILE_LEN)?;
-        }
-
-        let clear_start = required_len;
-        if clear_start < OFFSET_FILE_LEN {
-            // Remove offsets to entries beyond the committed slot.
-            off_file.seek(SeekFrom::Start(clear_start))?;
-            let zeroes = vec![0; (OFFSET_FILE_LEN - clear_start) as usize];
-            off_file.write_all(&zeroes)?;
-            sync_file(&off_file)?;
-        }
-
-        Ok(())
-    }
-
-    /// Remove data/offset files newer than the committed file id.
-    /// `None` means the store is empty, so every data/offset file is removed.
-    fn remove_uncommitted_files(&self, max_file_id: Option<u64>) -> Result<(), Error> {
+    /// Remove data/index files newer than `max_file_id`; `None` removes all.
+    fn remove_files_beyond(&self, max_file_id: Option<u64>) -> Result<(), Error> {
         let mut removed = false;
         for entry in fs::read_dir(&self.root_dir)? {
             let entry = entry?;
@@ -493,14 +374,13 @@ impl StaticFile {
                 continue;
             };
             if max_file_id.is_none_or(|max| file_id > max) {
-                let file_type = entry.file_type()?;
-                if !file_type.is_file() {
+                if !entry.file_type()?.is_file() {
                     return Err(Error::Corrupt(format!(
                         "static data path is not a file: {}",
                         entry.path().display()
                     )));
                 }
-                fs::remove_file(entry.path())?;
+                f_remove(&entry.path())?;
                 removed = true;
             }
         }
@@ -510,36 +390,29 @@ impl StaticFile {
         Ok(())
     }
 
-    /// Atomically publish the commit marker after data and offsets are durable.
-    fn write_config(
-        &self,
-        highest_written_slot: Option<u64>,
-        current_data_len: u64,
-    ) -> Result<(), Error> {
-        atomic_write_config(
-            &self.config_path(),
-            &self.root_dir.join(CONFIG_TMP_FILE),
-            &self.root_dir,
-            highest_written_slot,
-            current_data_len,
-        )
-    }
+    /// Append a seal footer to a full file's index if not already sealed.
+    fn seal_file(&self, file_id: u64) -> Result<(), Error> {
+        let mut idx = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.idx_path(file_id))?;
+        if idx.metadata()?.len() > TABLE_LEN {
+            return Ok(());
+        }
+        let mut table = vec![0u8; TABLE_LEN as usize];
+        idx.seek(SeekFrom::Start(0))?;
+        idx.read_exact(&mut table)?;
 
-    fn read_offset(&self, file_id: u64, slot: u64) -> Result<u64, Error> {
-        let off_path = self.offset_path(file_id);
-        let mut off_file = match File::open(&off_path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e.into()),
-        };
-        let mut bytes = [0; 8];
-        off_file.seek(SeekFrom::Start(offset_position(slot)))?;
-        off_file.read_exact(&mut bytes)?;
-        Ok(u64::from_le_bytes(bytes))
-    }
+        let mut seal = [0u8; META_SLOT_LEN];
+        seal[0..4].copy_from_slice(MAGIC);
+        seal[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+        seal[8..16].copy_from_slice(&file_id.to_le_bytes());
+        seal[16..20].copy_from_slice(&crc32fast::hash(&table).to_le_bytes());
+        let crc = crc32fast::hash(&seal[..META_SLOT_LEN - 4]);
+        seal[META_SLOT_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
 
-    fn config_path(&self) -> PathBuf {
-        self.root_dir.join(CONFIG_FILE)
+        f_write_at(&idx, TABLE_LEN, &seal)?;
+        sync_file(&idx)
     }
 
     fn data_path(&self, file_id: u64) -> PathBuf {
@@ -547,86 +420,297 @@ impl StaticFile {
             .join(format!("{DATA_FILE_PREFIX}{file_id:05}"))
     }
 
-    fn offset_path(&self, file_id: u64) -> PathBuf {
+    fn idx_path(&self, file_id: u64) -> PathBuf {
         self.root_dir
-            .join(format!("{DATA_FILE_PREFIX}{file_id:05}.off"))
+            .join(format!("{DATA_FILE_PREFIX}{file_id:05}{IDX_SUFFIX}"))
     }
 }
 
-/// Pack the `column.conf` marker.
-fn serialize_on_disk_config(committed: CommittedState) -> Vec<u8> {
-    let mut bytes = vec![0u8; 24];
-    bytes[0..4].copy_from_slice(CONFIG_MAGIC);
-    bytes[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
-    bytes[8..16].copy_from_slice(&committed.highest_slot.unwrap_or(EMPTY_SLOT).to_le_bytes());
-    bytes[16..24].copy_from_slice(&committed.data_len.to_le_bytes());
-    bytes
+/// One file being written by a [`Batch`].
+struct CurFile {
+    file_id: u64,
+    data: BufWriter<File>,
+    idx: File,
+    cursor: u64,
+    entries: Vec<(u64, Entry)>,
 }
 
-/// Parse the `column.conf` marker.
-fn deserialize_on_disk_config(bytes: &[u8]) -> Result<CommittedState, Error> {
-    if bytes.len() != 24 {
-        return Err(Error::Corrupt("invalid config length".into()));
-    }
-    if &bytes[0..4] != CONFIG_MAGIC {
-        return Err(Error::Corrupt("invalid config magic".into()));
-    }
-    let version = u32::from_le_bytes(bytes[4..8].try_into().expect("slice length checked"));
-    if version != FORMAT_VERSION {
-        return Err(Error::Corrupt(format!(
-            "unsupported config version {version}, expected {FORMAT_VERSION}"
-        )));
-    }
-    let highest = u64::from_le_bytes(bytes[8..16].try_into().expect("slice length checked"));
-    let data_len = u64::from_le_bytes(bytes[16..24].try_into().expect("slice length checked"));
-    Ok(CommittedState {
-        highest_slot: (highest != EMPTY_SLOT).then_some(highest),
-        data_len,
-    })
+/// Streaming write batch; holds the writer lock. Durable on `commit`;
+/// dropping it uncommitted discards the writes (healed lazily).
+pub struct Batch<'a> {
+    store: &'a StaticFile,
+    state: MutexGuard<'a, State>,
+    cur: Option<CurFile>,
+    last_put: Option<u64>,
+    /// Last slot actually written and the data cursor after it.
+    written: Option<(u64, u64)>,
+    done: bool,
 }
 
-/// Write `column.conf.tmp`, fsync it, rename over `column.conf`, then fsync
-/// the directory so the rename is durable.
-fn atomic_write_config(
-    config_path: &Path,
-    tmp_path: &Path,
-    root_dir: &Path,
-    highest_written_slot: Option<u64>,
-    current_data_len: u64,
-) -> Result<(), Error> {
-    let bytes = serialize_on_disk_config(CommittedState {
-        highest_slot: highest_written_slot,
-        data_len: current_data_len,
-    });
+impl Batch<'_> {
+    /// Stream `bytes` for `slot` to disk. Slots strictly ascending; a re-put
+    /// of a committed slot is crc-verified and skipped.
+    pub fn put(&mut self, slot: u64, bytes: &[u8]) -> Result<(), Error> {
+        if self.state.poisoned {
+            return Err(Error::Poisoned);
+        }
+        if slot == EMPTY_SLOT {
+            return Err(Error::Invalid("slot u64::MAX is reserved".into()));
+        }
+        if self.last_put.is_some_and(|last| slot <= last) {
+            return Err(Error::Invalid("slots must be strictly ascending".into()));
+        }
+        if bytes.len() as u64 > MAX_RECORD_LEN || u32::try_from(bytes.len()).is_err() {
+            return Err(Error::Invalid(format!(
+                "record at slot {slot} exceeds size limit"
+            )));
+        }
 
-    {
-        let mut tmp = File::create(tmp_path)?;
-        tmp.write_all(&bytes)?;
-        sync_file(&tmp)?;
+        // Committed prefix: verify against the stored crc and skip.
+        if self.state.committed.highest_slot.is_some_and(|h| slot <= h) {
+            let entry = self.store.read_entry(slot)?.ok_or_else(|| {
+                Error::Invalid(format!("cannot fill previously-skipped slot {slot}"))
+            })?;
+            if entry.len as usize != bytes.len() || entry.crc != crc32fast::hash(bytes) {
+                return Err(Error::Invalid(format!(
+                    "re-put at slot {slot} with mismatched value"
+                )));
+            }
+            self.last_put = Some(slot);
+            return Ok(());
+        }
+
+        if let Err(e) = self.write_record(slot, bytes) {
+            self.state.poisoned = true;
+            return Err(e);
+        }
+        self.last_put = Some(slot);
+        Ok(())
     }
 
-    fs::rename(tmp_path, config_path)?;
-    sync_dir(root_dir)
+    /// Make the batch durable and visible. A batch that wrote nothing is a
+    /// no-op.
+    pub fn commit(mut self) -> Result<(), Error> {
+        let Some((last_slot, data_len)) = self.written else {
+            self.done = true;
+            return Ok(());
+        };
+        if let Err(e) = self.finish_current(false) {
+            self.state.poisoned = true;
+            return Err(e);
+        }
+
+        let seq = self.state.seq + 1;
+        let committed = CommittedState {
+            highest_slot: Some(last_slot),
+            data_len,
+        };
+        if let Err(e) = write_meta(&self.store.meta, seq, committed) {
+            self.state.poisoned = true;
+            return Err(e);
+        }
+        self.state.seq = seq;
+        self.state.committed = committed;
+        self.done = true;
+        Ok(())
+    }
+
+    fn write_record(&mut self, slot: u64, bytes: &[u8]) -> Result<(), Error> {
+        let target = file_id(slot);
+        if self.cur.as_ref().is_none_or(|c| c.file_id != target) {
+            self.switch_file(target)?;
+        }
+        let cur = self.cur.as_mut().expect("switched above");
+
+        gate()?;
+        cur.data.write_all(bytes)?;
+        cur.entries.push((
+            slot,
+            Entry {
+                offset: cur.cursor,
+                len: bytes.len() as u32,
+                crc: crc32fast::hash(bytes),
+            },
+        ));
+        cur.cursor += bytes.len() as u64;
+        self.written = Some((slot, cur.cursor));
+        Ok(())
+    }
+
+    /// Finish the current file and open `target` for writing.
+    fn switch_file(&mut self, target: u64) -> Result<(), Error> {
+        if self.cur.is_some() {
+            // Moving past the current file: it is full history now, seal it.
+            self.finish_current(true)?;
+        } else if let Some(top) = self.state.committed.highest_slot.map(file_id)
+            && target > top
+        {
+            // Skipping past the committed top file without touching it.
+            self.store.seal_file(top)?;
+        }
+
+        let committed = self.state.committed;
+        let data = f_open(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+            &self.store.data_path(target),
+        )?;
+        let cursor = if committed.highest_slot.is_some_and(|h| file_id(h) == target) {
+            committed.data_len
+        } else {
+            // New file: plant the header, start just past it.
+            if data.metadata()?.len() != 0 {
+                f_set_len(&data, 0)?;
+            }
+            f_write_at(&data, 0, &MAGIC[..])?;
+            MAGIC.len() as u64
+        };
+        let data_len = data.metadata()?.len();
+        if data_len < cursor {
+            return Err(Error::Corrupt(
+                "data file shorter than committed length".into(),
+            ));
+        }
+        if data_len != cursor {
+            f_set_len(&data, cursor)?;
+        }
+        let mut data = data;
+        data.seek(SeekFrom::Start(cursor))?;
+
+        let idx = f_open(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+            &self.store.idx_path(target),
+        )?;
+        // Pre-size so absent slots read as zero entries; drop any stale seal.
+        if idx.metadata()?.len() != TABLE_LEN {
+            f_set_len(&idx, TABLE_LEN)?;
+        }
+
+        self.cur = Some(CurFile {
+            file_id: target,
+            // 1 MiB batches tiny record writes during imports.
+            data: BufWriter::with_capacity(1 << 20, data),
+            idx,
+            cursor,
+            entries: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Flush and fsync the current file: payloads first, then index entries.
+    fn finish_current(&mut self, seal: bool) -> Result<(), Error> {
+        let Some(mut cur) = self.cur.take() else {
+            return Ok(());
+        };
+        cur.data.flush()?;
+        sync_file(cur.data.get_ref())?;
+        for (slot, entry) in &cur.entries {
+            f_write_at(&cur.idx, entry_position(*slot), &entry.serialize())?;
+        }
+        sync_file(&cur.idx)?;
+        if seal {
+            let id = cur.file_id;
+            drop(cur);
+            self.store.seal_file(id)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Batch<'_> {
+    fn drop(&mut self) {
+        if self.written.is_some() && !self.done {
+            self.state.dirty = true;
+        }
+    }
+}
+
+/// Serialize the marker into one meta slot.
+fn serialize_meta_slot(seq: u64, committed: CommittedState) -> [u8; META_SLOT_LEN] {
+    let mut b = [0u8; META_SLOT_LEN];
+    b[0..4].copy_from_slice(MAGIC);
+    b[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    b[8..16].copy_from_slice(&seq.to_le_bytes());
+    b[16..24].copy_from_slice(&committed.highest_slot.unwrap_or(EMPTY_SLOT).to_le_bytes());
+    b[24..32].copy_from_slice(&committed.data_len.to_le_bytes());
+    let crc = crc32fast::hash(&b[..META_SLOT_LEN - 4]);
+    b[META_SLOT_LEN - 4..].copy_from_slice(&crc.to_le_bytes());
+    b
+}
+
+/// Parse one meta slot; `None` if it fails validation.
+fn parse_meta_slot(b: &[u8]) -> Option<(u64, CommittedState)> {
+    if b.len() != META_SLOT_LEN || &b[0..4] != MAGIC {
+        return None;
+    }
+    if u32::from_le_bytes(b[4..8].try_into().expect("slice length checked")) != FORMAT_VERSION {
+        return None;
+    }
+    let crc = u32::from_le_bytes(
+        b[META_SLOT_LEN - 4..]
+            .try_into()
+            .expect("slice length checked"),
+    );
+    if crc32fast::hash(&b[..META_SLOT_LEN - 4]) != crc {
+        return None;
+    }
+    let seq = u64::from_le_bytes(b[8..16].try_into().expect("slice length checked"));
+    let highest = u64::from_le_bytes(b[16..24].try_into().expect("slice length checked"));
+    let data_len = u64::from_le_bytes(b[24..32].try_into().expect("slice length checked"));
+    Some((
+        seq,
+        CommittedState {
+            highest_slot: (highest != EMPTY_SLOT).then_some(highest),
+            data_len,
+        },
+    ))
+}
+
+/// Commit: write the inactive slot and fsync. The fsync is the commit point.
+fn write_meta(meta: &File, seq: u64, committed: CommittedState) -> Result<(), Error> {
+    let slot_offset = (seq % 2) * META_SLOT_LEN as u64;
+    f_write_at(meta, slot_offset, &serialize_meta_slot(seq, committed))?;
+    sync_file(meta)
+}
+
+/// Pick the valid slot with the highest seq.
+fn read_meta(meta: &File) -> Result<(u64, CommittedState), Error> {
+    let mut buf = [0u8; META_SLOT_LEN * 2];
+    let mut f = meta;
+    f.seek(SeekFrom::Start(0))?;
+    f.read_exact(&mut buf)?;
+    [&buf[..META_SLOT_LEN], &buf[META_SLOT_LEN..]]
+        .iter()
+        .filter_map(|slot| parse_meta_slot(slot))
+        .max_by_key(|(seq, _)| *seq)
+        .ok_or_else(|| Error::Corrupt("no valid meta slot".into()))
 }
 
 fn file_id(slot: u64) -> u64 {
     slot / SLOTS_PER_FILE
 }
 
-fn offset_position(slot: u64) -> u64 {
-    (slot % SLOTS_PER_FILE) * OFFSET_SIZE
+fn entry_position(slot: u64) -> u64 {
+    (slot % SLOTS_PER_FILE) * ENTRY_LEN
 }
 
 fn static_file_id(file_name: &str) -> Option<u64> {
     let suffix = file_name.strip_prefix(DATA_FILE_PREFIX)?;
-    let id = suffix.strip_suffix(".off").unwrap_or(suffix);
+    let id = suffix.strip_suffix(IDX_SUFFIX).unwrap_or(suffix);
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     id.parse().ok()
 }
 
-/// `true` if `root_dir` contains any data or offset file.
+/// `true` if `root_dir` contains any data or index file.
 fn dir_has_static_files(root_dir: &Path) -> Result<bool, Error> {
     for entry in fs::read_dir(root_dir)? {
         let entry = entry?;
@@ -641,31 +725,30 @@ fn dir_has_static_files(root_dir: &Path) -> Result<bool, Error> {
     Ok(false)
 }
 
-/// Convert an ascending slot list into consecutive groups for each data file.
-fn group_by_file_id<'a>(items: &[(u64, &'a [u8])]) -> Vec<SlotGroup<'a>> {
-    let mut groups = Vec::new();
-    let mut current_file_id = None;
-    let mut current_group = Vec::new();
+// ---- gated file ops: every write-path syscall goes through one of these so
+// tests can inject a fault at any boundary ----
 
-    for (slot, value) in items {
-        let target_file_id = file_id(*slot);
-        if current_file_id == Some(target_file_id) {
-            current_group.push((*slot, *value));
-        } else {
-            if let Some(file_id) = current_file_id {
-                groups.push((file_id, current_group));
-                current_group = Vec::new();
-            }
-            current_file_id = Some(target_file_id);
-            current_group.push((*slot, *value));
-        }
-    }
+fn f_open(opts: &OpenOptions, path: &Path) -> Result<File, Error> {
+    gate()?;
+    Ok(opts.open(path)?)
+}
 
-    if let Some(file_id) = current_file_id {
-        groups.push((file_id, current_group));
-    }
+fn f_write_at(file: &File, pos: u64, bytes: &[u8]) -> Result<(), Error> {
+    gate()?;
+    let mut f = file;
+    f.seek(SeekFrom::Start(pos))?;
+    f.write_all(bytes)?;
+    Ok(())
+}
 
-    groups
+fn f_set_len(file: &File, len: u64) -> Result<(), Error> {
+    gate()?;
+    Ok(file.set_len(len)?)
+}
+
+fn f_remove(path: &Path) -> Result<(), Error> {
+    gate()?;
+    Ok(fs::remove_file(path)?)
 }
 
 #[cfg(not(windows))]
@@ -681,6 +764,7 @@ fn sync_dir(_path: &Path) -> Result<(), Error> {
 
 #[cfg(not(target_os = "macos"))]
 fn sync_file(file: &File) -> Result<(), Error> {
+    gate()?;
     file.sync_all()?;
     Ok(())
 }
@@ -689,6 +773,7 @@ fn sync_file(file: &File) -> Result<(), Error> {
 /// fall back to plain fsync like LevelDB does.
 #[cfg(target_os = "macos")]
 fn sync_file(file: &File) -> Result<(), Error> {
+    gate()?;
     use std::os::fd::AsRawFd;
     match file.sync_all() {
         Err(e) if e.raw_os_error() == Some(libc::ENOTSUP) => {
@@ -702,14 +787,58 @@ fn sync_file(file: &File) -> Result<(), Error> {
     }
 }
 
+#[inline]
+fn gate() -> io::Result<()> {
+    #[cfg(test)]
+    failpoint::gate()?;
+    Ok(())
+}
+
+/// Test-only fault injection: arm to fail the Nth gated write op on the
+/// arming thread, and every one after it (a failed disk stays failed).
+#[cfg(test)]
+mod failpoint {
+    use parking_lot::Mutex;
+    use std::io;
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::thread::ThreadId;
+
+    static ARMED: Mutex<Option<ThreadId>> = Mutex::new(None);
+    static REMAINING: AtomicI64 = AtomicI64::new(0);
+    static TRIGGERED: AtomicBool = AtomicBool::new(false);
+
+    pub fn arm(n: i64) {
+        *ARMED.lock() = Some(std::thread::current().id());
+        REMAINING.store(n, Ordering::SeqCst);
+        TRIGGERED.store(false, Ordering::SeqCst);
+    }
+
+    pub fn disarm() {
+        *ARMED.lock() = None;
+    }
+
+    pub fn triggered() -> bool {
+        TRIGGERED.load(Ordering::SeqCst)
+    }
+
+    pub fn gate() -> io::Result<()> {
+        if *ARMED.lock() != Some(std::thread::current().id()) {
+            return Ok(());
+        }
+        if REMAINING.fetch_sub(1, Ordering::SeqCst) <= 0 {
+            TRIGGERED.store(true, Ordering::SeqCst);
+            return Err(io::Error::other("injected fault"));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const MAX_VALUE_BYTES: u64 = 1024;
-
     fn open(dir: &tempfile::TempDir) -> StaticFile {
-        StaticFile::open(dir.path().to_path_buf(), MAX_VALUE_BYTES).unwrap()
+        StaticFile::open(dir.path().to_path_buf()).unwrap()
     }
 
     #[test]
@@ -729,30 +858,133 @@ mod tests {
     }
 
     #[test]
-    fn reopen_preserves_committed_records() {
+    fn batch_streams_across_files_and_seals() {
         let dir = tempfile::tempdir().unwrap();
-        open(&dir)
-            .put_batch(&[(SLOTS_PER_FILE - 1, b"a"), (SLOTS_PER_FILE, b"b")])
-            .unwrap();
-
         let store = open(&dir);
+
+        let mut batch = store.batch().unwrap();
+        batch.put(SLOTS_PER_FILE - 1, b"a").unwrap();
+        batch.put(SLOTS_PER_FILE, b"b").unwrap();
+        batch.put(3 * SLOTS_PER_FILE, b"c").unwrap();
+        batch.commit().unwrap();
+
         assert_eq!(store.get(SLOTS_PER_FILE - 1).unwrap(), Some(b"a".to_vec()));
+        assert_eq!(store.get(SLOTS_PER_FILE).unwrap(), Some(b"b".to_vec()));
+        assert_eq!(store.get(3 * SLOTS_PER_FILE).unwrap(), Some(b"c".to_vec()));
+        // crossed files sealed, top not, gap file absent
+        let idx_len = |id: u64| {
+            fs::metadata(dir.path().join(format!("data_{id:05}.idx")))
+                .map(|m| m.len())
+                .ok()
+        };
+        assert_eq!(idx_len(0), Some(TABLE_LEN + META_SLOT_LEN as u64));
+        assert_eq!(idx_len(1), Some(TABLE_LEN + META_SLOT_LEN as u64));
+        assert_eq!(idx_len(2), None);
+        assert_eq!(idx_len(3), Some(TABLE_LEN));
+
+        drop(store);
+        let store = open(&dir);
         assert_eq!(store.get(SLOTS_PER_FILE).unwrap(), Some(b"b".to_vec()));
     }
 
     #[test]
-    fn batch_retries_committed_prefix() {
+    fn reput_of_committed_prefix_is_verified_and_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let store = open(&dir);
+        store.put(0, b"a").unwrap();
+        store.put(1, b"b").unwrap();
 
-        store.put_batch(&[(0, b"a"), (1, b"b")]).unwrap();
-        store.put_batch(&[(0, b"a"), (1, b"b"), (2, b"c")]).unwrap();
-
+        let mut batch = store.batch().unwrap();
+        batch.put(0, b"a").unwrap();
+        batch.put(1, b"b").unwrap();
+        batch.put(2, b"c").unwrap();
+        batch.commit().unwrap();
         assert_eq!(store.get(2).unwrap(), Some(b"c".to_vec()));
+
+        let mut batch = store.batch().unwrap();
+        assert!(matches!(batch.put(1, b"wrong"), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn abandoned_batch_is_invisible_and_healed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(&dir);
+        store.put(0, b"a").unwrap();
+
+        let mut batch = store.batch().unwrap();
+        batch.put(1, b"ghost").unwrap();
+        batch.put(SLOTS_PER_FILE, b"ghost2").unwrap();
+        drop(batch);
+
+        assert_eq!(store.get(1).unwrap(), None);
+        assert_eq!(store.highest_written_slot(), Some(0));
+
+        // next batch heals and works
+        store.put(1, b"real").unwrap();
+        assert_eq!(store.get(1).unwrap(), Some(b"real".to_vec()));
+        assert_eq!(store.get(SLOTS_PER_FILE).unwrap(), None);
+    }
+
+    #[test]
+    fn torn_commit_falls_back_to_previous_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(&dir);
+        store.put(0, b"a").unwrap(); // seq 2
+        store.put(1, b"b").unwrap(); // seq 3
+        drop(store);
+
+        // Corrupt the newest slot (seq 3 lives at offset (3 % 2) * 64 = 64).
+        let meta_path = dir.path().join("meta");
+        let meta = fs::read(&meta_path).unwrap();
+        let mut torn = meta.clone();
+        torn[64 + 40] ^= 0xff;
+        fs::write(&meta_path, &torn).unwrap();
+
+        let store = open(&dir);
+        assert_eq!(store.highest_written_slot(), Some(0));
+        assert_eq!(store.get(0).unwrap(), Some(b"a".to_vec()));
+        assert_eq!(store.get(1).unwrap(), None); // healed away
+        drop(store);
+
+        // Both slots corrupt -> refuse to open.
+        let mut dead = meta;
+        dead[1] ^= 0xff;
+        dead[64 + 40] ^= 0xff;
+        fs::write(&meta_path, &dead).unwrap();
         assert!(matches!(
-            store.put_batch(&[(1, b"wrong")]),
-            Err(Error::Invalid(_))
+            StaticFile::open(dir.path().to_path_buf()),
+            Err(Error::Corrupt(_))
         ));
+    }
+
+    #[test]
+    fn corrupt_payload_detected_by_crc() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(&dir);
+        store.put(0, b"hello world").unwrap();
+        drop(store);
+
+        let data_path = dir.path().join("data_00000");
+        let mut bytes = fs::read(&data_path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        fs::write(&data_path, &bytes).unwrap();
+
+        let store = open(&dir);
+        assert!(matches!(store.get(0), Err(Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn missing_meta_with_data_files_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        open(&dir).put(0, b"a").unwrap();
+        fs::remove_file(dir.path().join("meta")).unwrap();
+
+        assert!(matches!(
+            StaticFile::open(dir.path().to_path_buf()),
+            Err(Error::Corrupt(_))
+        ));
+        assert!(dir.path().join("data_00000").exists());
     }
 
     #[test]
@@ -760,23 +992,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         open(&dir).put(0, b"a").unwrap();
         fs::write(dir.path().join("data_00001"), b"stale").unwrap();
-        fs::write(dir.path().join("data_00001.off"), b"stale").unwrap();
+        fs::write(dir.path().join("data_00001.idx"), b"stale").unwrap();
 
         let store = open(&dir);
         assert!(!dir.path().join("data_00001").exists());
-        assert!(!dir.path().join("data_00001.off").exists());
-
+        assert!(!dir.path().join("data_00001.idx").exists());
         store.put(SLOTS_PER_FILE, b"b").unwrap();
         assert_eq!(store.get(SLOTS_PER_FILE).unwrap(), Some(b"b".to_vec()));
-    }
-
-    #[test]
-    fn max_slot_is_reserved() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            open(&dir).put(u64::MAX, b"x"),
-            Err(Error::Invalid(_))
-        ));
     }
 
     #[test]
@@ -786,79 +1008,11 @@ mod tests {
         store.put(0, b"a").unwrap();
 
         assert!(matches!(
-            StaticFile::open(dir.path().to_path_buf(), MAX_VALUE_BYTES),
+            StaticFile::open(dir.path().to_path_buf()),
             Err(Error::AlreadyOpen(_))
         ));
 
         drop(store);
-        assert_eq!(open(&dir).get(0).unwrap(), Some(b"a".to_vec()));
-    }
-
-    #[test]
-    fn write_failure_poisons_writes_until_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open(&dir);
-        store.put(0, b"a").unwrap();
-
-        // Force a real write error: swap the data file for a directory.
-        let data_path = dir.path().join("data_00000");
-        let orig = fs::read(&data_path).unwrap();
-        fs::remove_file(&data_path).unwrap();
-        fs::create_dir(&data_path).unwrap();
-        assert!(matches!(store.put(1, b"b"), Err(Error::Io(_))));
-        fs::remove_dir(&data_path).unwrap();
-        fs::write(&data_path, &orig).unwrap();
-
-        // writes rejected, reads still served
-        assert!(matches!(store.put(3, b"c"), Err(Error::Poisoned)));
-        assert_eq!(store.get(0).unwrap(), Some(b"a".to_vec()));
-
-        // reopen heals and lifts the poison
-        drop(store);
-        let store = open(&dir);
-        store.put(3, b"c").unwrap();
-        assert_eq!(store.get(3).unwrap(), Some(b"c".to_vec()));
-    }
-
-    #[test]
-    fn oversized_put_rejected_without_poisoning() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open(&dir);
-        let oversized = vec![0u8; (MAX_VALUE_BYTES + 1) as usize];
-        assert!(matches!(store.put(0, &oversized), Err(Error::Invalid(_))));
-        // caller mistake, not a write failure: store stays usable
-        store.put(0, b"a").unwrap();
-        assert_eq!(store.get(0).unwrap(), Some(b"a".to_vec()));
-    }
-
-    #[test]
-    fn corrupt_conf_rejected_on_open() {
-        let dir = tempfile::tempdir().unwrap();
-        open(&dir).put(0, b"a").unwrap();
-        let conf_path = dir.path().join("column.conf");
-        let good = fs::read(&conf_path).unwrap();
-
-        for bad in [
-            {
-                let mut b = good.clone();
-                b[0] ^= 0xff; // magic
-                b
-            },
-            {
-                let mut b = good.clone();
-                b[4] ^= 0xff; // version
-                b
-            },
-            good[..good.len() - 1].to_vec(), // length
-        ] {
-            fs::write(&conf_path, &bad).unwrap();
-            assert!(matches!(
-                StaticFile::open(dir.path().to_path_buf(), MAX_VALUE_BYTES),
-                Err(Error::Corrupt(_))
-            ));
-        }
-
-        fs::write(&conf_path, &good).unwrap();
         assert_eq!(open(&dir).get(0).unwrap(), Some(b"a".to_vec()));
     }
 
@@ -875,76 +1029,70 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = open(&dir);
         store.put(0, b"").unwrap();
+        store.put(5, b"x").unwrap();
         assert_eq!(store.get(0).unwrap(), Some(vec![]));
         assert!(store.contains(0).unwrap());
+        assert_eq!(store.get(3).unwrap(), None);
     }
 
     #[test]
-    fn missing_conf_with_data_files_errors() {
+    fn max_slot_is_reserved() {
         let dir = tempfile::tempdir().unwrap();
-        open(&dir)
-            .put_batch(&[(0, b"a"), (SLOTS_PER_FILE, b"b")])
-            .unwrap();
-        fs::remove_file(dir.path().join("column.conf")).unwrap();
-
-        assert!(matches!(
-            StaticFile::open(dir.path().to_path_buf(), MAX_VALUE_BYTES),
-            Err(Error::Corrupt(_))
-        ));
-        assert!(dir.path().join("data_00000").exists());
-        assert!(dir.path().join("data_00001").exists());
-    }
-
-    /// Forge a record + offset for `slot` without committing `column.conf`,
-    /// mimicking a crash after the data/offset fsyncs but before the marker.
-    fn forge_uncommitted(dir: &tempfile::TempDir, file_id: u64, slot: u64, at: u64, value: &[u8]) {
-        let data = dir.path().join(format!("data_{file_id:05}"));
-        let off = dir.path().join(format!("data_{file_id:05}.off"));
-        let mut d = OpenOptions::new().append(true).open(&data).unwrap();
-        d.write_all(&(value.len() as u32).to_le_bytes()).unwrap();
-        d.write_all(value).unwrap();
-        let mut o = OpenOptions::new().write(true).open(&off).unwrap();
-        o.seek(SeekFrom::Start(offset_position(slot))).unwrap();
-        o.write_all(&at.to_le_bytes()).unwrap();
-    }
-
-    // A torn append (data + offset written, marker not) is rolled back on open,
-    // leaving committed records intact and no phantom record.
-    #[test]
-    fn reopen_truncates_torn_append() {
-        let dir = tempfile::tempdir().unwrap();
-        open(&dir).put_batch(&[(0, b"a"), (1, b"b")]).unwrap();
-        let data = dir.path().join("data_00000");
-        let committed_len = fs::metadata(&data).unwrap().len();
-        forge_uncommitted(&dir, 0, 2, committed_len, b"Z");
-
         let store = open(&dir);
-        assert_eq!(store.get(0).unwrap(), Some(b"a".to_vec()));
-        assert_eq!(store.get(1).unwrap(), Some(b"b".to_vec()));
-        assert_eq!(store.get(2).unwrap(), None);
-        assert_eq!(fs::metadata(&data).unwrap().len(), committed_len);
+        let mut batch = store.batch().unwrap();
+        assert!(matches!(batch.put(u64::MAX, b"x"), Err(Error::Invalid(_))));
     }
 
-    // A torn multi-file batch (appended to the committed file and created a new
-    // one, marker not updated) rolls back wholesale on open.
+    /// Enumerate every gated write-path syscall: fail it (and everything
+    /// after, like a dead disk), then assert the handle poisons, reopen
+    /// heals, committed data survives, and the store is writable again.
     #[test]
-    fn reopen_rolls_back_torn_multifile_batch() {
-        let dir = tempfile::tempdir().unwrap();
-        open(&dir).put(0, b"a").unwrap();
-        let data0 = dir.path().join("data_00000");
-        let committed_len = fs::metadata(&data0).unwrap().len();
-        forge_uncommitted(&dir, 0, 1, committed_len, b"b");
-        fs::write(dir.path().join("data_00001"), b"garbage").unwrap();
-        fs::write(
-            dir.path().join("data_00001.off"),
-            vec![0u8; OFFSET_FILE_LEN as usize],
-        )
-        .unwrap();
+    fn write_failure_at_every_io_op_recovers() {
+        let mut n = 0;
+        loop {
+            let dir = tempfile::tempdir().unwrap();
+            let hit;
+            {
+                let store = open(&dir);
+                store.put(0, b"base").unwrap();
 
-        let store = open(&dir);
-        assert_eq!(store.get(0).unwrap(), Some(b"a".to_vec()));
-        assert_eq!(store.get(1).unwrap(), None);
-        assert_eq!(fs::metadata(&data0).unwrap().len(), committed_len);
-        assert!(!dir.path().join("data_00001").exists());
+                failpoint::arm(n);
+                let result = (|| -> Result<(), Error> {
+                    let mut batch = store.batch()?;
+                    batch.put(SLOTS_PER_FILE - 1, b"a")?;
+                    batch.put(SLOTS_PER_FILE, b"b")?;
+                    batch.put(3 * SLOTS_PER_FILE, b"c")?;
+                    batch.commit()
+                })();
+                hit = failpoint::triggered();
+                failpoint::disarm();
+
+                if hit {
+                    assert!(result.is_err(), "op {n}: injected fault must surface");
+                    assert!(
+                        matches!(store.put(90000, b"x"), Err(Error::Poisoned)),
+                        "op {n}: handle must be poisoned"
+                    );
+                } else {
+                    result.unwrap();
+                }
+            }
+
+            let store = StaticFile::open(dir.path().to_path_buf())
+                .unwrap_or_else(|e| panic!("op {n}: reopen after fault must heal, got {e}"));
+            assert_eq!(
+                store.get(0).unwrap(),
+                Some(b"base".to_vec()),
+                "op {n}: committed data lost"
+            );
+            let next = store.highest_written_slot().unwrap() + 1;
+            store.put(next, b"post").unwrap();
+
+            if !hit {
+                break;
+            }
+            n += 1;
+            assert!(n < 500, "runaway failpoint enumeration");
+        }
     }
 }

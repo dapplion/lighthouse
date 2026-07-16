@@ -1,8 +1,8 @@
 //! Benchmarks for the write path under ERA-load-shaped record sizes.
 //!
 //! The targeted profile is mainnet ERA import: ~10–30 MB state-snapshot and
-//! state-diff records. Callers are expected to pre-compress payloads if they
-//! want compression; this benchmark measures only static storage write cost.
+//! state-diff records. Callers own payload encoding; this measures only
+//! static storage write cost.
 //!
 //! Fresh temp dir per iteration: measures the first batch into an empty
 //! store (open/heal excluded). Point TMPDIR at a real disk — tmpfs makes
@@ -21,8 +21,6 @@ const RECORD_30MB: usize = 30 * 1024 * 1024;
 const RECORD_4MB: usize = 4 * 1024 * 1024;
 const RECORD_1KB: usize = 1024;
 
-const MAX_VALUE_BYTES: u64 = 1024 * 1024 * 1024;
-
 fn payload(seed: u64, len: usize) -> Vec<u8> {
     let mut buf = vec![0u8; len];
     XorShiftRng::seed_from_u64(seed).fill_bytes(&mut buf);
@@ -33,13 +31,6 @@ fn fresh_dir() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().to_path_buf();
     (dir, path)
-}
-
-fn borrowed_items(values: &[(u64, Vec<u8>)]) -> Vec<(u64, &[u8])> {
-    values
-        .iter()
-        .map(|(slot, value)| (*slot, value.as_slice()))
-        .collect()
 }
 
 fn batch_values(start_slot: u64, count: u64, record_size: usize) -> Vec<(u64, Vec<u8>)> {
@@ -60,7 +51,7 @@ fn bench_put_single_30mb(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (dir, path) = fresh_dir();
-                let sf = StaticFile::open(path, MAX_VALUE_BYTES).expect("open");
+                let sf = StaticFile::open(path).expect("open");
                 (dir, sf)
             },
             |(_dir, sf)| {
@@ -93,11 +84,15 @@ fn bench_put_batch(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let (dir, path) = fresh_dir();
-                    let sf = StaticFile::open(path, MAX_VALUE_BYTES).expect("open");
-                    (dir, sf, values.clone())
+                    let sf = StaticFile::open(path).expect("open");
+                    (dir, sf)
                 },
-                |(_dir, sf, items)| {
-                    sf.put_batch(&borrowed_items(&items)).expect("put_batch");
+                |(_dir, sf)| {
+                    let mut batch = sf.batch().expect("batch");
+                    for (slot, value) in &values {
+                        batch.put(*slot, value).expect("put");
+                    }
+                    batch.commit().expect("commit");
                 },
                 BatchSize::PerIteration,
             );
