@@ -196,24 +196,36 @@ impl StaticFile {
             Err(TryLockError::Error(e)) => return Err(e.into()),
         }
 
-        let (seq, committed) = if meta.metadata()?.len() == 0 {
-            // A store writes meta before any data file, so data files without
-            // one mean external damage — don't wipe them.
-            if dir_has_static_files(&root_dir)? {
-                return Err(Error::Corrupt(format!(
-                    "meta missing but data files exist in {}",
-                    root_dir.display()
-                )));
-            }
-            let empty = CommittedState {
-                highest_slot: None,
-                data_len: 0,
-            };
-            write_meta(&meta, 1, empty)?;
-            sync_dir(&root_dir)?;
-            (1, empty)
+        let parsed = if meta.metadata()?.len() == 0 {
+            None
         } else {
-            read_meta(&meta)?
+            match read_meta(&meta) {
+                Ok(x) => Some(x),
+                // A torn first-ever init is recoverable iff the store is
+                // provably empty; with data files present, don't touch it.
+                Err(_) if !dir_has_static_files(&root_dir)? => None,
+                Err(e) => return Err(e),
+            }
+        };
+        let (seq, committed) = match parsed {
+            Some(x) => x,
+            None => {
+                // A store writes meta before any data file, so data files
+                // without one mean external damage — don't wipe them.
+                if dir_has_static_files(&root_dir)? {
+                    return Err(Error::Corrupt(format!(
+                        "meta missing but data files exist in {}",
+                        root_dir.display()
+                    )));
+                }
+                let empty = CommittedState {
+                    highest_slot: None,
+                    data_len: 0,
+                };
+                write_meta(&meta, 1, empty)?;
+                sync_dir(&root_dir)?;
+                (1, empty)
+            }
         };
 
         let handle = Self {
@@ -251,11 +263,14 @@ impl StaticFile {
             )));
         }
 
+        if entry.offset < MAGIC.len() as u64 {
+            return Err(Error::Corrupt(format!("bad record offset at slot {slot}")));
+        }
         let mut data = File::open(self.data_path(file_id(slot)))?;
         data.seek(SeekFrom::Start(entry.offset))?;
         let mut payload = vec![0; entry.len as usize];
         data.read_exact(&mut payload)?;
-        if crc32fast::hash(&payload) != entry.crc {
+        if record_crc(slot, &payload) != entry.crc {
             return Err(Error::Corrupt(format!("crc mismatch at slot {slot}")));
         }
         Ok(Some(payload))
@@ -297,6 +312,7 @@ impl StaticFile {
             cur: None,
             last_put: None,
             written: None,
+            created_file: false,
             done: false,
         })
     }
@@ -321,10 +337,7 @@ impl StaticFile {
         };
         let top = file_id(highest);
 
-        let data = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(self.data_path(top))?;
+        let data = self.open_rw_committed(&self.data_path(top))?;
         let data_len = data.metadata()?.len();
         if data_len < committed.data_len {
             return Err(Error::Corrupt(
@@ -336,10 +349,7 @@ impl StaticFile {
             sync_file(&data)?;
         }
 
-        let idx = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(self.idx_path(top))?;
+        let idx = self.open_rw_committed(&self.idx_path(top))?;
         let idx_len = idx.metadata()?.len();
         if idx_len < TABLE_LEN {
             return Err(Error::Corrupt("index shorter than its table".into()));
@@ -359,6 +369,77 @@ impl StaticFile {
         sync_file(&idx)?;
 
         self.remove_files_beyond(Some(top))
+    }
+
+    /// Open a file the marker references; missing = corruption, not a fresh file.
+    fn open_rw_committed(&self, path: &Path) -> Result<File, Error> {
+        match f_open(OpenOptions::new().read(true).write(true), path) {
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound => Err(Error::Corrupt(
+                format!("committed file missing: {}", path.display()),
+            )),
+            other => other,
+        }
+    }
+
+    /// Scrub the whole column: seal footers, index tables, and every record's
+    /// crc. Reads the full archive — an operator/startup check, not a hot call.
+    pub fn verify(&self) -> Result<(), Error> {
+        let Some(highest) = self.highest_written_slot() else {
+            return Ok(());
+        };
+        let top = file_id(highest);
+        for id in 0..=top {
+            let mut idx = match File::open(self.idx_path(id)) {
+                Ok(f) => f,
+                // Whole-file gap.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let mut table = vec![0u8; TABLE_LEN as usize];
+            idx.read_exact(&mut table)?;
+
+            if id < top {
+                let mut seal = [0u8; META_SLOT_LEN];
+                idx.read_exact(&mut seal)
+                    .map_err(|_| Error::Corrupt(format!("file {id} below top is not sealed")))?;
+                let crc = u32::from_le_bytes(
+                    seal[META_SLOT_LEN - 4..]
+                        .try_into()
+                        .expect("slice length checked"),
+                );
+                if &seal[0..4] != MAGIC
+                    || crc32fast::hash(&seal[..META_SLOT_LEN - 4]) != crc
+                    || seal[16..20] != crc32fast::hash(&table).to_le_bytes()
+                {
+                    return Err(Error::Corrupt(format!("seal mismatch on file {id}")));
+                }
+            }
+
+            let mut data = File::open(self.data_path(id))?;
+            for i in 0..SLOTS_PER_FILE {
+                let slot = id * SLOTS_PER_FILE + i;
+                if slot > highest {
+                    break;
+                }
+                let start = (i * ENTRY_LEN) as usize;
+                let bytes: &[u8; ENTRY_LEN as usize] = table[start..start + ENTRY_LEN as usize]
+                    .try_into()
+                    .expect("slice length checked");
+                let Some(entry) = Entry::deserialize(bytes) else {
+                    continue;
+                };
+                if u64::from(entry.len) > MAX_RECORD_LEN || entry.offset < MAGIC.len() as u64 {
+                    return Err(Error::Corrupt(format!("bad entry at slot {slot}")));
+                }
+                data.seek(SeekFrom::Start(entry.offset))?;
+                let mut payload = vec![0; entry.len as usize];
+                data.read_exact(&mut payload)?;
+                if record_crc(slot, &payload) != entry.crc {
+                    return Err(Error::Corrupt(format!("crc mismatch at slot {slot}")));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Remove data/index files newer than `max_file_id`; `None` removes all.
@@ -392,10 +473,10 @@ impl StaticFile {
 
     /// Append a seal footer to a full file's index if not already sealed.
     fn seal_file(&self, file_id: u64) -> Result<(), Error> {
-        let mut idx = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(self.idx_path(file_id))?;
+        let mut idx = f_open(
+            OpenOptions::new().read(true).write(true),
+            &self.idx_path(file_id),
+        )?;
         if idx.metadata()?.len() > TABLE_LEN {
             return Ok(());
         }
@@ -444,6 +525,8 @@ pub struct Batch<'a> {
     last_put: Option<u64>,
     /// Last slot actually written and the data cursor after it.
     written: Option<(u64, u64)>,
+    /// Whether this batch created any data/idx file (needs a dir fsync).
+    created_file: bool,
     done: bool,
 }
 
@@ -471,7 +554,7 @@ impl Batch<'_> {
             let entry = self.store.read_entry(slot)?.ok_or_else(|| {
                 Error::Invalid(format!("cannot fill previously-skipped slot {slot}"))
             })?;
-            if entry.len as usize != bytes.len() || entry.crc != crc32fast::hash(bytes) {
+            if entry.len as usize != bytes.len() || entry.crc != record_crc(slot, bytes) {
                 return Err(Error::Invalid(format!(
                     "re-put at slot {slot} with mismatched value"
                 )));
@@ -491,11 +574,21 @@ impl Batch<'_> {
     /// Make the batch durable and visible. A batch that wrote nothing is a
     /// no-op.
     pub fn commit(mut self) -> Result<(), Error> {
+        if self.state.poisoned {
+            return Err(Error::Poisoned);
+        }
         let Some((last_slot, data_len)) = self.written else {
             self.done = true;
             return Ok(());
         };
         if let Err(e) = self.finish_current(false) {
+            self.state.poisoned = true;
+            return Err(e);
+        }
+        // Make created files' dirents durable before the marker references them.
+        if self.created_file
+            && let Err(e) = sync_dir(&self.store.root_dir)
+        {
             self.state.poisoned = true;
             return Err(e);
         }
@@ -529,7 +622,7 @@ impl Batch<'_> {
             Entry {
                 offset: cur.cursor,
                 len: bytes.len() as u32,
-                crc: crc32fast::hash(bytes),
+                crc: record_crc(slot, bytes),
             },
         ));
         cur.cursor += bytes.len() as u64;
@@ -562,6 +655,7 @@ impl Batch<'_> {
             committed.data_len
         } else {
             // New file: plant the header, start just past it.
+            self.created_file = true;
             if data.metadata()?.len() != 0 {
                 f_set_len(&data, 0)?;
             }
@@ -609,6 +703,7 @@ impl Batch<'_> {
         let Some(mut cur) = self.cur.take() else {
             return Ok(());
         };
+        gate()?;
         cur.data.flush()?;
         sync_file(cur.data.get_ref())?;
         for (slot, entry) in &cur.entries {
@@ -626,6 +721,10 @@ impl Batch<'_> {
 
 impl Drop for Batch<'_> {
     fn drop(&mut self) {
+        // Dispose the buffered writer while the lock is still held: its
+        // drop-flush must not race the next batch's heal. (Fields drop after
+        // this body, guard included.)
+        self.cur = None;
         if self.written.is_some() && !self.done {
             self.state.dirty = true;
         }
@@ -680,17 +779,28 @@ fn write_meta(meta: &File, seq: u64, committed: CommittedState) -> Result<(), Er
     sync_file(meta)
 }
 
-/// Pick the valid slot with the highest seq.
+/// Pick the valid slot with the highest seq. A short file (torn init) simply
+/// has no valid slot.
 fn read_meta(meta: &File) -> Result<(u64, CommittedState), Error> {
-    let mut buf = [0u8; META_SLOT_LEN * 2];
+    let mut buf = Vec::with_capacity(META_SLOT_LEN * 2);
     let mut f = meta;
     f.seek(SeekFrom::Start(0))?;
-    f.read_exact(&mut buf)?;
+    f.take((META_SLOT_LEN * 2) as u64).read_to_end(&mut buf)?;
+    buf.resize(META_SLOT_LEN * 2, 0);
     [&buf[..META_SLOT_LEN], &buf[META_SLOT_LEN..]]
         .iter()
         .filter_map(|slot| parse_meta_slot(slot))
         .max_by_key(|(seq, _)| *seq)
         .ok_or_else(|| Error::Corrupt("no valid meta slot".into()))
+}
+
+/// Record checksum, seeded with the slot so a forged all-zero-ish entry
+/// (crc32 of empty data is 0) or a slot mixup can't validate.
+fn record_crc(slot: u64, payload: &[u8]) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&slot.to_le_bytes());
+    hasher.update(payload);
+    hasher.finalize()
 }
 
 fn file_id(slot: u64) -> u64 {
@@ -1041,6 +1151,93 @@ mod tests {
         let store = open(&dir);
         let mut batch = store.batch().unwrap();
         assert!(matches!(batch.put(u64::MAX, b"x"), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn poisoned_batch_cannot_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(&dir);
+        store.put(0, b"a").unwrap();
+
+        let mut batch = store.batch().unwrap();
+        failpoint::arm(0);
+        assert!(batch.put(1, b"x").is_err());
+        failpoint::disarm();
+        assert!(matches!(batch.commit(), Err(Error::Poisoned)));
+    }
+
+    #[test]
+    fn forged_empty_entry_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(&dir);
+        store.put(0, b"a").unwrap();
+        store.put(10, b"b").unwrap();
+        drop(store);
+
+        // Forge a zero-length entry at gap slot 5 (crc32 of "" is 0, so an
+        // unseeded scheme would serve a phantom empty record).
+        let idx_path = dir.path().join("data_00000.idx");
+        let mut idx = fs::OpenOptions::new().write(true).open(&idx_path).unwrap();
+        idx.seek(SeekFrom::Start(entry_position(5))).unwrap();
+        idx.write_all(&8u64.to_le_bytes()).unwrap(); // offset 8, len 0, crc 0
+        drop(idx);
+
+        let store = open(&dir);
+        assert!(matches!(store.get(5), Err(Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn torn_first_init_recovers_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(open(&dir));
+
+        // Crash mid-first-init: meta persisted short.
+        let meta_path = dir.path().join("meta");
+        let meta = fs::read(&meta_path).unwrap();
+        fs::write(&meta_path, &meta[..64]).unwrap();
+        let store = open(&dir); // re-inits: provably empty
+        store.put(0, b"a").unwrap();
+        drop(store);
+
+        // But with data files present, a bad meta must not re-init.
+        fs::write(&meta_path, b"garbage").unwrap();
+        assert!(matches!(
+            StaticFile::open(dir.path().to_path_buf()),
+            Err(Error::Corrupt(_))
+        ));
+    }
+
+    #[test]
+    fn verify_scrubs_seals_and_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(&dir);
+        let mut batch = store.batch().unwrap();
+        batch.put(0, b"a").unwrap();
+        batch.put(SLOTS_PER_FILE, b"b").unwrap();
+        batch.commit().unwrap();
+        store.verify().unwrap();
+        drop(store);
+
+        // Payload corruption in the sealed file.
+        let data_path = dir.path().join("data_00000");
+        let mut bytes = fs::read(&data_path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        fs::write(&data_path, &bytes).unwrap();
+        let store = open(&dir);
+        assert!(matches!(store.verify(), Err(Error::Corrupt(_))));
+        drop(store);
+        bytes[last] ^= 0xff;
+        fs::write(&data_path, &bytes).unwrap();
+
+        // Seal corruption.
+        let idx_path = dir.path().join("data_00000.idx");
+        let mut idx = fs::OpenOptions::new().write(true).open(&idx_path).unwrap();
+        idx.seek(SeekFrom::Start(TABLE_LEN + 16)).unwrap();
+        idx.write_all(&[0xff; 4]).unwrap();
+        drop(idx);
+        let store = open(&dir);
+        assert!(matches!(store.verify(), Err(Error::Corrupt(_))));
     }
 
     /// Enumerate every gated write-path syscall: fail it (and everything
