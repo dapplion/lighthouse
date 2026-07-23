@@ -746,6 +746,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let mut new_forkchoice_update_parameters =
             fork_choice_read_lock.get_forkchoice_update_parameters();
 
+        // When FCR is enabled, default the EL `safe` tag to finalized rather than justified.
+        // Finalized is always a fast-confirmed block, whereas the interim justified block's safety
+        // isn't proven under FCR. A successful FCR run below overrides this with the confirmed
+        // block; if FCR is skipped (deep sync) / errors / hasn't confirmed yet, `safe` stays
+        // finalized. With FCR disabled, `safe` remains justified (unchanged behaviour).
+        if self.canonical_head.fast_confirmation.is_some() {
+            new_forkchoice_update_parameters.justified_hash =
+                new_forkchoice_update_parameters.finalized_hash;
+        }
+
         // Run the Fast Confirmation Rule (FCR) while we still hold the fork choice read lock.
         // FCR must run even when the head hasn't changed, because new attestations may advance
         // the confirmed_root without changing the head/justified/finalized view.
