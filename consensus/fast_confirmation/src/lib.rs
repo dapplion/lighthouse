@@ -169,6 +169,16 @@ impl FastConfirmationRule {
     /// `checkpoint_state` (spec: `store.checkpoint_states[finalized_checkpoint]`); the
     /// head-derived caches come from `head_state`, whose block root is `head_root`.
     /// `byzantine_threshold` is clamped to [0, 25].
+    ///
+    /// `persisted_confirmed_root`, when `Some`, seeds `confirmed_root` instead of the finalized
+    /// root — used to restore a previously confirmed root across restarts so the EL
+    /// `safeBlockHash` doesn't revert to finalized. The caller MUST validate the root (present in
+    /// fork choice and an ancestor of the head) before passing it here. Only the observed-justified
+    /// balance sources stay reseeded to finalized, which is safe because they only gate the
+    /// epoch-boundary re-confirmation; a mid-head confirmed root is retained for the rest of the
+    /// epoch by the existing ancestry/epoch checks. `None` (old DB / FCR disabled / failed guard)
+    /// falls back to the finalized root, matching prior behaviour.
+    #[allow(clippy::too_many_arguments)]
     pub fn new<E: EthSpec>(
         head_root: Hash256,
         head_state: &BeaconState<E>,
@@ -176,6 +186,7 @@ impl FastConfirmationRule {
         checkpoint_state: &BeaconState<E>,
         byzantine_threshold: u64,
         proposer_score_boost: u64,
+        persisted_confirmed_root: Option<Hash256>,
         spec: &ChainSpec,
     ) -> Result<Self, Error> {
         let byzantine_threshold = byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD);
@@ -187,7 +198,7 @@ impl FastConfirmationRule {
         let checkpoint_balance =
             BalanceSourceData::new(checkpoint_state, finalized_checkpoint.root)?;
         Ok(Self {
-            confirmed_root: finalized_checkpoint.root,
+            confirmed_root: persisted_confirmed_root.unwrap_or(finalized_checkpoint.root),
             previous_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
                 checkpoint_balance.clone(),
@@ -1593,9 +1604,17 @@ mod tests {
             root: Hash256::repeat_byte(1),
         };
         let head_root_a = Hash256::repeat_byte(2);
-        let mut fcr =
-            FastConfirmationRule::new::<E>(head_root_a, &state, checkpoint, &state, 25, 40, &spec)
-                .expect("fcr initialization");
+        let mut fcr = FastConfirmationRule::new::<E>(
+            head_root_a,
+            &state,
+            checkpoint,
+            &state,
+            25,
+            40,
+            None,
+            &spec,
+        )
+        .expect("fcr initialization");
 
         assert!(matches!(
             fcr.head_balance_source.key,

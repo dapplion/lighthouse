@@ -40,7 +40,10 @@ use crate::shuffling_cache::BlockShufflingIds;
 use crate::state_advance_timer::MAX_ADVANCE_DISTANCE;
 use crate::{
     BeaconChain, BeaconChainError as Error, BeaconChainTypes, BeaconSnapshot,
-    beacon_chain::{BeaconForkChoice, BeaconStore, FORK_CHOICE_DB_KEY, OverrideForkchoiceUpdate},
+    beacon_chain::{
+        BeaconForkChoice, BeaconStore, FCR_CONFIRMED_ROOT_DB_KEY, FORK_CHOICE_DB_KEY,
+        OverrideForkchoiceUpdate,
+    },
     block_times_cache::BlockTimesCache,
     events::ServerSentEventHandler,
     metrics,
@@ -66,7 +69,8 @@ use state_processing::state_advance::complete_state_advance;
 use std::sync::Arc;
 use std::time::Duration;
 use store::{
-    Error as StoreError, KeyValueStore, KeyValueStoreOp, StoreConfig, iter::StateRootsIterator,
+    DBColumn, Error as StoreError, KeyValueStore, KeyValueStoreOp, StoreConfig,
+    iter::StateRootsIterator,
 };
 use task_executor::{JoinHandle, ShutdownReason};
 use tracing::{debug, error, info, instrument, warn};
@@ -312,6 +316,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 <BeaconChain<T>>::new_fast_confirmation_rule(
                     fork_choice_view.finalized_checkpoint,
                     &snapshot,
+                    &fork_choice,
                     store,
                     spec,
                 )
@@ -402,11 +407,18 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         drop(fork_choice_write_lock);
         *self.cached_head.write() = cached_head;
 
-        // Reset FCR to the restored finalized checkpoint so it doesn't carry stale state.
+        // Reset FCR to the restored finalized checkpoint so it doesn't carry stale state. A
+        // persisted `confirmed_root` may re-seed it, but only if it is still a valid ancestor of the
+        // restored head (the guard falls back to finalized for a possibly-ahead persisted root).
+        // Acquire the fork-choice read lock before the cached-head read lock to respect the
+        // documented lock ordering (1 before 2).
         if let Some(ref fcr_mutex) = self.fast_confirmation {
+            let fork_choice_read_lock = self.fork_choice.read();
+            let snapshot = self.cached_head.read().snapshot.clone();
             *fcr_mutex.lock() = <BeaconChain<T>>::new_fast_confirmation_rule(
                 fork_choice_view.finalized_checkpoint,
-                &self.cached_head.read().snapshot,
+                &snapshot,
+                &fork_choice_read_lock,
                 store,
                 spec,
             )
@@ -796,6 +808,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     }
                     if new_confirmed_root {
                         metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_CHANGES);
+                        // Persist the confirmed root so the EL `safeBlockHash` can be restored
+                        // across a restart instead of reverting to finalized. A small hot-DB write,
+                        // only on change; errors are logged and swallowed (FCR is a read-only
+                        // observer and must never affect consensus).
+                        Self::persist_fcr_confirmed_root(&self.store, confirmed_root);
                     }
 
                     // Emit a `fast_confirmation` event on every FCR run, regardless of
@@ -1087,9 +1104,15 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// When the head snapshot *is* the checkpoint state — same block root, state at the first slot
     /// of the checkpoint's epoch, as at genesis or checkpoint-sync startup — it is reused directly;
     /// otherwise the checkpoint state is loaded from the `store`.
+    ///
+    /// A previously-confirmed root persisted in the store (see `FCR_CONFIRMED_ROOT_DB_KEY`) is used
+    /// to seed `confirmed_root` — restoring the EL `safeBlockHash` across restarts — but only if it
+    /// passes `fcr_persisted_root_is_valid` against `fork_choice`. Otherwise FCR seeds finalized,
+    /// matching prior behaviour.
     fn new_fast_confirmation_rule(
         finalized_checkpoint: Checkpoint,
         snapshot: &BeaconSnapshot<T::EthSpec>,
+        fork_choice: &BeaconForkChoice<T>,
         store: &BeaconStore<T>,
         spec: &ChainSpec,
     ) -> Result<FastConfirmationRule, FastConfirmationError> {
@@ -1106,6 +1129,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 finalized_checkpoint,
             )?)
         };
+        let persisted_confirmed_root =
+            Self::load_persisted_fcr_confirmed_root(store).filter(|root| {
+                Self::fcr_persisted_root_is_valid(fork_choice, snapshot.beacon_block_root, *root)
+            });
         FastConfirmationRule::new(
             snapshot.beacon_block_root,
             &snapshot.beacon_state,
@@ -1115,8 +1142,59 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .unwrap_or(&snapshot.beacon_state),
             spec.confirmation_byzantine_threshold,
             spec.proposer_score_boost,
+            persisted_confirmed_root,
             spec,
         )
+    }
+
+    /// Load the persisted FCR `confirmed_root` from the store. Returns `None` when absent (old DBs,
+    /// FCR previously disabled) or on any store error — FCR is a read-only observer, so a failure
+    /// here simply falls back to seeding from finalized and never affects consensus.
+    fn load_persisted_fcr_confirmed_root(store: &BeaconStore<T>) -> Option<Hash256> {
+        match store
+            .hot_db
+            .get_bytes(DBColumn::ForkChoice, FCR_CONFIRMED_ROOT_DB_KEY.as_slice())
+        {
+            Ok(Some(bytes)) if bytes.len() == 32 => Some(Hash256::from_slice(&bytes)),
+            Ok(Some(bytes)) => {
+                warn!(
+                    len = bytes.len(),
+                    "Ignoring malformed persisted FCR confirmed root"
+                );
+                None
+            }
+            Ok(None) => None,
+            Err(e) => {
+                debug!(error = ?e, "Unable to read persisted FCR confirmed root");
+                None
+            }
+        }
+    }
+
+    /// Validity guard for a persisted FCR `confirmed_root`: accept it only if it is a block known to
+    /// fork choice (`get_block` also checks it is a finalized-or-descendant) AND an ancestor of the
+    /// current head. Every other staleness case is already handled by `get_latest_confirmed`'s
+    /// first-run reverts, so a rejected root just falls back to finalized (== current behaviour).
+    fn fcr_persisted_root_is_valid(
+        fork_choice: &BeaconForkChoice<T>,
+        head_root: Hash256,
+        persisted_root: Hash256,
+    ) -> bool {
+        fork_choice.get_block(&persisted_root).is_some()
+            && fork_choice.is_descendant(persisted_root, head_root)
+    }
+
+    /// Persist the FCR `confirmed_root` so it survives a restart. A small hot-DB write; called only
+    /// when the confirmed root changes. Errors are logged and swallowed — FCR must never affect
+    /// consensus.
+    fn persist_fcr_confirmed_root(store: &BeaconStore<T>, confirmed_root: Hash256) {
+        if let Err(e) = store.hot_db.put_bytes(
+            DBColumn::ForkChoice,
+            FCR_CONFIRMED_ROOT_DB_KEY.as_slice(),
+            confirmed_root.as_slice(),
+        ) {
+            debug!(error = ?e, "Unable to persist FCR confirmed root");
+        }
     }
 
     /// Load the state for `checkpoint` (spec: `store.checkpoint_states[checkpoint]`) — the
