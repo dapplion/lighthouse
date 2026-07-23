@@ -74,3 +74,30 @@ pub(crate) static FCR_ADVANCE: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
         "Count of FCR advances of the confirmed root to a descendant",
     )
 });
+
+// Standardized fast-confirmation metrics from ethereum/beacon-metrics
+// (metrics.md#fast-confirmation). Names, types and help strings are fixed by the standard.
+pub static FAST_CONFIRMATION_SLOT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "beacon_fast_confirmation_slot",
+        "Slot of the most recent confirmed block",
+    )
+});
+pub(crate) static FAST_CONFIRMATION_REORGS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "beacon_fast_confirmation_reorgs_total",
+        "Total number of confirmed block reorganizations",
+    )
+});
+pub(crate) static FAST_CONFIRMATION_FALLBACKS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "beacon_fast_confirmation_fallbacks_total",
+        "Total number of fallbacks to finality",
+    )
+});
+pub(crate) static FAST_CONFIRMATION_RESTARTS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "beacon_fast_confirmation_restarts_total",
+        "Total number of restarts from a safe unrealized justified block",
+    )
+});

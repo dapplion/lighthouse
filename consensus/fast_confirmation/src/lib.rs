@@ -442,6 +442,15 @@ impl FastConfirmationRule {
             );
             confirmed_root = finalized_checkpoint.root;
             metrics::inc_counter_vec(&metrics::FCR_REVERT_TO_FINALIZED, &[reason]);
+            // Standard metric: every revert of the confirmed root to the finalized block is a
+            // fallback to finality.
+            metrics::inc_counter(&metrics::FAST_CONFIRMATION_FALLBACKS);
+            // Standard metric: a `not_ancestor` revert means the confirmed block left the
+            // canonical chain, i.e. a confirmed-block reorganization. The revert reasons are
+            // mutually exclusive (single if/else-if chain), so this counts each reorg once.
+            if reason == "not_ancestor" {
+                metrics::inc_counter(&metrics::FAST_CONFIRMATION_REORGS);
+            }
         }
 
         // Restart the confirmation chain if each of the following conditions are true:
@@ -474,6 +483,8 @@ impl FastConfirmationRule {
             );
             confirmed_root = self.current_epoch_observed_justified.checkpoint().root;
             metrics::inc_counter(&metrics::FCR_RESTART_FROM_JUSTIFIED);
+            // Standard metric: restart from a safe unrealized justified block.
+            metrics::inc_counter(&metrics::FAST_CONFIRMATION_RESTARTS);
         }
 
         // Attempt to further advance the latest confirmed block

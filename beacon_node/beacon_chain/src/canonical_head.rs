@@ -786,6 +786,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         &fcr_metrics::FCR_CONFIRMED_ROOT_SLOT,
                         confirmed_slot.as_u64() as i64,
                     );
+                    // Standard metric (ethereum/beacon-metrics): slot of the most recent
+                    // confirmed block, set after every successful FCR run.
+                    metrics::set_gauge(
+                        &fcr_metrics::FAST_CONFIRMATION_SLOT,
+                        confirmed_slot.as_u64() as i64,
+                    );
                     // Sample the settled-delay histogram only on the first recompute that advanced
                     // FCR's per-slot update, so intra-slot block-import recomputes don't bias it.
                     if new_update_slot {
