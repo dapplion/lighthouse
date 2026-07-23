@@ -161,6 +161,9 @@ type HashBlockTuple<E> = (Hash256, RangeSyncBlock<E>);
 pub const BEACON_CHAIN_DB_KEY: Hash256 = Hash256::ZERO;
 pub const OP_POOL_DB_KEY: Hash256 = Hash256::ZERO;
 pub const FORK_CHOICE_DB_KEY: Hash256 = Hash256::ZERO;
+/// Key for the persisted FCR `confirmed_root`. Shares `DBColumn::ForkChoice` with
+/// `FORK_CHOICE_DB_KEY`, so it MUST be distinct from it to avoid colliding.
+pub const FCR_CONFIRMED_ROOT_DB_KEY: Hash256 = Hash256::repeat_byte(1);
 
 /// Defines how old a block can be before it's no longer a candidate for the early attester cache.
 const EARLY_ATTESTER_CACHE_HISTORIC_SLOTS: u64 = 4;

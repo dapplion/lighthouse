@@ -284,6 +284,7 @@ fn build_chain_inner(
         &seed_state,
         25,
         40,
+        None,
         &spec,
     )
     .expect("fcr initialization");
