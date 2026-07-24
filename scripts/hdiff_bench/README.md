@@ -71,3 +71,12 @@ subtree skipping is the obvious follow-up. Deep-span apply regressed (get_mut/pu
 changed validator); batch rebuild above a patch-count threshold is another follow-up.
 Buffer size() still reports the flat-equivalent (~348MB); actual marginal memory of a
 hybrid buffer beside its cached state is only the flat vecs + residual (~60MB).
+
+### Legacy V0 diffs
+
+V0 diffs apply at runtime through the same `HDiff::apply`: shared sections are encoding-
+identical, and the xdelta3 section round-trips through the legacy residual layout (pending
+queues inline) when the state is Electra+ (~250ms extra; skipped pre-Electra where layouts
+are identical). Cross-version validated: V0 diff computed by the pre-hybrid code applies
+byte-for-byte on mainnet Fulu era states (445ms legacy apply vs 55ms V1). No DB migration
+or resync needed; new diffs are always written as V1.
