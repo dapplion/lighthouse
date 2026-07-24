@@ -1785,7 +1785,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                 )
             })?
         };
-        let target_buffer = HDiffBuffer::from_state(state.clone());
+        let target_buffer = HDiffBuffer::from_state(state.clone())?;
         let diff = {
             let _timer = metrics::start_timer_vec(&metrics::BEACON_HDIFF_COMPUTE_TIME, HOT_METRIC);
             HDiff::compute(&base_buffer, &target_buffer, &self.config)?
@@ -1884,7 +1884,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                     );
                     return Err(Error::MissingHotStateSnapshot(state_root, slot));
                 };
-                HDiffBuffer::from_state(state)
+                HDiffBuffer::from_state(state)?
             }
             StorageStrategy::DiffFrom(from_slot) => {
                 let from_state_root = diff_base_state.get_root(from_slot)?;
@@ -1899,7 +1899,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                 {
                     let _timer =
                         metrics::start_timer_vec(&metrics::BEACON_HDIFF_APPLY_TIME, HOT_METRIC);
-                    diff.apply(&mut buffer, &self.config)?;
+                    diff.apply(&mut buffer, &self.config, &self.spec)?;
                 }
                 buffer
             }
@@ -2266,7 +2266,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
             );
             self.load_hdiff_buffer_for_slot(from_slot)?
         };
-        let target_buffer = HDiffBuffer::from_state(state.clone());
+        let target_buffer = HDiffBuffer::from_state(state.clone())?;
         let diff = {
             let _timer = metrics::start_timer_vec(&metrics::BEACON_HDIFF_COMPUTE_TIME, COLD_METRIC);
             HDiff::compute(&base_buffer, &target_buffer, &self.config)?
@@ -2437,7 +2437,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                 let state = self
                     .load_cold_state_as_snapshot(slot)?
                     .ok_or(Error::MissingSnapshot(slot))?;
-                let buffer = HDiffBuffer::from_state(state.clone());
+                let buffer = HDiffBuffer::from_state(state.clone())?;
 
                 self.historic_state_cache
                     .lock()
@@ -2461,7 +2461,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                 {
                     let _timer =
                         metrics::start_timer_vec(&metrics::BEACON_HDIFF_APPLY_TIME, COLD_METRIC);
-                    diff.apply(&mut buffer, &self.config)?;
+                    diff.apply(&mut buffer, &self.config, &self.spec)?;
                 }
 
                 self.historic_state_cache

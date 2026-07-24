@@ -14,8 +14,8 @@ use superstruct::superstruct;
 use typenum::Unsigned;
 use types::state::HistoricalSummary;
 use types::{
-    BeaconState, ChainSpec, Epoch, EthSpec, Hash256, PendingConsolidation, PendingDeposit,
-    PendingPartialWithdrawal, Slot, Validator, Validators,
+    BeaconState, ChainSpec, Epoch, EthSpec, ForkName, Hash256, PendingConsolidation,
+    PendingDeposit, PendingPartialWithdrawal, Slot, Validator, Validators,
 };
 
 static EMPTY_PUBKEY: LazyLock<PublicKeyBytes> = LazyLock::new(PublicKeyBytes::empty);
@@ -32,9 +32,7 @@ pub enum Error {
     InvalidBalancesLength,
     LessThanStart(Slot, Slot),
     MilhouseError(milhouse::Error),
-    /// V0 diffs were computed against buffers whose xdelta3 section included the pending
-    /// queues; they cannot be applied to the current buffer layout.
-    IncompatibleDiffVariant,
+    BeaconStateError(types::BeaconStateError),
 }
 
 impl From<milhouse::Error> for Error {
@@ -211,8 +209,13 @@ pub struct FifoQueueDiff<T: Encode + Decode> {
 }
 
 impl<E: EthSpec> HDiffBuffer<E> {
-    pub fn from_state(mut beacon_state: BeaconState<E>) -> Self {
+    pub fn from_state(mut beacon_state: BeaconState<E>) -> Result<Self, Error> {
         let _t = metrics::start_timer(&metrics::STORE_BEACON_HDIFF_BUFFER_FROM_STATE_TIME);
+        // Flush pending mutations so that the extracted lists are canonical trees which
+        // share structure with the source state.
+        beacon_state
+            .apply_pending_mutations()
+            .map_err(Error::BeaconStateError)?;
         // Set state.balances to empty list, and then serialize state as ssz
         let balances_list = std::mem::take(beacon_state.balances_mut());
         let inactivity_scores = if let Ok(inactivity_scores) = beacon_state.inactivity_scores_mut()
@@ -257,7 +260,7 @@ impl<E: EthSpec> HDiffBuffer<E> {
         let state = beacon_state.as_ssz_bytes();
         let balances = balances_list.to_vec();
 
-        HDiffBuffer {
+        Ok(HDiffBuffer {
             state,
             balances,
             inactivity_scores,
@@ -267,7 +270,7 @@ impl<E: EthSpec> HDiffBuffer<E> {
             pending_deposits,
             pending_partial_withdrawals,
             pending_consolidations,
-        }
+        })
     }
 
     pub fn as_state(&self, spec: &ChainSpec) -> Result<BeaconState<E>, Error> {
@@ -302,6 +305,74 @@ impl<E: EthSpec> HDiffBuffer<E> {
         }
 
         Ok(state)
+    }
+
+    /// Fork of the state held in a residual `state` byte buffer, sniffed from its slot
+    /// field (fixed offset 40 in every fork).
+    fn residual_fork(bytes: &[u8], spec: &ChainSpec) -> Result<ForkName, Error> {
+        let invalid = || {
+            Error::InvalidSszState(ssz::DecodeError::InvalidByteLength {
+                len: bytes.len(),
+                expected: 48,
+            })
+        };
+        let slot_bytes: [u8; 8] = bytes
+            .get(40..48)
+            .ok_or_else(invalid)?
+            .try_into()
+            .map_err(|_| invalid())?;
+        Ok(spec.fork_name_at_slot::<E>(Slot::new(u64::from_le_bytes(slot_bytes))))
+    }
+
+    /// Residual bytes in the pre-V1 layout (pending queues inline), as V0 diffs were
+    /// computed over. Identical to `self.state` for pre-Electra states.
+    fn legacy_state_bytes(&self, spec: &ChainSpec) -> Result<Vec<u8>, Error> {
+        if !Self::residual_fork(&self.state, spec)?.electra_enabled() {
+            return Ok(self.state.clone());
+        }
+        let mut state =
+            BeaconState::<E>::from_ssz_bytes(&self.state, spec).map_err(Error::InvalidSszState)?;
+        if let Ok(pending_deposits) = state.pending_deposits_mut() {
+            *pending_deposits = self.pending_deposits.clone();
+        }
+        if let Ok(pending_partial_withdrawals) = state.pending_partial_withdrawals_mut() {
+            *pending_partial_withdrawals = self.pending_partial_withdrawals.clone();
+        }
+        if let Ok(pending_consolidations) = state.pending_consolidations_mut() {
+            *pending_consolidations = self.pending_consolidations.clone();
+        }
+        Ok(state.as_ssz_bytes())
+    }
+
+    /// Split a pre-V1 residual (pending queues inline) into the hybrid layout.
+    fn set_from_legacy_state_bytes(
+        &mut self,
+        legacy: Vec<u8>,
+        spec: &ChainSpec,
+    ) -> Result<(), Error> {
+        if !Self::residual_fork(&legacy, spec)?.electra_enabled() {
+            self.state = legacy;
+            self.pending_deposits = List::default();
+            self.pending_partial_withdrawals = List::default();
+            self.pending_consolidations = List::default();
+            return Ok(());
+        }
+        let mut state =
+            BeaconState::<E>::from_ssz_bytes(&legacy, spec).map_err(Error::InvalidSszState)?;
+        self.pending_deposits = state
+            .pending_deposits_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        self.pending_partial_withdrawals = state
+            .pending_partial_withdrawals_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        self.pending_consolidations = state
+            .pending_consolidations_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        self.state = state.as_ssz_bytes();
+        Ok(())
     }
 
     /// Byte size of this instance
@@ -366,25 +437,44 @@ impl HDiff {
         &self,
         source: &mut HDiffBuffer<E>,
         config: &StoreConfig,
+        spec: &ChainSpec,
     ) -> Result<(), Error> {
-        let HDiff::V1(diff) = self else {
-            return Err(Error::IncompatibleDiffVariant);
-        };
-        let source_state = std::mem::take(&mut source.state);
-        diff.state_diff.apply(&source_state, &mut source.state)?;
-        diff.balances_diff.apply(&mut source.balances, config)?;
-        diff.inactivity_scores_diff
-            .apply(&mut source.inactivity_scores, config)?;
-        diff.validators_diff
-            .apply::<E>(&mut source.validators, config)?;
-        diff.historical_roots.apply(&mut source.historical_roots)?;
-        diff.historical_summaries
-            .apply(&mut source.historical_summaries)?;
-        diff.pending_deposits.apply(&mut source.pending_deposits)?;
-        diff.pending_partial_withdrawals
-            .apply(&mut source.pending_partial_withdrawals)?;
-        diff.pending_consolidations
-            .apply(&mut source.pending_consolidations)?;
+        match self {
+            HDiff::V1(diff) => {
+                let source_state = std::mem::take(&mut source.state);
+                diff.state_diff.apply(&source_state, &mut source.state)?;
+                diff.pending_deposits.apply(&mut source.pending_deposits)?;
+                diff.pending_partial_withdrawals
+                    .apply(&mut source.pending_partial_withdrawals)?;
+                diff.pending_consolidations
+                    .apply(&mut source.pending_consolidations)?;
+                diff.balances_diff.apply(&mut source.balances, config)?;
+                diff.inactivity_scores_diff
+                    .apply(&mut source.inactivity_scores, config)?;
+                diff.validators_diff
+                    .apply::<E>(&mut source.validators, config)?;
+                diff.historical_roots.apply(&mut source.historical_roots)?;
+                diff.historical_summaries
+                    .apply(&mut source.historical_summaries)?;
+            }
+            // Legacy diffs: the xdelta3 section was computed over residuals with the
+            // pending queues inline, so round-trip through that layout. The layouts are
+            // identical pre-Electra, in which case the round-trip is skipped.
+            HDiff::V0(diff) => {
+                let legacy = source.legacy_state_bytes(spec)?;
+                let mut new_legacy = vec![];
+                diff.state_diff.apply(&legacy, &mut new_legacy)?;
+                source.set_from_legacy_state_bytes(new_legacy, spec)?;
+                diff.balances_diff.apply(&mut source.balances, config)?;
+                diff.inactivity_scores_diff
+                    .apply(&mut source.inactivity_scores, config)?;
+                diff.validators_diff
+                    .apply::<E>(&mut source.validators, config)?;
+                diff.historical_roots.apply(&mut source.historical_roots)?;
+                diff.historical_summaries
+                    .apply(&mut source.historical_summaries)?;
+            }
+        }
 
         Ok(())
     }
@@ -990,7 +1080,7 @@ impl StorageStrategy {
 mod tests {
     use super::*;
     use rand::{Rng, SeedableRng, rng, rngs::SmallRng};
-    use types::MainnetEthSpec as E;
+    use types::{Eth1Data, MainnetEthSpec as E};
 
     #[test]
     fn default_storage_strategy() {
@@ -1250,8 +1340,80 @@ mod tests {
         assert_eq!(hdiff_ssz, hdiff_v1_expected_bytes());
     }
 
-    // V0 diffs written by prior releases must still decode (they cannot be applied to the
-    // current buffer layout, but must not be misinterpreted).
+    fn compute_v0(
+        source: &HDiffBuffer<E>,
+        target: &HDiffBuffer<E>,
+        config: &StoreConfig,
+        spec: &ChainSpec,
+    ) -> HDiff {
+        HDiff::V0(HDiffV0 {
+            state_diff: BytesDiff::compute(
+                &source.legacy_state_bytes(spec).unwrap(),
+                &target.legacy_state_bytes(spec).unwrap(),
+            )
+            .unwrap(),
+            balances_diff: CompressedU64Diff::compute(&source.balances, &target.balances, config)
+                .unwrap(),
+            inactivity_scores_diff: CompressedU64Diff::compute(
+                &source.inactivity_scores,
+                &target.inactivity_scores,
+                config,
+            )
+            .unwrap(),
+            validators_diff: ValidatorsDiff::compute::<E>(
+                &source.validators,
+                &target.validators,
+                config,
+            )
+            .unwrap(),
+            historical_roots: AppendOnlyDiff::compute(
+                &source.historical_roots,
+                &target.historical_roots,
+            )
+            .unwrap(),
+            historical_summaries: AppendOnlyDiff::compute(
+                &source.historical_summaries,
+                &target.historical_summaries,
+            )
+            .unwrap(),
+        })
+    }
+
+    #[test]
+    fn v0_diff_apply_roundtrip() {
+        let spec = E::default_spec();
+        let config = StoreConfig::default();
+        let mut rng = rng();
+
+        let mut pre_state = BeaconState::<E>::new(0, Eth1Data::default(), &spec);
+        for _ in 0..4 {
+            pre_state.balances_mut().push(32_000_000_000).unwrap();
+            pre_state
+                .validators_mut()
+                .push(rand_validator(&mut rng))
+                .unwrap();
+        }
+        let mut post_state = pre_state.clone();
+        *post_state.slot_mut() = Slot::new(32);
+        if let Some(balance) = post_state.balances_mut().get_mut(1) {
+            *balance += 1_000_000;
+        }
+        post_state.balances_mut().push(31_000_000_000).unwrap();
+        post_state
+            .validators_mut()
+            .push(rand_validator(&mut rng))
+            .unwrap();
+
+        let pre_buffer = HDiffBuffer::from_state(pre_state).unwrap();
+        let target_buffer = HDiffBuffer::from_state(post_state).unwrap();
+        let v0 = compute_v0(&pre_buffer, &target_buffer, &config, &spec);
+
+        let mut buffer = pre_buffer.clone();
+        v0.apply(&mut buffer, &config, &spec).unwrap();
+        assert_eq!(buffer, target_buffer);
+    }
+
+    // V0 diffs written by prior releases must still decode.
     #[test]
     fn hdiff_v0_decode_compat() {
         let v0_bytes = vec![

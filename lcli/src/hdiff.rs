@@ -38,11 +38,13 @@ pub fn run_compute<E: EthSpec>(
     );
 
     let t = Instant::now();
-    let pre_buffer = HDiffBuffer::from_state(pre_state);
+    let pre_buffer = HDiffBuffer::from_state(pre_state)
+        .map_err(|e| format!("failed to build pre buffer: {e:?}"))?;
     println!("Pre-state buffer creation: {:?}", t.elapsed());
 
     let t = Instant::now();
-    let post_buffer = HDiffBuffer::from_state(post_state);
+    let post_buffer = HDiffBuffer::from_state(post_state)
+        .map_err(|e| format!("failed to build post buffer: {e:?}"))?;
     println!("Post-state buffer creation: {:?}", t.elapsed());
 
     println!(
@@ -106,14 +108,15 @@ pub fn run_apply<E: EthSpec>(
     );
 
     let t = Instant::now();
-    let pre_buffer = HDiffBuffer::from_state(pre_state);
+    let pre_buffer = HDiffBuffer::from_state(pre_state)
+        .map_err(|e| format!("failed to build pre buffer: {e:?}"))?;
     println!("Pre-state buffer creation: {:?}", t.elapsed());
 
     let mut applied_buffer = None;
     for i in 0..runs {
         let mut buffer = pre_buffer.clone();
         let t = Instant::now();
-        diff.apply(&mut buffer, &config)
+        diff.apply(&mut buffer, &config, spec)
             .map_err(|e| format!("failed to apply diff: {e:?}"))?;
         println!("Run {i}: apply time {:?}", t.elapsed());
         applied_buffer = Some(buffer);

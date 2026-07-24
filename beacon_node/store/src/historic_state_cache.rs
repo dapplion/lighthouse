@@ -1,6 +1,7 @@
 use crate::hdiff::{Error, HDiffBuffer};
 use crate::metrics;
 use hashlink::lru_cache::LruCache;
+use tracing::warn;
 use types::{BeaconState, ChainSpec, EthSpec, Slot};
 
 /// Holds a combination of finalized states in two formats:
@@ -39,7 +40,9 @@ impl<E: EthSpec> HistoricStateCache<E> {
             );
             Some(buffer_ref.clone())
         } else if let Some(state) = self.states.get(&slot) {
-            let buffer = HDiffBuffer::from_state(state.clone());
+            let buffer = HDiffBuffer::from_state(state.clone())
+                .inspect_err(|e| warn!(error = ?e, "Failed to build hdiff buffer"))
+                .ok()?;
             let _timer = metrics::start_timer_vec(
                 &metrics::BEACON_HDIFF_BUFFER_CLONE_TIME,
                 metrics::COLD_METRIC,
