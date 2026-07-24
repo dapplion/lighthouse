@@ -729,21 +729,48 @@ impl<T: Decode + Encode + Copy + milhouse::Value> AppendOnlyDiff<T> {
 
 impl<T: Decode + Encode + PartialEq + milhouse::Value> FifoQueueDiff<T> {
     /// Queue items are immutable: the target queue must equal a suffix of the base queue
-    /// followed by appended items. Scan for the smallest consumed count whose remaining
-    /// base items form a prefix of the target; if none exists the whole queue is replaced.
+    /// followed by appended items. The smallest consumed count corresponds to the longest
+    /// suffix of the base that is a prefix of the target, found with a KMP prefix
+    /// automaton in O(base + target) worst case: queue contents are attacker-influenced,
+    /// so a naive scan with quadratic worst case is not acceptable here. If no overlap
+    /// exists the whole queue is replaced.
+    // TODO(hdiff-hybrid): review the overlap find algorithm before merging: KMP edge
+    // cases, adversarial queue contents, and whether a semantic cursor (e.g. deposit
+    // queue head index from the state) could replace content search entirely.
     pub fn compute<N: Unsigned>(xs: &List<T, N>, ys: &List<T, N>) -> Self {
         let xs_vec = xs.iter().collect::<Vec<_>>();
         let ys_vec = ys.iter().collect::<Vec<_>>();
-        let min_consumed = xs_vec.len().saturating_sub(ys_vec.len());
-        let consumed = (min_consumed..=xs_vec.len())
-            .find(|&k| xs_vec[k..].iter().zip(&ys_vec).all(|(a, b)| a == b))
-            .unwrap_or(xs_vec.len());
-        let appended = ys_vec[(xs_vec.len() - consumed)..]
-            .iter()
-            .map(|t| (*t).clone())
-            .collect();
+
+        // KMP failure function over the target: failure[i] is the length of the longest
+        // proper prefix of ys[..=i] that is also a suffix of it. All indices are bounded
+        // by the invariants `j < i` and `failure[i] <= i`.
+        let mut failure = vec![0usize; ys_vec.len()];
+        let mut j = 0;
+        for i in 1..ys_vec.len() {
+            while j > 0 && ys_vec[i] != ys_vec[j] {
+                j = failure[j - 1];
+            }
+            if ys_vec[i] == ys_vec[j] {
+                j += 1;
+            }
+            failure[i] = j;
+        }
+
+        // Stream the base through the automaton; the final state is the length of the
+        // longest suffix of the base that is a prefix of the target.
+        let mut overlap = 0usize;
+        for x in &xs_vec {
+            while overlap > 0 && (overlap == ys_vec.len() || *x != ys_vec[overlap]) {
+                overlap = failure[overlap - 1];
+            }
+            if overlap < ys_vec.len() && *x == ys_vec[overlap] {
+                overlap += 1;
+            }
+        }
+
+        let appended = ys_vec[overlap..].iter().map(|t| (*t).clone()).collect();
         Self {
-            consumed: consumed as u64,
+            consumed: (xs_vec.len() - overlap) as u64,
             appended,
         }
     }
@@ -1097,6 +1124,9 @@ mod tests {
             (&[1, 2, 3, 4], &[3, 4], 2, 0),
             // Consume AND append while growing: the case that trips pure-append heuristics.
             (&[1, 2, 3, 4], &[3, 4, 5, 6, 7], 2, 3),
+            // Duplicate items must not confuse the overlap search.
+            (&[1, 1, 1, 2], &[1, 2, 9], 2, 1),
+            (&[1, 2, 1, 2, 1], &[2, 1, 2, 1, 7], 1, 1),
             (&[1, 2, 3, 4], &[5, 6], 4, 2),
             (&[1, 2, 3, 4], &[], 4, 0),
             (&[], &[1, 2], 0, 2),
