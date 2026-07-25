@@ -52,6 +52,10 @@ pub fn run_compute<E: EthSpec>(
         pre_buffer.size(),
         post_buffer.size()
     );
+    println!(
+        "Post buffer marginal bytes vs pre: {}",
+        post_buffer.marginal_bytes_vs(&pre_buffer)
+    );
 
     let mut diff = None;
     for i in 0..runs {

@@ -80,3 +80,15 @@ queues inline) when the state is Electra+ (~250ms extra; skipped pre-Electra whe
 are identical). Cross-version validated: V0 diff computed by the pre-hybrid code applies
 byte-for-byte on mainnet Fulu era states (445ms legacy apply vs 55ms V1). No DB migration
 or resync needed; new diffs are always written as V1.
+
+## Final reference results (sparse sections + structural compute, 2026-07)
+
+23 mainnet pairs verified byte-for-byte (incl. Electra->Fulu 1.8M-slot cross-fork + leak).
+vs unstable V0: diff sizes -72% @span32 (541->150KB), -46% @480, -16% @8192, ~flat >=57k;
+leak32 -65%. Archive census: 71.7 -> 36.5 GB/yr (-49%); full archive 405 -> 206 GB.
+Compute 223-296ms flat across spans (V0: 172-1432; unshared-tree worst case — in-node
+lineage sharing skips unchanged validator subtrees via Arc::ptr_eq). Apply 32-45ms leaf
+(V0 34-194), 58ms @8192 (193), deep spans regress (888ms @1.8M) from wholesale rebuilds.
+from_state ~290ms (V0 950), as_state ~340ms (V0 614). Buffer marginal memory: flat
+sections ~45MB + only unshared tree nodes (lcli shows the unshared upper bound;
+in-node buffers share lineage via the state cache).
