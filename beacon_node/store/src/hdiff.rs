@@ -2,7 +2,7 @@
 use crate::{DBColumn, StoreConfig, StoreItem, metrics};
 use bls::PublicKeyBytes;
 use itertools::Itertools;
-use milhouse::List;
+use milhouse::{List, Vector};
 use serde::{Deserialize, Serialize};
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
@@ -14,8 +14,8 @@ use superstruct::superstruct;
 use typenum::Unsigned;
 use types::state::HistoricalSummary;
 use types::{
-    BeaconState, ChainSpec, Epoch, EthSpec, ForkName, Hash256, PendingConsolidation,
-    PendingDeposit, PendingPartialWithdrawal, Slot, Validator, Validators,
+    BeaconState, ChainSpec, Epoch, EthSpec, Hash256, PendingConsolidation, PendingDeposit,
+    PendingPartialWithdrawal, Slot, Validator, Validators,
 };
 
 static EMPTY_PUBKEY: LazyLock<PublicKeyBytes> = LazyLock::new(PublicKeyBytes::empty);
@@ -117,7 +117,14 @@ pub struct HDiffBuffer<E: EthSpec> {
     state: Vec<u8>,
     balances: Vec<u64>,
     inactivity_scores: Vec<u64>,
+    /// SSZ bytes of the participation lists (one byte per validator, empty pre-Altair).
+    previous_epoch_participation: Vec<u8>,
+    current_epoch_participation: Vec<u8>,
     validators: Validators<E>,
+    block_roots: Vector<Hash256, E::SlotsPerHistoricalRoot>,
+    state_roots: Vector<Hash256, E::SlotsPerHistoricalRoot>,
+    randao_mixes: Vector<Hash256, E::EpochsPerHistoricalVector>,
+    slashings: Vector<u64, E::EpochsPerSlashingsVector>,
     historical_roots: List<Hash256, E::HistoricalRootsLimit>,
     historical_summaries: List<HistoricalSummary, E::HistoricalRootsLimit>,
     pending_deposits: List<PendingDeposit, E::PendingDepositsLimit>,
@@ -164,6 +171,24 @@ pub struct HDiff {
     inactivity_scores_diff: CompressedU64Diff,
     #[superstruct(only(V1))]
     inactivity_scores_sparse_diff: SparseU64Diff,
+    /// Participation flags are sticky across epochs for stable validators, so a sparse
+    /// gap-encoded patch is tiny; keeping them out of the xdelta3 residual removes
+    /// ~4.6MB from its input. `current_epoch_participation` is all-zero at
+    /// epoch-boundary grid states and costs nothing.
+    #[superstruct(only(V1))]
+    previous_participation: ParticipationDiff,
+    #[superstruct(only(V1))]
+    current_participation: ParticipationDiff,
+    /// Ring buffers encoded as sparse index updates: span-agnostic, and removes ~5MB of
+    /// slowly-rotating data from the xdelta3 residual.
+    #[superstruct(only(V1))]
+    block_roots: RingDiff<Hash256>,
+    #[superstruct(only(V1))]
+    state_roots: RingDiff<Hash256>,
+    #[superstruct(only(V1))]
+    randao_mixes: RingDiff<Hash256>,
+    #[superstruct(only(V1))]
+    slashings_ring: RingDiff<u64>,
     /// The validators array represents the vast majority of data in a BeaconState. Due to its big
     /// size we have seen the performance of xdelta3 degrade. Comparing each entry of the
     /// validators array manually significantly speeds up the computation of the diff (+10x faster)
@@ -210,6 +235,20 @@ pub struct SparseU64Diff {
     bytes: Vec<u8>,
 }
 
+/// Sparse patch for participation-flag byte arrays: gap-encoded changed indices with
+/// replacement bytes, plus the appended tail. zstd-compressed.
+#[derive(Debug, PartialEq, Encode, Decode)]
+pub struct ParticipationDiff {
+    bytes: Vec<u8>,
+}
+
+/// Sparse updates to a fixed-size ring buffer, as parallel index/value lists.
+#[derive(Debug, PartialEq, Encode, Decode)]
+pub struct RingDiff<T: Encode + Decode> {
+    indices: Vec<u32>,
+    values: Vec<T>,
+}
+
 #[derive(Debug, PartialEq, Encode, Decode)]
 pub struct ValidatorsDiff {
     bytes: Vec<u8>,
@@ -246,7 +285,24 @@ impl<E: EthSpec> HDiffBuffer<E> {
             // is post altair, all its items will show up in the diff as is.
             vec![]
         };
+        let previous_epoch_participation =
+            if let Ok(participation) = beacon_state.previous_epoch_participation_mut() {
+                std::mem::take(participation).as_ssz_bytes()
+            } else {
+                // Pre-altair, same reasoning as inactivity_scores.
+                vec![]
+            };
+        let current_epoch_participation =
+            if let Ok(participation) = beacon_state.current_epoch_participation_mut() {
+                std::mem::take(participation).as_ssz_bytes()
+            } else {
+                vec![]
+            };
         let validators = std::mem::take(beacon_state.validators_mut());
+        let block_roots = std::mem::take(beacon_state.block_roots_mut());
+        let state_roots = std::mem::take(beacon_state.state_roots_mut());
+        let randao_mixes = std::mem::take(beacon_state.randao_mixes_mut());
+        let slashings = std::mem::take(beacon_state.slashings_mut());
         let historical_roots = std::mem::take(beacon_state.historical_roots_mut());
         let historical_summaries =
             if let Ok(historical_summaries) = beacon_state.historical_summaries_mut() {
@@ -284,7 +340,13 @@ impl<E: EthSpec> HDiffBuffer<E> {
             state,
             balances,
             inactivity_scores,
+            previous_epoch_participation,
+            current_epoch_participation,
             validators,
+            block_roots,
+            state_roots,
+            randao_mixes,
+            slashings,
             historical_roots,
             historical_summaries,
             pending_deposits,
@@ -306,7 +368,21 @@ impl<E: EthSpec> HDiffBuffer<E> {
                 .map_err(|_| Error::InvalidBalancesLength)?;
         }
 
+        if let Ok(participation) = state.previous_epoch_participation_mut() {
+            *participation = List::from_ssz_bytes(&self.previous_epoch_participation)
+                .map_err(Error::InvalidSszState)?;
+        }
+        if let Ok(participation) = state.current_epoch_participation_mut() {
+            *participation = List::from_ssz_bytes(&self.current_epoch_participation)
+                .map_err(Error::InvalidSszState)?;
+        }
+
         *state.validators_mut() = self.validators.clone();
+
+        *state.block_roots_mut() = self.block_roots.clone();
+        *state.state_roots_mut() = self.state_roots.clone();
+        *state.randao_mixes_mut() = self.randao_mixes.clone();
+        *state.slashings_mut() = self.slashings.clone();
 
         *state.historical_roots_mut() = self.historical_roots.clone();
 
@@ -327,31 +403,23 @@ impl<E: EthSpec> HDiffBuffer<E> {
         Ok(state)
     }
 
-    /// Fork of the state held in a residual `state` byte buffer, sniffed from its slot
-    /// field (fixed offset 40 in every fork).
-    fn residual_fork(bytes: &[u8], spec: &ChainSpec) -> Result<ForkName, Error> {
-        let invalid = || {
-            Error::InvalidSszState(ssz::DecodeError::InvalidByteLength {
-                len: bytes.len(),
-                expected: 48,
-            })
-        };
-        let slot_bytes: [u8; 8] = bytes
-            .get(40..48)
-            .ok_or_else(invalid)?
-            .try_into()
-            .map_err(|_| invalid())?;
-        Ok(spec.fork_name_at_slot::<E>(Slot::new(u64::from_le_bytes(slot_bytes))))
-    }
-
-    /// Residual bytes in the pre-V1 layout (pending queues inline), as V0 diffs were
-    /// computed over. Identical to `self.state` for pre-Electra states.
+    /// Residual bytes in the pre-V1 layout (participation, rings and pending queues
+    /// inline), as V0 diffs were computed over.
     fn legacy_state_bytes(&self, spec: &ChainSpec) -> Result<Vec<u8>, Error> {
-        if !Self::residual_fork(&self.state, spec)?.electra_enabled() {
-            return Ok(self.state.clone());
-        }
         let mut state =
             BeaconState::<E>::from_ssz_bytes(&self.state, spec).map_err(Error::InvalidSszState)?;
+        if let Ok(participation) = state.previous_epoch_participation_mut() {
+            *participation = List::from_ssz_bytes(&self.previous_epoch_participation)
+                .map_err(Error::InvalidSszState)?;
+        }
+        if let Ok(participation) = state.current_epoch_participation_mut() {
+            *participation = List::from_ssz_bytes(&self.current_epoch_participation)
+                .map_err(Error::InvalidSszState)?;
+        }
+        *state.block_roots_mut() = self.block_roots.clone();
+        *state.state_roots_mut() = self.state_roots.clone();
+        *state.randao_mixes_mut() = self.randao_mixes.clone();
+        *state.slashings_mut() = self.slashings.clone();
         if let Ok(pending_deposits) = state.pending_deposits_mut() {
             *pending_deposits = self.pending_deposits.clone();
         }
@@ -364,21 +432,27 @@ impl<E: EthSpec> HDiffBuffer<E> {
         Ok(state.as_ssz_bytes())
     }
 
-    /// Split a pre-V1 residual (pending queues inline) into the hybrid layout.
+    /// Split a pre-V1 residual (participation, rings and pending queues inline) into the
+    /// hybrid layout.
     fn set_from_legacy_state_bytes(
         &mut self,
         legacy: Vec<u8>,
         spec: &ChainSpec,
     ) -> Result<(), Error> {
-        if !Self::residual_fork(&legacy, spec)?.electra_enabled() {
-            self.state = legacy;
-            self.pending_deposits = List::default();
-            self.pending_partial_withdrawals = List::default();
-            self.pending_consolidations = List::default();
-            return Ok(());
-        }
         let mut state =
             BeaconState::<E>::from_ssz_bytes(&legacy, spec).map_err(Error::InvalidSszState)?;
+        self.previous_epoch_participation = state
+            .previous_epoch_participation_mut()
+            .map(|participation| std::mem::take(participation).as_ssz_bytes())
+            .unwrap_or_default();
+        self.current_epoch_participation = state
+            .current_epoch_participation_mut()
+            .map(|participation| std::mem::take(participation).as_ssz_bytes())
+            .unwrap_or_default();
+        self.block_roots = std::mem::take(state.block_roots_mut());
+        self.state_roots = std::mem::take(state.state_roots_mut());
+        self.randao_mixes = std::mem::take(state.randao_mixes_mut());
+        self.slashings = std::mem::take(state.slashings_mut());
         self.pending_deposits = state
             .pending_deposits_mut()
             .map(std::mem::take)
@@ -400,7 +474,12 @@ impl<E: EthSpec> HDiffBuffer<E> {
         self.state.len()
             + self.balances.len() * std::mem::size_of::<u64>()
             + self.inactivity_scores.len() * std::mem::size_of::<u64>()
+            + self.previous_epoch_participation.len()
+            + self.current_epoch_participation.len()
             + self.validators.len() * std::mem::size_of::<Validator>()
+            + (self.block_roots.len() + self.state_roots.len() + self.randao_mixes.len())
+                * std::mem::size_of::<Hash256>()
+            + self.slashings.len() * std::mem::size_of::<u64>()
             + self.historical_roots.len() * std::mem::size_of::<Hash256>()
             + self.historical_summaries.len() * std::mem::size_of::<HistoricalSummary>()
             + self.pending_deposits.len() * std::mem::size_of::<PendingDeposit>()
@@ -421,8 +500,22 @@ impl HDiff {
             SparseU64Diff::compute(&source.balances, &target.balances, config)?;
         let inactivity_scores_sparse_diff =
             SparseU64Diff::compute(&source.inactivity_scores, &target.inactivity_scores, config)?;
+        let previous_participation = ParticipationDiff::compute(
+            &source.previous_epoch_participation,
+            &target.previous_epoch_participation,
+            config,
+        )?;
+        let current_participation = ParticipationDiff::compute(
+            &source.current_epoch_participation,
+            &target.current_epoch_participation,
+            config,
+        )?;
         let validators_diff =
             ValidatorsDiff::compute::<E>(&source.validators, &target.validators, config)?;
+        let block_roots = RingDiff::compute(&source.block_roots, &target.block_roots);
+        let state_roots = RingDiff::compute(&source.state_roots, &target.state_roots);
+        let randao_mixes = RingDiff::compute(&source.randao_mixes, &target.randao_mixes);
+        let slashings_ring = RingDiff::compute(&source.slashings, &target.slashings);
         let historical_roots =
             AppendOnlyDiff::compute(&source.historical_roots, &target.historical_roots)?;
         let historical_summaries =
@@ -442,7 +535,13 @@ impl HDiff {
             state_diff,
             balances_sparse_diff,
             inactivity_scores_sparse_diff,
+            previous_participation,
+            current_participation,
             validators_diff,
+            block_roots,
+            state_roots,
+            randao_mixes,
+            slashings_ring,
             historical_roots,
             historical_summaries,
             pending_deposits,
@@ -470,8 +569,16 @@ impl HDiff {
                     .apply(&mut source.balances, config)?;
                 diff.inactivity_scores_sparse_diff
                     .apply(&mut source.inactivity_scores, config)?;
+                diff.previous_participation
+                    .apply(&mut source.previous_epoch_participation, config)?;
+                diff.current_participation
+                    .apply(&mut source.current_epoch_participation, config)?;
                 diff.validators_diff
                     .apply::<E>(&mut source.validators, config)?;
+                diff.block_roots.apply(&mut source.block_roots)?;
+                diff.state_roots.apply(&mut source.state_roots)?;
+                diff.randao_mixes.apply(&mut source.randao_mixes)?;
+                diff.slashings_ring.apply(&mut source.slashings)?;
                 diff.historical_roots.apply(&mut source.historical_roots)?;
                 diff.historical_summaries
                     .apply(&mut source.historical_summaries)?;
@@ -513,6 +620,12 @@ impl HDiff {
             HDiff::V1(diff) => {
                 sizes.push(diff.balances_sparse_diff.size());
                 sizes.push(diff.inactivity_scores_sparse_diff.size());
+                sizes.push(diff.previous_participation.size());
+                sizes.push(diff.current_participation.size());
+                sizes.push(diff.block_roots.size());
+                sizes.push(diff.state_roots.size());
+                sizes.push(diff.randao_mixes.size());
+                sizes.push(diff.slashings_ring.size());
             }
         }
         sizes.push(self.validators_diff().size());
@@ -855,6 +968,111 @@ impl SparseU64Diff {
     /// Byte size of this instance
     pub fn size(&self) -> usize {
         self.bytes.len()
+    }
+}
+
+impl ParticipationDiff {
+    pub fn compute(xs: &[u8], ys: &[u8], config: &StoreConfig) -> Result<Self, Error> {
+        if xs.len() > ys.len() {
+            return Err(Error::DiffDeletionsNotSupported);
+        }
+        let n = xs.len();
+        let mut gaps = Vec::new();
+        let mut values = Vec::new();
+        let mut last = 0usize;
+        for (i, (x, y)) in xs.iter().zip(ys).enumerate() {
+            if x != y {
+                write_varint((i - last) as u64, &mut gaps);
+                values.push(*y);
+                last = i;
+            }
+        }
+        let mut payload = Vec::with_capacity(24 + gaps.len() + values.len() + ys.len() - n);
+        payload.extend_from_slice(&(n as u64).to_le_bytes());
+        payload.extend_from_slice(&(values.len() as u64).to_le_bytes());
+        payload.extend_from_slice(&gaps);
+        payload.extend_from_slice(&values);
+        payload.extend_from_slice(&ys[n..]);
+        Ok(Self {
+            bytes: config
+                .compress_bytes(&payload)
+                .map_err(Error::Compression)?,
+        })
+    }
+
+    pub fn apply(&self, xs: &mut Vec<u8>, config: &StoreConfig) -> Result<(), Error> {
+        let payload = config
+            .decompress_bytes(&self.bytes)
+            .map_err(Error::Compression)?;
+        let mut reader = SparseReader {
+            buf: &payload,
+            pos: 0,
+        };
+        let n = usize::try_from(reader.u64()?).map_err(|_| Error::InvalidSparseDiff)?;
+        if n != xs.len() {
+            return Err(Error::InvalidSparseDiff);
+        }
+        let changed = usize::try_from(reader.u64()?).map_err(|_| Error::InvalidSparseDiff)?;
+        let mut gaps = Vec::with_capacity(changed);
+        for _ in 0..changed {
+            gaps.push(reader.varint()?);
+        }
+        let values = reader.bytes(changed)?;
+        let mut index = 0usize;
+        for (gap, value) in gaps.iter().zip(values) {
+            index = index
+                .checked_add(usize::try_from(*gap).map_err(|_| Error::InvalidSparseDiff)?)
+                .ok_or(Error::InvalidSparseDiff)?;
+            *xs.get_mut(index).ok_or(Error::InvalidSparseDiff)? = *value;
+        }
+        xs.extend_from_slice(reader.bytes(payload.len() - reader.pos)?);
+        Ok(())
+    }
+
+    /// Byte size of this instance
+    pub fn size(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+impl<T: Decode + Encode + PartialEq + Copy + milhouse::Value> RingDiff<T> {
+    pub fn compute<N: Unsigned>(xs: &Vector<T, N>, ys: &Vector<T, N>) -> Self {
+        let mut indices = Vec::new();
+        let mut values = Vec::new();
+        for (i, (x, y)) in xs.iter().zip(ys.iter()).enumerate() {
+            if x != y {
+                indices.push(i as u32);
+                values.push(*y);
+            }
+        }
+        Self { indices, values }
+    }
+
+    pub fn apply<N: Unsigned>(&self, xs: &mut Vector<T, N>) -> Result<(), Error> {
+        if self.indices.len() != self.values.len() {
+            return Err(Error::InvalidSparseDiff);
+        }
+        // Same copy-on-write threshold rationale as `ValidatorsDiff::apply`.
+        if self.indices.len().saturating_mul(32) > xs.len() {
+            let mut out = xs.iter().copied().collect::<Vec<_>>();
+            for (index, value) in self.indices.iter().zip(&self.values) {
+                *out.get_mut(*index as usize)
+                    .ok_or(Error::InvalidSparseDiff)? = *value;
+            }
+            *xs = Vector::try_from_iter(out)?;
+        } else {
+            for (index, value) in self.indices.iter().zip(&self.values) {
+                *xs.get_mut(*index as usize)
+                    .ok_or(Error::InvalidSparseDiff)? = *value;
+            }
+            xs.apply_updates()?;
+        }
+        Ok(())
+    }
+
+    /// Byte size of this instance
+    pub fn size(&self) -> usize {
+        self.indices.len() * std::mem::size_of::<u32>() + self.values.len() * size_of::<T>()
     }
 }
 
@@ -1537,6 +1755,43 @@ mod tests {
     }
 
     #[test]
+    fn participation_diff_roundtrip() {
+        let config = &StoreConfig::default();
+        let cases: &[(&[u8], &[u8])] = &[
+            (&[], &[]),
+            (&[7, 7, 7], &[7, 7, 7]),
+            (&[7, 7, 7], &[7, 5, 7, 3]),
+            (&[0, 0], &[7, 7, 7, 7]),
+        ];
+        for (xs, ys) in cases {
+            let diff = ParticipationDiff::compute(xs, ys, config).unwrap();
+            let mut out = xs.to_vec();
+            diff.apply(&mut out, config).unwrap();
+            assert_eq!(&out, ys, "roundtrip {xs:?} -> {ys:?}");
+        }
+        let diff = ParticipationDiff::compute(&[7, 7], &[5, 5], config).unwrap();
+        assert!(diff.apply(&mut vec![7, 7, 7], config).is_err());
+    }
+
+    #[test]
+    fn ring_diff_roundtrip() {
+        type Ring = Vector<u64, typenum::U16>;
+        let base = Ring::try_from_iter(0..16).unwrap();
+        // Sparse update path.
+        let mut few = base.to_vec();
+        few[3] = 99;
+        let few = Ring::try_from_iter(few).unwrap();
+        // Rebuild path (most entries changed).
+        let many = Ring::try_from_iter((0..16).map(|i| i + 1000)).unwrap();
+        for target in [&base, &few, &many] {
+            let diff = RingDiff::compute(&base, target);
+            let mut out = base.clone();
+            diff.apply(&mut out).unwrap();
+            assert_eq!(&out, target);
+        }
+    }
+
+    #[test]
     fn validators_diff_in_place_path() {
         // Large list with few changes exercises the per-index (non-rebuild) apply path.
         let mut rng = rng();
@@ -1575,16 +1830,20 @@ mod tests {
 
     fn hdiff_v1_expected_bytes() -> Vec<u8> {
         vec![
-            1u8, 36, 0, 0, 0, 61, 0, 0, 0, 108, 0, 0, 0, 138, 0, 0, 0, 151, 0, 0, 0, 187, 0, 0, 0,
-            191, 0, 0, 0, 203, 0, 0, 0, 215, 0, 0, 0, 4, 0, 0, 0, 214, 195, 196, 0, 0, 0, 14, 8, 0,
-            8, 1, 0, 0, 1, 3, 2, 2, 3, 1, 1, 9, 4, 0, 0, 0, 40, 181, 47, 253, 0, 72, 21, 1, 0, 208,
-            3, 0, 54, 101, 196, 255, 255, 255, 255, 6, 0, 15, 0, 255, 190, 243, 208, 111, 0, 0, 0,
-            0, 0, 0, 0, 0, 2, 0, 96, 156, 12, 96, 1, 4, 0, 0, 0, 40, 181, 47, 253, 0, 72, 141, 0,
-            0, 88, 3, 0, 42, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 10, 192, 2, 4, 0, 0, 0, 40, 181, 47,
-            253, 32, 0, 1, 0, 0, 4, 0, 0, 0, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238,
+            1u8, 60, 0, 0, 0, 85, 0, 0, 0, 132, 0, 0, 0, 162, 0, 0, 0, 194, 0, 0, 0, 215, 0, 0, 0,
+            223, 0, 0, 0, 231, 0, 0, 0, 239, 0, 0, 0, 247, 0, 0, 0, 4, 1, 0, 0, 40, 1, 0, 0, 44, 1,
+            0, 0, 56, 1, 0, 0, 68, 1, 0, 0, 4, 0, 0, 0, 214, 195, 196, 0, 0, 0, 14, 8, 0, 8, 1, 0,
+            0, 1, 3, 2, 2, 3, 1, 1, 9, 4, 0, 0, 0, 40, 181, 47, 253, 0, 72, 21, 1, 0, 208, 3, 0,
+            54, 101, 196, 255, 255, 255, 255, 6, 0, 15, 0, 255, 190, 243, 208, 111, 0, 0, 0, 0, 0,
+            0, 0, 0, 2, 0, 96, 156, 12, 96, 1, 4, 0, 0, 0, 40, 181, 47, 253, 0, 72, 141, 0, 0, 88,
+            3, 0, 42, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 10, 192, 2, 4, 0, 0, 0, 40, 181, 47, 253, 0,
+            72, 153, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 5, 7, 4, 0, 0, 0, 40,
+            181, 47, 253, 0, 72, 69, 0, 0, 16, 3, 0, 1, 0, 29, 192, 2, 8, 0, 0, 0, 8, 0, 0, 0, 8,
+            0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 40,
+            181, 47, 253, 32, 0, 1, 0, 0, 4, 0, 0, 0, 238, 238, 238, 238, 238, 238, 238, 238, 238,
             238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238,
-            238, 238, 238, 238, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0,
+            238, 238, 238, 238, 238, 238, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0,
         ]
     }
 
@@ -1618,7 +1877,13 @@ mod tests {
             state: vec![0, 1, 2, 3, 3, 2, 1, 0],
             balances: pre_balances,
             inactivity_scores: pre_inactivity_scores,
+            previous_epoch_participation: vec![7, 7, 7],
+            current_epoch_participation: vec![0, 0, 0],
             validators: pre_validators,
+            block_roots: Vector::default(),
+            state_roots: Vector::default(),
+            randao_mixes: Vector::default(),
+            slashings: Vector::default(),
             historical_roots: pre_historical_roots,
             historical_summaries: pre_historical_summaries,
             pending_deposits: List::default(),
@@ -1629,7 +1894,13 @@ mod tests {
             state: vec![0, 1, 3, 2, 2, 3, 1, 1],
             balances: post_balances,
             inactivity_scores: post_inactivity_scores,
+            previous_epoch_participation: vec![7, 5, 7, 7],
+            current_epoch_participation: vec![0, 0, 0, 0],
             validators: post_validators,
+            block_roots: Vector::default(),
+            state_roots: Vector::default(),
+            randao_mixes: Vector::default(),
+            slashings: Vector::default(),
             historical_roots: post_historical_roots,
             historical_summaries: post_historical_summaries,
             pending_deposits: List::default(),
