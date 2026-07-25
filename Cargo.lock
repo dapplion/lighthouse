@@ -5916,6 +5916,7 @@ dependencies = [
 [[package]]
 name = "milhouse"
 version = "0.9.0"
+source = "git+https://github.com/dapplion/milhouse?branch=hdiff-support#a262d4bea769cda69fd5dfac495c8298ea096af4"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
