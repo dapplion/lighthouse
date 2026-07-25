@@ -732,51 +732,79 @@ impl ValidatorsDiff {
             .decompress_bytes(&self.bytes)
             .map_err(Error::Compression)?;
 
-        for diff_bytes in
-            validator_diff_bytes.chunks(<ValidatorDiffEntry as Decode>::ssz_fixed_len())
-        {
-            let ValidatorDiffEntry {
+        let entries = validator_diff_bytes
+            .chunks(<ValidatorDiffEntry as Decode>::ssz_fixed_len())
+            .map(|diff_bytes| {
+                ValidatorDiffEntry::from_ssz_bytes(diff_bytes)
+                    .map_err(|_| Error::BalancesIncompleteChunk)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Per-index copy-on-write updates cost a path copy each; above a threshold it is
+        // cheaper to rebuild the whole list in one pass.
+        if entries.len().saturating_mul(32) > xs.len() {
+            let mut entries_iter = entries.into_iter().peekable();
+            let mut out = Vec::with_capacity(xs.len());
+            for (i, x) in xs.iter().enumerate() {
+                let mut v = x.clone();
+                if entries_iter.peek().is_some_and(|e| e.index as usize == i) {
+                    // Peeked entry matches this index, consume it.
+                    if let Some(entry) = entries_iter.next() {
+                        Self::merge_validator_diff(&mut v, entry.validator_diff);
+                    }
+                }
+                out.push(v);
+            }
+            // Remaining entries are appended validators, stored verbatim.
+            out.extend(entries_iter.map(|e| e.validator_diff));
+            *xs = Validators::<E>::try_from_iter(out)?;
+        } else {
+            for ValidatorDiffEntry {
                 index,
                 validator_diff: diff,
-            } = ValidatorDiffEntry::from_ssz_bytes(diff_bytes)
-                .map_err(|_| Error::BalancesIncompleteChunk)?;
-
-            if let Some(x) = xs.get_mut(index as usize) {
-                // Note: a pubkey change implies index re-use. In that case over-write
-                // withdrawal_credentials and slashed inconditionally as their default values
-                // are valid values.
-                let pubkey_changed = diff.pubkey != *EMPTY_PUBKEY;
-                if pubkey_changed {
-                    x.pubkey = diff.pubkey;
+            } in entries
+            {
+                if let Some(x) = xs.get_mut(index as usize) {
+                    Self::merge_validator_diff(x, diff);
+                } else {
+                    xs.push(diff)?;
                 }
-                if pubkey_changed || diff.withdrawal_credentials != Hash256::ZERO {
-                    x.withdrawal_credentials = diff.withdrawal_credentials;
-                }
-                if diff.effective_balance != 0 {
-                    x.effective_balance = x.effective_balance.wrapping_add(diff.effective_balance);
-                }
-                if pubkey_changed || diff.slashed {
-                    x.slashed = diff.slashed;
-                }
-                if diff.activation_eligibility_epoch != Epoch::new(0) {
-                    x.activation_eligibility_epoch = diff.activation_eligibility_epoch;
-                }
-                if diff.activation_epoch != Epoch::new(0) {
-                    x.activation_epoch = diff.activation_epoch;
-                }
-                if diff.exit_epoch != Epoch::new(0) {
-                    x.exit_epoch = diff.exit_epoch;
-                }
-                if diff.withdrawable_epoch != Epoch::new(0) {
-                    x.withdrawable_epoch = diff.withdrawable_epoch;
-                }
-            } else {
-                xs.push(diff)?;
             }
+            xs.apply_updates()?;
         }
-        xs.apply_updates()?;
 
         Ok(())
+    }
+
+    fn merge_validator_diff(x: &mut Validator, diff: Validator) {
+        // Note: a pubkey change implies index re-use. In that case over-write
+        // withdrawal_credentials and slashed inconditionally as their default values
+        // are valid values.
+        let pubkey_changed = diff.pubkey != *EMPTY_PUBKEY;
+        if pubkey_changed {
+            x.pubkey = diff.pubkey;
+        }
+        if pubkey_changed || diff.withdrawal_credentials != Hash256::ZERO {
+            x.withdrawal_credentials = diff.withdrawal_credentials;
+        }
+        if diff.effective_balance != 0 {
+            x.effective_balance = x.effective_balance.wrapping_add(diff.effective_balance);
+        }
+        if pubkey_changed || diff.slashed {
+            x.slashed = diff.slashed;
+        }
+        if diff.activation_eligibility_epoch != Epoch::new(0) {
+            x.activation_eligibility_epoch = diff.activation_eligibility_epoch;
+        }
+        if diff.activation_epoch != Epoch::new(0) {
+            x.activation_epoch = diff.activation_epoch;
+        }
+        if diff.exit_epoch != Epoch::new(0) {
+            x.exit_epoch = diff.exit_epoch;
+        }
+        if diff.withdrawable_epoch != Epoch::new(0) {
+            x.withdrawable_epoch = diff.withdrawable_epoch;
+        }
     }
 
     /// Byte size of this instance
@@ -1238,6 +1266,26 @@ mod tests {
             diff.apply(&mut out).unwrap();
             assert_eq!(out, ys, "roundtrip for {base:?} -> {target:?}");
         }
+    }
+
+    #[test]
+    fn validators_diff_in_place_path() {
+        // Large list with few changes exercises the per-index (non-rebuild) apply path.
+        let mut rng = rng();
+        let config = &StoreConfig::default();
+        let xs_vec = (0..200)
+            .map(|_| rand_validator(&mut rng))
+            .collect::<Vec<_>>();
+        let mut ys_vec = xs_vec.clone();
+        ys_vec[7].effective_balance += 1_000_000_000;
+        ys_vec[150].slashed = true;
+        let xs = Validators::<E>::try_from_iter(xs_vec).unwrap();
+        let ys = Validators::<E>::try_from_iter(ys_vec).unwrap();
+        let diff = ValidatorsDiff::compute::<E>(&xs, &ys, config).unwrap();
+
+        let mut xs_out = xs.clone();
+        diff.apply::<E>(&mut xs_out, config).unwrap();
+        assert_eq!(xs_out, ys);
     }
 
     fn rand_validator(mut rng: impl Rng) -> Validator {
