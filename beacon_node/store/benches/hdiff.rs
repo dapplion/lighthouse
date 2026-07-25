@@ -56,8 +56,9 @@ fn bench_against_states(
 ) {
     let slot_diff = target_state.slot() - source_state.slot();
     let config = StoreConfig::default();
-    let source = HDiffBuffer::from_state(source_state);
-    let target = HDiffBuffer::from_state(target_state);
+    let spec = E::default_spec();
+    let source = HDiffBuffer::from_state(source_state).unwrap();
+    let target = HDiffBuffer::from_state(target_state).unwrap();
     let diff = HDiff::compute(&source, &target, &config).unwrap();
     println!(
         "state slot diff {slot_diff} - diff size {id} {}",
@@ -72,7 +73,7 @@ fn bench_against_states(
     c.bench_function(&format!("apply hdiff {id}"), |b| {
         b.iter(|| {
             let mut source = source.clone();
-            diff.apply(&mut source, &config).unwrap();
+            diff.apply(&mut source, &config, &spec).unwrap();
         })
     });
 }

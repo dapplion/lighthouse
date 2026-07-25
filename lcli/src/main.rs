@@ -1,6 +1,7 @@
 mod block_root;
 mod check_deposit_data;
 mod generate_bootnode_enr;
+mod hdiff;
 mod http_sync;
 mod indexed_attestations;
 mod mnemonic_validators;
@@ -227,6 +228,95 @@ fn main() {
                         .help_heading(FLAG_HEADER)
                         .help("If present, don't rebuild the tree-hash-cache after applying \
                             the block.")
+                        .display_order(0)
+                )
+        )
+        .subcommand(
+            Command::new("compute-hdiff")
+                .about("Compute a hierarchical state diff between two states and write it to a \
+                        file. Useful for validating and benchmarking hdiff.")
+                .arg(
+                    Arg::new("pre-state")
+                        .long("pre-state")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .help("Path to a SSZ file of the pre (base) state.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("post-state")
+                        .long("post-state")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .help("Path to a SSZ file of the post (target) state.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .help("Path to write the SSZ-encoded diff to.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("runs")
+                        .long("runs")
+                        .value_name("INTEGER")
+                        .action(ArgAction::Set)
+                        .default_value("1")
+                        .help("Number of repeat runs, useful for benchmarking.")
+                        .display_order(0)
+                )
+        )
+        .subcommand(
+            Command::new("apply-hdiff")
+                .about("Apply a hierarchical state diff (produced by compute-hdiff) to a state.")
+                .arg(
+                    Arg::new("pre-state")
+                        .long("pre-state")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .help("Path to a SSZ file of the pre (base) state.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("diff")
+                        .long("diff")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .required(true)
+                        .help("Path to the SSZ-encoded diff to apply.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .help("Path to write the reconstructed post-state to.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("post-state")
+                        .long("post-state")
+                        .value_name("PATH")
+                        .action(ArgAction::Set)
+                        .help("Path to a SSZ file of the expected post-state. If provided, the \
+                               reconstructed state is verified against it.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("runs")
+                        .long("runs")
+                        .value_name("INTEGER")
+                        .action(ArgAction::Set)
+                        .default_value("1")
+                        .help("Number of repeat runs, useful for benchmarking.")
                         .display_order(0)
                 )
         )
@@ -737,6 +827,16 @@ fn run<E: EthSpec>(env_builder: EnvironmentBuilder<E>, matches: &ArgMatches) -> 
             let network_config = get_network_config()?;
             skip_slots::run::<E>(env, network_config, matches)
                 .map_err(|e| format!("Failed to skip slots: {}", e))
+        }
+        Some(("compute-hdiff", matches)) => {
+            let network_config = get_network_config()?;
+            hdiff::run_compute::<E>(network_config, matches)
+                .map_err(|e| format!("Failed to compute hdiff: {}", e))
+        }
+        Some(("apply-hdiff", matches)) => {
+            let network_config = get_network_config()?;
+            hdiff::run_apply::<E>(network_config, matches)
+                .map_err(|e| format!("Failed to apply hdiff: {}", e))
         }
         Some(("pretty-ssz", matches)) => {
             let network_config = get_network_config()?;

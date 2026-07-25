@@ -1785,7 +1785,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                 )
             })?
         };
-        let target_buffer = HDiffBuffer::from_state(state.clone());
+        let target_buffer = HDiffBuffer::from_state(state.clone())?;
         let diff = {
             let _timer = metrics::start_timer_vec(&metrics::BEACON_HDIFF_COMPUTE_TIME, HOT_METRIC);
             HDiff::compute(&base_buffer, &target_buffer, &self.config)?
@@ -1855,7 +1855,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
         }
     }
 
-    fn load_hot_hdiff_buffer(&self, state_root: Hash256) -> Result<HDiffBuffer, Error> {
+    fn load_hot_hdiff_buffer(&self, state_root: Hash256) -> Result<Arc<HDiffBuffer<E>>, Error> {
         if let Some(buffer) = self
             .state_cache
             .lock()
@@ -1884,24 +1884,25 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                     );
                     return Err(Error::MissingHotStateSnapshot(state_root, slot));
                 };
-                HDiffBuffer::from_state(state)
+                Arc::new(HDiffBuffer::from_state(state)?)
             }
             StorageStrategy::DiffFrom(from_slot) => {
                 let from_state_root = diff_base_state.get_root(from_slot)?;
-                let mut buffer = self.load_hot_hdiff_buffer(from_state_root).map_err(|e| {
+                let base_buffer = self.load_hot_hdiff_buffer(from_state_root).map_err(|e| {
                     Error::LoadingHotHdiffBufferError(
                         format!("load hdiff DiffFrom {from_slot} {state_root}"),
                         from_state_root,
                         e.into(),
                     )
                 })?;
+                let mut buffer = Arc::unwrap_or_clone(base_buffer);
                 let diff = self.load_hot_hdiff(state_root)?;
                 {
                     let _timer =
                         metrics::start_timer_vec(&metrics::BEACON_HDIFF_APPLY_TIME, HOT_METRIC);
-                    diff.apply(&mut buffer, &self.config)?;
+                    diff.apply(&mut buffer, &self.config, &self.spec)?;
                 }
-                buffer
+                Arc::new(buffer)
             }
             StorageStrategy::ReplayFrom(from_slot) => {
                 let from_state_root = diff_base_state.get_root(from_slot)?;
@@ -2266,7 +2267,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
             );
             self.load_hdiff_buffer_for_slot(from_slot)?
         };
-        let target_buffer = HDiffBuffer::from_state(state.clone());
+        let target_buffer = HDiffBuffer::from_state(state.clone())?;
         let diff = {
             let _timer = metrics::start_timer_vec(&metrics::BEACON_HDIFF_COMPUTE_TIME, COLD_METRIC);
             HDiff::compute(&base_buffer, &target_buffer, &self.config)?
@@ -2417,7 +2418,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
 
     /// Returns `HDiffBuffer` for the specified slot, or `HDiffBuffer` for the `ReplayFrom` slot if
     /// the diff for the specified slot is not stored.
-    fn load_hdiff_buffer_for_slot(&self, slot: Slot) -> Result<(Slot, HDiffBuffer), Error> {
+    fn load_hdiff_buffer_for_slot(&self, slot: Slot) -> Result<(Slot, Arc<HDiffBuffer<E>>), Error> {
         if let Some(buffer) = self.historic_state_cache.lock().get_hdiff_buffer(slot) {
             debug!(
                 %slot,
@@ -2437,7 +2438,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                 let state = self
                     .load_cold_state_as_snapshot(slot)?
                     .ok_or(Error::MissingSnapshot(slot))?;
-                let buffer = HDiffBuffer::from_state(state.clone());
+                let buffer = Arc::new(HDiffBuffer::from_state(state.clone())?);
 
                 self.historic_state_cache
                     .lock()
@@ -2454,16 +2455,18 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
             }
             // Recursive case.
             StorageStrategy::DiffFrom(from) => {
-                let (_buffer_slot, mut buffer) = self.load_hdiff_buffer_for_slot(from)?;
+                let (_buffer_slot, base_buffer) = self.load_hdiff_buffer_for_slot(from)?;
+                let mut buffer = Arc::unwrap_or_clone(base_buffer);
 
                 // Load diff and apply it to buffer.
                 let diff = self.load_hdiff_for_slot(slot)?;
                 {
                     let _timer =
                         metrics::start_timer_vec(&metrics::BEACON_HDIFF_APPLY_TIME, COLD_METRIC);
-                    diff.apply(&mut buffer, &self.config)?;
+                    diff.apply(&mut buffer, &self.config, &self.spec)?;
                 }
 
+                let buffer = Arc::new(buffer);
                 self.historic_state_cache
                     .lock()
                     .put_hdiff_buffer(slot, buffer.clone());

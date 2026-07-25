@@ -5916,8 +5916,7 @@ dependencies = [
 [[package]]
 name = "milhouse"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "259dd9da2ae5e0278b95da0b7ecef9c18c309d0a2d9e6db57ed33b9e8910c5e7"
+source = "git+https://github.com/dapplion/milhouse?branch=hdiff-support#a262d4bea769cda69fd5dfac495c8298ea096af4"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
@@ -8682,6 +8681,7 @@ dependencies = [
  "ethereum_ssz",
  "ethereum_ssz_derive",
  "fixed_bytes",
+ "fnv",
  "hashlink",
  "itertools 0.14.0",
  "leveldb",
