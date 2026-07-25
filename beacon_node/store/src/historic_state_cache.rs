@@ -81,7 +81,7 @@ impl<E: EthSpec> HistoricStateCache<E> {
     pub fn put_hdiff_buffer(&mut self, slot: Slot, buffer: Arc<HDiffBuffer<E>>) {
         // Record how much of the new buffer is actually private memory: Milhouse
         // sections shared with the most recently used cached buffer cost nothing.
-        if let Some((_, base)) = self.hdiff_buffers.iter().last() {
+        if let Some((_, base)) = self.hdiff_buffers.iter().next_back() {
             metrics::set_gauge(
                 &metrics::STORE_BEACON_HDIFF_BUFFER_MARGINAL_BYTES,
                 buffer.marginal_bytes_vs(base) as i64,

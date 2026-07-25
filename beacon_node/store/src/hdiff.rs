@@ -874,10 +874,12 @@ impl SparseU64Diff {
         // varints into a single zero byte.
         let mut freq = fnv::FnvHashMap::default();
         for (x, y) in xs.iter().zip(ys) {
-            if x != y && *y != 0 && *x != 0 {
-                if let Ok(delta) = i64::try_from(*y as i128 - *x as i128) {
-                    *freq.entry(delta).or_insert(0u32) += 1;
-                }
+            if x != y
+                && *y != 0
+                && *x != 0
+                && let Ok(delta) = i64::try_from(*y as i128 - *x as i128)
+            {
+                *freq.entry(delta).or_insert(0u32) += 1;
             }
         }
         let mode = freq
@@ -966,6 +968,7 @@ impl SparseU64Diff {
             // In-bounds: i < n and tags has ceil(n / 4) bytes, checked above.
             let tag = (tags[i / 4] >> ((i % 4) * 2)) & 0b11;
             match tag {
+                SPARSE_TAG_NO_CHANGE => {}
                 SPARSE_TAG_ZERO => *x = 0,
                 SPARSE_TAG_ABSOLUTE => *x = absolutes.u64()?,
                 SPARSE_TAG_DIFF => {
