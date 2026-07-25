@@ -5916,8 +5916,6 @@ dependencies = [
 [[package]]
 name = "milhouse"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "259dd9da2ae5e0278b95da0b7ecef9c18c309d0a2d9e6db57ed33b9e8910c5e7"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
@@ -8682,6 +8680,7 @@ dependencies = [
  "ethereum_ssz",
  "ethereum_ssz_derive",
  "fixed_bytes",
+ "fnv",
  "hashlink",
  "itertools 0.14.0",
  "leveldb",

@@ -279,6 +279,7 @@ inherits = "release"
 debug = true
 
 [patch.crates-io]
+milhouse = { path = "../milhouse" }
 # Temporary patch until the axum migration is complete
 warp = { git = "https://github.com/macladson/warp", rev = "6f5f21beab6a240e59470caaab56afd46d46b709" }
 
