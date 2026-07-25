@@ -469,7 +469,38 @@ impl<E: EthSpec> HDiffBuffer<E> {
         Ok(())
     }
 
-    /// Byte size of this instance
+    /// Approximate heap bytes of `self` that are not shared with `base`.
+    ///
+    /// Flat sections are counted in full; Milhouse sections count only tree nodes not
+    /// shared with `base` (O(unshared nodes)).
+    pub fn marginal_bytes_vs(&self, base: &Self) -> usize {
+        self.state.len()
+            + self.balances.len() * std::mem::size_of::<u64>()
+            + self.inactivity_scores.len() * std::mem::size_of::<u64>()
+            + self.previous_epoch_participation.len()
+            + self.current_epoch_participation.len()
+            + self.validators.cow_bytes(&base.validators)
+            + self.block_roots.cow_bytes(&base.block_roots)
+            + self.state_roots.cow_bytes(&base.state_roots)
+            + self.randao_mixes.cow_bytes(&base.randao_mixes)
+            + self.slashings.cow_bytes(&base.slashings)
+            + self.historical_roots.cow_bytes(&base.historical_roots)
+            + self
+                .historical_summaries
+                .cow_bytes(&base.historical_summaries)
+            + self.pending_deposits.cow_bytes(&base.pending_deposits)
+            + self
+                .pending_partial_withdrawals
+                .cow_bytes(&base.pending_partial_withdrawals)
+            + self
+                .pending_consolidations
+                .cow_bytes(&base.pending_consolidations)
+    }
+
+    /// Flat-equivalent byte size of this instance, as if nothing were shared.
+    ///
+    /// Milhouse sections typically share most of their memory with cached states and
+    /// other buffers; see `marginal_bytes_vs` for the real marginal cost.
     pub fn size(&self) -> usize {
         self.state.len()
             + self.balances.len() * std::mem::size_of::<u64>()

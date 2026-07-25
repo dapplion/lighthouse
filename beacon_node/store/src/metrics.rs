@@ -284,6 +284,14 @@ pub static STORE_BEACON_HDIFF_BUFFER_CACHE_SIZE: LazyLock<Result<IntGaugeVec>> =
             &["db"],
         )
     });
+pub static STORE_BEACON_HDIFF_BUFFER_MARGINAL_BYTES: LazyLock<Result<IntGauge>> =
+    LazyLock::new(|| {
+        try_create_int_gauge(
+            "store_beacon_hdiff_buffer_marginal_bytes",
+            "Heap bytes of the most recently cached cold hdiff buffer that are not shared \
+             with the previously cached one",
+        )
+    });
 pub static STORE_BEACON_HDIFF_BUFFER_CACHE_BYTE_SIZE: LazyLock<Result<IntGaugeVec>> =
     LazyLock::new(|| {
         try_create_int_gauge_vec(
