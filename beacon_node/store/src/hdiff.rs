@@ -116,7 +116,7 @@ pub enum StorageStrategy {
 pub struct HDiffBuffer<E: EthSpec> {
     state: Vec<u8>,
     balances: Vec<u64>,
-    inactivity_scores: Vec<u64>,
+    inactivity_scores: CompactU64Vec,
     /// SSZ bytes of the participation lists (one byte per validator, empty pre-Altair).
     previous_epoch_participation: Vec<u8>,
     current_epoch_participation: Vec<u8>,
@@ -267,6 +267,115 @@ pub struct FifoQueueDiff<T: Encode + Decode> {
     appended: Vec<T>,
 }
 
+/// In-memory representation of the inactivity scores section of `HDiffBuffer`.
+///
+/// Outside inactivity leaks effectively all scores are zero (3 nonzero entries out of
+/// 2.3M validators on mainnet, mid-2025), so storing only the nonzero entries saves
+/// ~8 bytes per validator per buffer. During long periods of non-finality the scores
+/// densify and the representation falls back to a flat vector.
+#[derive(Debug, PartialEq, Clone)]
+enum CompactU64Vec {
+    Sparse {
+        len: usize,
+        /// Indices of nonzero entries, ascending, all less than `len`.
+        indices: Vec<u32>,
+        values: Vec<u64>,
+    },
+    Dense(Vec<u64>),
+}
+
+impl Default for CompactU64Vec {
+    fn default() -> Self {
+        Self::from_vec(vec![])
+    }
+}
+
+impl CompactU64Vec {
+    fn from_vec(values: Vec<u64>) -> Self {
+        let nonzero = values.iter().filter(|value| **value != 0).count();
+        // Sparse entries cost 12 bytes against 8 dense; require low density so the
+        // representation only flips at the edges of leak periods.
+        if values.len() <= u32::MAX as usize && nonzero <= values.len() / 8 {
+            let mut indices = Vec::with_capacity(nonzero);
+            let mut nonzero_values = Vec::with_capacity(nonzero);
+            for (i, value) in values.iter().enumerate() {
+                if *value != 0 {
+                    indices.push(i as u32);
+                    nonzero_values.push(*value);
+                }
+            }
+            Self::Sparse {
+                len: values.len(),
+                indices,
+                values: nonzero_values,
+            }
+        } else {
+            Self::Dense(values)
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Sparse { len, .. } => *len,
+            Self::Dense(values) => values.len(),
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        match self {
+            Self::Sparse {
+                len,
+                indices,
+                values,
+            } => {
+                let mut nonzero = indices.iter().zip(values).peekable();
+                itertools::Either::Left((0..*len).map(move |i| {
+                    nonzero
+                        .next_if(|(index, _)| **index as usize == i)
+                        .map_or(0, |(_, value)| *value)
+                }))
+            }
+            Self::Dense(values) => itertools::Either::Right(values.iter().copied()),
+        }
+    }
+
+    fn to_vec(&self) -> Vec<u64> {
+        match self {
+            Self::Sparse {
+                len,
+                indices,
+                values,
+            } => {
+                let mut out = vec![0; *len];
+                for (index, value) in indices.iter().zip(values) {
+                    if let Some(entry) = out.get_mut(*index as usize) {
+                        *entry = *value;
+                    }
+                }
+                out
+            }
+            Self::Dense(values) => values.clone(),
+        }
+    }
+
+    fn into_vec(self) -> Vec<u64> {
+        match self {
+            Self::Dense(values) => values,
+            sparse => sparse.to_vec(),
+        }
+    }
+
+    /// Heap bytes used by this representation.
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Sparse {
+                indices, values, ..
+            } => indices.len() * size_of::<u32>() + values.len() * size_of::<u64>(),
+            Self::Dense(values) => values.len() * size_of::<u64>(),
+        }
+    }
+}
+
 impl<E: EthSpec> HDiffBuffer<E> {
     pub fn from_state(mut beacon_state: BeaconState<E>) -> Result<Self, Error> {
         let _t = metrics::start_timer(&metrics::STORE_BEACON_HDIFF_BUFFER_FROM_STATE_TIME);
@@ -280,11 +389,11 @@ impl<E: EthSpec> HDiffBuffer<E> {
         let balances = balances_list.to_vec_leaves();
         let inactivity_scores = if let Ok(inactivity_scores) = beacon_state.inactivity_scores_mut()
         {
-            std::mem::take(inactivity_scores).to_vec_leaves()
+            CompactU64Vec::from_vec(std::mem::take(inactivity_scores).to_vec_leaves())
         } else {
             // If this state is pre-altair consider the list empty. If the target state
             // is post altair, all its items will show up in the diff as is.
-            vec![]
+            CompactU64Vec::default()
         };
         let previous_epoch_participation =
             if let Ok(participation) = beacon_state.previous_epoch_participation_mut() {
@@ -364,7 +473,7 @@ impl<E: EthSpec> HDiffBuffer<E> {
             .map_err(|_| Error::InvalidBalancesLength)?;
 
         if let Ok(inactivity_scores) = state.inactivity_scores_mut() {
-            *inactivity_scores = List::try_from_iter(self.inactivity_scores.iter().copied())
+            *inactivity_scores = List::try_from_iter(self.inactivity_scores.iter())
                 .map_err(|_| Error::InvalidBalancesLength)?;
         }
 
@@ -476,7 +585,7 @@ impl<E: EthSpec> HDiffBuffer<E> {
     pub fn marginal_bytes_vs(&self, base: &Self) -> usize {
         self.state.len()
             + self.balances.len() * std::mem::size_of::<u64>()
-            + self.inactivity_scores.len() * std::mem::size_of::<u64>()
+            + self.inactivity_scores.heap_bytes()
             + self.previous_epoch_participation.len()
             + self.current_epoch_participation.len()
             + self.validators.cow_bytes(&base.validators)
@@ -529,8 +638,12 @@ impl HDiff {
         let state_diff = BytesDiff::compute(&source.state, &target.state)?;
         let balances_sparse_diff =
             SparseU64Diff::compute(&source.balances, &target.balances, config)?;
-        let inactivity_scores_sparse_diff =
-            SparseU64Diff::compute(&source.inactivity_scores, &target.inactivity_scores, config)?;
+        // Densify so that the encoded bytes are identical to a flat representation.
+        let inactivity_scores_sparse_diff = SparseU64Diff::compute(
+            &source.inactivity_scores.to_vec(),
+            &target.inactivity_scores.to_vec(),
+            config,
+        )?;
         let previous_participation = ParticipationDiff::compute(
             &source.previous_epoch_participation,
             &target.previous_epoch_participation,
@@ -598,8 +711,11 @@ impl HDiff {
                     .apply(&mut source.pending_consolidations)?;
                 diff.balances_sparse_diff
                     .apply(&mut source.balances, config)?;
+                let mut inactivity_scores =
+                    std::mem::take(&mut source.inactivity_scores).into_vec();
                 diff.inactivity_scores_sparse_diff
-                    .apply(&mut source.inactivity_scores, config)?;
+                    .apply(&mut inactivity_scores, config)?;
+                source.inactivity_scores = CompactU64Vec::from_vec(inactivity_scores);
                 diff.previous_participation
                     .apply(&mut source.previous_epoch_participation, config)?;
                 diff.current_participation
@@ -623,8 +739,11 @@ impl HDiff {
                 diff.state_diff.apply(&legacy, &mut new_legacy)?;
                 source.set_from_legacy_state_bytes(new_legacy, spec)?;
                 diff.balances_diff.apply(&mut source.balances, config)?;
+                let mut inactivity_scores =
+                    std::mem::take(&mut source.inactivity_scores).into_vec();
                 diff.inactivity_scores_diff
-                    .apply(&mut source.inactivity_scores, config)?;
+                    .apply(&mut inactivity_scores, config)?;
+                source.inactivity_scores = CompactU64Vec::from_vec(inactivity_scores);
                 diff.validators_diff
                     .apply::<E>(&mut source.validators, config)?;
                 diff.historical_roots.apply(&mut source.historical_roots)?;
@@ -1788,6 +1907,29 @@ mod tests {
     }
 
     #[test]
+    fn compact_u64_vec_repr() {
+        let mut sparse_values = vec![0u64; 100];
+        sparse_values[7] = 77;
+        sparse_values[99] = 99;
+        let sparse = CompactU64Vec::from_vec(sparse_values.clone());
+        assert!(matches!(&sparse, CompactU64Vec::Sparse { .. }));
+        assert_eq!(sparse.len(), 100);
+        assert_eq!(sparse.to_vec(), sparse_values);
+        assert_eq!(sparse.iter().collect::<Vec<_>>(), sparse_values);
+        assert_eq!(sparse.heap_bytes(), 2 * 12);
+        assert_eq!(sparse.clone().into_vec(), sparse_values);
+
+        let dense_values = vec![1u64, 2, 3, 0];
+        let dense = CompactU64Vec::from_vec(dense_values.clone());
+        assert!(matches!(&dense, CompactU64Vec::Dense(_)));
+        assert_eq!(dense.to_vec(), dense_values);
+        assert_eq!(dense.iter().collect::<Vec<_>>(), dense_values);
+        assert_eq!(dense.clone().into_vec(), dense_values);
+
+        assert_eq!(CompactU64Vec::default().len(), 0);
+    }
+
+    #[test]
     fn sparse_u64_diff_roundtrip_cases() {
         let config = &StoreConfig::default();
         let cases: &[(&[u64], &[u64])] = &[
@@ -1969,7 +2111,7 @@ mod tests {
         let pre_buffer = HDiffBuffer::<E> {
             state: vec![0, 1, 2, 3, 3, 2, 1, 0],
             balances: pre_balances,
-            inactivity_scores: pre_inactivity_scores,
+            inactivity_scores: CompactU64Vec::from_vec(pre_inactivity_scores),
             previous_epoch_participation: vec![7, 7, 7],
             current_epoch_participation: vec![0, 0, 0],
             validators: pre_validators,
@@ -1986,7 +2128,7 @@ mod tests {
         let post_buffer = HDiffBuffer::<E> {
             state: vec![0, 1, 3, 2, 2, 3, 1, 1],
             balances: post_balances,
-            inactivity_scores: post_inactivity_scores,
+            inactivity_scores: CompactU64Vec::from_vec(post_inactivity_scores),
             previous_epoch_participation: vec![7, 5, 7, 7],
             current_epoch_participation: vec![0, 0, 0, 0],
             validators: post_validators,
@@ -2035,8 +2177,8 @@ mod tests {
             balances_diff: CompressedU64Diff::compute(&source.balances, &target.balances, config)
                 .unwrap(),
             inactivity_scores_diff: CompressedU64Diff::compute(
-                &source.inactivity_scores,
-                &target.inactivity_scores,
+                &source.inactivity_scores.to_vec(),
+                &target.inactivity_scores.to_vec(),
                 config,
             )
             .unwrap(),
