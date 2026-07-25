@@ -795,6 +795,8 @@ impl CompressedU64Diff {
     }
 }
 
+const SPARSE_TABLE_MAX_ENTRIES: usize = 100;
+
 const SPARSE_TAG_NO_CHANGE: u8 = 0;
 const SPARSE_TAG_ABSOLUTE: u8 = 1;
 const SPARSE_TAG_ZERO: u8 = 2;
@@ -869,9 +871,12 @@ impl SparseU64Diff {
         }
         let n = xs.len();
 
-        // Mode of the changed deltas: per-epoch reward accrual concentrates on one value
-        // per effective-balance cohort, so subtracting the mode turns the majority of
-        // varints into a single zero byte.
+        // Changed deltas concentrate on a small set of values (per-epoch reward accrual
+        // is identical within an effective-balance/participation cohort). A table of the
+        // most common deltas maps those entries to small single-byte tokens, which the
+        // entropy coder then compresses close to the value distribution's entropy —
+        // generic byte-level compression alone cannot exploit value repetition split
+        // across multi-byte varints.
         let mut freq = fnv::FnvHashMap::default();
         for (x, y) in xs.iter().zip(ys) {
             if x != y
@@ -882,11 +887,21 @@ impl SparseU64Diff {
                 *freq.entry(delta).or_insert(0u32) += 1;
             }
         }
-        let mode = freq
-            .into_iter()
-            .max_by_key(|(delta, count)| (*count, *delta))
-            .map(|(delta, _)| delta)
-            .unwrap_or(0);
+        let mut by_count = freq.into_iter().collect::<Vec<_>>();
+        by_count.sort_unstable_by_key(|(delta, count)| (std::cmp::Reverse(*count), *delta));
+        let table = by_count
+            .iter()
+            .take(SPARSE_TABLE_MAX_ENTRIES)
+            // An entry costs 8 header bytes and pays ~1 byte per hit.
+            .take_while(|(_, count)| *count >= 32)
+            .map(|(delta, _)| *delta)
+            .collect::<Vec<_>>();
+        let table_index = table
+            .iter()
+            .enumerate()
+            .map(|(index, delta)| (*delta, index as u64))
+            .collect::<fnv::FnvHashMap<_, _>>();
+        let mode = table.first().copied().unwrap_or(0);
 
         let tags_len = n.div_ceil(4);
         let mut tags = vec![0u8; tags_len];
@@ -902,11 +917,20 @@ impl SparseU64Diff {
                 absolutes.extend_from_slice(&y.to_le_bytes());
                 SPARSE_TAG_ABSOLUTE
             } else {
-                let corrected = i64::try_from(*y as i128 - *x as i128)
+                let token = i64::try_from(*y as i128 - *x as i128)
                     .ok()
-                    .and_then(|delta| i64::try_from(delta as i128 - mode as i128).ok());
-                if let Some(corrected) = corrected {
-                    write_varint(zigzag_encode(corrected), &mut varints);
+                    .and_then(|delta| {
+                        if let Some(index) = table_index.get(&delta) {
+                            Some(*index)
+                        } else {
+                            i64::try_from(delta as i128 - mode as i128)
+                                .ok()
+                                .map(zigzag_encode)
+                                .and_then(|literal| literal.checked_add(table.len() as u64))
+                        }
+                    });
+                if let Some(token) = token {
+                    write_varint(token, &mut varints);
                     SPARSE_TAG_DIFF
                 } else {
                     absolutes.extend_from_slice(&y.to_le_bytes());
@@ -921,7 +945,10 @@ impl SparseU64Diff {
             24 + tags_len + varints.len() + absolutes.len() + (ys.len() - n) * 8,
         );
         payload.extend_from_slice(&(n as u64).to_le_bytes());
-        payload.extend_from_slice(&mode.to_le_bytes());
+        payload.extend_from_slice(&(table.len() as u64).to_le_bytes());
+        for delta in &table {
+            payload.extend_from_slice(&delta.to_le_bytes());
+        }
         payload.extend_from_slice(&(varints.len() as u64).to_le_bytes());
         payload.extend_from_slice(&tags);
         payload.extend_from_slice(&varints);
@@ -949,7 +976,15 @@ impl SparseU64Diff {
         if n != xs.len() {
             return Err(Error::InvalidSparseDiff);
         }
-        let mode = reader.u64()? as i64;
+        let table_len = usize::try_from(reader.u64()?).map_err(|_| Error::InvalidSparseDiff)?;
+        if table_len > SPARSE_TABLE_MAX_ENTRIES {
+            return Err(Error::InvalidSparseDiff);
+        }
+        let mut table = Vec::with_capacity(table_len);
+        for _ in 0..table_len {
+            table.push(reader.u64()? as i64);
+        }
+        let mode = table.first().copied().unwrap_or(0);
         let varints_len = usize::try_from(reader.u64()?).map_err(|_| Error::InvalidSparseDiff)?;
         let tags = reader.bytes(n.div_ceil(4))?;
         let varints_end = reader
@@ -975,9 +1010,16 @@ impl SparseU64Diff {
                     if reader.pos >= varints_end {
                         return Err(Error::InvalidSparseDiff);
                     }
-                    let delta = zigzag_decode(reader.varint()?)
-                        .checked_add(mode)
-                        .ok_or(Error::InvalidSparseDiff)?;
+                    let token = reader.varint()?;
+                    let delta = if let Some(entry) =
+                        table.get(usize::try_from(token).unwrap_or(usize::MAX))
+                    {
+                        *entry
+                    } else {
+                        zigzag_decode(token - table_len as u64)
+                            .checked_add(mode)
+                            .ok_or(Error::InvalidSparseDiff)?
+                    };
                     *x = x.wrapping_add(delta as u64);
                 }
                 _ => {}
@@ -1782,6 +1824,30 @@ mod tests {
     }
 
     #[test]
+    fn sparse_u64_diff_table_roundtrip() {
+        let config = &StoreConfig::default();
+        // Several large cohorts sharing identical deltas, plus outliers: the table must
+        // absorb the cohorts and literals/absolutes the rest.
+        let n = 500usize;
+        let xs = (0..n as u64).map(|i| 1_000_000 + i).collect::<Vec<_>>();
+        let ys = xs
+            .iter()
+            .enumerate()
+            .map(|(i, x)| match i % 5 {
+                0 => x + 8_537,
+                1 => x + 8_537,
+                2 => x + 6_326,
+                3 => x + 546_488,
+                _ => x + i as u64,
+            })
+            .collect::<Vec<_>>();
+        let diff = SparseU64Diff::compute(&xs, &ys, config).unwrap();
+        let mut out = xs.clone();
+        diff.apply(&mut out, config).unwrap();
+        assert_eq!(out, ys);
+    }
+
+    #[test]
     fn participation_diff_roundtrip() {
         let config = &StoreConfig::default();
         let cases: &[(&[u8], &[u8])] = &[
@@ -1857,20 +1923,20 @@ mod tests {
 
     fn hdiff_v1_expected_bytes() -> Vec<u8> {
         vec![
-            1u8, 60, 0, 0, 0, 85, 0, 0, 0, 132, 0, 0, 0, 162, 0, 0, 0, 194, 0, 0, 0, 215, 0, 0, 0,
-            223, 0, 0, 0, 231, 0, 0, 0, 239, 0, 0, 0, 247, 0, 0, 0, 4, 1, 0, 0, 40, 1, 0, 0, 44, 1,
-            0, 0, 56, 1, 0, 0, 68, 1, 0, 0, 4, 0, 0, 0, 214, 195, 196, 0, 0, 0, 14, 8, 0, 8, 1, 0,
-            0, 1, 3, 2, 2, 3, 1, 1, 9, 4, 0, 0, 0, 40, 181, 47, 253, 0, 72, 21, 1, 0, 208, 3, 0,
-            54, 101, 196, 255, 255, 255, 255, 6, 0, 15, 0, 255, 190, 243, 208, 111, 0, 0, 0, 0, 0,
-            0, 0, 0, 2, 0, 96, 156, 12, 96, 1, 4, 0, 0, 0, 40, 181, 47, 253, 0, 72, 141, 0, 0, 88,
-            3, 0, 42, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 10, 192, 2, 4, 0, 0, 0, 40, 181, 47, 253, 0,
-            72, 153, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 5, 7, 4, 0, 0, 0, 40,
-            181, 47, 253, 0, 72, 69, 0, 0, 16, 3, 0, 1, 0, 29, 192, 2, 8, 0, 0, 0, 8, 0, 0, 0, 8,
-            0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 40,
-            181, 47, 253, 32, 0, 1, 0, 0, 4, 0, 0, 0, 238, 238, 238, 238, 238, 238, 238, 238, 238,
+            1u8, 60, 0, 0, 0, 85, 0, 0, 0, 129, 0, 0, 0, 159, 0, 0, 0, 191, 0, 0, 0, 212, 0, 0, 0,
+            220, 0, 0, 0, 228, 0, 0, 0, 236, 0, 0, 0, 244, 0, 0, 0, 1, 1, 0, 0, 37, 1, 0, 0, 41, 1,
+            0, 0, 53, 1, 0, 0, 65, 1, 0, 0, 4, 0, 0, 0, 214, 195, 196, 0, 0, 0, 14, 8, 0, 8, 1, 0,
+            0, 1, 3, 2, 2, 3, 1, 1, 9, 4, 0, 0, 0, 40, 181, 47, 253, 0, 72, 253, 0, 0, 184, 3, 0,
+            10, 0, 15, 255, 167, 214, 185, 7, 255, 230, 201, 138, 119, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+            0, 96, 192, 50, 192, 2, 4, 0, 0, 0, 40, 181, 47, 253, 0, 72, 141, 0, 0, 88, 3, 0, 42,
+            1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 10, 192, 2, 4, 0, 0, 0, 40, 181, 47, 253, 0, 72, 153, 0,
+            0, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 5, 7, 4, 0, 0, 0, 40, 181, 47,
+            253, 0, 72, 69, 0, 0, 16, 3, 0, 1, 0, 29, 192, 2, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0,
+            8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0, 40, 181, 47,
+            253, 32, 0, 1, 0, 0, 4, 0, 0, 0, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238,
             238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238, 238,
-            238, 238, 238, 238, 238, 238, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0,
+            238, 238, 238, 238, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0,
         ]
     }
 
