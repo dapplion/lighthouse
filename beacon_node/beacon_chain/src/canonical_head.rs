@@ -1401,7 +1401,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Return a database operation for writing fork choice to disk.
     pub fn persist_fork_choice_in_batch(&self) -> Result<KeyValueStoreOp, Error> {
         Self::persist_fork_choice_in_batch_standalone(
-            &self.canonical_head.fork_choice_read_lock(),
+            // Take the upgradable read-lock, which is mutually exclusive with the upgradable
+            // guard held by `import_block` across its database write. This ensures we never
+            // persist a fork choice containing a block whose own database write is still in
+            // flight (and might fail), which would leave fork choice on disk referencing a
+            // missing block.
+            &self.canonical_head.fork_choice_upgradable_read_lock(),
             self.store.get_config(),
         )
         .map_err(Into::into)
