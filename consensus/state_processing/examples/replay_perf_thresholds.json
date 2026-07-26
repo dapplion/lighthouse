@@ -1,0 +1,7 @@
+{
+  "_comment": "Thresholds for the replay_perf block processing regression gate, in milliseconds. Reference machine: 13th-gen Intel i5, jemalloc, mainnet slot ~14.8M fixtures, 2.31M validators (measured 2026-07-26): total-per-block p50 199.6ms, max 1362ms, epoch-boundary avg 983ms, hash_tree_root avg 40.7ms. Thresholds set with ~40% headroom.",
+  "total_per_block_p50_ms": 280,
+  "total_per_block_max_ms": 1900,
+  "epoch_boundary_avg_ms": 1400,
+  "hash_tree_root_avg_ms": 57
+}

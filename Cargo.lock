@@ -8641,6 +8641,7 @@ dependencies = [
  "rand 0.9.2",
  "rayon",
  "safe_arith",
+ "serde_json",
  "smallvec",
  "ssz_types",
  "state_processing",
