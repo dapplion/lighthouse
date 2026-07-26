@@ -111,7 +111,7 @@ use logging::crit;
 use operation_pool::{
     CompactAttestationRef, OperationPool, PersistedOperationPool, ReceivedPreCapella,
 };
-use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
+use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use proto_array::{DoNotReOrg, ProposerHeadError, ReOrgThreshold};
 use rand::RngCore;
 use safe_arith::SafeArith;
@@ -4459,6 +4459,34 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
         drop(post_exec_timer);
 
+        // Downgrade the fork choice write-lock to an upgradable read-lock, allowing fork choice
+        // readers (e.g. attestation verification) back in while this block is written to the
+        // database below. The guard is held until the database write has completed, which
+        // upholds two invariants:
+        //
+        // - Fork choice cannot advance past this block before it is on disk: all fork choice
+        //   writers (`on_block` for a child block, `recompute_head`, `on_attestation`, etc.)
+        //   remain blocked until the guard is dropped. In particular the cached head can never
+        //   reference an unpersisted block, and at most one block in fork choice (this one) can
+        //   be unpersisted at any instant, with all of its ancestors fully persisted.
+        // - Fork choice cannot be persisted while this block's database write is in flight:
+        //   `persist_fork_choice_in_batch` takes the upgradable read-lock, which is mutually
+        //   exclusive with this guard. Hence the fork choice on disk never contains a block that
+        //   is not itself on disk, and a crash during the write below is recovered by re-syncing
+        //   this block.
+        //
+        // An upgradable guard is used rather than a plain read guard for the second invariant,
+        // and because it can be atomically upgraded back to a write-lock if the database write
+        // fails (see `handle_import_block_db_write_error`).
+        //
+        // Readers may observe this block in fork choice before its database write completes.
+        // This is safe for in-memory readers (proto-array lookups, the early attester cache).
+        // Readers that follow up with a database read (e.g. `load_parent` for a child block
+        // arriving during the write) may transiently fail to find the block; such failures are
+        // internal errors that do not penalise peers and are recovered by sync re-fetching the
+        // block.
+        let fork_choice = parking_lot::RwLockWriteGuard::downgrade_to_upgradable(fork_choice);
+
         // ---------------------------- BLOCK PROBABLY ATTESTABLE ----------------------------------
         // Most blocks are now capable of being attested to thanks to the `early_attester_cache`
         // cache above. Resume non-essential processing.
@@ -4518,8 +4546,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         drop(db_span);
 
-        // The fork choice write-lock is dropped *after* the on-disk database has been updated.
-        // This prevents inconsistency between the two at the expense of concurrency.
+        // The fork choice upgradable read-lock is dropped *after* the on-disk database has been
+        // updated. This prevents fork choice writers from advancing past this block before it is
+        // on disk.
         drop(fork_choice);
 
         // We're declaring the block "imported" at this point, since fork choice and the DB know
@@ -4561,14 +4590,21 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
     fn handle_import_block_db_write_error(
         &self,
-        // We don't actually need this value, however it's always present when we call this function
-        // and it needs to be dropped to prevent a dead-lock. Requiring it to be passed here is
-        // defensive programming.
-        fork_choice_write_lock: RwLockWriteGuard<BeaconForkChoice<T>>,
+        // This guard has been held continuously since before the block was applied to fork
+        // choice: initially as a write-lock for `on_block`, then downgraded across the database
+        // write. No other fork choice mutation and no fork choice persistence can have occurred
+        // in that window, so the fork choice on disk is exactly the pre-import version:
+        // restoring it rolls back this block and nothing else.
+        fork_choice_upgradable_lock: RwLockUpgradableReadGuard<BeaconForkChoice<T>>,
     ) -> Result<(), BlockError> {
         // Clear the early attester cache to prevent attestations which we would later be unable
         // to verify due to the failure.
         self.early_attester_cache.clear();
+
+        // Upgrading is atomic: no writer can modify fork choice between the failed write and the
+        // restore below.
+        let fork_choice_write_lock =
+            parking_lot::RwLockUpgradableReadGuard::upgrade(fork_choice_upgradable_lock);
 
         // Since the write failed, try to revert the canonical head back to what was stored
         // in the database. This attempts to prevent inconsistency between the database and
@@ -7658,5 +7694,58 @@ impl ChainSegmentResult {
             ChainSegmentResult::Failed { error, .. } => Err(error),
             ChainSegmentResult::Successful { .. } => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_utils::BeaconChainHarness;
+    use types::MinimalEthSpec;
+
+    /// Check that `handle_import_block_db_write_error` rolls fork choice back to the version
+    /// last persisted to disk, exactly as `import_block` would after a failed database write.
+    #[tokio::test]
+    async fn db_write_error_rolls_back_fork_choice() {
+        let harness = BeaconChainHarness::builder(MinimalEthSpec)
+            .default_spec()
+            .deterministic_keypairs(32)
+            .fresh_ephemeral_store()
+            .mock_execution_layer()
+            .build();
+        harness.advance_slot();
+
+        harness.extend_slots(3).await;
+        harness.chain.persist_fork_choice().unwrap();
+        let old_head_root = harness.chain.canonical_head.cached_head().head_block_root();
+
+        // Import one more block. Fork choice on disk is now stale: it does not contain the new
+        // block, matching the state after a failed `import_block` database write.
+        harness.extend_slots(1).await;
+        let new_head_root = harness.chain.canonical_head.cached_head().head_block_root();
+        assert_ne!(old_head_root, new_head_root);
+
+        // Take the guard as `import_block` holds it across the database write and run the error
+        // handler.
+        let guard = harness
+            .chain
+            .canonical_head
+            .fork_choice_upgradable_read_lock();
+        harness
+            .chain
+            .handle_import_block_db_write_error(guard)
+            .unwrap();
+
+        // The new block has been rolled back and the head reverted to the persisted version.
+        assert!(
+            !harness
+                .chain
+                .canonical_head
+                .fork_choice_read_lock()
+                .contains_block(&new_head_root)
+        );
+        assert_eq!(
+            harness.chain.canonical_head.cached_head().head_block_root(),
+            old_head_root
+        );
     }
 }
