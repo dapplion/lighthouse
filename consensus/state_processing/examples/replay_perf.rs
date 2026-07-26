@@ -78,6 +78,12 @@ fn main() {
         decompress
     );
 
+    let pk_index: std::collections::HashMap<_, usize> = pubkey_bytes
+        .iter()
+        .enumerate()
+        .map(|(i, pk)| (*pk, i))
+        .collect();
+
     let t = Instant::now();
     let mut initial_root = state.update_tree_hash_cache().expect("initial tree hash");
     let build_tree = t.elapsed();
@@ -130,7 +136,12 @@ fn main() {
         BlockSignatureVerifier::verify_entire_block(
             &state,
             |i| pubkeys.get(i).map(Cow::Borrowed),
-            |pk_bytes| pk_bytes.decompress().ok().map(Cow::Owned),
+            |pk_bytes| {
+                pk_index
+                    .get(pk_bytes)
+                    .and_then(|&i| pubkeys.get(i))
+                    .map(Cow::Borrowed)
+            },
             block,
             &mut ctxt,
             &spec,
