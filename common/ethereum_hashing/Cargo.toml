@@ -1,0 +1,28 @@
+[package]
+name = "ethereum_hashing"
+version = "0.8.0"
+edition = "2021"
+rust-version = "1.80.0"
+description = "Hashing primitives used in Ethereum, vendored with a hashtree fast path"
+license = "Apache-2.0"
+repository = "https://github.com/sigp/ethereum_hashing"
+publish = false
+
+[features]
+default = ["zero_hash_cache", "ring", "hashtree"]
+hashtree = ["dep:hashtree-rs"]
+ring = ["dep:ring"]
+zero_hash_cache = []
+
+[dependencies]
+ring = { version = "0.17", optional = true }
+
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
+hashtree-rs = { version = "0.2.5", optional = true }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+cpufeatures = "0.2"
+sha2 = "0.10"
+
+[dev-dependencies]
+rustc-hex = "2"

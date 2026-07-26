@@ -3350,11 +3350,11 @@ dependencies = [
 [[package]]
 name = "ethereum_hashing"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aa93f58bb1eb3d1e556e4f408ef1dac130bad01ac37db4e7ade45de40d1c86a"
 dependencies = [
  "cpufeatures 0.2.17",
+ "hashtree-rs",
  "ring",
+ "rustc-hex",
  "sha2",
 ]
 
@@ -4108,6 +4108,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea0b22561a9c04a7cb1a302c013e0259cd3b4bb619f145b32f72b8b4bcbed230"
 dependencies = [
  "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "hashtree-rs"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b23deca7da825dd86839c95e1cac403f224d5dc77359df2407212b232b1c013"
+dependencies = [
+ "cc",
+ "libc",
 ]
 
 [[package]]
