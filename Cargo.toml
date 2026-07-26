@@ -27,6 +27,7 @@ members = [
     "common/eth2_interop_keypairs",
     "common/eth2_network_config",
     "common/eth2_wallet_manager",
+    "common/ethereum_hashing",
     "common/filesystem",
     "common/health_metrics",
     "common/lighthouse_version",
@@ -279,6 +280,8 @@ inherits = "release"
 debug = true
 
 [patch.crates-io]
+# Vendored with a hashtree (SIMD sha256) fast path for 64-byte merkle nodes
+ethereum_hashing = { path = "common/ethereum_hashing" }
 # Temporary patch until the axum migration is complete
 warp = { git = "https://github.com/macladson/warp", rev = "6f5f21beab6a240e59470caaab56afd46d46b709" }
 
