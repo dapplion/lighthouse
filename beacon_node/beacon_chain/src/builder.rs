@@ -986,6 +986,8 @@ where
         debug!(?custody_context, "Loaded persisted custody context");
         let custody_context = Arc::new(custody_context);
 
+        let require_execution_proofs = self.proof_engine.is_some();
+
         let beacon_chain = BeaconChain {
             spec: self.spec.clone(),
             config: self.chain_config,
@@ -1066,6 +1068,7 @@ where
                     self.spec.clone(),
                     enable_partial_columns,
                     disable_get_blobs,
+                    require_execution_proofs,
                 )
                 .map_err(|e| format!("Error initializing DataAvailabilityChecker: {:?}", e))?,
             ),

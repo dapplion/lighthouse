@@ -228,7 +228,7 @@ pub fn test_da_checker<E: EthSpec>(
 ) -> DataAvailabilityChecker<EphemeralHarnessType<E>> {
     let kzg = get_kzg(&spec);
     let custody_context = test_custody_context(node_custody_type, spec.clone());
-    DataAvailabilityChecker::new(kzg, custody_context, spec, true, false)
+    DataAvailabilityChecker::new(kzg, custody_context, spec, true, false, false)
         .expect("should initialise data availability checker")
 }
 

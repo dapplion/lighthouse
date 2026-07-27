@@ -1,6 +1,7 @@
 use super::Error;
-use crate::beacon_chain::BeaconStore;
+use crate::beacon_chain::{BeaconStore, BlockProcessStatus};
 use crate::canonical_head::CanonicalHead;
+use crate::data_availability_checker::DataAvailabilityChecker;
 use crate::execution_proof_verification::observed_execution_proofs::{
     ObservedExecutionProofs, ProofObservation,
 };
@@ -20,6 +21,7 @@ pub struct GossipVerificationContext<'a, T: BeaconChainTypes> {
     pub validator_pubkey_cache: &'a RwLock<ValidatorPubkeyCache<T>>,
     pub shuffling_cache: &'a RwLock<ShufflingCache<T::EthSpec>>,
     pub store: &'a BeaconStore<T>,
+    pub data_availability_checker: &'a DataAvailabilityChecker<T>,
     pub proof_engine: &'a Option<Arc<ProofEngine>>,
     pub spec: &'a ChainSpec,
     pub genesis_validators_root: Hash256,
@@ -48,15 +50,29 @@ impl GossipVerifiedExecutionProof {
         let validator_index = proof.validator_index;
 
         // [IGNORE] The referenced beacon block is known. Its slot determines the fork for the
-        // signing domain.
-        let proto_block = ctx
+        // signing domain. Blocks pending in the data availability checker must be recognised too:
+        // with proof gating enabled their import waits on this very proof, so they are typically
+        // not in fork choice when the proof arrives. Such blocks are not resolvable by the
+        // shuffling cache, so shufflings are anchored at their parent (same chain, same result).
+        let (block_slot, shuffling_anchor_root) = if let Some(proto_block) = ctx
             .canonical_head
             .fork_choice_read_lock()
             .get_block(&block_root)
-            .ok_or(Error::UnknownBlockRoot {
-                beacon_block_root: block_root,
-            })?;
-        let block_slot = proto_block.slot;
+        {
+            (proto_block.slot, block_root)
+        } else {
+            match ctx.data_availability_checker.get_cached_block(&block_root) {
+                Some(
+                    BlockProcessStatus::NotValidated(block, _)
+                    | BlockProcessStatus::ExecutionValidated(block),
+                ) => (block.slot(), block.parent_root()),
+                Some(BlockProcessStatus::Unknown) | None => {
+                    return Err(Error::UnknownBlockRoot {
+                        beacon_block_root: block_root,
+                    });
+                }
+            }
+        };
 
         // [IGNORE] Deduplication rules, checked before any expensive work.
         match ctx
@@ -80,15 +96,16 @@ impl GossipVerifiedExecutionProof {
         }
 
         // [REJECT] The validator is active at the epoch of the referenced block. The committee
-        // cache is keyed by the block's shuffling id, so proofs for blocks on non-canonical
-        // forks are judged against their own fork's active set without loading a state.
+        // cache is keyed by the anchor block's shuffling id, so proofs for blocks on
+        // non-canonical forks are judged against their own fork's active set without loading a
+        // state.
         let block_epoch = block_slot.epoch(T::EthSpec::slots_per_epoch());
         let is_active = with_cached_shuffling(
             ctx.canonical_head,
             ctx.shuffling_cache,
             ctx.store,
             ctx.spec,
-            block_root,
+            shuffling_anchor_root,
             block_epoch,
             |cached_shuffling, _| {
                 Ok::<_, Error>(
@@ -169,6 +186,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             validator_pubkey_cache: &self.validator_pubkey_cache,
             shuffling_cache: &self.shuffling_cache,
             store: &self.store,
+            data_availability_checker: &self.data_availability_checker,
             proof_engine: &self.proof_engine,
             spec: &self.spec,
             genesis_validators_root: self.genesis_validators_root,

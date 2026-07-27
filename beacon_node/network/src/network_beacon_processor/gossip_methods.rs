@@ -4029,6 +4029,41 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     "Verified execution proof from gossip"
                 );
                 self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Accept);
+
+                match self
+                    .chain
+                    .process_gossip_verified_execution_proof(verified)
+                    .await
+                {
+                    Ok(AvailabilityProcessingStatus::Imported(_, block_root)) => {
+                        debug!(
+                            %block_root,
+                            "Execution proof processed, imported fully available block"
+                        );
+                        self.chain.recompute_head_at_current_slot().await;
+                    }
+                    Ok(AvailabilityProcessingStatus::MissingComponents(slot, block_root)) => {
+                        trace!(
+                            %slot,
+                            %block_root,
+                            "Processed execution proof, waiting for other components"
+                        );
+                    }
+                    Err(BlockError::DuplicateFullyImported(block_root)) => {
+                        debug!(
+                            %block_root,
+                            "Ignoring execution proof for already imported block"
+                        );
+                    }
+                    Err(error) => {
+                        debug!(
+                            %beacon_block_root,
+                            proof_type,
+                            ?error,
+                            "Error processing execution proof availability"
+                        );
+                    }
+                }
             }
             Err(error) => {
                 debug!(%beacon_block_root, proof_type, ?error, "Could not verify execution proof");

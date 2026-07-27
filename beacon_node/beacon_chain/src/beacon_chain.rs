@@ -35,7 +35,7 @@ use crate::envelope_times_cache::EnvelopeTimesCache;
 use crate::errors::{BeaconChainError as Error, BlockProductionError};
 use crate::events::ServerSentEventHandler;
 use crate::execution_payload::{NotifyExecutionLayer, PreparePayloadHandle, get_execution_payload};
-use crate::execution_proof_verification::ObservedExecutionProofs;
+use crate::execution_proof_verification::{GossipVerifiedExecutionProof, ObservedExecutionProofs};
 use crate::fork_choice_signal::{ForkChoiceSignalRx, ForkChoiceSignalTx};
 use crate::graffiti_calculator::{GraffitiCalculator, GraffitiSettings};
 use crate::light_client_finality_update_verification::{
@@ -3362,6 +3362,27 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             publish_fn,
         )
         .await
+    }
+
+    /// Cache a gossip-verified execution proof in the data availability checker, and import the
+    /// referenced block if the proof completes its availability requirements.
+    pub async fn process_gossip_verified_execution_proof(
+        self: &Arc<Self>,
+        verified_proof: GossipVerifiedExecutionProof,
+    ) -> Result<AvailabilityProcessingStatus, BlockError> {
+        let block_root = verified_proof.proof.beacon_block_root();
+        let block_slot = verified_proof.block_slot;
+
+        if self.is_block_data_imported(block_root, block_slot) {
+            return Err(BlockError::DuplicateFullyImported(block_root));
+        }
+
+        let availability = self
+            .data_availability_checker
+            .put_gossip_verified_execution_proof(verified_proof)?;
+
+        self.process_availability(block_slot, availability, || Ok(()))
+            .await
     }
 
     /// Process a gossip-verified partial data column by attempting to merge it in the assembler.
