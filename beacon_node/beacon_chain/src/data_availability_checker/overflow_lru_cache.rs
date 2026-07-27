@@ -14,7 +14,6 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 use tracing::{Span, debug, debug_span};
 use types::data::BlobIdentifier;
-use types::execution::SignedExecutionProof;
 use types::kzg_ext::KzgCommitments;
 use types::{
     BlobSidecar, BlockImportSource, ChainSpec, ColumnIndex, DataColumnSidecar,
@@ -70,8 +69,6 @@ pub struct PendingComponents<E: EthSpec> {
     pub block_root: Hash256,
     pub verified_blobs: RuntimeFixedVector<Option<KzgVerifiedBlob<E>>>,
     pub verified_data_columns: Vec<KzgVerifiedCustodyDataColumn<E>>,
-    /// Gossip-verified EIP-8025 execution proof for this block, if one has been received.
-    pub execution_proof: Option<Arc<SignedExecutionProof>>,
     pub block: Option<CachedBlock<E>>,
     pub reconstruction_started: bool,
     span: Span,
@@ -198,33 +195,16 @@ impl<E: EthSpec> PendingComponents<E> {
         self.merge_blobs(reinsert);
     }
 
-    /// Merges an execution proof into the cache. The first proof received is kept.
-    pub fn merge_execution_proof(&mut self, execution_proof: Arc<SignedExecutionProof>) {
-        if self.execution_proof.is_none() {
-            self.execution_proof = Some(execution_proof);
-        }
-    }
-
     /// Returns Some if the block has received all its required data for import. The return value
     /// must be persisted in the DB along with the block.
     pub fn make_available(
         &self,
         num_expected_columns_opt: Option<usize>,
-        require_execution_proof: bool,
     ) -> Result<Option<AvailableExecutedBlock<E>>, AvailabilityCheckError> {
         let Some(CachedBlock::Executed(block)) = &self.block else {
             // Block not available yet
             return Ok(None);
         };
-
-        // EIP-8025: when a proof engine is configured, blocks with an in-block execution payload
-        // (post-Bellatrix, pre-Gloas) additionally require a verified execution proof.
-        if require_execution_proof
-            && block.as_block().message().execution_payload().is_ok()
-            && self.execution_proof.is_none()
-        {
-            return Ok(None);
-        }
 
         let num_expected_blobs = block.num_blobs_expected();
         let blob_data = if num_expected_blobs == 0 {
@@ -309,7 +289,6 @@ impl<E: EthSpec> PendingComponents<E> {
             block_root,
             verified_blobs: RuntimeFixedVector::new(vec![None; max_len]),
             verified_data_columns: vec![],
-            execution_proof: None,
             block: None,
             reconstruction_started: false,
             span,
@@ -340,27 +319,14 @@ impl<E: EthSpec> PendingComponents<E> {
         None
     }
 
-    pub fn status_str(
-        &self,
-        num_expected_columns_opt: Option<usize>,
-        require_execution_proof: bool,
-    ) -> String {
+    pub fn status_str(&self, num_expected_columns_opt: Option<usize>) -> String {
         let block_count = if self.block.is_some() { 1 } else { 0 };
-        let proof_status = if require_execution_proof {
-            format!(
-                " execution_proof {}/1",
-                if self.execution_proof.is_some() { 1 } else { 0 }
-            )
-        } else {
-            String::new()
-        };
         if let Some(num_expected_columns) = num_expected_columns_opt {
             format!(
-                "block {} data_columns {}/{}{}",
+                "block {} data_columns {}/{}",
                 block_count,
                 self.verified_data_columns.len(),
-                num_expected_columns,
-                proof_status
+                num_expected_columns
             )
         } else {
             let num_expected_blobs = if let Some(block) = &self.block {
@@ -369,11 +335,10 @@ impl<E: EthSpec> PendingComponents<E> {
                 "?"
             };
             format!(
-                "block {} blobs {}/{}{}",
+                "block {} blobs {}/{}",
                 block_count,
                 self.verified_blobs.iter().flatten().count(),
-                num_expected_blobs,
-                proof_status
+                num_expected_blobs
             )
         }
     }
@@ -385,8 +350,6 @@ pub struct DataAvailabilityCheckerInner<T: BeaconChainTypes> {
     /// Contains all the data we keep in memory, protected by an RwLock
     critical: RwLock<LruCache<Hash256, PendingComponents<T::EthSpec>>>,
     custody_context: Arc<CustodyContext<T>>,
-    /// Whether blocks additionally require an EIP-8025 execution proof to become available.
-    require_execution_proofs: bool,
     spec: Arc<ChainSpec>,
 }
 
@@ -403,13 +366,11 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
     pub fn new(
         capacity: usize,
         custody_context: Arc<CustodyContext<T>>,
-        require_execution_proofs: bool,
         spec: Arc<ChainSpec>,
     ) -> Result<Self, AvailabilityCheckError> {
         Ok(Self {
             critical: RwLock::new(LruCache::new(capacity)),
             custody_context,
-            require_execution_proofs,
             spec,
         })
     }
@@ -510,43 +471,12 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         pending_components.span.in_scope(|| {
             debug!(
                 component = "blobs",
-                status = pending_components.status_str(None, self.require_execution_proofs),
+                status = pending_components.status_str(None),
                 "Component added to data availability checker"
             );
         });
 
         self.check_availability_and_cache_components(block_root, pending_components, None)
-    }
-
-    /// Puts a gossip-verified execution proof into the availability cache as a pending component.
-    pub fn put_execution_proof(
-        &self,
-        block_root: Hash256,
-        epoch: Epoch,
-        execution_proof: Arc<SignedExecutionProof>,
-    ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
-        let pending_components =
-            self.update_or_insert_pending_components(block_root, epoch, |pending_components| {
-                pending_components.merge_execution_proof(execution_proof);
-                Ok(())
-            })?;
-
-        let num_expected_columns_opt = self.get_num_expected_columns(epoch);
-
-        pending_components.span.in_scope(|| {
-            debug!(
-                component = "execution_proof",
-                status = pending_components
-                    .status_str(num_expected_columns_opt, self.require_execution_proofs),
-                "Component added to data availability checker"
-            );
-        });
-
-        self.check_availability_and_cache_components(
-            block_root,
-            pending_components,
-            num_expected_columns_opt,
-        )
     }
 
     #[allow(clippy::type_complexity)]
@@ -579,8 +509,7 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         pending_components.span.in_scope(|| {
             debug!(
                 component = "data_columns",
-                status = pending_components
-                    .status_str(Some(num_expected_columns), self.require_execution_proofs),
+                status = pending_components.status_str(Some(num_expected_columns)),
                 "Component added to data availability checker"
             );
         });
@@ -598,8 +527,8 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         pending_components: MappedRwLockReadGuard<'_, PendingComponents<T::EthSpec>>,
         num_expected_columns_opt: Option<usize>,
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
-        if let Some(available_block) = pending_components
-            .make_available(num_expected_columns_opt, self.require_execution_proofs)?
+        if let Some(available_block) =
+            pending_components.make_available(num_expected_columns_opt)?
         {
             // Explicitly drop read lock before acquiring write lock
             drop(pending_components);
@@ -727,8 +656,7 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         pending_components.span.in_scope(|| {
             debug!(
                 component = "pre execution block",
-                status = pending_components
-                    .status_str(num_expected_columns_opt, self.require_execution_proofs),
+                status = pending_components.status_str(num_expected_columns_opt),
                 "Component added to data availability checker"
             );
         });
@@ -767,8 +695,7 @@ impl<T: BeaconChainTypes> DataAvailabilityCheckerInner<T> {
         pending_components.span.in_scope(|| {
             debug!(
                 component = "block",
-                status = pending_components
-                    .status_str(num_expected_columns_opt, self.require_execution_proofs),
+                status = pending_components.status_str(num_expected_columns_opt),
                 "Component added to data availability checker"
             );
         });
@@ -983,7 +910,6 @@ mod test {
 
     async fn setup_harness_and_cache<E, T>(
         capacity: usize,
-        require_execution_proofs: bool,
     ) -> (
         BeaconChainHarness<DiskHarnessType<E>>,
         Arc<DataAvailabilityCheckerInner<T>>,
@@ -1013,13 +939,8 @@ mod test {
             spec.clone(),
         ));
         let cache = Arc::new(
-            DataAvailabilityCheckerInner::<T>::new(
-                capacity,
-                custody_context,
-                require_execution_proofs,
-                spec,
-            )
-            .expect("should create cache"),
+            DataAvailabilityCheckerInner::<T>::new(capacity, custody_context, spec)
+                .expect("should create cache"),
         );
         (harness, cache, chain_db_path)
     }
@@ -1029,7 +950,7 @@ mod test {
         type E = MinimalEthSpec;
         type T = DiskHarnessType<E>;
         let capacity = 4;
-        let (harness, cache, _path) = setup_harness_and_cache::<E, T>(capacity, false).await;
+        let (harness, cache, _path) = setup_harness_and_cache::<E, T>(capacity).await;
 
         let (pending_block, columns) = availability_pending_block(&harness).await;
         let root = pending_block.import_data.block_root;
@@ -1150,56 +1071,6 @@ mod test {
             cache.critical.read().len() == 2,
             "cache should still have available block"
         );
-    }
-
-    fn test_execution_proof(block_root: Hash256) -> Arc<SignedExecutionProof> {
-        Arc::new(SignedExecutionProof {
-            message: types::execution::ExecutionProof {
-                proof_data: vec![0u8; 32].try_into().expect("proof data within bound"),
-                proof_type: 0,
-                public_input: types::execution::PublicInput {
-                    new_payload_request_root: Hash256::repeat_byte(42),
-                },
-                beacon_block_root: block_root,
-            },
-            validator_index: 0,
-            signature: bls::Signature::empty(),
-        })
-    }
-
-    #[tokio::test]
-    async fn execution_proof_gates_availability() {
-        type E = MinimalEthSpec;
-        type T = DiskHarnessType<E>;
-        let (harness, cache, _path) = setup_harness_and_cache::<E, T>(4, true).await;
-
-        let (pending_block, columns) = availability_pending_block(&harness).await;
-        let root = pending_block.import_data.block_root;
-        let epoch = pending_block.block.epoch();
-
-        let availability = cache
-            .put_executed_block(pending_block)
-            .expect("should put block");
-        assert!(matches!(availability, Availability::MissingComponents(_)));
-
-        let sampling_column_indices = cache.custody_context.sampling_columns_for_epoch(epoch);
-        let kzg_verified_columns = columns
-            .into_iter()
-            .filter(|col| sampling_column_indices.contains(&col.index()))
-            .map(|col| KzgVerifiedCustodyDataColumn::from_asserted_custody(col.into_inner()))
-            .collect::<Vec<_>>();
-        let availability = cache
-            .put_kzg_verified_data_columns(root, kzg_verified_columns)
-            .expect("should put columns");
-        assert!(
-            matches!(availability, Availability::MissingComponents(_)),
-            "all columns received but still missing the execution proof"
-        );
-
-        let availability = cache
-            .put_execution_proof(root, epoch, test_execution_proof(root))
-            .expect("should put execution proof");
-        assert!(matches!(availability, Availability::Available(_)));
     }
 }
 

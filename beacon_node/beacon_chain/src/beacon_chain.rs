@@ -3364,8 +3364,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         .await
     }
 
-    /// Cache a gossip-verified execution proof in the data availability checker, and import the
-    /// referenced block if the proof completes its availability requirements.
+    /// Cache a gossip-verified execution proof in the pending payload cache, and import the
+    /// referenced payload envelope if the proof completes its availability requirements.
     pub async fn process_gossip_verified_execution_proof(
         self: &Arc<Self>,
         verified_proof: GossipVerifiedExecutionProof,
@@ -3378,10 +3378,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
 
         let availability = self
-            .data_availability_checker
-            .put_gossip_verified_execution_proof(verified_proof)?;
+            .pending_payload_cache
+            .put_execution_proof(block_root, verified_proof.proof)?;
 
-        self.process_availability(block_slot, availability, || Ok(()))
+        self.process_payload_envelope_availability(block_slot, availability, || Ok(()))
             .await
     }
 

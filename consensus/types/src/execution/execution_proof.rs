@@ -22,6 +22,12 @@ pub type ProofData = VariableList<u8, MaxProofSize>;
 /// Identifier for the proof system that produced a proof (EIP-8025 `ProofType`).
 pub type ProofType = u8;
 
+/// Maximum number of execution proofs kept per payload (EIP-8025 `MaxExecutionProofsPerPayload`).
+pub const MAX_EXECUTION_PROOFS_PER_PAYLOAD: usize = 4;
+
+/// Minimum number of valid proofs of distinct types required to consider a payload verified.
+pub const MIN_REQUIRED_EXECUTION_PROOFS: usize = 1;
+
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode, TreeHash)]
 #[context_deserialize(ForkName)]

@@ -30,7 +30,6 @@ use crate::data_column_verification::{
     GossipVerifiedDataColumn, KzgVerifiedCustodyDataColumn, KzgVerifiedDataColumn,
     verify_kzg_for_data_column_list,
 };
-use crate::execution_proof_verification::GossipVerifiedExecutionProof;
 use crate::kzg_utils::validate_data_columns_with_commitments;
 use crate::metrics::{
     KZG_DATA_COLUMN_RECONSTRUCTION_ATTEMPTS, KZG_DATA_COLUMN_RECONSTRUCTION_FAILURES,
@@ -118,12 +117,10 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
         spec: Arc<ChainSpec>,
         enable_partial_columns: bool,
         disable_get_blobs: bool,
-        require_execution_proofs: bool,
     ) -> Result<Self, AvailabilityCheckError> {
         let inner = DataAvailabilityCheckerInner::new(
             OVERFLOW_LRU_CAPACITY,
             custody_context.clone(),
-            require_execution_proofs,
             spec.clone(),
         )?;
         let partial_assembler = if enable_partial_columns {
@@ -412,20 +409,6 @@ impl<T: BeaconChainTypes> DataAvailabilityChecker<T> {
     ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
         self.availability_cache
             .put_kzg_verified_data_columns(block_root, custody_columns)
-    }
-
-    /// Put a gossip-verified execution proof into the availability cache. If it completes the
-    /// requirements of a cached block, return the `Availability` variant triggering block import.
-    pub fn put_gossip_verified_execution_proof(
-        &self,
-        verified_proof: GossipVerifiedExecutionProof,
-    ) -> Result<Availability<T::EthSpec>, AvailabilityCheckError> {
-        let GossipVerifiedExecutionProof { proof, block_slot } = verified_proof;
-        self.availability_cache.put_execution_proof(
-            proof.beacon_block_root(),
-            block_slot.epoch(T::EthSpec::slots_per_epoch()),
-            proof,
-        )
     }
 
     /// Check if we have all the blobs for a block. Returns `Availability` which has information
@@ -1370,7 +1353,7 @@ mod test {
             complete_blob_backfill,
             spec.clone(),
         ));
-        DataAvailabilityChecker::new(kzg, custody_context, spec, true, false, false)
+        DataAvailabilityChecker::new(kzg, custody_context, spec, true, false)
             .expect("should initialise data availability checker")
     }
 }

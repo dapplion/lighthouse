@@ -11,6 +11,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{Span, debug, debug_span};
 use types::DataColumnSidecar;
+use types::execution::{
+    MAX_EXECUTION_PROOFS_PER_PAYLOAD, MIN_REQUIRED_EXECUTION_PROOFS, SignedExecutionProof,
+};
 use types::{ColumnIndex, EthSpec, Hash256, SignedExecutionPayloadBid};
 
 /// This represents the components of a payload pending data availability.
@@ -24,6 +27,8 @@ pub struct PendingComponents<E: EthSpec> {
     pub envelope: Option<AvailabilityPendingExecutedEnvelope<E>>,
     /// A column entry in this map may only have some cells filled in (i.e. a partial data column)
     pub verified_data_columns: HashMap<ColumnIndex, PendingColumn<E>>,
+    /// Gossip-verified EIP-8025 execution proofs for this payload, at most one per proof type.
+    pub execution_proofs: Vec<Arc<SignedExecutionProof>>,
     pub reconstruction_started: bool,
     pub(crate) span: Span,
 }
@@ -99,6 +104,19 @@ impl<E: EthSpec> PendingComponents<E> {
         self.envelope = Some(envelope);
     }
 
+    /// Merges an execution proof into the cache. The first proof received for each proof type is
+    /// kept, up to `MAX_EXECUTION_PROOFS_PER_PAYLOAD`.
+    pub fn merge_execution_proof(&mut self, execution_proof: Arc<SignedExecutionProof>) {
+        if self.execution_proofs.len() < MAX_EXECUTION_PROOFS_PER_PAYLOAD
+            && !self
+                .execution_proofs
+                .iter()
+                .any(|proof| proof.proof_type() == execution_proof.proof_type())
+        {
+            self.execution_proofs.push(execution_proof);
+        }
+    }
+
     pub fn num_completed_columns(&self) -> usize {
         self.get_cached_data_columns().len()
     }
@@ -107,6 +125,7 @@ impl<E: EthSpec> PendingComponents<E> {
     pub fn make_available<T>(
         &self,
         custody_context: &CustodyContext<T>,
+        require_execution_proofs: bool,
     ) -> Result<Option<AvailableExecutedEnvelope<E>>, AvailabilityCheckError>
     where
         T: BeaconChainTypes<EthSpec = E>,
@@ -115,6 +134,12 @@ impl<E: EthSpec> PendingComponents<E> {
         let Some(envelope) = &self.envelope else {
             return Ok(None);
         };
+
+        // EIP-8025: when a proof engine is configured, the payload additionally requires valid
+        // execution proofs of `MIN_REQUIRED_EXECUTION_PROOFS` distinct types.
+        if require_execution_proofs && self.execution_proofs.len() < MIN_REQUIRED_EXECUTION_PROOFS {
+            return Ok(None);
+        }
 
         let AvailabilityPendingExecutedEnvelope {
             envelope,
@@ -175,21 +200,36 @@ impl<E: EthSpec> PendingComponents<E> {
             bid,
             envelope: None,
             verified_data_columns: HashMap::new(),
+            execution_proofs: vec![],
             reconstruction_started: false,
             span,
         }
     }
 
-    pub fn status_str<T>(&self, custody_context: &CustodyContext<T>) -> String
+    pub fn status_str<T>(
+        &self,
+        custody_context: &CustodyContext<T>,
+        require_execution_proofs: bool,
+    ) -> String
     where
         T: BeaconChainTypes<EthSpec = E>,
     {
         let num_columns_required = self.num_columns_required(custody_context);
+        let proof_status = if require_execution_proofs {
+            format!(
+                ", execution_proofs {}/{}",
+                self.execution_proofs.len(),
+                MIN_REQUIRED_EXECUTION_PROOFS
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "envelope {}, data_columns {}/{}",
+            "envelope {}, data_columns {}/{}{}",
             self.envelope.is_some(),
             self.num_completed_columns(),
-            num_columns_required
+            num_columns_required,
+            proof_status
         )
     }
 }

@@ -30,7 +30,8 @@ pub use execution_payload_header::{
     ExecutionPayloadHeaderRef, ExecutionPayloadHeaderRefMut,
 };
 pub use execution_proof::{
-    ExecutionProof, MAX_PROOF_SIZE, MaxProofSize, ProofData, ProofType, PublicInput,
+    ExecutionProof, MAX_EXECUTION_PROOFS_PER_PAYLOAD, MAX_PROOF_SIZE,
+    MIN_REQUIRED_EXECUTION_PROOFS, MaxProofSize, ProofData, ProofType, PublicInput,
     SignedExecutionProof,
 };
 pub use execution_requests::{
