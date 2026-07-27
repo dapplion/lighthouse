@@ -144,7 +144,7 @@ fn get_valid_unaggregated_attestation<T: BeaconChainTypes>(
         .get(validator_committee_index)
         .expect("there should be an attesting validator");
 
-    let validator_sk = generate_deterministic_keypair(validator_index).sk;
+    let validator_sk = generate_deterministic_keypair(validator_index as usize).sk;
 
     valid_attestation
         .sign(
@@ -197,6 +197,7 @@ fn get_valid_aggregated_attestation<T: BeaconChainTypes>(
         .committee
         .iter()
         .find_map(|&val_index| {
+            let val_index = val_index as usize;
             let aggregator_sk = generate_deterministic_keypair(val_index).sk;
 
             let proof = SelectionProof::new::<T::EthSpec>(
@@ -252,6 +253,7 @@ fn get_non_aggregator<T: BeaconChainTypes>(
         .committee
         .iter()
         .find_map(|&val_index| {
+            let val_index = val_index as usize;
             let aggregator_sk = generate_deterministic_keypair(val_index).sk;
 
             let proof = SelectionProof::new::<T::EthSpec>(

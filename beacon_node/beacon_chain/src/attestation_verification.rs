@@ -703,7 +703,7 @@ impl<'a, T: BeaconChainTypes> IndexedAggregatedAttestation<'a, T> {
                 }
 
                 // Ensure the aggregator is a member of the committee for which it is aggregating.
-                if !committee.committee.contains(&(aggregator_index as usize)) {
+                if !committee.committee.contains(&(aggregator_index as u32)) {
                     return Err(Error::AggregatorNotInCommittee { aggregator_index });
                 }
 
@@ -1070,7 +1070,7 @@ impl<'a, T: BeaconChainTypes> VerifiedUnaggregatedAttestation<'a, T> {
             });
         };
 
-        if !committee.contains(&(attestation.attester_index as usize)) {
+        if !committee.contains(&(attestation.attester_index as u32)) {
             return Err(Error::AttesterNotInCommittee {
                 attester_index: attestation.attester_index,
                 committee_index: attestation.committee_index,

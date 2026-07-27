@@ -6,7 +6,7 @@ use types::{
 
 pub fn single_attestation_to_attestation<E: EthSpec>(
     single_attestation: &SingleAttestation,
-    committee: &[usize],
+    committee: &[u32],
     fork_name: ForkName,
 ) -> Result<Attestation<E>, Error> {
     let attester_index = single_attestation.attester_index;
@@ -17,7 +17,7 @@ pub fn single_attestation_to_attestation<E: EthSpec>(
         .iter()
         .enumerate()
         .find_map(|(i, &validator_index)| {
-            if attester_index as usize == validator_index {
+            if attester_index == validator_index as u64 {
                 return Some(i);
             }
             None

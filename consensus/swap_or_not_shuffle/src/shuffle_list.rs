@@ -76,12 +76,12 @@ impl Buf {
 ///  - `list_size == 0`
 ///  - `list_size > 2**24`
 ///  - `list_size > usize::MAX / 2`
-pub fn shuffle_list(
-    mut input: Vec<usize>,
+pub fn shuffle_list<T>(
+    mut input: Vec<T>,
     rounds: u8,
     seed: &[u8],
     forwards: bool,
-) -> Option<Vec<usize>> {
+) -> Option<Vec<T>> {
     let list_size = input.len();
 
     if input.is_empty() || list_size > usize::MAX / 2 || list_size > 2_usize.pow(24) || rounds == 0
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn returns_none_for_zero_length_list() {
-        assert_eq!(None, shuffle_list(vec![], 90, &[42, 42], true));
+        assert_eq!(None, shuffle_list::<usize>(vec![], 90, &[42, 42], true));
     }
 
     #[test]

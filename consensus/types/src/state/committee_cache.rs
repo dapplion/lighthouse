@@ -1,10 +1,8 @@
-use std::{num::NonZeroUsize, ops::Range, sync::Arc};
+use std::{num::NonZeroU32, ops::Range, sync::Arc};
 
 use educe::Educe;
 use safe_arith::{ArithError, SafeArith};
 use serde::{Deserialize, Serialize};
-use ssz::{Decode, DecodeError, Encode, four_byte_option_impl};
-use ssz_derive::{Decode, Encode};
 use swap_or_not_shuffle::shuffle_list;
 
 use crate::{
@@ -14,21 +12,19 @@ use crate::{
     validator::Validator,
 };
 
-// Define "legacy" implementations of `Option<Epoch>`, `Option<NonZeroUsize>` which use four bytes
-// for encoding the union selector.
-four_byte_option_impl!(four_byte_option_epoch, Epoch);
-four_byte_option_impl!(four_byte_option_non_zero_usize, NonZeroUsize);
-
 /// Computes and stores the shuffling for an epoch. Provides various getters to allow callers to
 /// read the committees for the given epoch.
-#[derive(Educe, Debug, Default, Clone, Serialize, Deserialize, Encode, Decode)]
+///
+/// Validator indices are stored as `u32` to halve the memory footprint: the index space is
+/// bounded well below `u32::MAX` (enforced in `initialized_unchecked`) and the shuffled list
+/// length is bounded to `2**24` by `shuffle_list`.
+#[derive(Educe, Debug, Default, Clone, Serialize, Deserialize)]
 #[educe(PartialEq)]
 pub struct CommitteeCache {
-    #[ssz(with = "four_byte_option_epoch")]
     initialized_epoch: Option<Epoch>,
-    shuffling: Vec<usize>,
+    shuffling: Vec<u32>,
     #[educe(PartialEq(method(compare_shuffling_positions)))]
-    shuffling_positions: Vec<NonZeroUsizeOption>,
+    shuffling_positions: Vec<NonZeroU32Option>,
     committees_per_slot: u64,
     slots_per_epoch: u64,
 }
@@ -43,7 +39,7 @@ pub struct CommitteeCache {
 ///
 /// In practice this is only used in tests.
 #[allow(clippy::indexing_slicing)]
-fn compare_shuffling_positions(xs: &Vec<NonZeroUsizeOption>, ys: &Vec<NonZeroUsizeOption>) -> bool {
+fn compare_shuffling_positions(xs: &Vec<NonZeroU32Option>, ys: &Vec<NonZeroU32Option>) -> bool {
     use std::cmp::Ordering;
 
     let (shorter, longer) = match xs.len().cmp(&ys.len()) {
@@ -56,7 +52,7 @@ fn compare_shuffling_positions(xs: &Vec<NonZeroUsizeOption>, ys: &Vec<NonZeroUsi
     shorter == &longer[..shorter.len()]
         && longer[shorter.len()..]
             .iter()
-            .all(|new| *new == NonZeroUsizeOption(None))
+            .all(|new| *new == NonZeroU32Option(None))
 }
 
 impl CommitteeCache {
@@ -127,12 +123,21 @@ impl CommitteeCache {
             return Err(BeaconStateError::ZeroSlotsPerEpoch);
         }
 
-        // The use of `NonZeroUsize` reduces the maximum number of possible validators by one.
-        if state.validators().len() == usize::MAX {
+        // Indices must fit `u32`, and the use of `NonZeroU32` for shuffling positions reduces
+        // the maximum by one more.
+        if state.validators().len() >= u32::MAX as usize {
             return Err(BeaconStateError::TooManyValidators);
         }
 
-        let active_validator_indices = get_active_validator_indices(state.validators(), epoch);
+        let mut active_validator_indices: Vec<u32> = state
+            .validators()
+            .iter()
+            .enumerate()
+            .filter(|(_, validator)| validator.is_active_at(epoch))
+            .map(|(index, _)| index as u32)
+            .collect();
+        // This allocation lives on as `shuffling`, so trim the collect slack.
+        active_validator_indices.shrink_to_fit();
 
         if active_validator_indices.is_empty() {
             return Err(BeaconStateError::InsufficientValidators);
@@ -155,9 +160,13 @@ impl CommitteeCache {
         let mut shuffling_positions = vec![<_>::default(); state.validators().len()];
         for (i, &v) in shuffling.iter().enumerate() {
             *shuffling_positions
-                .get_mut(v)
-                .ok_or(BeaconStateError::ShuffleIndexOutOfBounds(v))? =
-                NonZeroUsize::new(i.safe_add(1).map_err(BeaconStateError::ArithError)?).into();
+                .get_mut(v as usize)
+                .ok_or(BeaconStateError::ShuffleIndexOutOfBounds(v as usize))? = NonZeroU32::new(
+                (i as u32)
+                    .safe_add(1)
+                    .map_err(BeaconStateError::ArithError)?,
+            )
+            .into();
         }
 
         Ok(Arc::new(CommitteeCache {
@@ -183,7 +192,7 @@ impl CommitteeCache {
     /// Always returns `&[]` for a non-initialized epoch.
     ///
     /// Spec v0.12.1
-    pub fn active_validator_indices(&self) -> &[usize] {
+    pub fn active_validator_indices(&self) -> &[u32] {
         &self.shuffling
     }
 
@@ -192,7 +201,7 @@ impl CommitteeCache {
     /// Always returns `&[]` for a non-initialized epoch.
     ///
     /// Spec v0.12.1
-    pub fn shuffling(&self) -> &[usize] {
+    pub fn shuffling(&self) -> &[u32] {
         &self.shuffling
     }
 
@@ -341,7 +350,7 @@ impl CommitteeCache {
     /// Returns a slice of `self.shuffling` that represents the `index`'th committee in the epoch.
     ///
     /// Spec v0.12.1
-    fn compute_committee(&self, index: usize) -> Result<Option<&[usize]>, ArithError> {
+    fn compute_committee(&self, index: usize) -> Result<Option<&[u32]>, ArithError> {
         if let Some(range) = self.compute_committee_range(index)? {
             Ok(self.shuffling.get(range))
         } else {
@@ -367,7 +376,7 @@ impl CommitteeCache {
         self.shuffling_positions
             .get(validator_index)?
             .0
-            .map(|p| p.get() - 1)
+            .map(|p| (p.get() - 1) as usize)
     }
 }
 
@@ -436,51 +445,13 @@ impl arbitrary::Arbitrary<'_> for CommitteeCache {
     }
 }
 
-/// This is a shim struct to ensure that we can encode a `Vec<Option<NonZeroUsize>>` an SSZ union
-/// with a four-byte selector. The SSZ specification changed from four bytes to one byte during 2021
-/// and we use this shim to avoid breaking the Lighthouse database.
-#[derive(Debug, Default, PartialEq, Clone, Serialize, Deserialize)]
+/// Wrapper for `Option<NonZeroU32>` to allow a custom `PartialEq` for `shuffling_positions`.
+#[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
 #[serde(transparent)]
-struct NonZeroUsizeOption(Option<NonZeroUsize>);
+struct NonZeroU32Option(Option<NonZeroU32>);
 
-impl From<Option<NonZeroUsize>> for NonZeroUsizeOption {
-    fn from(opt: Option<NonZeroUsize>) -> Self {
+impl From<Option<NonZeroU32>> for NonZeroU32Option {
+    fn from(opt: Option<NonZeroU32>) -> Self {
         Self(opt)
-    }
-}
-
-impl Encode for NonZeroUsizeOption {
-    fn is_ssz_fixed_len() -> bool {
-        four_byte_option_non_zero_usize::encode::is_ssz_fixed_len()
-    }
-
-    fn ssz_fixed_len() -> usize {
-        four_byte_option_non_zero_usize::encode::ssz_fixed_len()
-    }
-
-    fn ssz_bytes_len(&self) -> usize {
-        four_byte_option_non_zero_usize::encode::ssz_bytes_len(&self.0)
-    }
-
-    fn ssz_append(&self, buf: &mut Vec<u8>) {
-        four_byte_option_non_zero_usize::encode::ssz_append(&self.0, buf)
-    }
-
-    fn as_ssz_bytes(&self) -> Vec<u8> {
-        four_byte_option_non_zero_usize::encode::as_ssz_bytes(&self.0)
-    }
-}
-
-impl Decode for NonZeroUsizeOption {
-    fn is_ssz_fixed_len() -> bool {
-        four_byte_option_non_zero_usize::decode::is_ssz_fixed_len()
-    }
-
-    fn ssz_fixed_len() -> usize {
-        four_byte_option_non_zero_usize::decode::ssz_fixed_len()
-    }
-
-    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        four_byte_option_non_zero_usize::decode::from_ssz_bytes(bytes).map(Self)
     }
 }

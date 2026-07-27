@@ -478,7 +478,7 @@ impl ForkChoiceTest {
         )
         .expect("should compute subnet id");
 
-        let validator_sk = generate_deterministic_keypair(validator_index).sk;
+        let validator_sk = generate_deterministic_keypair(validator_index as usize).sk;
 
         attestation
             .sign(

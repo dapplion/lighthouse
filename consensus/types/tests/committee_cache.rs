@@ -113,7 +113,7 @@ async fn shuffles_for_the_right_epoch() {
 
     let shuffling_with_seed = |seed: Hash256| {
         shuffle_list(
-            (0..num_validators).collect(),
+            (0..num_validators as u32).collect(),
             spec.shuffle_round_count,
             &seed[..],
             false,
@@ -124,7 +124,7 @@ async fn shuffles_for_the_right_epoch() {
     let assert_shuffling_positions_accurate = |cache: &CommitteeCache| {
         for (i, v) in cache.shuffling().iter().enumerate() {
             assert_eq!(
-                cache.shuffled_position(*v).unwrap(),
+                cache.shuffled_position(*v as usize).unwrap(),
                 i,
                 "Shuffling position inaccurate"
             );
