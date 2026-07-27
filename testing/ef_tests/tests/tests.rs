@@ -1160,11 +1160,34 @@ fn fork_choice_payload_data_availability() {
     ForkChoiceHandler::<MainnetEthSpec>::new("payload_data_availability").run();
 }
 
-/// Report-only runner for the fork choice compliance suites. Always passes; prints a summary of
-/// failures grouped by failure signature. The vectors are opt-in: `make test-fc-compliance`.
 #[test]
-fn fork_choice_compliance() {
-    ForkChoiceComplianceHandler::<MinimalEthSpec>::default().run_report();
+fn fork_choice_compliance_attester_slashing_test() {
+    ForkChoiceComplianceHandler::<MinimalEthSpec>::new("attester_slashing_test").run();
+}
+
+#[test]
+fn fork_choice_compliance_block_cover_test() {
+    ForkChoiceComplianceHandler::<MinimalEthSpec>::new("block_cover_test").run();
+}
+
+#[test]
+fn fork_choice_compliance_block_tree_test() {
+    ForkChoiceComplianceHandler::<MinimalEthSpec>::new("block_tree_test").run();
+}
+
+#[test]
+fn fork_choice_compliance_block_weight_test() {
+    ForkChoiceComplianceHandler::<MinimalEthSpec>::new("block_weight_test").run();
+}
+
+#[test]
+fn fork_choice_compliance_invalid_message_test() {
+    ForkChoiceComplianceHandler::<MinimalEthSpec>::new("invalid_message_test").run();
+}
+
+#[test]
+fn fork_choice_compliance_shuffling_test() {
+    ForkChoiceComplianceHandler::<MinimalEthSpec>::new("shuffling_test").run();
 }
 
 #[test]

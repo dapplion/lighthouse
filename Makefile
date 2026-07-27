@@ -250,13 +250,12 @@ run-state-transition-tests:
 # Downloads and runs the EF test vectors.
 test-ef: make-ef-tests run-ef-tests
 
-# Downloads the fork choice compliance test vectors and runs the report-only compliance runner.
-# The test always passes; it prints a pass rate and a summary of failures grouped by signature.
-# Set FC_COMPLIANCE_FORK (e.g. FC_COMPLIANCE_FORK=fulu) to run a single fork.
+# Downloads the fork choice compliance test vectors and runs the compliance tests. Cases listed
+# in testing/ef_tests/fork_choice_compliance_excluded.txt are skipped.
 test-fc-compliance:
 	make -C $(EF_TESTS) comptests
 	RUST_LOG=error cargo nextest run --release -p ef_tests --features "ef_tests,fake_crypto" \
-		--no-capture fork_choice_compliance
+		-E 'test(fork_choice_compliance)'
 
 # Downloads and runs the nightly EF test vectors.
 test-ef-nightly: make-ef-tests-nightly run-ef-tests

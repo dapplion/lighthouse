@@ -93,10 +93,31 @@ excluded_paths = [
     "tests/.*/.*/networking/gossip_blob_sidecar/.*",
     "tests/.*/.*/networking/gossip_data_column_sidecar/.*",
     "tests/.*/.*/networking/gossip_partial_data_column_sidecar/.*",
-    # Fork choice compliance vectors are opt-in (`make -C testing/ef_tests comptests`) and run by
-    # a report-only runner, so they are exempt from the accessed-files check.
-    "tests/.*/.*/fork_choice_compliance/.*",
+    # Generator metadata not used by the test runner.
+    "tests/.*/.*/fork_choice_compliance/.*/manifest.yaml",
 ]
+
+# Fork choice compliance cases that Lighthouse does not pass yet are skipped by the test runner
+# and excluded here. Each line of the file is a directory path relative to `tests/`; matching by
+# ancestor-directory set lookup keeps this fast with thousands of entries.
+exclusions_file = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fork_choice_compliance_excluded.txt"
+)
+excluded_dirs = set()
+with open(exclusions_file) as f:
+    for line in f:
+        line = line.strip()
+        if line and not line.startswith("#"):
+            excluded_dirs.add("tests/" + line)
+
+
+def in_excluded_dirs(name):
+    path = os.path.dirname(name)
+    while path:
+        if path in excluded_dirs:
+            return True
+        path = os.path.dirname(path)
+    return False
 
 
 def normalize_path(path):
@@ -119,11 +140,12 @@ for root, dirs, files in os.walk(tests_dir_filename):
     for name in files:
         name = normalize_path(os.path.join(root, name))
         if name not in passed:
-            excluded = False
-            for excluded_path_regex in excluded_paths:
-                if re.match(excluded_path_regex, name):
-                    excluded = True
-                    break
+            excluded = in_excluded_dirs(name)
+            if not excluded:
+                for excluded_path_regex in excluded_paths:
+                    if re.match(excluded_path_regex, name):
+                        excluded = True
+                        break
             if excluded:
                 excluded_files += 1
             else:
