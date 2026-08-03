@@ -253,7 +253,8 @@ impl<E: EthSpec> MetaData<E> {
 /// Note: any unknown `u64::into(n)` will resolve to `Goodbye::Unknown` for any unknown `n`,
 /// however `GoodbyeReason::Unknown.into()` will go into `0_u64`. Therefore de-serializing then
 /// re-serializing may not return the same bytes.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum GoodbyeReason {
     /// This node has shutdown.
     ClientShutdown = 1,

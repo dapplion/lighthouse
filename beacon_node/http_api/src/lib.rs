@@ -74,7 +74,6 @@ use lighthouse_network::Enr;
 use lighthouse_network::NetworkGlobals;
 use lighthouse_network::PeerId;
 use lighthouse_network::PeerInfo;
-use lighthouse_network::rpc::GoodbyeReason;
 use lighthouse_version::version_with_platform;
 use logging::{SSELoggingComponents, crit};
 use network::{NetworkMessage, NetworkSenders};
@@ -117,70 +116,17 @@ use warp_utils::{query::multi_key_query, uor::UnifyingOrFilter};
 
 const API_PREFIX: &str = "eth";
 
-/// Maps a peer's goodbye reason to the `disconnect_reason` vocabulary of the beacon-API spec.
-fn map_disconnect_reason(reason: &GoodbyeReason) -> &'static str {
-    match reason {
-        GoodbyeReason::BadScore | GoodbyeReason::Banned | GoodbyeReason::BannedIP => "bad_score",
-        GoodbyeReason::ClientShutdown => "client_shutdown",
-        GoodbyeReason::IrrelevantNetwork => "irrelevant_network",
-        GoodbyeReason::UnableToVerifyNetwork => "unviable_fork",
-        GoodbyeReason::TooManyPeers => "too_many_peers",
-        GoodbyeReason::Fault | GoodbyeReason::Unknown => "unknown",
-    }
-}
-
-/// Maps a `report_peer` msg to the `downscore_reasons` vocabulary of the beacon-API spec.
-fn map_downscore_reason(msg: &str) -> &'static str {
-    match msg {
-        "invalid_request" => "rpc_invalid_request",
-        "rate_limited" => "rpc_rate_limited",
-        "io_error" => "rpc_io_error",
-        "stream_timeout" | "negotiation_timeout" => "rpc_timeout",
-        "invalid_data" | "ssz_decode_error" => "rpc_invalid_response",
-        "faulty_batch" | "faulty_chain" | "backfill_batch_failed" => "sync_bad_batch",
-        _ if msg.contains("attn_") => "gossip_invalid_attestation",
-        _ if msg.contains("gossip_block") => "gossip_invalid_block",
-        _ if msg.contains("data_column") => "gossip_invalid_data_column_sidecar",
-        _ => "unknown",
-    }
-}
-
-/// Builds the `PeerData` response for a peer, or `None` if the peer was never connected.
-fn peer_data<E: EthSpec>(peer_id: &PeerId, peer_info: &PeerInfo<E>) -> Option<api_types::PeerData> {
-    // the eth2 API spec implies only peers we have been connected to at some point should be included.
-    let direction = (*peer_info.connection_direction()?).into();
-    let last_seen_p2p_address = if let Some(multiaddr) = peer_info.seen_multiaddrs().next() {
-        multiaddr.to_string()
-    } else if let Some(addr) = peer_info.listening_addresses().first() {
-        addr.to_string()
-    } else {
-        String::new()
-    };
-    let state: api_types::PeerState = peer_info.connection_status().clone().into();
-    // Per the spec, `disconnect_reason` must only be set while disconnected or disconnecting.
-    let disconnect_reason = if matches!(
-        state,
-        api_types::PeerState::Disconnected | api_types::PeerState::Disconnecting
-    ) {
-        peer_info
+/// Per the spec, `disconnect_reason` must only be set while disconnected or disconnecting.
+fn disconnect_reason<E: EthSpec>(
+    peer_info: &PeerInfo<E>,
+    state: api_types::PeerState,
+) -> Option<String> {
+    match state {
+        api_types::PeerState::Disconnected | api_types::PeerState::Disconnecting => peer_info
             .last_goodbye_reason()
-            .map(|reason| map_disconnect_reason(reason).to_string())
-    } else {
-        None
-    };
-    Some(api_types::PeerData {
-        peer_id: peer_id.to_string(),
-        enr: peer_info.enr().map(|enr| enr.to_base64()),
-        last_seen_p2p_address,
-        state,
-        direction,
-        agent_version: peer_info.client().agent_string.clone(),
-        score: Some(peer_info.score().score()),
-        disconnect_reason,
-        downscore_reasons: peer_info
-            .last_downscore_msg()
-            .map(|msg| vec![map_downscore_reason(msg).to_string()]),
-    })
+            .map(|reason| <&str>::from(reason).to_string()),
+        _ => None,
+    }
 }
 
 /// Alias for readability.
@@ -2484,13 +2430,33 @@ pub async fn serve<T: BeaconChainTypes>(
                         warp_utils::reject::custom_bad_request("invalid peer id.".to_string())
                     })?;
 
-                    if let Some(data) = network_globals
-                        .peers
-                        .read()
-                        .peer_info(&peer_id)
-                        .and_then(|peer_info| peer_data(&peer_id, peer_info))
-                    {
-                        return Ok(api_types::GenericResponse::from(data));
+                    if let Some(peer_info) = network_globals.peers.read().peer_info(&peer_id) {
+                        let address = if let Some(multiaddr) = peer_info.seen_multiaddrs().next() {
+                            multiaddr.to_string()
+                        } else if let Some(addr) = peer_info.listening_addresses().first() {
+                            addr.to_string()
+                        } else {
+                            String::new()
+                        };
+
+                        // the eth2 API spec implies only peers we have been connected to at some point should be included.
+                        if let Some(&dir) = peer_info.connection_direction() {
+                            let state: api_types::PeerState =
+                                peer_info.connection_status().clone().into();
+                            return Ok(api_types::GenericResponse::from(api_types::PeerData {
+                                peer_id: peer_id.to_string(),
+                                enr: peer_info.enr().map(|enr| enr.to_base64()),
+                                last_seen_p2p_address: address,
+                                direction: dir.into(),
+                                state,
+                                agent_version: peer_info.client().agent_string.clone(),
+                                score: Some(peer_info.score().score()),
+                                disconnect_reason: disconnect_reason(peer_info, state),
+                                downscore_reasons: peer_info
+                                    .last_downscore_msg()
+                                    .map(|msg| vec![msg.to_string()]),
+                            }));
+                        }
                     }
                     Err(warp_utils::reject::custom_not_found(
                         "peer not found.".to_string(),
@@ -2520,18 +2486,43 @@ pub async fn serve<T: BeaconChainTypes>(
                         .read()
                         .peers()
                         .for_each(|(peer_id, peer_info)| {
-                            if let Some(data) = peer_data(peer_id, peer_info) {
+                            let address =
+                                if let Some(multiaddr) = peer_info.seen_multiaddrs().next() {
+                                    multiaddr.to_string()
+                                } else if let Some(addr) = peer_info.listening_addresses().first() {
+                                    addr.to_string()
+                                } else {
+                                    String::new()
+                                };
+
+                            // the eth2 API spec implies only peers we have been connected to at some point should be included.
+                            if let Some(&dir) = peer_info.connection_direction() {
+                                let direction = dir.into();
+                                let state = peer_info.connection_status().clone().into();
+
                                 let state_matches = query
                                     .state
                                     .as_ref()
-                                    .is_none_or(|states| states.contains(&data.state));
+                                    .is_none_or(|states| states.contains(&state));
                                 let direction_matches = query
                                     .direction
                                     .as_ref()
-                                    .is_none_or(|directions| directions.contains(&data.direction));
+                                    .is_none_or(|directions| directions.contains(&direction));
 
                                 if state_matches && direction_matches {
-                                    peers.push(data);
+                                    peers.push(api_types::PeerData {
+                                        peer_id: peer_id.to_string(),
+                                        enr: peer_info.enr().map(|enr| enr.to_base64()),
+                                        last_seen_p2p_address: address,
+                                        direction,
+                                        state,
+                                        agent_version: peer_info.client().agent_string.clone(),
+                                        score: Some(peer_info.score().score()),
+                                        disconnect_reason: disconnect_reason(peer_info, state),
+                                        downscore_reasons: peer_info
+                                            .last_downscore_msg()
+                                            .map(|msg| vec![msg.to_string()]),
+                                    });
                                 }
                             }
                         });
