@@ -478,9 +478,14 @@ impl<E: EthSpec> PeerInfo<E> {
 
     /// Apply peer action to a non-trusted peer's score.
     // VISIBILITY: The peer manager is able to modify the score of a peer.
-    pub(in crate::peer_manager) fn apply_peer_action_to_score(&mut self, peer_action: PeerAction) {
+    pub(in crate::peer_manager) fn apply_peer_action_to_score(
+        &mut self,
+        peer_action: PeerAction,
+        msg: &'static str,
+    ) {
         if !self.is_trusted {
-            self.score.apply_peer_action(peer_action)
+            self.score.apply_peer_action(peer_action);
+            self.last_downscore_msg = Some(msg);
         }
     }
 
@@ -497,11 +502,6 @@ impl<E: EthSpec> PeerInfo<E> {
     /// Records the last goodbye reason sent to or received from this peer.
     pub(crate) fn set_last_goodbye_reason(&mut self, reason: GoodbyeReason) {
         self.last_goodbye_reason = Some(reason);
-    }
-
-    /// Records the `report_peer` msg of a downscore applied to this peer.
-    pub(super) fn set_last_downscore_msg(&mut self, msg: &'static str) {
-        self.last_downscore_msg = Some(msg);
     }
 
     /// Updates the gossipsub score with a new score. Optionally ignore the gossipsub score.

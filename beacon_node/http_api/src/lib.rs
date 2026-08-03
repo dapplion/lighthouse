@@ -72,6 +72,7 @@ use eth2::{CONSENSUS_VERSION_HEADER, CONTENT_TYPE_HEADER, SSZ_CONTENT_TYPE_HEADE
 use health_metrics::observe::Observe;
 use lighthouse_network::Enr;
 use lighthouse_network::NetworkGlobals;
+use lighthouse_network::PeerConnectionStatus;
 use lighthouse_network::PeerId;
 use lighthouse_network::PeerInfo;
 use lighthouse_version::version_with_platform;
@@ -117,15 +118,15 @@ use warp_utils::{query::multi_key_query, uor::UnifyingOrFilter};
 const API_PREFIX: &str = "eth";
 
 /// Per the spec, `disconnect_reason` must only be set while disconnected or disconnecting.
-fn disconnect_reason<E: EthSpec>(
-    peer_info: &PeerInfo<E>,
-    state: api_types::PeerState,
-) -> Option<String> {
-    match state {
-        api_types::PeerState::Disconnected | api_types::PeerState::Disconnecting => peer_info
+fn disconnect_reason<E: EthSpec>(peer_info: &PeerInfo<E>) -> Option<String> {
+    match peer_info.connection_status() {
+        PeerConnectionStatus::Connected { .. } | PeerConnectionStatus::Dialing { .. } => None,
+        PeerConnectionStatus::Disconnecting { .. }
+        | PeerConnectionStatus::Disconnected { .. }
+        | PeerConnectionStatus::Banned { .. }
+        | PeerConnectionStatus::Unknown => peer_info
             .last_goodbye_reason()
             .map(|reason| <&str>::from(reason).to_string()),
-        _ => None,
     }
 }
 
@@ -2441,17 +2442,15 @@ pub async fn serve<T: BeaconChainTypes>(
 
                         // the eth2 API spec implies only peers we have been connected to at some point should be included.
                         if let Some(&dir) = peer_info.connection_direction() {
-                            let state: api_types::PeerState =
-                                peer_info.connection_status().clone().into();
                             return Ok(api_types::GenericResponse::from(api_types::PeerData {
                                 peer_id: peer_id.to_string(),
                                 enr: peer_info.enr().map(|enr| enr.to_base64()),
                                 last_seen_p2p_address: address,
                                 direction: dir.into(),
-                                state,
+                                state: peer_info.connection_status().clone().into(),
                                 agent_version: peer_info.client().agent_string.clone(),
                                 score: Some(peer_info.score().score()),
-                                disconnect_reason: disconnect_reason(peer_info, state),
+                                disconnect_reason: disconnect_reason(peer_info),
                                 downscore_reasons: peer_info
                                     .last_downscore_msg()
                                     .map(|msg| vec![msg.to_string()]),
@@ -2518,7 +2517,7 @@ pub async fn serve<T: BeaconChainTypes>(
                                         state,
                                         agent_version: peer_info.client().agent_string.clone(),
                                         score: Some(peer_info.score().score()),
-                                        disconnect_reason: disconnect_reason(peer_info, state),
+                                        disconnect_reason: disconnect_reason(peer_info),
                                         downscore_reasons: peer_info
                                             .last_downscore_msg()
                                             .map(|msg| vec![msg.to_string()]),

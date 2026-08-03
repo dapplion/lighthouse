@@ -631,10 +631,7 @@ impl<E: EthSpec> PeerDB<E> {
         match self.peers.get_mut(peer_id) {
             Some(info) => {
                 let previous_state = info.score_state();
-                info.apply_peer_action_to_score(action);
-                if !info.is_trusted {
-                    info.set_last_downscore_msg(msg);
-                }
+                info.apply_peer_action_to_score(action, msg);
                 metrics::inc_counter_vec(
                     &metrics::PEER_ACTION_EVENTS_PER_CLIENT,
                     &[info.client().kind.as_ref(), action.as_ref(), source.into()],
@@ -911,7 +908,7 @@ impl<E: EthSpec> PeerDB<E> {
                 _ => {
                     // If score isn't low enough to ban, this function has been called incorrectly.
                     error!(%peer_id, "Banning a peer with a good score");
-                    info.apply_peer_action_to_score(score::PeerAction::Fatal);
+                    info.apply_peer_action_to_score(score::PeerAction::Fatal, "banned");
                 }
             }
         }
