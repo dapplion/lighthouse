@@ -837,41 +837,29 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         Ok(LookupRequestResult::RequestSent(id.req_id))
     }
 
-    /// Sends a `beacon_blocks_by_head` request to `peer_id`, fetching `block_root` and a run of its
-    /// ancestors in a single request.
+    /// Sends a `beacon_blocks_by_head` request to `peer_id`, fetching `request.beacon_root` and a
+    /// run of its ancestors in a single request.
     pub fn send_blocks_by_head(
         &mut self,
         peer_id: PeerId,
         lookup_id: SingleLookupId,
-        block_root: Hash256,
+        request: BlocksByHeadRequest,
     ) -> Result<Id, RpcRequestSendError> {
         let id = SingleLookupReqId {
             lookup_id,
             req_id: self.next_id(),
         };
-        // Fetch the block plus a few ancestors so the common shallow case doesn't over-fetch.
-        let count = 4;
-        // Lookup sync event safety: see `block_lookup_request`. The same guarantees apply,
-        // with the events handled by `Self::on_blocks_by_head_response`.
-        metrics::observe(
-            &metrics::SYNC_BLOCKS_BY_HEAD_REQUESTED_ANCESTORS,
-            count as f64,
-        );
-        let request = BlocksByHeadRequest {
-            beacon_root: block_root,
-            count,
-        };
         self.network_send
             .send(NetworkMessage::SendRequest {
                 peer_id,
-                request: RequestType::BlocksByHead(request),
+                request: RequestType::BlocksByHead(request.clone()),
                 app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByHead(id)),
             })
             .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
 
         debug!(
             method = "BlocksByHead",
-            ?block_root,
+            block_root = ?request.beacon_root,
             peer = %peer_id,
             %id,
             "Sync RPC request sent"
@@ -880,7 +868,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let request_span = debug_span!(
             parent: Span::current(),
             "lh_outgoing_block_by_head_request",
-            %block_root,
+            block_root = %request.beacon_root,
         );
         self.blocks_by_head_requests.insert(
             id,
@@ -888,7 +876,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             // false = the peer may return fewer blocks than requested (e.g. reached genesis or
             // finalization), so the request completes on stream termination.
             false,
-            BlocksByHeadRequestItems::new(block_root, count as usize),
+            BlocksByHeadRequestItems::new(request.beacon_root, request.count as usize),
             request_span,
         );
 
@@ -1445,22 +1433,22 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.on_rpc_response_result(resp, peer_id)
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn on_blocks_by_head_response(
         &mut self,
         id: SingleLookupReqId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) -> Option<RpcResponseResult<Arc<SignedBeaconBlock<T::EthSpec>>>> {
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>> {
         // The response has the requested `beacon_root` first followed by its ancestors in
-        // descending slot order. Only the requested block is returned to the lookup; the ancestors
-        // are discarded for now, and will be consumed to seed parent lookups in a follow-up.
+        // descending slot order, and must contain at least the requested block.
         let resp = self.blocks_by_head_requests.on_response(id, rpc_event);
         let resp = resp.map(|res| {
-            res.and_then(|mut blocks| {
+            res.and_then(|blocks| {
                 if blocks.is_empty() {
                     Err(LookupVerifyError::NotEnoughResponsesReturned { actual: 0 }.into())
                 } else {
-                    Ok(blocks.swap_remove(0))
+                    Ok(blocks)
                 }
             })
         });

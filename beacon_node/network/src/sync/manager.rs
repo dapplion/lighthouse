@@ -1153,14 +1153,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         peer_id: PeerId,
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
-        if let Some(resp) = self.network.on_blocks_by_head_response(id, peer_id, block) {
-            self.block_lookups.on_block_download_response(
-                id,
-                peer_id,
-                resp.map(|value| DownloadResult::new(value, PeerGroup::from_single(peer_id))),
-                &mut self.network,
-            )
-        }
+        // The response is not consumed yet: a follow-up will inject the blocks into lookup sync.
+        self.network.on_blocks_by_head_response(id, peer_id, block);
     }
 
     fn rpc_blob_received(
