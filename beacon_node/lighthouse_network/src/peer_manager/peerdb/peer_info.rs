@@ -2,7 +2,10 @@ use super::client::Client;
 use super::score::{PeerAction, Score, ScoreState};
 use super::sync_status::SyncStatus;
 use crate::discovery::Eth2Enr;
-use crate::{rpc::MetaData, types::Subnet};
+use crate::{
+    rpc::{GoodbyeReason, MetaData},
+    types::Subnet,
+};
 use PeerConnectionStatus::*;
 use discv5::Enr;
 use eth2::types::{PeerDirection, PeerState};
@@ -59,6 +62,12 @@ pub struct PeerInfo<E: EthSpec> {
     connection_direction: Option<ConnectionDirection>,
     /// The enr of the peer, if known.
     enr: Option<Enr>,
+    /// The last goodbye reason sent to or received from this peer, if any.
+    #[serde(skip)]
+    last_goodbye_reason: Option<GoodbyeReason>,
+    /// The `report_peer` msg of the last downscore in the current connection, if any.
+    #[serde(skip)]
+    last_downscore_msg: Option<&'static str>,
 }
 
 impl<E: EthSpec> Default for PeerInfo<E> {
@@ -78,6 +87,8 @@ impl<E: EthSpec> Default for PeerInfo<E> {
             is_trusted: false,
             connection_direction: None,
             enr: None,
+            last_goodbye_reason: None,
+            last_downscore_msg: None,
         }
     }
 }
@@ -473,6 +484,26 @@ impl<E: EthSpec> PeerInfo<E> {
         }
     }
 
+    /// Returns the last goodbye reason sent to or received from this peer, if any.
+    pub fn last_goodbye_reason(&self) -> Option<&GoodbyeReason> {
+        self.last_goodbye_reason.as_ref()
+    }
+
+    /// Returns the `report_peer` msg of the last downscore in the current connection, if any.
+    pub fn last_downscore_msg(&self) -> Option<&'static str> {
+        self.last_downscore_msg
+    }
+
+    /// Records the last goodbye reason sent to or received from this peer.
+    pub(crate) fn set_last_goodbye_reason(&mut self, reason: GoodbyeReason) {
+        self.last_goodbye_reason = Some(reason);
+    }
+
+    /// Records the `report_peer` msg of a downscore applied to this peer.
+    pub(super) fn set_last_downscore_msg(&mut self, msg: &'static str) {
+        self.last_downscore_msg = Some(msg);
+    }
+
     /// Updates the gossipsub score with a new score. Optionally ignore the gossipsub score.
     pub(super) fn update_gossipsub_score(&mut self, new_score: f64, ignore: bool) {
         self.score.update_gossipsub_score(new_score, ignore);
@@ -517,6 +548,8 @@ impl<E: EthSpec> PeerInfo<E> {
                     multiaddr,
                 };
                 self.connection_direction = Some(ConnectionDirection::Incoming);
+                self.last_goodbye_reason = None;
+                self.last_downscore_msg = None;
             }
         }
     }
@@ -538,6 +571,8 @@ impl<E: EthSpec> PeerInfo<E> {
                     multiaddr,
                 };
                 self.connection_direction = Some(ConnectionDirection::Outgoing);
+                self.last_goodbye_reason = None;
+                self.last_downscore_msg = None;
             }
         }
     }

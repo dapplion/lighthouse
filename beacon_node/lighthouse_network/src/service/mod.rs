@@ -1652,6 +1652,11 @@ impl<E: EthSpec> Network<E> {
                             client = %self.network_globals.client(&peer_id),
                             "Peer sent Goodbye"
                         );
+                        if let Some(info) =
+                            self.network_globals.peers.write().peer_info_mut(&peer_id)
+                        {
+                            info.set_last_goodbye_reason(reason.clone());
+                        }
                         // NOTE: We currently do not inform the application that we are
                         // disconnecting here. The RPC handler will automatically
                         // disconnect for us.

@@ -118,7 +118,7 @@ impl<E: EthSpec> PeerDB<E> {
     /// Returns a mutable reference to a peer's info if known.
     // VISIBILITY: The peer manager is able to modify some elements of the peer info, such as sync
     // status.
-    pub(super) fn peer_info_mut(&mut self, peer_id: &PeerId) -> Option<&mut PeerInfo<E>> {
+    pub(crate) fn peer_info_mut(&mut self, peer_id: &PeerId) -> Option<&mut PeerInfo<E>> {
         self.peers.get_mut(peer_id)
     }
 
@@ -632,6 +632,9 @@ impl<E: EthSpec> PeerDB<E> {
             Some(info) => {
                 let previous_state = info.score_state();
                 info.apply_peer_action_to_score(action);
+                if !info.is_trusted {
+                    info.set_last_downscore_msg(msg);
+                }
                 metrics::inc_counter_vec(
                     &metrics::PEER_ACTION_EVENTS_PER_CLIENT,
                     &[info.client().kind.as_ref(), action.as_ref(), source.into()],

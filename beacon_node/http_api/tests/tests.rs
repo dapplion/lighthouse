@@ -3437,6 +3437,10 @@ impl ApiTester {
             last_seen_p2p_address: EXTERNAL_ADDR.to_string(),
             state: PeerState::Connected,
             direction: PeerDirection::Inbound,
+            agent_version: None,
+            score: Some(0.0),
+            disconnect_reason: None,
+            downscore_reasons: None,
         };
 
         assert_eq!(result, expected);
@@ -3469,6 +3473,10 @@ impl ApiTester {
                     last_seen_p2p_address: EXTERNAL_ADDR.to_string(),
                     state: PeerState::Connected,
                     direction: PeerDirection::Inbound,
+                    agent_version: None,
+                    score: Some(0.0),
+                    disconnect_reason: None,
+                    downscore_reasons: None,
                 };
 
                 let state_match =

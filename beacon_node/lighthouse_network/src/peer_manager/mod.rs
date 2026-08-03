@@ -220,6 +220,7 @@ impl<E: EthSpec> PeerManager<E> {
             if matches!(reason, GoodbyeReason::IrrelevantNetwork) {
                 info.update_sync_status(SyncStatus::IrrelevantPeer);
             }
+            info.set_last_goodbye_reason(reason.clone());
         }
 
         self.report_peer(
@@ -686,7 +687,7 @@ impl<E: EthSpec> PeerManager<E> {
             peer_action,
             ReportSource::RPC,
             None,
-            "handle_rpc_error",
+            err.as_static_str(),
         );
     }
 
