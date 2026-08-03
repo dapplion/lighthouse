@@ -737,33 +737,22 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         block_root: Hash256,
     ) -> Result<LookupRequestResult<Arc<SignedBeaconBlock<T::EthSpec>>>, RpcRequestSendError> {
         let blocks_by_root_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
-        let blocks_by_head_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_head_requests);
         let Some(peer_id) = lookup_peers
             .read()
             .iter()
             .map(|peer| {
-                let supports_blocks_by_head = self.peer_supports_blocks_by_head(peer);
-                // The spec limits concurrent requests per protocol ID, so gate on the protocol we
-                // would actually use.
-                let at_concurrency_limit = if supports_blocks_by_head {
-                    blocks_by_head_per_peer.at_concurrency_limit(peer)
-                } else {
-                    blocks_by_root_per_peer.at_concurrency_limit(peer)
-                };
                 (
                     // De-prioritize peers that have already failed this request
                     peers_to_deprioritize.contains(peer),
                     // Strictly de-prioritize peers already at the per-protocol concurrency limit
-                    at_concurrency_limit,
-                    // Prefer peers that support `beacon_blocks_by_head`
-                    !supports_blocks_by_head,
+                    blocks_by_root_per_peer.at_concurrency_limit(peer),
                     // Random factor to break ties, otherwise the PeerID breaks ties
                     rand::random::<u32>(),
                     peer,
                 )
             })
             .min()
-            .map(|(_, _, _, _, peer)| *peer)
+            .map(|(_, _, _, peer)| *peer)
         else {
             // Allow lookup to not have any peers and do nothing. This is an optimization to not
             // lose progress of lookups created from a block with unknown parent before we receive
@@ -796,24 +785,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             }
         }
 
-        // If the peer supports `beacon_blocks_by_head`, fetch the block and a run of its ancestors
-        // in a single request; otherwise fall back to `beacon_blocks_by_root` for the single block.
-        Ok(LookupRequestResult::RequestSent(
-            if self.peer_supports_blocks_by_head(&peer_id) {
-                self.send_blocks_by_head(peer_id, lookup_id, block_root)?
-            } else {
-                self.send_block_by_root_request(peer_id, lookup_id, block_root)?
-            },
-        ))
-    }
-
-    /// Sends a `beacon_blocks_by_root` request to `peer_id` for the single block `block_root`.
-    fn send_block_by_root_request(
-        &mut self,
-        peer_id: PeerId,
-        lookup_id: SingleLookupId,
-        block_root: Hash256,
-    ) -> Result<Id, RpcRequestSendError> {
         let id = SingleLookupReqId {
             lookup_id,
             req_id: self.next_id(),
@@ -863,12 +834,12 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_span,
         );
 
-        Ok(id.req_id)
+        Ok(LookupRequestResult::RequestSent(id.req_id))
     }
 
     /// Sends a `beacon_blocks_by_head` request to `peer_id`, fetching `block_root` and a run of its
     /// ancestors in a single request.
-    fn send_blocks_by_head(
+    pub fn send_blocks_by_head(
         &mut self,
         peer_id: PeerId,
         lookup_id: SingleLookupId,
@@ -880,7 +851,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         };
         // Fetch the block plus a few ancestors so the common shallow case doesn't over-fetch.
         let count = 4;
-        // Lookup sync event safety: see `send_block_by_root_request`. The same guarantees apply,
+        // Lookup sync event safety: see `block_lookup_request`. The same guarantees apply,
         // with the events handled by `Self::on_blocks_by_head_response`.
         metrics::observe(
             &metrics::SYNC_BLOCKS_BY_HEAD_REQUESTED_ANCESTORS,
