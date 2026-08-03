@@ -210,9 +210,6 @@ pub struct SingleBlockLookup<T: BeaconChainTypes> {
     #[educe(Debug(method(fmt_peer_map_as_len)))]
     gloas_child_peers: HashMap<ExecutionBlockHash, PeerSet>,
     awaiting_parent: Option<AwaitingParent>,
-    /// Count to request over `beacon_blocks_by_head`: small for a lone lookup, large once it's known
-    /// to be part of a deep chain. Fixed at creation from the lookup graph.
-    by_head_count: u64,
     created: Instant,
     pub(crate) span: Span,
 }
@@ -224,7 +221,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         peer_type: &PeerType,
         id: Id,
         awaiting_parent: Option<AwaitingParent>,
-        by_head_count: u64,
     ) -> Self {
         let lookup_span = debug_span!(
             "lh_single_block_lookup",
@@ -250,7 +246,6 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             peers: block_peers,
             gloas_child_peers,
             awaiting_parent,
-            by_head_count,
             created: Instant::now(),
             span: lookup_span,
         }
@@ -394,13 +389,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         self.block_request
             .state
             .maybe_start_downloading(|failed_peers| {
-                cx.block_lookup_request(
-                    self.id,
-                    self.peers.clone(),
-                    failed_peers,
-                    self.block_root,
-                    self.by_head_count,
-                )
+                cx.block_lookup_request(self.id, self.peers.clone(), failed_peers, self.block_root)
             })?;
         if self.awaiting_parent.is_none()
             && let Some(data) = self.block_request.state.is_awaiting_process()

@@ -80,6 +80,10 @@ macro_rules! new_range_request_span {
 /// Slots a block may lead our clock by (clock skew).
 const FUTURE_SLOT_TOLERANCE: u64 = 1;
 
+/// `beacon_blocks_by_head` count for block lookups: fetch the block plus a few ancestors so the
+/// common shallow case doesn't over-fetch. Tune against mainnet metrics.
+const BLOCKS_BY_HEAD_REQUEST_COUNT: u64 = 4;
+
 #[derive(Debug)]
 pub enum RpcEvent<T> {
     StreamTermination,
@@ -795,7 +799,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
         peers_to_deprioritize: &HashSet<PeerId>,
         block_root: Hash256,
-        by_head_count: u64,
     ) -> Result<LookupRequestResult<Arc<SignedBeaconBlock<T::EthSpec>>>, RpcRequestSendError> {
         let blocks_by_root_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
         let blocks_by_head_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_head_requests);
@@ -861,7 +864,12 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         // in a single request; otherwise fall back to `beacon_blocks_by_root` for the single block.
         Ok(LookupRequestResult::RequestSent(
             if self.peer_supports_blocks_by_head(&peer_id) {
-                self.send_blocks_by_head(peer_id, lookup_id, block_root, by_head_count)?
+                self.send_blocks_by_head(
+                    peer_id,
+                    lookup_id,
+                    block_root,
+                    BLOCKS_BY_HEAD_REQUEST_COUNT,
+                )?
             } else {
                 self.send_block_by_root_request(peer_id, lookup_id, block_root)?
             },

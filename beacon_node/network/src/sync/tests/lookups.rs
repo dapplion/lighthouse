@@ -5,9 +5,6 @@ use crate::network_beacon_processor::sync_methods::WhichPeerToPenalize;
 use crate::network_beacon_processor::{
     ChainSegmentProcessId, InvalidBlockStorage, NetworkBeaconProcessor,
 };
-use crate::sync::block_lookups::{
-    BLOCKS_BY_HEAD_CHAIN_REQUEST_COUNT, BLOCKS_BY_HEAD_LONE_REQUEST_COUNT,
-};
 use crate::sync::block_lookups::{BlockLookupSummary, PARENT_DEPTH_TOLERANCE};
 use crate::sync::{
     SyncMessage,
@@ -2489,43 +2486,6 @@ async fn peer_disconnected_then_rpc_error(depth: usize, by_head_support: ByHeadS
     assert_eq!(r.dropped_lookups(), 0, "some dropped lookups");
     r.assert_empty_network();
     r.assert_single_lookups_count(1);
-}
-
-/// A lone lookup over `beacon_blocks_by_head` fetches only a few ancestors; once the chain proves
-/// deep the next request fetches a large batch, caching every block, so no `beacon_blocks_by_root`
-/// requests are needed.
-#[tokio::test]
-async fn blocks_by_head_request_count_grows_for_a_chain() {
-    // Peers advertise `beacon_blocks_by_head`, so lookups fetch via it.
-    let mut r = TestRig::new(ByHeadSupport::Supported);
-    // Deep enough that the lone count doesn't resolve it, forcing a second (chain) request, while
-    // staying under `PARENT_DEPTH_TOLERANCE`.
-    r.build_chain_and_trigger_last_block(BLOCKS_BY_HEAD_CHAIN_REQUEST_COUNT as usize)
-        .await;
-    r.simulate(SimulateConfig::happy_path()).await;
-
-    r.assert_successful_lookup_sync();
-    // The lone first lookup fetches only a few ancestors; once the chain is proven deep the next
-    // request fetches a large batch. No by-root is used.
-    let by_head_counts = r
-        .requests
-        .iter()
-        .filter_map(|(req, _)| match req {
-            RequestType::BlocksByHead(req) => Some(req.count),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        by_head_counts,
-        vec![
-            BLOCKS_BY_HEAD_LONE_REQUEST_COUNT,
-            BLOCKS_BY_HEAD_CHAIN_REQUEST_COUNT
-        ]
-    );
-    assert_eq!(
-        r.requests_count().get("BlocksByRoot").copied().unwrap_or(0),
-        0
-    );
 }
 
 /// A peer serves a block from a future slot. It must be dropped, not turned into a parent lookup /
