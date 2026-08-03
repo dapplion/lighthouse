@@ -4146,13 +4146,15 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 | ProposerPreferencesError::BeaconChainError(_)
                 | ProposerPreferencesError::BeaconStateError(_)
                 | ProposerPreferencesError::UnableToReadSlot
-                | ProposerPreferencesError::DependentRootUnknown { .. },
+                | ProposerPreferencesError::DependentRootUnknown { .. }
+                | ProposerPreferencesError::InvalidDependentRoot { .. },
             ) => {
                 self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
             }
             Err(
                 ProposerPreferencesError::InvalidProposalSlot { .. }
-                | ProposerPreferencesError::BadSignature,
+                | ProposerPreferencesError::BadSignature
+                | ProposerPreferencesError::DependentRootToRecent { .. },
             ) => {
                 self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Reject);
                 self.gossip_penalize_peer(
