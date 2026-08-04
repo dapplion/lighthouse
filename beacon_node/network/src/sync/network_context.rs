@@ -12,6 +12,7 @@ use crate::metrics;
 use crate::network_beacon_processor::NetworkBeaconProcessor;
 #[cfg(test)]
 use crate::network_beacon_processor::TestBeaconChainType;
+use crate::network_beacon_processor::sync_methods::WhichPeerToPenalize;
 use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::batch::ByRangeRequestType;
@@ -193,6 +194,55 @@ impl PeerGroup {
                 None
             }
         })
+    }
+}
+
+/// The peers that served the components of a range sync batch.
+///
+/// Blocks come from a single peer of the syncing chain, while custody columns come from whichever
+/// peers custody them, which are often not peers of that chain. Keeping the two apart lets an
+/// invalid column be charged to the peer that served it instead of the peer that served the blocks
+/// it was coupled with.
+#[derive(Clone, Debug)]
+pub struct BatchPeers {
+    block_peer: PeerId,
+    columns: PeerGroup,
+}
+
+impl From<PeerId> for BatchPeers {
+    fn from(block_peer: PeerId) -> Self {
+        Self {
+            block_peer,
+            columns: PeerGroup::from_set(Default::default()),
+        }
+    }
+}
+
+impl BatchPeers {
+    pub fn new(block_peer: PeerId, columns: PeerGroup) -> Self {
+        Self {
+            block_peer,
+            columns,
+        }
+    }
+
+    pub fn block_peer(&self) -> PeerId {
+        self.block_peer
+    }
+
+    /// Every peer that served some part of the batch.
+    pub fn all(&self) -> impl Iterator<Item = &PeerId> + '_ {
+        std::iter::once(&self.block_peer).chain(self.columns.all())
+    }
+
+    /// The peers at fault for `whom`. Empty if we no longer know who served that column.
+    pub fn to_penalize(&self, whom: WhichPeerToPenalize) -> Vec<PeerId> {
+        match whom {
+            WhichPeerToPenalize::BlockPeer => vec![self.block_peer],
+            WhichPeerToPenalize::CustodyPeerForColumn(index) => {
+                self.columns.of_index(index as usize).copied().collect()
+            }
+        }
     }
 }
 
@@ -639,7 +689,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         &mut self,
         id: ComponentsByRangeRequestId,
         range_block_component: RangeBlockComponent<T::EthSpec>,
-    ) -> Option<Result<(PeerId, Vec<RangeSyncBlock<T::EthSpec>>), RpcResponseError>> {
+    ) -> Option<(
+        Option<BatchPeers>,
+        Result<Vec<RangeSyncBlock<T::EthSpec>>, RpcResponseError>,
+    )> {
         // Remove from map to allow passing &mut self to continue_requests
         let mut request = self.components_by_range_requests.remove(&id)?;
 
@@ -676,26 +729,31 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
                     })
             }),
         };
+        // These are our own bookkeeping failures, so there is no peer to attribute them to.
         if let Err(e) = add_result {
-            return Some(Err(e));
+            return Some((None, Err(e)));
         }
 
         // Let the coupling struct initiate any follow-up requests (custody-by-root)
         if let Err(e) = request.continue_requests(id, self) {
-            return Some(Err(RpcResponseError::BlockComponentCouplingError(
-                CouplingError::InternalError(e),
-            )));
+            return Some((
+                None,
+                Err(RpcResponseError::BlockComponentCouplingError(
+                    CouplingError::InternalError(e),
+                )),
+            ));
         }
 
         // Check if all components have arrived
-        if let Some((blocks_result, block_peer)) =
+        if let Some((blocks_result, batch_peers)) =
             request.responses(&self.chain.custody_context, self.chain.spec.clone())
         {
-            Some(
-                blocks_result
-                    .map(|blocks| (block_peer, blocks))
-                    .map_err(RpcResponseError::BlockComponentCouplingError),
-            )
+            // Return the peers on both paths: a failed batch must be attributed to the peers that
+            // actually served it.
+            Some((
+                Some(batch_peers),
+                blocks_result.map_err(RpcResponseError::BlockComponentCouplingError),
+            ))
         } else {
             // Re-insert — still waiting for more components
             self.components_by_range_requests.insert(id, request);

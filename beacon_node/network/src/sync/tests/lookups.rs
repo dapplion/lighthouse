@@ -480,6 +480,8 @@ impl TestRig {
                                 result: BatchProcessResult::FaultyFailure {
                                     imported_blocks: 0,
                                     penalty: PeerAction::LowToleranceError,
+                                    whom: WhichPeerToPenalize::BlockPeer,
+                                    msg: "faulty_batch",
                                 },
                             });
                         } else if self.complete_strategy.range_non_faulty_failures > 0 {

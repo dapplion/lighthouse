@@ -626,7 +626,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                     }
                 }
 
-                match batch.download_failed(Some(*peer_id)) {
+                match batch.download_failed(Some((*peer_id).into())) {
                     Err(e) => {
                         self.fail_sync(CustodyBackfillError::BatchInvalidState(batch_id, e.0))?;
                     }
@@ -693,7 +693,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
             }
         };
 
-        let Some(peer) = batch.processing_peer() else {
+        let Some(batch_peers) = batch.processing_peers().cloned() else {
             self.fail_sync(CustodyBackfillError::BatchInvalidState(
                 batch_id,
                 String::from("Peer does not exist"),
@@ -704,8 +704,8 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
         debug!(
             ?result,
             batch_id = %custody_batch_id,
-            %peer,
-            client = %network.client_type(peer),
+            peer = %batch_peers.block_peer(),
+            client = %network.client_type(&batch_peers.block_peer()),
             "Custody backfill batch processed"
         );
 
