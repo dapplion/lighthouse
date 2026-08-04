@@ -788,7 +788,12 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> BackgroundMigrator<E, Hot, Col
 
         // Prune all payloads of the canonical finalized blocks
         if store.get_config().prune_payloads {
-            Self::prune_finalized_payloads(new_finalized_slot, &newly_finalized_blocks, &mut batch);
+            Self::prune_finalized_payloads(
+                new_finalized_slot,
+                new_finalized_checkpoint.root,
+                &newly_finalized_blocks,
+                &mut batch,
+            );
         }
 
         store.do_atomically_with_block_and_blobs_cache(batch)?;
@@ -805,14 +810,15 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> BackgroundMigrator<E, Hot, Col
 
     fn prune_finalized_payloads(
         new_finalized_slot: Slot,
+        split_block_root: Hash256,
         finalized_blocks: &[(Hash256, Slot)],
         hot_db_ops: &mut Vec<StoreOp<E>>,
     ) {
         for (block_root, slot) in finalized_blocks {
-            // Delete the execution payload if payload pruning is enabled. At a skipped slot we may
-            // delete the payload for the finalized block itself, but that's OK as we only guarantee
-            // that payloads are present for slots >= the split slot.
-            if *slot < new_finalized_slot {
+            // Delete the execution payload if payload pruning is enabled. Never prune the split
+            // block's payload: at a skipped slot its own slot is below the split slot, and it is
+            // the head after checkpoint sync, so it must remain loadable as a full block.
+            if *slot < new_finalized_slot && *block_root != split_block_root {
                 hot_db_ops.push(StoreOp::DeleteExecutionPayload(*block_root));
             }
         }

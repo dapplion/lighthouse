@@ -2818,14 +2818,17 @@ async fn weak_subjectivity_sync_without_blobs() {
 // Previously, the `HotColdDB` would refuse to load the execution payload for the
 // anchor block because it was considered "pruned", causing the node to fail startup.
 #[tokio::test]
-async fn reproduction_unaligned_checkpoint_sync_pruned_payload() {
-    let spec = test_spec::<E>();
+async fn checkpoint_sync_preserves_split_payload_aligned() {
+    let num_initial_slots = E::slots_per_epoch() * 11;
+    let checkpoint_slot = Slot::new(E::slots_per_epoch() * 9);
 
-    // Requires Execution Payloads.
-    let Some(_) = spec.deneb_fork_epoch else {
-        return;
-    };
+    let slots = (1..num_initial_slots).map(Slot::new).collect::<Vec<_>>();
 
+    assert_checkpoint_sync_preserves_split_payload(checkpoint_slot, slots, true).await;
+}
+
+#[tokio::test]
+async fn checkpoint_sync_preserves_split_payload_unaligned() {
     // Create an unaligned checkpoint with a gap of 3 slots.
     let num_initial_slots = E::slots_per_epoch() * 11;
     let checkpoint_slot = Slot::new(E::slots_per_epoch() * 9 - 3);
@@ -2834,6 +2837,31 @@ async fn reproduction_unaligned_checkpoint_sync_pruned_payload() {
         .map(Slot::new)
         .filter(|&slot| slot <= checkpoint_slot || slot > checkpoint_slot + 3)
         .collect::<Vec<_>>();
+
+    assert_checkpoint_sync_preserves_split_payload(checkpoint_slot, slots, false).await;
+}
+
+/// Assert that the split block's execution payload survives checkpoint sync with
+/// `prune_payloads = true`, and then survives a forced payload prune.
+///
+/// Covers both the `MissingFullBlockExecutionPayloadPruned` regression on unaligned checkpoint
+/// sync (#8426) and `try_prune_execution_payloads` exempting the split block (#8431).
+async fn assert_checkpoint_sync_preserves_split_payload(
+    checkpoint_slot: Slot,
+    slots: Vec<Slot>,
+    expect_aligned: bool,
+) {
+    let spec = test_spec::<E>();
+
+    // Requires execution payloads stored against the block.
+    let Some(_) = spec.deneb_fork_epoch else {
+        return;
+    };
+    // From Gloas the payload lives in a separate envelope synced from the network, so there is no
+    // block-keyed payload for pruning to preserve.
+    if spec.gloas_fork_epoch.is_some() {
+        return;
+    }
 
     let temp1 = tempdir().unwrap();
     let full_store = get_store_generic(&temp1, StoreConfig::default(), spec.clone());
@@ -2858,38 +2886,27 @@ async fn reproduction_unaligned_checkpoint_sync_pruned_payload() {
         .get_full_block(&wss_block_root)
         .unwrap()
         .unwrap();
-
     let wss_state_root = harness
         .chain
         .state_root_at_slot(checkpoint_slot)
         .unwrap()
         .unwrap();
 
-    // The test premise requires the anchor block to have a payload (or a payload bid in Gloas).
-    assert!(
-        wss_block.message().execution_payload().is_ok()
-            || wss_block
-                .message()
-                .body()
-                .signed_execution_payload_bid()
-                .is_ok()
-    );
+    // The test premise requires the anchor block to have a payload.
+    assert!(wss_block.message().execution_payload().is_ok());
 
     let wss_blobs_opt = get_or_reconstruct_blobs(&harness.chain, &wss_block_root).unwrap();
-
     let wss_state = full_store
         .get_state(&wss_state_root, Some(checkpoint_slot), CACHE_STATE_IN_TESTS)
         .unwrap()
         .unwrap();
 
     // Configure the client with `prune_payloads = true`.
-    // This triggers the path where `try_get_full_block` must explicitly handle the anchor block.
     let temp2 = tempdir().unwrap();
     let store_config = StoreConfig {
         prune_payloads: true,
         ..StoreConfig::default()
     };
-
     let store = get_store_generic(&temp2, store_config, spec.clone());
 
     let slot_clock = TestingSlotClock::new(
@@ -2912,9 +2929,8 @@ async fn reproduction_unaligned_checkpoint_sync_pruned_payload() {
     );
     let all_custody_columns = (0..spec.number_of_custody_groups).collect::<Vec<_>>();
 
-    // Attempt to build the BeaconChain.
-    // If the bug is present, this will panic with `MissingFullBlockExecutionPayloadPruned`.
-    let beacon_chain = BeaconChainBuilder::<DiskHarnessType<E>>::new(MinimalEthSpec, trusted_setup)
+    // If the anchor payload is pruned, this panics with `MissingFullBlockExecutionPayloadPruned`.
+    let chain = BeaconChainBuilder::<DiskHarnessType<E>>::new(MinimalEthSpec, trusted_setup)
         .chain_config(chain_config)
         .store(store.clone())
         .custom_spec(spec.clone().into())
@@ -2933,184 +2949,46 @@ async fn reproduction_unaligned_checkpoint_sync_pruned_payload() {
         .execution_layer(Some(mock.el))
         .ordered_custody_column_indices(all_custody_columns)
         .rng(Box::new(StdRng::seed_from_u64(42)))
-        .build();
+        .build()
+        .expect("Beacon chain failed to build; the anchor payload may have been pruned");
 
-    assert!(
-        beacon_chain.is_ok(),
-        "Beacon Chain failed to build. The anchor payload may have been incorrectly pruned. Error: {:?}",
-        beacon_chain.err()
-    );
-
-    let chain = beacon_chain.as_ref().unwrap();
-    let wss_block_slot = wss_block.slot();
-
-    assert_ne!(
-        wss_block_slot,
-        chain.head_snapshot().beacon_state.slot(),
-        "Test invalid: Checkpoint was aligned (Slot {} == Slot {}). The test did not trigger the unaligned edge case.",
-        wss_block_slot,
-        chain.head_snapshot().beacon_state.slot()
-    );
-
-    // In Gloas, the execution payload envelope is separate from the block and will be synced
-    // from the network. We don't check for its existence here.
-    if !wss_block.fork_name_unchecked().gloas_enabled() {
-        let payload_exists = chain
-            .store
-            .execution_payload_exists(&wss_block_root)
-            .unwrap_or(false);
-
-        assert!(
-            payload_exists,
-            "Split block payload must exist in the new node's store after checkpoint sync"
+    // Guard the test premise: the split must actually be (un)aligned as the caller intends.
+    let head_state_slot = chain.head_snapshot().beacon_state.slot();
+    if expect_aligned {
+        assert_eq!(
+            wss_block.slot(),
+            head_state_slot,
+            "Test invalid: checkpoint was unaligned, the aligned case was not exercised"
+        );
+    } else {
+        assert_ne!(
+            wss_block.slot(),
+            head_state_slot,
+            "Test invalid: checkpoint was aligned, the unaligned case was not exercised"
         );
     }
-}
 
-#[tokio::test]
-async fn pruning_preserves_payload_aligned() {
-    type E = MinimalEthSpec;
-    let num_initial_slots = E::slots_per_epoch() * 11;
-    let checkpoint_slot = Slot::new(E::slots_per_epoch() * 9); // Aligned Slot
-
-    let slots = (1..num_initial_slots).map(Slot::new).collect::<Vec<_>>();
-
-    verify_pruning_preserves_payload(checkpoint_slot, slots).await;
-}
-
-#[tokio::test]
-async fn pruning_preserves_payload_unaligned() {
-    type E = MinimalEthSpec;
-    let num_initial_slots = E::slots_per_epoch() * 11;
-    let checkpoint_slot = Slot::new(E::slots_per_epoch() * 9 - 3);
-
-    let slots = (1..num_initial_slots)
-        .map(Slot::new)
-        .filter(|&slot| slot <= checkpoint_slot || slot > checkpoint_slot + 3)
-        .collect::<Vec<_>>();
-
-    verify_pruning_preserves_payload(checkpoint_slot, slots).await;
-}
-
-async fn verify_pruning_preserves_payload(checkpoint_slot: Slot, slots: Vec<Slot>) {
-    type E = MinimalEthSpec;
-    let spec = test_spec::<E>();
-
-    // Requires Execution Payloads.
-    let Some(_) = spec.deneb_fork_epoch else {
-        return;
-    };
-
-    // Create a standard chain.
-    let temp1 = tempdir().unwrap();
-    let full_store = get_store_generic(&temp1, StoreConfig::default(), spec.clone());
-
-    let harness = get_harness_import_all_data_columns(full_store.clone(), LOW_VALIDATOR_COUNT);
-    let all_validators = (0..LOW_VALIDATOR_COUNT).collect::<Vec<_>>();
-
-    let genesis_state = harness.get_current_state();
-    harness
-        .add_attested_blocks_at_slots(genesis_state.clone(), &slots, &all_validators)
-        .await;
-
-    // Extract snapshot data.
-    let wss_block_root = harness
-        .chain
-        .block_root_at_slot(checkpoint_slot, WhenSlotSkipped::Prev)
-        .unwrap()
-        .unwrap();
-        
-    let wss_state_root = harness
-        .chain
-        .state_root_at_slot(checkpoint_slot)
-        .unwrap()
-        .unwrap();
-
-    let wss_block = harness
-        .chain
-        .store
-        .get_full_block(&wss_block_root)
-        .unwrap()
-        .unwrap();
-        
-    let wss_blobs_opt = get_or_reconstruct_blobs(&harness.chain, &wss_block_root).unwrap();
-    
-    let wss_state = full_store
-        .get_state(&wss_state_root, Some(checkpoint_slot), CACHE_STATE_IN_TESTS)
-        .unwrap()
-        .unwrap();
-
-    // Ensure client with `prune_payloads = true`.
-    let temp2 = tempdir().unwrap();
-    let store_config = StoreConfig {
-        prune_payloads: true,
-        ..StoreConfig::default()
-    };
-
-    let store = get_store_generic(&temp2, store_config, spec.clone());
-    let slot_clock = TestingSlotClock::new(
-        Slot::new(0),
-        Duration::from_secs(harness.chain.genesis_time),
-        spec.get_slot_duration(),
+    assert!(
+        chain
+            .store
+            .execution_payload_exists(&wss_block_root)
+            .unwrap(),
+        "split block payload must exist after checkpoint sync"
     );
-    slot_clock.set_slot(harness.get_current_slot().as_u64());
 
-    let chain_config = ChainConfig {
-        archive: true,
-        ..ChainConfig::default()
-    };
-
-    let trusted_setup = get_kzg(&spec);
-    let (shutdown_tx, _shutdown_rx) = futures::channel::mpsc::channel(1);
-    let mock = mock_execution_layer_from_parts(
-        harness.spec.clone(),
-        harness.runtime.task_executor.clone(),
-    );
-    let all_custody_columns = (0..spec.number_of_custody_groups).collect::<Vec<_>>();
-
-    let beacon_chain = BeaconChainBuilder::<DiskHarnessType<E>>::new(MinimalEthSpec, trusted_setup)
-        .chain_config(chain_config)
-        .store(store.clone())
-        .custom_spec(spec.clone().into())
-        .task_executor(harness.chain.task_executor.clone())
-        .weak_subjectivity_state(
-            wss_state,
-            wss_block.clone(),
-            wss_blobs_opt.clone(),
-            genesis_state,
-        )
-        .unwrap()
-        .store_migrator_config(MigratorConfig::default().blocking())
-        .slot_clock(slot_clock)
-        .shutdown_sender(shutdown_tx)
-        .event_handler(Some(ServerSentEventHandler::new_with_capacity(1)))
-        .execution_layer(Some(mock.el))
-        .ordered_custody_column_indices(all_custody_columns)
-        .rng(Box::new(StdRng::seed_from_u64(42)))
-        .build();
-
-    assert!(beacon_chain.is_ok(), "Beacon Chain failed to build");
-    let chain = beacon_chain.as_ref().unwrap();
-
-    // Trigger Pruning Explicitly.
+    // Forcing a prune must not remove the split block's payload either.
     chain
         .store
         .try_prune_execution_payloads(true)
         .expect("Pruning should succeed");
 
-    // In Gloas, the execution payload envelope is separate from the block.
-    if !wss_block.fork_name_unchecked().gloas_enabled() {
-        // Assert the Split Payload still exists.
-        let payload_exists = chain
+    assert!(
+        chain
             .store
             .execution_payload_exists(&wss_block_root)
-            .unwrap_or(false);
-
-        assert!(
-            payload_exists,
-            "Split block payload must exist after pruning"
-        );
-    }
+            .unwrap(),
+        "split block payload must exist after pruning"
+    );
 }
 
 async fn weak_subjectivity_sync_test(
@@ -6376,4 +6254,110 @@ fn get_blocks(
 
 fn clone_block<E: EthSpec>(block: &AvailableBlock<E>) -> AvailableBlock<E> {
     block.__clone_without_recv().unwrap()
+}
+
+/// The finalization migration must retain the split block's payload while it is the split, and
+/// prune it once the split advances past it.
+#[tokio::test]
+async fn migration_prunes_previous_split_payload() {
+    let spec = test_spec::<E>();
+
+    // Requires execution payloads stored against the block.
+    let Some(_) = spec.deneb_fork_epoch else {
+        return;
+    };
+    // From Gloas the payload lives in a separate envelope synced from the network, so there is no
+    // block-keyed payload for pruning to preserve.
+    if spec.gloas_fork_epoch.is_some() {
+        return;
+    }
+
+    let temp = tempdir().unwrap();
+    let store_config = StoreConfig {
+        prune_payloads: true,
+        ..StoreConfig::default()
+    };
+    let store = get_store_generic(&temp, store_config, spec.clone());
+    let chain_config = ChainConfig {
+        archive: false,
+        ..ChainConfig::default()
+    };
+    let harness = get_harness_generic(
+        store.clone(),
+        LOW_VALIDATOR_COUNT,
+        chain_config,
+        NodeCustodyType::Fullnode,
+    );
+
+    let all_validators = (0..LOW_VALIDATOR_COUNT).collect::<Vec<_>>();
+
+    let finalized_epoch_start_slot = Slot::new(E::slots_per_epoch() * 4);
+    let pre_skips = 1;
+    let post_skips = 1;
+
+    // Skip the epoch-boundary slot so the first split lands unaligned.
+    let slots = (1..=finalized_epoch_start_slot.as_u64() - pre_skips)
+        .map(Slot::new)
+        .collect::<Vec<_>>();
+
+    let genesis_state = harness.get_current_state();
+    harness
+        .add_attested_blocks_at_slots(genesis_state.clone(), &slots, &all_validators)
+        .await;
+
+    let finalizing_slot = finalized_epoch_start_slot + 2 * E::slots_per_epoch();
+    for _ in 0..pre_skips + post_skips {
+        harness.advance_slot();
+    }
+    harness.extend_to_slot(finalizing_slot - 1).await;
+    Box::pin(harness.add_block_at_slot(finalizing_slot, harness.get_current_state()))
+        .await
+        .unwrap();
+
+    // First migration: the split is unaligned and its payload must be retained.
+    let first_split = store.get_split_info();
+    assert_eq!(first_split.slot, finalized_epoch_start_slot);
+    let first_split_block = store
+        .get_blinded_block(&first_split.block_root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        first_split_block.slot(),
+        first_split.slot,
+        "test invalid: split is aligned, so the unaligned case was not exercised"
+    );
+    assert!(
+        store
+            .execution_payload_exists(&first_split.block_root)
+            .unwrap(),
+        "split payload must be retained while it is the split"
+    );
+
+    // Advance far enough that another finalization migration runs and the split moves on.
+    harness
+        .extend_to_slot(finalizing_slot + 2 * E::slots_per_epoch())
+        .await;
+
+    let second_split = store.get_split_info();
+    assert!(
+        second_split.slot > first_split.slot,
+        "split did not advance ({} -> {}), the second migration did not run",
+        first_split.slot,
+        second_split.slot
+    );
+
+    assert!(
+        store
+            .execution_payload_exists(&second_split.block_root)
+            .unwrap(),
+        "the new split block's payload must be retained"
+    );
+    assert!(
+        !store
+            .execution_payload_exists(&first_split.block_root)
+            .unwrap(),
+        "the previous split block's payload (slot {}) must be pruned once the split advances to {}",
+        first_split_block.slot(),
+        second_split.slot
+    );
 }
