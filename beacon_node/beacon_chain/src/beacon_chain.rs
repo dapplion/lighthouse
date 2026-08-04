@@ -3526,34 +3526,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .await
     }
 
-    /// Process blobs retrieved from the EL and returns the `AvailabilityProcessingStatus`.
-    pub async fn process_engine_blobs_fulu(
-        self: &Arc<Self>,
-        slot: Slot,
-        block_root: Hash256,
-        engine_get_blobs_output: Vec<KzgVerifiedCustodyDataColumn<T::EthSpec>>,
-    ) -> Result<AvailabilityProcessingStatus, BlockError> {
-        // If this block has already been imported to forkchoice it must have been available, so
-        // we don't need to process its blobs again.
-        if self
-            .canonical_head
-            .fork_choice_read_lock()
-            .contains_block(&block_root)
-        {
-            return Err(BlockError::DuplicateFullyImported(block_root));
-        }
-
-        self.emit_sse_data_column_sidecar_events(
-            &block_root,
-            engine_get_blobs_output
-                .iter()
-                .map(|column| column.as_data_column()),
-        );
-
-        self.check_engine_blobs_availability_and_import(slot, block_root, engine_get_blobs_output)
-            .await
-    }
-
     fn emit_sse_blob_sidecar_events<'a, I>(self: &Arc<Self>, block_root: &Hash256, blobs_iter: I)
     where
         I: Iterator<Item = &'a BlobSidecar<T::EthSpec>>,
@@ -3575,7 +3547,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
     }
 
-    fn emit_sse_data_column_sidecar_events<'a, I>(
+    pub(crate) fn emit_sse_data_column_sidecar_events<'a, I>(
         self: &Arc<Self>,
         block_root: &Hash256,
         data_columns_iter: I,
@@ -4083,7 +4055,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .await
     }
 
-    async fn check_engine_blobs_availability_and_import(
+    pub(crate) async fn check_engine_blobs_availability_and_import(
         self: &Arc<Self>,
         slot: Slot,
         block_root: Hash256,

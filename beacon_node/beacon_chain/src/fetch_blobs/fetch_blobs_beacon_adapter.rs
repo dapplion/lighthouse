@@ -3,7 +3,7 @@ use crate::fetch_blobs::FetchEngineBlobError;
 use crate::observed_data_sidecars::ObservationKey;
 use crate::partial_data_column_assembler::PartialDataColumnAssembler;
 use crate::pending_payload_cache::{Availability, PendingPayloadCache};
-use crate::{AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes};
+use crate::{AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes, BlockError};
 use execution_layer::json_structures::{BlobAndProofV2, BlobAndProofV3};
 use kzg::Kzg;
 #[cfg(test)]
@@ -107,8 +107,21 @@ impl<T: BeaconChainTypes> FetchBlobsBeaconAdapter<T> {
         block_root: Hash256,
         blobs: Vec<KzgVerifiedCustodyDataColumn<T::EthSpec>>,
     ) -> Result<AvailabilityProcessingStatus, FetchEngineBlobError> {
+        // If this block has already been imported to forkchoice it must have been available, so
+        // we don't need to process its blobs again.
+        if self.fork_choice_contains_block(&block_root) {
+            return Err(FetchEngineBlobError::BlobProcessingError(
+                BlockError::DuplicateFullyImported(block_root),
+            ));
+        }
+
+        self.chain.emit_sse_data_column_sidecar_events(
+            &block_root,
+            blobs.iter().map(|column| column.as_data_column()),
+        );
+
         self.chain
-            .process_engine_blobs_fulu(slot, block_root, blobs)
+            .check_engine_blobs_availability_and_import(slot, block_root, blobs)
             .await
             .map_err(FetchEngineBlobError::BlobProcessingError)
     }
