@@ -2451,9 +2451,13 @@ pub async fn serve<T: BeaconChainTypes>(
                                 agent_version: peer_info.client().agent_string.clone(),
                                 score: Some(peer_info.score().score()),
                                 disconnect_reason: disconnect_reason(peer_info),
-                                downscore_reasons: peer_info
-                                    .last_downscore_msg()
-                                    .map(|msg| vec![msg.to_string()]),
+                                downscore_reasons: Some(
+                                    peer_info
+                                        .downscore_msgs()
+                                        .iter()
+                                        .map(|msg| msg.to_string())
+                                        .collect(),
+                                ),
                             }));
                         }
                     }
@@ -2518,9 +2522,13 @@ pub async fn serve<T: BeaconChainTypes>(
                                         agent_version: peer_info.client().agent_string.clone(),
                                         score: Some(peer_info.score().score()),
                                         disconnect_reason: disconnect_reason(peer_info),
-                                        downscore_reasons: peer_info
-                                            .last_downscore_msg()
-                                            .map(|msg| vec![msg.to_string()]),
+                                        downscore_reasons: Some(
+                                            peer_info
+                                                .downscore_msgs()
+                                                .iter()
+                                                .map(|msg| msg.to_string())
+                                                .collect(),
+                                        ),
                                     });
                                 }
                             }

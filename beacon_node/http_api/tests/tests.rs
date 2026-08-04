@@ -3440,7 +3440,7 @@ impl ApiTester {
             agent_version: None,
             score: Some(0.0),
             disconnect_reason: None,
-            downscore_reasons: None,
+            downscore_reasons: Some(vec![]),
         };
 
         assert_eq!(result, expected);
@@ -3476,7 +3476,7 @@ impl ApiTester {
                     agent_version: None,
                     score: Some(0.0),
                     disconnect_reason: None,
-                    downscore_reasons: None,
+                    downscore_reasons: Some(vec![]),
                 };
 
                 let state_match =

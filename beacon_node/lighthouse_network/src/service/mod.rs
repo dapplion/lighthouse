@@ -1985,6 +1985,9 @@ impl<E: EthSpec> Network<E> {
             }
             PeerManagerEvent::DisconnectPeer(peer_id, reason) => {
                 debug!(%peer_id, %reason, "Peer Manager disconnecting peer");
+                if let Some(info) = self.network_globals.peers.write().peer_info_mut(&peer_id) {
+                    info.set_last_goodbye_reason(reason.clone());
+                }
                 // send one goodbye
                 self.eth2_rpc_mut()
                     .shutdown(peer_id, AppRequestId::Internal, reason);

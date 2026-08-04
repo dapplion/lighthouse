@@ -14,11 +14,15 @@ use serde::{
     Serialize,
     ser::{SerializeStruct, Serializer},
 };
+use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::Instant;
 use strum::AsRefStr;
 use types::{DataColumnSubnetId, EthSpec, Slot};
+
+/// The number of most recent distinct downscore reasons retained per connection.
+const MAX_DOWNSCORE_REASONS: usize = 3;
 
 /// Information about a given connected peer.
 #[derive(Clone, Debug, Serialize)]
@@ -65,9 +69,9 @@ pub struct PeerInfo<E: EthSpec> {
     /// The last goodbye reason sent to or received from this peer, if any.
     #[serde(skip)]
     last_goodbye_reason: Option<GoodbyeReason>,
-    /// The `report_peer` msg of the last downscore in the current connection, if any.
+    /// The most recent distinct `report_peer` msgs of the current connection, oldest first.
     #[serde(skip)]
-    last_downscore_msg: Option<&'static str>,
+    downscore_msgs: SmallVec<[&'static str; MAX_DOWNSCORE_REASONS]>,
 }
 
 impl<E: EthSpec> Default for PeerInfo<E> {
@@ -88,7 +92,7 @@ impl<E: EthSpec> Default for PeerInfo<E> {
             connection_direction: None,
             enr: None,
             last_goodbye_reason: None,
-            last_downscore_msg: None,
+            downscore_msgs: SmallVec::new(),
         }
     }
 }
@@ -485,7 +489,13 @@ impl<E: EthSpec> PeerInfo<E> {
     ) {
         if !self.is_trusted {
             self.score.apply_peer_action(peer_action);
-            self.last_downscore_msg = Some(msg);
+            // Keep the reasons distinct and most-recent-last, dropping the oldest when full.
+            if let Some(i) = self.downscore_msgs.iter().position(|m| *m == msg) {
+                self.downscore_msgs.remove(i);
+            } else if self.downscore_msgs.len() == MAX_DOWNSCORE_REASONS {
+                self.downscore_msgs.remove(0);
+            }
+            self.downscore_msgs.push(msg);
         }
     }
 
@@ -494,9 +504,9 @@ impl<E: EthSpec> PeerInfo<E> {
         self.last_goodbye_reason.as_ref()
     }
 
-    /// Returns the `report_peer` msg of the last downscore in the current connection, if any.
-    pub fn last_downscore_msg(&self) -> Option<&'static str> {
-        self.last_downscore_msg
+    /// Returns the most recent distinct downscore reasons of the current connection.
+    pub fn downscore_msgs(&self) -> &[&'static str] {
+        &self.downscore_msgs
     }
 
     /// Records the last goodbye reason sent to or received from this peer.
@@ -549,7 +559,7 @@ impl<E: EthSpec> PeerInfo<E> {
                 };
                 self.connection_direction = Some(ConnectionDirection::Incoming);
                 self.last_goodbye_reason = None;
-                self.last_downscore_msg = None;
+                self.downscore_msgs.clear();
             }
         }
     }
@@ -572,7 +582,7 @@ impl<E: EthSpec> PeerInfo<E> {
                 };
                 self.connection_direction = Some(ConnectionDirection::Outgoing);
                 self.last_goodbye_reason = None;
-                self.last_downscore_msg = None;
+                self.downscore_msgs.clear();
             }
         }
     }
