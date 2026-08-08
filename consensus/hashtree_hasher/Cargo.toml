@@ -1,0 +1,21 @@
+[package]
+name = "hashtree_hasher"
+version = "0.1.0"
+edition = { workspace = true }
+
+[dependencies]
+ethereum_hashing = { workspace = true }
+hashtree-rs = { workspace = true }
+smallvec = { workspace = true }
+tree_hash = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+rand = { workspace = true }
+rand_xorshift = { workspace = true }
+ssz_types = { workspace = true }
+types = { workspace = true }
+
+[[bench]]
+name = "hashing"
+harness = false
