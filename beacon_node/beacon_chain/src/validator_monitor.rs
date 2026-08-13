@@ -2053,19 +2053,11 @@ impl<E: EthSpec> ValidatorMonitor<E> {
     }
 }
 
-/// Return the slot at which the block an attestation votes for was proposed.
+/// Slot the attested block was proposed at, walking back over skipped slots.
 ///
-/// [New in Gloas:EIP7732] `get_attestation_participation_flag_indices` looks up payload
-/// availability at the slot of the attested block, which during block processing is the including
-/// block's parent slot and is read from `state.latest_execution_payload_bid`. The validator monitor
-/// runs against the post-state of the most recently imported block, where that bid has already been
-/// replaced by the block's own, so the slot has to be recovered from the block roots instead.
-/// Skipped slots repeat the preceding block's root, so walking back from `data.slot` while the root
-/// is unchanged lands on the slot the attested block was proposed at.
-///
-/// This is best effort. Monitored attestations are several slots old, so the walk stays well inside
-/// the state's block roots in practice; if it ever ran off the end the search stops early, which
-/// can only cost a simulated attestation its head flag in the metrics.
+/// [New in Gloas:EIP7732] Block processing takes this from `latest_execution_payload_bid`, but the
+/// monitor sees a post-block state where that bid is the block's own. Leaving the block roots
+/// window stops the walk early, costing at most a head flag in the metrics.
 fn attested_block_slot<E: EthSpec>(state: &BeaconState<E>, data: &AttestationData) -> Slot {
     let mut slot = data.slot;
     while slot > 0 {
@@ -2169,5 +2161,56 @@ fn min_opt<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
         (Some(x), None) => Some(x),
         (None, Some(y)) => Some(y),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{AttestationStrategy, BeaconChainHarness, BlockStrategy};
+    use types::{Checkpoint, MainnetEthSpec};
+
+    /// A skipped slot repeats the preceding block's root, so an attestation cast there votes for a
+    /// block proposed at an earlier slot than `data.slot`.
+    #[tokio::test]
+    async fn attested_block_slot_walks_back_over_a_skipped_slot() {
+        let harness = BeaconChainHarness::builder(MainnetEthSpec)
+            .default_spec()
+            .deterministic_keypairs(64)
+            .fresh_ephemeral_store()
+            .mock_execution_layer()
+            .build();
+
+        // Blocks at slots 1..=3.
+        harness.advance_slot();
+        harness
+            .extend_chain(
+                3,
+                BlockStrategy::OnCanonicalHead,
+                AttestationStrategy::AllValidators,
+            )
+            .await;
+        let block_3_root = harness.chain.head_snapshot().beacon_block_root;
+        let state_at_3 = harness.get_current_state();
+
+        // Skip slot 4, then propose at slot 5 so the state carries roots for both.
+        harness.advance_slot();
+        harness.advance_slot();
+        harness
+            .add_attested_block_at_slot(Slot::new(5), state_at_3, &[])
+            .await
+            .unwrap();
+        let state = harness.get_current_state();
+
+        let data = AttestationData {
+            slot: Slot::new(4),
+            index: 1,
+            beacon_block_root: block_3_root,
+            source: Checkpoint::default(),
+            target: Checkpoint::default(),
+        };
+
+        assert_eq!(*state.get_block_root(Slot::new(4)).unwrap(), block_3_root);
+        assert_eq!(attested_block_slot(&state, &data), Slot::new(3));
     }
 }

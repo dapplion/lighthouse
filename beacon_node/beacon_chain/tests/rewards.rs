@@ -918,13 +918,8 @@ fn apply_other_rewards(balances: &mut [u64], rewards_map: &HashMap<u64, i64>) {
     }
 }
 
-/// A block that packs attestations cast in a skipped slot, voting for a parent whose payload was
-/// revealed, must be credited with the timely head flag those attestations earn.
-///
-/// The availability bit for the parent's slot is written by `process_parent_execution_payload` at
-/// the start of block processing, so a pre-block state does not carry it and the head flag was
-/// silently dropped from the reported reward. The oracle here is the state transition itself: the
-/// reward API's job is to predict what `process_attestations` actually pays the proposer.
+/// Attestations cast in a skipped slot, voting for a parent whose payload was revealed, must be
+/// credited with the timely head flag. Checked against what `process_attestations` pays.
 #[tokio::test]
 async fn test_gloas_block_reward_credits_head_flag_across_skipped_slot() {
     let spec = ForkName::Gloas.make_genesis_spec(E::default_spec());
