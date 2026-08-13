@@ -1608,13 +1608,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     ) -> Result<CustodyBackFillBatchRequestId, RpcRequestSendError> {
         // Attempt to find all required custody peers before sending any request or creating an ID
         let columns_by_range_peers_to_request = {
-            let column_indexes = self
-                .chain
-                .custody_context
-                .sampling_columns_for_epoch(batch_id.epoch)
-                .iter()
-                .cloned()
-                .collect();
+            let column_indexes = request.columns.iter().cloned().collect();
 
             self.select_columns_by_range_peers_to_request(
                 &column_indexes,
