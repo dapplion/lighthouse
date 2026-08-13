@@ -170,6 +170,7 @@ pub enum BeaconChainError {
     BlockRewardError,
     BlockRewardSlotError,
     BlockRewardAttestationError,
+    BlockRewardParentPayloadError(BlockProcessingError),
     BlockRewardSyncError,
     SyncCommitteeRewardsSyncError,
     AttestationRewardsError,
