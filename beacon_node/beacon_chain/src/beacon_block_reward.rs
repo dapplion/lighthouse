@@ -47,13 +47,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         if state.fork_name_unchecked().gloas_enabled() {
             let mut state_with_parent_payload = state.clone();
             process_parent_execution_payload(&mut state_with_parent_payload, block, &self.spec)
-                .map_err(|e| {
-                    error!(
-                        error = ?e,
-                        "Error applying parent execution payload for block reward"
-                    );
-                    BeaconChainError::BlockRewardError
-                })?;
+                .map_err(BeaconChainError::BlockRewardParentPayloadError)?;
             return self.compute_beacon_block_reward_with_cache(block, &state_with_parent_payload);
         }
 
