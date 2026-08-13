@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -227,6 +228,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         randao_reveal,
                         graffiti,
                         &parent_execution_requests_ref,
+                        should_build_on_full,
                     )
                 },
                 "produce_partial_beacon_block_gloas",
@@ -288,6 +290,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         randao_reveal: Signature,
         graffiti: Graffiti,
         parent_execution_requests: &ExecutionRequestsGloas<T::EthSpec>,
+        should_build_on_full: bool,
     ) -> Result<(PartialBeaconBlock<T::EthSpec>, BeaconState<T::EthSpec>), BlockProductionError>
     {
         // It is invalid to try to produce a block using a state from a future slot.
@@ -373,6 +376,28 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             state.build_total_active_balance_cache(&self.spec)?;
             initialize_epoch_cache(&mut state, &self.spec)?;
 
+            // [New in Gloas:EIP7732] Attestation scoring reads the parent block's
+            // `execution_payload_availability` bit to award the timely head flag, but that bit
+            // is written by `process_parent_execution_payload`, which has not run on this
+            // pre-block state. Score against a copy carrying the parent payload so that
+            // attestations to a full parent are not under-valued during packing. `state` itself
+            // must be left alone: block processing applies the parent payload itself, and
+            // applying it twice would double the parent's execution requests and builder
+            // payment.
+            let packing_state = if should_build_on_full {
+                let mut packing_state = state.clone();
+                apply_parent_execution_payload(
+                    &mut packing_state,
+                    parent_execution_requests,
+                    &self.spec,
+                )?;
+                Cow::Owned(packing_state)
+            } else {
+                // An empty parent leaves the availability bit unset, which the pre-block state
+                // already reflects.
+                Cow::Borrowed(&state)
+            };
+
             let mut prev_filter_cache = HashMap::new();
             let prev_attestation_filter = |att: &CompactAttestationRef<T::EthSpec>| {
                 self.filter_op_pool_attestation(&mut prev_filter_cache, att, &state)
@@ -384,7 +409,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
             self.op_pool
                 .get_attestations(
-                    &state,
+                    &packing_state,
                     prev_attestation_filter,
                     curr_attestation_filter,
                     &self.spec,
