@@ -1170,7 +1170,7 @@ impl HttpJsonRpc {
         custody_columns: Option<&[ColumnIndex]>,
     ) -> Result<ForkchoiceUpdatedResponse, Error> {
         let custody_columns = custody_columns
-            .map(CustodyColumnsBitArray::try_from)
+            .map(custody_columns_to_bitarray)
             .transpose()
             .unwrap_or_else(|err| {
                 error!(?err, "Failed to convert custody columns for fcuV4");
