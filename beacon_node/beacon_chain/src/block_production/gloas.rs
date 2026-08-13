@@ -376,14 +376,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             state.build_total_active_balance_cache(&self.spec)?;
             initialize_epoch_cache(&mut state, &self.spec)?;
 
-            // [New in Gloas:EIP7732] Attestation scoring reads the parent block's
-            // `execution_payload_availability` bit to award the timely head flag, but that bit
-            // is written by `process_parent_execution_payload`, which has not run on this
-            // pre-block state. Score against a copy carrying the parent payload so that
-            // attestations to a full parent are not under-valued during packing. `state` itself
-            // must be left alone: block processing applies the parent payload itself, and
-            // applying it twice would double the parent's execution requests and builder
-            // payment.
+            // [New in Gloas:EIP7732] Score against a copy carrying the parent payload: block
+            // processing has not written its availability bit yet, and must not apply it twice.
             let packing_state = if should_build_on_full {
                 let mut packing_state = state.clone();
                 apply_parent_execution_payload(
@@ -393,8 +387,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 )?;
                 Cow::Owned(packing_state)
             } else {
-                // An empty parent leaves the availability bit unset, which the pre-block state
-                // already reflects.
+                // An empty parent leaves the bit unset.
                 Cow::Borrowed(&state)
             };
 
