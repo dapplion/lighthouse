@@ -729,9 +729,9 @@ impl<E: EthSpec> ValidatorMonitor<E> {
                 let data = unaggregated_attestation.data();
 
                 let parent_slot = state
-                    .latest_execution_payload_bid()
-                    .ok()
-                    .map(|bid| bid.slot);
+                    .fork_name_unchecked()
+                    .gloas_enabled()
+                    .then(|| attested_block_slot(state, data));
 
                 // Get the reward indices for the unaggregated attestation or log an error
                 match get_attestation_participation_flag_indices(
@@ -2051,6 +2051,31 @@ impl<E: EthSpec> ValidatorMonitor<E> {
             }
         }
     }
+}
+
+/// Return the slot at which the block an attestation votes for was proposed.
+///
+/// [New in Gloas:EIP7732] `get_attestation_participation_flag_indices` looks up payload
+/// availability at the slot of the attested block, which during block processing is the including
+/// block's parent slot and is read from `state.latest_execution_payload_bid`. The validator monitor
+/// runs against the post-state of the most recently imported block, where that bid has already been
+/// replaced by the block's own, so the slot has to be recovered from the block roots instead.
+/// Skipped slots repeat the preceding block's root, so walking back from `data.slot` while the root
+/// is unchanged lands on the slot the attested block was proposed at.
+///
+/// This is best effort. Monitored attestations are several slots old, so the walk stays well inside
+/// the state's block roots in practice; if it ever ran off the end the search stops early, which
+/// can only cost a simulated attestation its head flag in the metrics.
+fn attested_block_slot<E: EthSpec>(state: &BeaconState<E>, data: &AttestationData) -> Slot {
+    let mut slot = data.slot;
+    while slot > 0 {
+        let prev_slot = slot - 1;
+        match state.get_block_root(prev_slot) {
+            Ok(root) if *root == data.beacon_block_root => slot = prev_slot,
+            _ => break,
+        }
+    }
+    slot
 }
 
 fn register_simulated_attestation(
