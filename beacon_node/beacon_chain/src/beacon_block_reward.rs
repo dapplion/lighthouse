@@ -11,6 +11,7 @@ use state_processing::{
     epoch_cache::initialize_epoch_cache,
     per_block_processing::{
         altair::sync_committee::compute_sync_aggregate_rewards, get_slashable_indices,
+        process_parent_execution_payload,
     },
 };
 use std::collections::HashSet;
@@ -36,6 +37,25 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         state.build_committee_cache(RelativeEpoch::Previous, &self.spec)?;
         state.build_committee_cache(RelativeEpoch::Current, &self.spec)?;
         initialize_epoch_cache(state, &self.spec)?;
+
+        // [New in Gloas:EIP7732] `process_parent_execution_payload` runs at the very start of
+        // block processing and is what writes the parent block's `execution_payload_availability`
+        // bit. The attestation participation flags read that bit, so on a pre-block state it is
+        // still unset and every attestation to a full parent loses the timely head flag. Apply it
+        // to a copy, since callers go on to use `state` for `per_block_processing` and applying it
+        // twice would double the parent's execution requests and builder payment.
+        if state.fork_name_unchecked().gloas_enabled() {
+            let mut state_with_parent_payload = state.clone();
+            process_parent_execution_payload(&mut state_with_parent_payload, block, &self.spec)
+                .map_err(|e| {
+                    error!(
+                        error = ?e,
+                        "Error applying parent execution payload for block reward"
+                    );
+                    BeaconChainError::BlockRewardError
+                })?;
+            return self.compute_beacon_block_reward_with_cache(block, &state_with_parent_payload);
+        }
 
         self.compute_beacon_block_reward_with_cache(block, state)
     }

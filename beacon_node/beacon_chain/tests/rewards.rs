@@ -11,7 +11,10 @@ use beacon_chain::{
 };
 use bls::Keypair;
 use eth2::types::{StandardAttestationRewards, TotalAttestationRewards, ValidatorId};
-use state_processing::{BlockReplayError, BlockReplayer};
+use state_processing::per_block_processing::{
+    process_operations, process_parent_execution_payload,
+};
+use state_processing::{BlockReplayError, BlockReplayer, ConsensusContext, VerifySignatures};
 use std::array::IntoIter;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -913,4 +916,123 @@ fn apply_other_rewards(balances: &mut [u64], rewards_map: &HashMap<u64, i64>) {
     for (i, balance) in balances.iter_mut().enumerate() {
         *balance = balance.saturating_add_signed(*rewards_map.get(&(i as u64)).unwrap_or(&0));
     }
+}
+
+/// A block that packs attestations cast in a skipped slot, voting for a parent whose payload was
+/// revealed, must be credited with the timely head flag those attestations earn.
+///
+/// The availability bit for the parent's slot is written by `process_parent_execution_payload` at
+/// the start of block processing, so a pre-block state does not carry it and the head flag was
+/// silently dropped from the reported reward. The oracle here is the state transition itself: the
+/// reward API's job is to predict what `process_attestations` actually pays the proposer.
+#[tokio::test]
+async fn test_gloas_block_reward_credits_head_flag_across_skipped_slot() {
+    let spec = ForkName::Gloas.make_genesis_spec(E::default_spec());
+    let harness = get_harness(spec);
+    let chain = &harness.chain;
+
+    // Blocks at slots 1..=3, each with its payload envelope processed.
+    harness
+        .extend_chain(
+            3,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+    let head = chain.head_snapshot();
+    assert_eq!(head.beacon_block.slot(), Slot::new(3));
+    let block_3_root = head.beacon_block_root;
+    let state_at_3 = head.beacon_state.clone();
+    let state_at_3_root = head.beacon_state_root();
+    drop(head);
+
+    // Slot 4 is skipped. Attesting there votes for block 3 with `index == 1`, because block 3's
+    // payload was revealed.
+    harness.advance_slot();
+    let validators: Vec<usize> = (0..VALIDATOR_COUNT).collect();
+    let attestations = harness.make_attestations(
+        &validators,
+        &state_at_3,
+        state_at_3_root,
+        block_3_root.into(),
+        Slot::new(4),
+    );
+    assert_eq!(
+        attestations[0].0[0].0.data().index,
+        1,
+        "attestation to a full parent should signal payload present"
+    );
+    harness.process_attestations(attestations, &state_at_3);
+
+    // Slot 5 proposes a block including them at inclusion delay 1.
+    harness.advance_slot();
+    let (block_contents, _envelope, _post_state) = harness
+        .make_block_with_envelope(state_at_3.clone(), Slot::new(5))
+        .await;
+    let block = block_contents.0.clone();
+    assert!(
+        block
+            .message()
+            .body()
+            .attestations()
+            .any(|att| att.data().slot == Slot::new(4)),
+        "block should pack the skipped-slot attestations"
+    );
+
+    // The pre-block state the reward API is handed.
+    let mut pre_state = BlockReplayer::<E, BlockReplayError, IntoIter<_, 0>>::new(
+        state_at_3.clone(),
+        &harness.spec,
+    )
+    .no_signature_verification()
+    .minimal_block_root_verification()
+    .apply_blocks(vec![], Some(Slot::new(5)))
+    .unwrap()
+    .into_state();
+    assert!(
+        !pre_state
+            .execution_payload_availability()
+            .unwrap()
+            .get(3)
+            .unwrap(),
+        "the parent's availability bit is not yet written on a pre-block state"
+    );
+
+    let reward = chain
+        .compute_beacon_block_reward(block.message(), &mut pre_state)
+        .unwrap();
+
+    // The reward API must not disturb the caller's state: block production reuses it for
+    // `per_block_processing`, which applies the parent payload itself.
+    assert!(
+        !pre_state
+            .execution_payload_availability()
+            .unwrap()
+            .get(3)
+            .unwrap(),
+        "computing the reward must not mutate the caller's state"
+    );
+
+    // Oracle: what `process_attestations` actually pays the proposer.
+    let mut stf_state = pre_state.clone();
+    process_parent_execution_payload(&mut stf_state, block.message(), &harness.spec).unwrap();
+    let parent_slot = Some(stf_state.latest_execution_payload_bid().unwrap().slot);
+    let proposer = block.message().proposer_index() as usize;
+    let balance_before = stf_state.balances().get(proposer).copied().unwrap();
+    let mut ctxt = ConsensusContext::new(block.slot());
+    process_operations::process_attestations(
+        &mut stf_state,
+        block.message().body(),
+        VerifySignatures::False,
+        parent_slot,
+        &mut ctxt,
+        &harness.spec,
+    )
+    .unwrap();
+    let paid = stf_state.balances().get(proposer).copied().unwrap() - balance_before;
+
+    assert_eq!(
+        reward.attestations, paid,
+        "reported attestation reward should match what block processing pays the proposer"
+    );
 }
