@@ -846,6 +846,42 @@ pub fn cli_app() -> Command {
                 .display_order(0)
         )
         .arg(
+            Arg::new("proof-producer-secret-key")
+                .long("proof-producer-secret-key")
+                .value_name("HEX")
+                .help("DEVNET ONLY. BLS secret key used to sign EIP-8025 execution proofs for \
+                       payloads this node imports, seeding them onto the network. Requires \
+                       --proof-engine-endpoint and --proof-producer-validator-index. The key is \
+                       read from the command line and the beacon node signs with it directly, so \
+                       never point this at a key that secures anything.")
+                .action(ArgAction::Set)
+                .requires("proof-engine-endpoint")
+                .requires("proof-producer-validator-index")
+                .display_order(0)
+        )
+        .arg(
+            Arg::new("proof-producer-validator-index")
+                .long("proof-producer-validator-index")
+                .value_name("INDEX")
+                .help("DEVNET ONLY. Index of the validator whose key signs produced execution \
+                       proofs. Must be active, or consumers will reject the proofs.")
+                .action(ArgAction::Set)
+                .requires("proof-producer-secret-key")
+                .display_order(0)
+        )
+        .arg(
+            Arg::new("proof-producer-types")
+                .long("proof-producer-types")
+                .value_name("TYPES")
+                .help("DEVNET ONLY. Comma separated EIP-8025 proof types to produce per payload. \
+                       Consumers require proofs from several distinct proof systems, so a lone \
+                       seeder must cover at least that many.")
+                .action(ArgAction::Set)
+                .default_value("0,1")
+                .requires("proof-producer-secret-key")
+                .display_order(0)
+        )
+        .arg(
             Arg::new("proof-engine-endpoint")
                 .long("proof-engine-endpoint")
                 .value_name("PROOF-ENGINE-ENDPOINT")

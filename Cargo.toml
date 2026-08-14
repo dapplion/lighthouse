@@ -70,6 +70,7 @@ members = [
     "slasher/service",
     "testing/ef_tests",
     "testing/execution_engine_integration",
+    "testing/mock_proof_engine",
     "testing/node_test_rig",
     "testing/simulator",
     "testing/state_transition_vectors",

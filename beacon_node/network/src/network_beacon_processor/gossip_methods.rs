@@ -4064,6 +4064,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 // The payload envelope is imported (`is_payload_received` is now true); release any
                 // attestations awaiting this block's payload so they can be re-processed.
                 self.notify_payload_envelope_imported(*block_root, EnvelopeSource::Gossip);
+                self.publish_execution_proofs(*block_root).await;
             }
             Ok(_) => {}
             Err(e) => {
@@ -4075,6 +4076,29 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 );
             }
         }
+    }
+
+    /// Produce execution proofs for an imported payload and gossip them, on devnet seeder nodes.
+    ///
+    /// A no-op unless this node is configured as a proof producer.
+    async fn publish_execution_proofs(&self, block_root: Hash256) {
+        let proofs = self.chain.produce_execution_proofs(block_root).await;
+        if proofs.is_empty() {
+            return;
+        }
+
+        let messages = proofs
+            .into_iter()
+            .map(|proof| {
+                debug!(
+                    ?block_root,
+                    proof_type = proof.proof_type(),
+                    "Publishing execution proof"
+                );
+                PubsubMessage::ExecutionProof(Arc::new(proof))
+            })
+            .collect();
+        self.send_network_message(NetworkMessage::Publish { messages });
     }
 
     /// Inform the reprocess queue that a fully available block (or its payload envelope, post-gloas)

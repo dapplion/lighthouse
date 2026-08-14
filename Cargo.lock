@@ -1990,6 +1990,7 @@ version = "0.2.0"
 dependencies = [
  "beacon_chain",
  "beacon_processor",
+ "bls",
  "directory",
  "dirs",
  "environment",
@@ -1999,6 +2000,7 @@ dependencies = [
  "execution_layer",
  "futures",
  "genesis",
+ "hex",
  "http_api",
  "http_metrics",
  "kzg",
@@ -5998,6 +6000,17 @@ name = "mock_instant"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9366861eb2a2c436c20b12c8dbec5f798cea6b47ad99216be0282942e2c81ea0"
+
+[[package]]
+name = "mock_proof_engine"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "clap",
+ "serde",
+ "sha2",
+ "tokio",
+]
 
 [[package]]
 name = "mockall"
