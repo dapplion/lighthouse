@@ -6,7 +6,8 @@ use beacon_chain::{
     BeaconChainError,
     observed_operations::ObservationOutcome,
     test_utils::{
-        AttestationStrategy, BeaconChainHarness, BlockStrategy, DiskHarnessType, test_spec,
+        AttestationStrategy, BeaconChainHarness, BlockStrategy, DiskHarnessType,
+        EphemeralHarnessType, test_spec,
     },
 };
 use bls::Keypair;
@@ -299,6 +300,67 @@ async fn proposer_slashing_duplicate_in_state() {
     ));
 }
 
+#[tokio::test]
+async fn slashings_cache_matches_state_after_block_import() {
+    let db_path = tempdir().unwrap();
+    let store = get_store(&db_path);
+    let harness = get_harness(store.clone(), VALIDATOR_COUNT);
+
+    // Slash a spread of validators by importing proposer slashings into the op pool, exactly as
+    // they would arrive over gossip.
+    let slashed_validators = [0u64, 7, VALIDATOR_COUNT as u64 - 1];
+    for &validator_index in &slashed_validators {
+        let slashing = harness.make_proposer_slashing(validator_index);
+        let ObservationOutcome::New(verified_slashing) = harness
+            .chain
+            .verify_proposer_slashing_for_gossip(slashing)
+            .unwrap()
+        else {
+            panic!("slashing should verify");
+        };
+        harness.chain.import_proposer_slashing(verified_slashing);
+    }
+
+    // Produce and import a block that includes the slashings. This drives the production flow:
+    // `per_block_processing` -> `slash_validator` -> `SlashingsCache::record_validator_slashing`.
+    harness
+        .extend_chain(
+            1,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+
+    let state = harness.get_current_state();
+
+    // The block processing above should have left the slashings cache initialized for the head.
+    assert!(
+        state.slashings_cache_is_initialized(),
+        "slashings cache should be initialized after block import"
+    );
+
+    // The targeted validators must actually be slashed in the state (i.e. the slashings were
+    // included and applied, not silently dropped).
+    for &validator_index in &slashed_validators {
+        assert!(
+            state
+                .get_validator(validator_index as usize)
+                .unwrap()
+                .slashed,
+            "validator {validator_index} should be slashed in the state"
+        );
+    }
+
+    // The cache must agree with the `slashed` flag of *every* validator in the state.
+    for index in 0..state.validators().len() {
+        assert_eq!(
+            state.slashings_cache().is_slashed(index),
+            state.get_validator(index).unwrap().slashed,
+            "slashings cache disagrees with state at validator {index}"
+        );
+    }
+}
+
 #[test]
 fn attester_slashing() {
     let db_path = tempdir().unwrap();
@@ -425,4 +487,218 @@ async fn attester_slashing_duplicate_in_state() {
             AttesterSlashingInvalid::NoSlashableIndices
         ))
     ));
+}
+
+fn get_fork_harness(fork_name: ForkName) -> BeaconChainHarness<EphemeralHarnessType<E>> {
+    let spec = Arc::new(fork_name.make_genesis_spec(E::default_spec()));
+    let harness = BeaconChainHarness::builder(MinimalEthSpec)
+        .spec(spec)
+        .keypairs(KEYPAIRS.to_vec())
+        .fresh_ephemeral_store()
+        .mock_execution_layer()
+        .build();
+    harness.advance_slot();
+    harness
+}
+
+#[tokio::test]
+async fn base_attester_slashing_included_in_electra_block() {
+    let harness = get_fork_harness(ForkName::Electra);
+
+    let slashed_validator = 0;
+    let AttesterSlashing::Electra(slashing) =
+        harness.make_attester_slashing(vec![slashed_validator])
+    else {
+        panic!("expected Electra slashing variant");
+    };
+    // Re-type the slashing as Base. The signatures cover the `AttestationData`, so they
+    // remain valid.
+    let slashing_base = AttesterSlashing::<E>::Base(AttesterSlashingBase {
+        attestation_1: IndexedAttestationBase {
+            attesting_indices: ssz_types::VariableList::new(
+                slashing.attestation_1.attesting_indices.to_vec(),
+            )
+            .unwrap(),
+            data: slashing.attestation_1.data,
+            signature: slashing.attestation_1.signature,
+        },
+        attestation_2: IndexedAttestationBase {
+            attesting_indices: ssz_types::VariableList::new(
+                slashing.attestation_2.attesting_indices.to_vec(),
+            )
+            .unwrap(),
+            data: slashing.attestation_2.data,
+            signature: slashing.attestation_2.signature,
+        },
+    });
+
+    let ObservationOutcome::New(verified_slashing) = harness
+        .chain
+        .verify_attester_slashing_for_gossip(slashing_base)
+        .unwrap()
+    else {
+        panic!("slashing should verify");
+    };
+    harness.chain.import_attester_slashing(verified_slashing);
+
+    harness
+        .extend_chain(
+            1,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+
+    assert!(
+        harness
+            .get_current_state()
+            .validators()
+            .get(slashed_validator as usize)
+            .unwrap()
+            .slashed
+    );
+}
+
+#[tokio::test]
+async fn gloas_attester_slashing_included_in_electra_block() {
+    let harness = get_fork_harness(ForkName::Electra);
+
+    let slashed_validator = 0;
+    let AttesterSlashing::Electra(slashing) =
+        harness.make_attester_slashing(vec![slashed_validator])
+    else {
+        panic!("expected Electra slashing variant");
+    };
+    let slashing_gloas = AttesterSlashing::<E>::Gloas(AttesterSlashingGloas {
+        attestation_1: IndexedAttestation::Electra(slashing.attestation_1).to_gloas(),
+        attestation_2: IndexedAttestation::Electra(slashing.attestation_2).to_gloas(),
+    });
+
+    let ObservationOutcome::New(verified_slashing) = harness
+        .chain
+        .verify_attester_slashing_for_gossip(slashing_gloas)
+        .unwrap()
+    else {
+        panic!("slashing should verify");
+    };
+    harness.chain.import_attester_slashing(verified_slashing);
+
+    harness
+        .extend_chain(
+            1,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+
+    assert!(
+        harness
+            .get_current_state()
+            .validators()
+            .get(slashed_validator as usize)
+            .unwrap()
+            .slashed
+    );
+}
+
+#[tokio::test]
+async fn base_attester_slashing_included_in_gloas_block() {
+    let harness = get_fork_harness(ForkName::Gloas);
+
+    let slashed_validator = 0;
+    let AttesterSlashing::Gloas(slashing) = harness.make_attester_slashing(vec![slashed_validator])
+    else {
+        panic!("expected Gloas slashing variant");
+    };
+    // Re-type the slashing as Base. The signatures cover the `AttestationData`, so they
+    // remain valid.
+    let slashing_base = AttesterSlashing::<E>::Base(AttesterSlashingBase {
+        attestation_1: IndexedAttestationBase {
+            attesting_indices: ssz_types::VariableList::new(
+                slashing.attestation_1.attesting_indices.to_vec(),
+            )
+            .unwrap(),
+            data: slashing.attestation_1.data,
+            signature: slashing.attestation_1.signature,
+        },
+        attestation_2: IndexedAttestationBase {
+            attesting_indices: ssz_types::VariableList::new(
+                slashing.attestation_2.attesting_indices.to_vec(),
+            )
+            .unwrap(),
+            data: slashing.attestation_2.data,
+            signature: slashing.attestation_2.signature,
+        },
+    });
+
+    let ObservationOutcome::New(verified_slashing) = harness
+        .chain
+        .verify_attester_slashing_for_gossip(slashing_base)
+        .unwrap()
+    else {
+        panic!("slashing should verify");
+    };
+    harness.chain.import_attester_slashing(verified_slashing);
+
+    harness
+        .extend_chain(
+            1,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+
+    assert!(
+        harness
+            .get_current_state()
+            .validators()
+            .get(slashed_validator as usize)
+            .unwrap()
+            .slashed
+    );
+}
+
+#[tokio::test]
+async fn electra_attester_slashing_included_in_gloas_block() {
+    let harness = get_fork_harness(ForkName::Gloas);
+
+    let slashed_validator = 0;
+    let AttesterSlashing::Gloas(slashing) = harness.make_attester_slashing(vec![slashed_validator])
+    else {
+        panic!("expected Gloas slashing variant");
+    };
+    let slashing_electra = AttesterSlashing::<E>::Electra(AttesterSlashingElectra {
+        attestation_1: IndexedAttestation::Gloas(slashing.attestation_1)
+            .to_electra()
+            .unwrap(),
+        attestation_2: IndexedAttestation::Gloas(slashing.attestation_2)
+            .to_electra()
+            .unwrap(),
+    });
+
+    let ObservationOutcome::New(verified_slashing) = harness
+        .chain
+        .verify_attester_slashing_for_gossip(slashing_electra)
+        .unwrap()
+    else {
+        panic!("slashing should verify");
+    };
+    harness.chain.import_attester_slashing(verified_slashing);
+
+    harness
+        .extend_chain(
+            1,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+
+    assert!(
+        harness
+            .get_current_state()
+            .validators()
+            .get(slashed_validator as usize)
+            .unwrap()
+            .slashed
+    );
 }

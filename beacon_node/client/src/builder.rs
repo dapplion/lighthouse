@@ -32,11 +32,11 @@ use lighthouse_network::identity::Keypair;
 use lighthouse_network::{NetworkGlobals, prometheus_client::registry::Registry};
 use monitoring_api::{MonitoringHttpClient, ProcessType};
 use network::{NetworkConfig, NetworkSenders, NetworkService};
+use proof_engine::ProofEngine;
 use rand::SeedableRng;
 use rand::rngs::{OsRng, StdRng};
 use slasher::Slasher;
 use slasher_service::SlasherService;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -188,6 +188,16 @@ where
             None
         };
 
+        let proof_engine = config
+            .proof_engine_endpoint
+            .clone()
+            .map(|url| {
+                ProofEngine::new(url)
+                    .map(Arc::new)
+                    .map_err(|e| format!("unable to start proof engine client: {:?}", e))
+            })
+            .transpose()?;
+
         let kzg_err_msg = |e| format!("Failed to load trusted setup: {:?}", e);
         let kzg = if spec.is_peer_das_scheduled() {
             Kzg::new_from_trusted_setup(&config.trusted_setup).map_err(kzg_err_msg)?
@@ -211,6 +221,7 @@ where
             .beacon_graffiti(beacon_graffiti)
             .event_handler(event_handler)
             .execution_layer(execution_layer)
+            .proof_engine(proof_engine)
             .node_custody_type(config.chain.node_custody_type)
             .ordered_custody_column_indices(ordered_custody_column_indices)
             .validator_monitor_config(config.validator_monitor.clone())
@@ -616,7 +627,7 @@ where
     /// If type inference errors are being raised, see the comment on the definition of `Self`.
     #[allow(clippy::type_complexity)]
     #[instrument(name = "build_client", skip_all)]
-    pub fn build(
+    pub async fn build(
         mut self,
     ) -> Result<Client<Witness<TSlotClock, E, THotStore, TColdStore>>, String> {
         let runtime_context = self
@@ -641,14 +652,14 @@ where
                 beacon_processor_send: Some(beacon_processor_channels.beacon_processor_tx.clone()),
                 sse_logging_components: runtime_context.sse_logging_components.clone(),
                 historical_committee_cache: Arc::new(http_api::HistoricalCommitteeCache::new(
-                    NonZeroUsize::new(self.http_api_config.historical_committee_cache_size)
-                        .unwrap_or(NonZeroUsize::MIN),
+                    self.http_api_config.historical_committee_cache_size,
                 )),
             });
 
             let exit = runtime_context.executor.exit();
 
             let (listen_addr, server) = http_api::serve(ctx, exit)
+                .await
                 .map_err(|e| format!("Unable to start HTTP API server: {:?}", e))?;
 
             let http_api_task = async move {
@@ -679,6 +690,7 @@ where
             let exit = runtime_context.executor.exit();
 
             let (listen_addr, server) = http_metrics::serve(ctx, exit)
+                .await
                 .map_err(|e| format!("Unable to start HTTP metrics server: {:?}", e))?;
 
             runtime_context
