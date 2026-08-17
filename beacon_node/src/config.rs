@@ -108,6 +108,10 @@ pub fn get_config<E: EthSpec>(
 
     set_network_config(&mut client_config.network, cli_args, &data_dir_ref)?;
 
+    // Not set in `set_network_config` as that function is shared with the boot node, which does
+    // not define this flag.
+    client_config.network.disable_range_sync = cli_args.get_flag("disable-range-sync");
+
     let default_partial_columns_enabled = spec
         .config_name
         .as_ref()
@@ -1506,8 +1510,6 @@ pub fn set_network_config(
                 )
             })?;
     }
-
-    config.disable_range_sync = cli_args.get_flag("disable-range-sync");
 
     Ok(())
 }
