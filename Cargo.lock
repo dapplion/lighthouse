@@ -6008,11 +6008,13 @@ dependencies = [
  "clap",
  "ethereum_ssz",
  "hex",
+ "reqwest",
  "serde",
  "sha2",
  "tokio",
  "tree_hash",
  "types",
+ "zip",
 ]
 
 [[package]]

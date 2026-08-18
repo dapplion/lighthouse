@@ -11,14 +11,17 @@
 //! distinct proofs, and bytes that were not minted by this engine are rejected. That last part
 //! matters: it keeps the consumer's REJECT path reachable, which an always-`VALID` mock would hide.
 //!
-//! `--proof-dir` swaps the synthetic bytes for real zkEVM proofs downloaded from Ethproofs, so the
-//! devnet carries realistic sizes and encodings rather than a round kilobyte. Real proofs are not
-//! derived from the payload, so in this mode a proof no longer binds to a particular request root;
-//! everything else, including the reject path for corrupt or mistyped bytes, still holds.
+//! `--ethproofs` swaps the synthetic bytes for real zkEVM proofs, downloaded at startup from the
+//! Ethproofs API, so the devnet carries realistic sizes and encodings rather than a round kilobyte.
+//! Real proofs are not derived from the payload, so in this mode a proof no longer binds to a
+//! particular request root; everything else, including the reject path for corrupt or mistyped
+//! bytes, still holds.
 //!
 //! The BLS signature over each proof is real, because consumers check it. Give the engine a
 //! validator key with `--secret-key` and it produces; leave it out and it only verifies, which is
 //! how a devnet decides which nodes seed.
+
+mod ethproofs;
 
 use axum::{
     Router,
@@ -35,12 +38,9 @@ use sha2::{Digest, Sha256};
 use ssz::Encode;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tree_hash::TreeHash;
-use types::execution::{
-    ExecutionProof, MAX_PROOF_SIZE, ProofData, ProofType, PublicInput, SignedExecutionProof,
-};
+use types::execution::{ExecutionProof, ProofData, ProofType, PublicInput, SignedExecutionProof};
 use types::{Hash256, SigningData};
 
 /// Domain separator, so mock proofs can never be confused with anything real.
@@ -68,10 +68,14 @@ struct Config {
     /// Comma separated proof types to produce for each payload.
     #[arg(long, value_delimiter = ',', default_value = "0,1")]
     proof_types: Vec<ProofType>,
-    /// Directory of real proof artifacts named `<proof_type>.bin`, as written by
-    /// `fetch_ethproofs.py`. Without it the engine mints synthetic proofs.
+    /// Serve real zkEVM proofs downloaded from Ethproofs rather than synthetic ones. Every
+    /// engine on a network needs the same setting, or their bytes disagree and nothing verifies.
     #[arg(long)]
-    proof_dir: Option<PathBuf>,
+    ethproofs: bool,
+    /// Mainnet block to take Ethproofs artifacts from. Pinned by default so that engines started
+    /// at different times agree.
+    #[arg(long, default_value_t = ethproofs::DEFAULT_BLOCK)]
+    ethproofs_block: u64,
 }
 
 struct Prover {
@@ -222,44 +226,24 @@ async fn get_proofs(
     (StatusCode::OK, proofs.as_ssz_bytes())
 }
 
-/// Load `<proof_type>.bin` artifacts, rejecting anything the SSZ type could not carry.
-fn load_fixtures(dir: &PathBuf) -> HashMap<ProofType, Vec<u8>> {
+/// Download one real proof per configured proof type, keyed the same way on every engine.
+async fn fetch_fixtures(
+    proof_types: &[ProofType],
+    block: u64,
+) -> Result<HashMap<ProofType, Vec<u8>>, String> {
+    let proofs = ethproofs::fetch(proof_types.len(), block).await?;
+
     let mut fixtures = HashMap::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        println!("no proof artifacts in {dir:?}, minting synthetic proofs instead");
-        return fixtures;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "bin") {
-            continue;
-        }
-        let Some(proof_type) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse::<ProofType>().ok())
-        else {
-            continue;
-        };
-
-        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {path:?}: {e}"));
-        assert!(
-            bytes.len() <= MAX_PROOF_SIZE,
-            "{path:?} is {} bytes, over MAX_PROOF_SIZE",
-            bytes.len()
-        );
+    for (proof_type, proof) in proof_types.iter().zip(proofs) {
         println!(
-            "loaded proof type {proof_type} from {path:?} ({} bytes)",
-            bytes.len()
+            "proof type {proof_type} is {} from block {} ({} bytes)",
+            proof.proving_system,
+            proof.block_number,
+            proof.bytes.len()
         );
-        fixtures.insert(proof_type, bytes);
+        fixtures.insert(*proof_type, proof.bytes);
     }
-
-    if fixtures.is_empty() {
-        println!("no <proof_type>.bin artifacts in {dir:?}, minting synthetic proofs instead");
-    }
-    fixtures
+    Ok(fixtures)
 }
 
 #[tokio::main]
@@ -278,11 +262,15 @@ async fn main() {
         })
     });
 
-    let fixtures = config
-        .proof_dir
-        .as_ref()
-        .map(load_fixtures)
-        .unwrap_or_default();
+    // Both roles need the fixtures: a producer signs over them, a verifier compares against them.
+    let fixtures = if config.ethproofs {
+        match fetch_fixtures(&config.proof_types, config.ethproofs_block).await {
+            Ok(fixtures) => fixtures,
+            Err(e) => panic!("cannot fetch proofs from ethproofs: {e}"),
+        }
+    } else {
+        HashMap::new()
+    };
 
     let engine = Engine {
         proof_size: config.proof_size,

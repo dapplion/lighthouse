@@ -25,10 +25,15 @@ and both the proving and the signing stay inside the engine binary.
 A seeder imports the proofs it was handed as well as gossiping them, so it satisfies its own gate
 and does not stall waiting on a proof it is already holding.
 
-Proving is mocked by `mock_proof_engine`, which mints a proof deterministically from the payload's
-request root and the proof type. It is not an always-`VALID` stub: bytes it did not mint verify as
-`INVALID`, so the consumer's reject path stays reachable. The BLS signature over each proof is
-real, because consumers check it.
+Proving is mocked by `mock_proof_engine`, but the proofs are not: it runs with `--ethproofs`, which
+downloads real zkEVM artifacts from the Ethproofs public API at startup, one per proof type from a
+pinned mainnet block. Those run from roughly 96 KB to 2.6 MB against the 2 KB a synthetic proof
+costs, so proof propagation is exercised at something like true size. The BLS signature over each
+proof is real too, because consumers check it.
+
+It is not an always-`VALID` stub either: bytes the engine did not serve verify as `INVALID`, so the
+consumer's reject path stays reachable. Real proofs are not derived from the payload, though, so a
+proof does not bind to a particular request root in this mode.
 
 ## Prerequisites
 
@@ -103,6 +108,10 @@ so this has to be a real key. To regenerate it, or to use a different mnemonic o
 ```
 python3 scripts/tests/derive_validator_key.py "<mnemonic>" 0
 ```
+
+Both engines fetch from Ethproofs on startup, which needs outbound network access from the enclave
+and adds a few seconds to it. Drop `--ethproofs` from `optional-proofs.star` to run offline on
+synthetic proofs instead.
 
 A consumer that misses a proof never imports that payload. Proofs have no RPC or sync path, on the
 assumption that they are recursive, and an unreachable proof engine is ignored without penalty, so

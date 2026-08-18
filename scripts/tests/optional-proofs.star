@@ -22,7 +22,7 @@ def run(plan, args):
         config = ServiceConfig(
             image = MOCK_PROOF_ENGINE_IMAGE,
             ports = PORTS,
-            cmd = ["--listen-address", "0.0.0.0:8025", "--proof-dir", "/proofs"],
+            cmd = ["--listen-address", "0.0.0.0:8025", "--ethproofs"],
         ),
     )
     plan.add_service(
@@ -39,8 +39,7 @@ def run(plan, args):
                 "0",
                 "--proof-types",
                 "0,1",
-                "--proof-dir",
-                "/proofs",
+                "--ethproofs",
             ],
         ),
     )
