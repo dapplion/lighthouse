@@ -6,6 +6,7 @@ use crate::config::{ClientGenesis, Config as ClientConfig};
 use crate::notifier::spawn_notifier;
 use beacon_chain::attestation_simulator::start_attestation_simulator_service;
 use beacon_chain::data_availability_checker::start_availability_cache_maintenance_service;
+use beacon_chain::execution_proof_production::ExecutionProofProducer;
 use beacon_chain::graffiti_calculator::start_engine_version_cache_refresh_service;
 use beacon_chain::proposer_prep_service::start_proposer_prep_service;
 use beacon_chain::schema_change::migrate_schema;
@@ -19,6 +20,7 @@ use beacon_chain::{
 use beacon_chain::{Kzg, LightClientProducerEvent};
 use beacon_processor::{BeaconProcessor, BeaconProcessorChannels};
 use beacon_processor::{BeaconProcessorConfig, BeaconProcessorQueueLengths};
+use bls::SecretKey;
 use environment::RuntimeContext;
 use eth2::{
     BeaconNodeHttpClient, Error as ApiError, Timeouts,
@@ -188,6 +190,23 @@ where
             None
         };
 
+        let execution_proof_producer = config
+            .execution_proof_producer
+            .as_ref()
+            .map(|producer| {
+                let secret_key = SecretKey::deserialize(
+                    &hex::decode(producer.secret_key.trim_start_matches("0x"))
+                        .map_err(|e| format!("invalid proof producer secret key hex: {e:?}"))?,
+                )
+                .map_err(|e| format!("invalid proof producer secret key: {e:?}"))?;
+                Ok::<_, String>(ExecutionProofProducer {
+                    secret_key,
+                    validator_index: producer.validator_index,
+                    proof_types: producer.proof_types.clone(),
+                })
+            })
+            .transpose()?;
+
         let proof_engine = config
             .proof_engine_endpoint
             .clone()
@@ -222,6 +241,7 @@ where
             .event_handler(event_handler)
             .execution_layer(execution_layer)
             .proof_engine(proof_engine)
+            .execution_proof_producer(execution_proof_producer)
             .node_custody_type(config.chain.node_custody_type)
             .ordered_custody_column_indices(ordered_custody_column_indices)
             .validator_monitor_config(config.validator_monitor.clone())

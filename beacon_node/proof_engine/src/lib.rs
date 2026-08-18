@@ -8,11 +8,13 @@
 use sensitive_url::SensitiveUrl;
 use serde::Deserialize;
 use std::time::Duration;
+use types::Hash256;
 use types::execution::ExecutionProof;
 
 pub const DEFAULT_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const PATH_PROOF_VERIFICATIONS: &str = "/v1/execution_proof_verifications";
+const PATH_PROOFS: &str = "/v1/execution_proofs";
 
 #[derive(Debug)]
 pub enum ProofEngineError {
@@ -54,6 +56,40 @@ impl ProofEngine {
             .build()
             .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?;
         Ok(Self { client, url })
+    }
+
+    /// Fetch the proof this engine holds for `new_payload_request_root` and `proof_type`.
+    ///
+    /// Only the proof producer calls this; a consumer never needs it, since proofs reach it over
+    /// gossip. Returns `None` when the engine has no proof of that type for that payload.
+    pub async fn get_execution_proof(
+        &self,
+        new_payload_request_root: Hash256,
+        proof_type: u8,
+    ) -> Result<Option<Vec<u8>>, ProofEngineError> {
+        let mut url = self.url.expose_full().clone();
+        url.set_path(&format!(
+            "{PATH_PROOFS}/{new_payload_request_root:?}/{proof_type}"
+        ));
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        let bytes = response
+            .error_for_status()
+            .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?
+            .bytes()
+            .await
+            .map_err(|e| ProofEngineError::InvalidResponse(e.to_string()))?;
+
+        Ok(Some(bytes.to_vec()))
     }
 
     /// EIP-8025 `ProofEngine.verify_execution_proof`.

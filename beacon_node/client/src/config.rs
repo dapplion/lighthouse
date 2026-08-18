@@ -47,6 +47,14 @@ pub enum ClientGenesis {
     },
 }
 
+/// Devnet-only configuration for seeding EIP-8025 execution proofs onto a network.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionProofProducerConfig {
+    pub secret_key: String,
+    pub validator_index: u64,
+    pub proof_types: Vec<u8>,
+}
+
 /// The core configuration of a Lighthouse beacon node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -70,6 +78,8 @@ pub struct Config {
     pub chain: beacon_chain::ChainConfig,
     pub execution_layer: Option<execution_layer::Config>,
     pub proof_engine_endpoint: Option<SensitiveUrl>,
+    /// Devnet-only: BLS secret key, validator index and proof types used to seed execution proofs.
+    pub execution_proof_producer: Option<ExecutionProofProducerConfig>,
     pub trusted_setup: Vec<u8>,
     pub http_api: http_api::Config,
     pub http_metrics: http_metrics::Config,
@@ -96,6 +106,7 @@ impl Default for Config {
             chain: <_>::default(),
             execution_layer: None,
             proof_engine_endpoint: None,
+            execution_proof_producer: None,
             trusted_setup: get_trusted_setup(),
             beacon_graffiti: GraffitiOrigin::default(),
             http_api: <_>::default(),

@@ -34,6 +34,7 @@ use crate::envelope_times_cache::EnvelopeTimesCache;
 use crate::errors::{BeaconChainError as Error, BlockProductionError};
 use crate::events::ServerSentEventHandler;
 use crate::execution_payload::{NotifyExecutionLayer, PreparePayloadHandle, get_execution_payload};
+use crate::execution_proof_production::ExecutionProofProducer;
 use crate::execution_proof_verification::{GossipVerifiedExecutionProof, ObservedExecutionProofs};
 use crate::fork_choice_signal::{ForkChoiceSignalRx, ForkChoiceSignalTx};
 use crate::graffiti_calculator::{GraffitiCalculator, GraffitiSettings};
@@ -456,6 +457,8 @@ pub struct BeaconChain<T: BeaconChainTypes> {
     pub execution_layer: Option<ExecutionLayer<T::EthSpec>>,
     /// Client for the EIP-8025 proof engine, if one is configured.
     pub proof_engine: Option<Arc<ProofEngine>>,
+    /// Set only on devnet proof seeder nodes. See `execution_proof_production`.
+    pub execution_proof_producer: Option<ExecutionProofProducer>,
     /// Stores information about the canonical head and finalized/justified checkpoints of the
     /// chain. Also contains the fork choice struct, for computing the canonical head.
     pub canonical_head: CanonicalHead<T>,
