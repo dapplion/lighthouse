@@ -317,19 +317,6 @@ Options:
           Server endpoint for an EIP-8025 proof engine used to verify execution
           proofs. When present, the node subscribes to the execution_proof
           gossip topic and propagates proofs that verify. Experimental.
-      --proof-producer-secret-key <HEX>
-          DEVNET ONLY. BLS secret key used to sign EIP-8025 execution proofs for
-          payloads this node imports, seeding them onto the network. Requires
-          --proof-engine-endpoint and --proof-producer-validator-index. The key
-          is read from the command line and the beacon node signs with it
-          directly, so never point this at a key that secures anything.
-      --proof-producer-types <TYPES>
-          DEVNET ONLY. Comma separated EIP-8025 proof types to produce per
-          payload. Consumers require proofs from several distinct proof systems,
-          so a lone seeder must cover at least that many. [default: 0,1]
-      --proof-producer-validator-index <INDEX>
-          DEVNET ONLY. Index of the validator whose key signs produced execution
-          proofs. Must be active, or consumers will reject the proofs.
       --proposer-reorg-cutoff <MILLISECONDS>
           DEPRECATED. This flag has no effect.
       --proposer-reorg-disallowed-offsets <N1,N2,...>
@@ -353,13 +340,6 @@ Options:
       --quic-port6 <PORT>
           The UDP port that quic will listen on over IPv6 if listening over both
           IPv4 and IPv6. Defaults to `port6` + 1
-      --required-execution-proofs <COUNT>
-          EXPERIMENTAL. Number of distinct EIP-8025 proof systems that must
-          prove a payload before it is imported. Defaults to the built-in
-          requirement when --proof-engine-endpoint is set, and to 0 otherwise.
-          Set 0 to verify and propagate proofs without gating import, which is
-          what a proof producer needs: it cannot wait on a proof it has not made
-          yet.
       --self-limiter-protocols <self-limiter-protocols>
           Enables the outbound rate limiter (requests made by this node).Rate
           limit quotas per protocol can be set in the form of

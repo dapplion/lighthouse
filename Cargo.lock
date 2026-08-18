@@ -1990,7 +1990,6 @@ version = "0.2.0"
 dependencies = [
  "beacon_chain",
  "beacon_processor",
- "bls",
  "directory",
  "dirs",
  "environment",
@@ -2000,7 +1999,6 @@ dependencies = [
  "execution_layer",
  "futures",
  "genesis",
- "hex",
  "http_api",
  "http_metrics",
  "kzg",
@@ -6006,10 +6004,15 @@ name = "mock_proof_engine"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
+ "bls",
  "clap",
+ "ethereum_ssz",
+ "hex",
  "serde",
  "sha2",
  "tokio",
+ "tree_hash",
+ "types",
 ]
 
 [[package]]
@@ -7167,6 +7170,7 @@ dependencies = [
 name = "proof_engine"
 version = "0.1.0"
 dependencies = [
+ "ethereum_ssz",
  "reqwest",
  "sensitive_url",
  "serde",

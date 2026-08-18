@@ -34,8 +34,7 @@ use crate::envelope_times_cache::EnvelopeTimesCache;
 use crate::errors::{BeaconChainError as Error, BlockProductionError};
 use crate::events::ServerSentEventHandler;
 use crate::execution_payload::{NotifyExecutionLayer, PreparePayloadHandle, get_execution_payload};
-use crate::execution_proof_production::ExecutionProofProducer;
-use crate::execution_proof_verification::{GossipVerifiedExecutionProof, ObservedExecutionProofs};
+use crate::execution_proof_verification::ObservedExecutionProofs;
 use crate::fork_choice_signal::{ForkChoiceSignalRx, ForkChoiceSignalTx};
 use crate::graffiti_calculator::{GraffitiCalculator, GraffitiSettings};
 use crate::light_client_finality_update_verification::{
@@ -151,7 +150,7 @@ use tokio_stream::Stream;
 use tracing::{debug, debug_span, error, info, info_span, instrument, trace, warn};
 use tree_hash::TreeHash;
 use types::data::{ColumnIndex, FixedBlobSidecarList};
-use types::execution::BlockProductionVersion;
+use types::execution::{BlockProductionVersion, SignedExecutionProof};
 use types::*;
 
 pub type ForkChoiceError = fork_choice::Error<crate::ForkChoiceStoreError>;
@@ -457,8 +456,6 @@ pub struct BeaconChain<T: BeaconChainTypes> {
     pub execution_layer: Option<ExecutionLayer<T::EthSpec>>,
     /// Client for the EIP-8025 proof engine, if one is configured.
     pub proof_engine: Option<Arc<ProofEngine>>,
-    /// Set only on devnet proof seeder nodes. See `execution_proof_production`.
-    pub execution_proof_producer: Option<ExecutionProofProducer>,
     /// Stores information about the canonical head and finalized/justified checkpoints of the
     /// chain. Also contains the fork choice struct, for computing the canonical head.
     pub canonical_head: CanonicalHead<T>,
@@ -4189,9 +4186,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Caches an execution proof, importing the payload envelope if that was the last piece.
     pub async fn check_execution_proof_availability_and_import(
         self: &Arc<Self>,
-        verified_proof: GossipVerifiedExecutionProof,
+        proof: Arc<SignedExecutionProof>,
+        block_slot: Slot,
     ) -> Result<AvailabilityProcessingStatus, BlockError> {
-        let GossipVerifiedExecutionProof { proof, block_slot } = verified_proof;
         let availability = self
             .pending_payload_cache
             .put_execution_proof(proof)

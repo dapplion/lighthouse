@@ -9,7 +9,7 @@ use bls::PublicKeyBytes;
 use clap::{ArgMatches, Id, parser::ValueSource};
 use clap_utils::flags::DISABLE_MALLOC_TUNING_FLAG;
 use clap_utils::{parse_flag, parse_optional, parse_required};
-use client::{ClientConfig, ClientGenesis, config::ExecutionProofProducerConfig};
+use client::{ClientConfig, ClientGenesis};
 use directory::{DEFAULT_BEACON_NODE_DIR, DEFAULT_NETWORK_DIR, DEFAULT_ROOT_DIR};
 use environment::RuntimeContext;
 use execution_layer::DEFAULT_JWT_FILE;
@@ -341,30 +341,6 @@ pub fn get_config<E: EthSpec>(
             "--proof-engine-endpoint",
         )?);
         client_config.network.enable_execution_proof = true;
-    }
-
-    client_config.required_execution_proofs =
-        clap_utils::parse_optional(cli_args, "required-execution-proofs")?;
-
-    // Parse and set the devnet-only execution proof producer, if any.
-    if let Some(secret_key) = cli_args.get_one::<String>("proof-producer-secret-key") {
-        let validator_index =
-            clap_utils::parse_required(cli_args, "proof-producer-validator-index")?;
-        let proof_types = clap_utils::parse_required::<String>(cli_args, "proof-producer-types")?
-            .split(',')
-            .map(|proof_type| {
-                proof_type
-                    .trim()
-                    .parse::<u8>()
-                    .map_err(|e| format!("Invalid --proof-producer-types: {e:?}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        client_config.execution_proof_producer = Some(ExecutionProofProducerConfig {
-            secret_key: secret_key.clone(),
-            validator_index,
-            proof_types,
-        });
     }
 
     // Parse and set the payload builder, if any.

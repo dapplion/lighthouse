@@ -6,7 +6,6 @@ use crate::beacon_chain::{
 use crate::beacon_proposer_cache::BeaconProposerCache;
 use crate::custody_context::NodeCustodyType;
 use crate::data_availability_checker::DataAvailabilityChecker;
-use crate::execution_proof_production::ExecutionProofProducer;
 use crate::fork_choice_signal::ForkChoiceSignalTx;
 use crate::graffiti_calculator::{GraffitiCalculator, GraffitiOrigin};
 use crate::kzg_utils::{build_data_column_sidecars_fulu, build_data_column_sidecars_gloas};
@@ -94,8 +93,6 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     op_pool: Option<OperationPool<T::EthSpec>>,
     execution_layer: Option<ExecutionLayer<T::EthSpec>>,
     proof_engine: Option<Arc<ProofEngine>>,
-    execution_proof_producer: Option<ExecutionProofProducer>,
-    required_execution_proofs: Option<usize>,
     event_handler: Option<ServerSentEventHandler<T::EthSpec>>,
     slot_clock: Option<T::SlotClock>,
     shutdown_sender: Option<Sender<ShutdownReason>>,
@@ -139,8 +136,6 @@ where
             op_pool: None,
             execution_layer: None,
             proof_engine: None,
-            execution_proof_producer: None,
-            required_execution_proofs: None,
             event_handler: None,
             slot_clock: None,
             shutdown_sender: None,
@@ -634,23 +629,8 @@ where
         self
     }
 
-    /// Sets the `BeaconChain` proof engine.
-    pub fn execution_proof_producer(
-        mut self,
-        execution_proof_producer: Option<ExecutionProofProducer>,
-    ) -> Self {
-        self.execution_proof_producer = execution_proof_producer;
-        self
-    }
-
     pub fn proof_engine(mut self, proof_engine: Option<Arc<ProofEngine>>) -> Self {
         self.proof_engine = proof_engine;
-        self
-    }
-
-    /// Overrides how many distinct proof systems must prove a payload before it is imported.
-    pub fn required_execution_proofs(mut self, required_execution_proofs: Option<usize>) -> Self {
-        self.required_execution_proofs = required_execution_proofs;
         self
     }
 
@@ -1005,16 +985,12 @@ where
         debug!(?custody_context, "Loaded persisted custody context");
         let custody_context = Arc::new(custody_context);
 
-        // Without a proof engine we can't verify proofs, so we don't require them. A producer
-        // has an engine but must be able to import payloads it has not yet proven, so it sets
-        // the override to zero.
-        let required_execution_proofs = self.required_execution_proofs.unwrap_or({
-            if self.proof_engine.is_some() {
-                REQUIRED_EXECUTION_PROOFS
-            } else {
-                0
-            }
-        });
+        // Without a proof engine we can't verify proofs, so we don't require them.
+        let required_execution_proofs = if self.proof_engine.is_some() {
+            REQUIRED_EXECUTION_PROOFS
+        } else {
+            0
+        };
 
         let beacon_chain = BeaconChain {
             spec: self.spec.clone(),
@@ -1057,7 +1033,6 @@ where
             observed_bls_to_execution_changes: <_>::default(),
             execution_layer: self.execution_layer.clone(),
             proof_engine: self.proof_engine,
-            execution_proof_producer: self.execution_proof_producer,
             genesis_validators_root,
             genesis_time,
             canonical_head,

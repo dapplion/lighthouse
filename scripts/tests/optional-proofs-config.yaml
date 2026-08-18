@@ -1,14 +1,13 @@
 # Kurtosis config for testing EIP-8025 optional execution proofs end to end.
 #
-# Three roles:
+# Every node using proofs gets the same flag. What differs is the engine behind it:
+#
 #   - control:  no proof engine, imports payloads unconditionally. Keeps the chain alive so a
 #               stalled consumer is distinguishable from a broken devnet.
-#   - consumer: gates payload import on proofs from two distinct proof systems.
-#   - seeder:   verifies and produces proofs, but does not gate. A producer cannot wait on a
-#               proof it has not made yet.
-#
-# The seeder signs with validator 0's key, derived from the ethereum-package mnemonic. Consumers
-# check that the index is active and that the signature verifies, so the key must be a real one.
+#   - consumer: a verify-only engine, so it gates payload import on proofs from two distinct
+#               proof systems and never seeds any itself.
+#   - seeder:   an engine holding a validator key, so it produces signed proofs, gossips them,
+#               and satisfies its own gate from the proofs it was handed.
 participants:
   - cl_type: lighthouse
     cl_image: lighthouse:local
@@ -31,11 +30,7 @@ participants:
     supernode: true
     validator_count: 0
     cl_extra_params:
-      - --proof-engine-endpoint=http://mock-proof-engine:8025
-      - --required-execution-proofs=0
-      - --proof-producer-secret-key=0dce41fa73ae9f6bdfd51df4d422d75eee174553dba5fd450c4437e4ed3fc903
-      - --proof-producer-validator-index=0
-      - --proof-producer-types=0,1
+      - --proof-engine-endpoint=http://mock-proof-seeder:8025
 network_params:
   gloas_fork_epoch: 0
   slot_duration_ms: 6000

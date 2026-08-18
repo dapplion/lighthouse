@@ -1,15 +1,19 @@
 //! Minimal EIP-8025 proof-engine client.
 //!
-//! Implements only `verify_execution_proof` from the proof-engine API
-//! (consensus-specs `_features/eip8025/proof-engine.md`). The proof engine is a trusted,
-//! locally-operated service; its verdict is authoritative for proof validity but never for
-//! payload validity.
+//! Implements `verify_execution_proof` from the proof-engine API (consensus-specs
+//! `_features/eip8025/proof-engine.md`), plus a route to collect the proofs the engine has
+//! produced itself. The proof engine is a trusted, locally-operated service; its verdict is
+//! authoritative for proof validity but never for payload validity.
+//!
+//! Proofs come back signed. Both the proving and the signing live in the engine, so the beacon
+//! node holds no validator key and only relays what the engine hands it.
 
 use sensitive_url::SensitiveUrl;
 use serde::Deserialize;
+use ssz::Decode;
 use std::time::Duration;
 use types::Hash256;
-use types::execution::ExecutionProof;
+use types::execution::{ExecutionProof, SignedExecutionProof};
 
 pub const DEFAULT_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -58,38 +62,42 @@ impl ProofEngine {
         Ok(Self { client, url })
     }
 
-    /// Fetch the proof this engine holds for `new_payload_request_root` and `proof_type`.
+    /// Collect the signed proofs this engine has produced for a payload.
     ///
-    /// Only the proof producer calls this; a consumer never needs it, since proofs reach it over
-    /// gossip. Returns `None` when the engine has no proof of that type for that payload.
-    pub async fn get_execution_proof(
+    /// Empty for an engine that only verifies, which is how a node opts out of seeding: the
+    /// difference between a seeder and a consumer is a property of the engine, not of the node.
+    ///
+    /// `domain` is passed in rather than derived here so the engine needs no chain configuration
+    /// to sign, the same arrangement a remote signer has with a validator client.
+    pub async fn get_execution_proofs(
         &self,
+        beacon_block_root: Hash256,
         new_payload_request_root: Hash256,
-        proof_type: u8,
-    ) -> Result<Option<Vec<u8>>, ProofEngineError> {
+        domain: Hash256,
+    ) -> Result<Vec<SignedExecutionProof>, ProofEngineError> {
         let mut url = self.url.expose_full().clone();
-        url.set_path(&format!(
-            "{PATH_PROOFS}/{new_payload_request_root:?}/{proof_type}"
-        ));
-        let response = self
+        url.set_path(PATH_PROOFS);
+        let bytes = self
             .client
             .get(url)
+            .query(&[
+                ("beacon_block_root", format!("{beacon_block_root:?}")),
+                (
+                    "new_payload_request_root",
+                    format!("{new_payload_request_root:?}"),
+                ),
+                ("domain", format!("{domain:?}")),
+            ])
             .send()
             .await
-            .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?;
-
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-
-        let bytes = response
+            .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?
             .error_for_status()
             .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?
             .bytes()
             .await
             .map_err(|e| ProofEngineError::InvalidResponse(e.to_string()))?;
 
-        Ok(Some(bytes.to_vec()))
+        Vec::from_ssz_bytes(&bytes).map_err(|e| ProofEngineError::InvalidResponse(format!("{e:?}")))
     }
 
     /// EIP-8025 `ProofEngine.verify_execution_proof`.

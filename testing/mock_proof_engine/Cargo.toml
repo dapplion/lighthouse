@@ -6,7 +6,12 @@ authors = ["Sigma Prime <contact@sigmaprime.io>"]
 
 [dependencies]
 axum = { workspace = true }
+bls = { workspace = true }
 clap = { workspace = true }
+ethereum_ssz = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
+tree_hash = { workspace = true }
+types = { workspace = true }

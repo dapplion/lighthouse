@@ -8,21 +8,27 @@ one, which is the question the optional-proof rollout turns on.
 
 Five Lighthouse nodes, Gloas from genesis, minimal preset, all paired with geth.
 
-| Nodes | Role | Flags | Behaviour |
-| --- | --- | --- | --- |
-| `cl-1`, `cl-2` | control | none | Import payloads unconditionally. |
-| `cl-3`, `cl-4` | consumer | `--proof-engine-endpoint` | Import only after two distinct proof systems prove the payload. |
-| `cl-5` | seeder | `--proof-engine-endpoint`, `--required-execution-proofs=0`, `--proof-producer-*` | Produces and gossips proofs. Does not gate. |
+| Nodes | Engine | Behaviour |
+| --- | --- | --- |
+| `cl-1`, `cl-2` | none | Control. Imports payloads unconditionally. |
+| `cl-3`, `cl-4` | `mock-proof-engine` | Consumer. Verify-only engine, so it gates payload import on proofs from two distinct proof systems. |
+| `cl-5` | `mock-proof-seeder` | Seeder. Its engine holds a validator key, so it produces signed proofs and gossips them. |
 
 The controls exist so a stalled consumer is distinguishable from a broken devnet. Without them, a
 chain that stops moving tells you nothing about why.
 
-The seeder sets `--required-execution-proofs=0` deliberately. It needs a proof engine, so it would
-otherwise inherit the default requirement and wait for a proof only it can produce.
+Every node using proofs is given the same `--proof-engine-endpoint` flag. Whether a node seeds is
+decided by the engine behind that flag, not by the node's configuration: an engine with a key
+returns signed proofs, one without returns nothing. The beacon node never holds a validator key,
+and both the proving and the signing stay inside the engine binary.
+
+A seeder imports the proofs it was handed as well as gossiping them, so it satisfies its own gate
+and does not stall waiting on a proof it is already holding.
 
 Proving is mocked by `mock_proof_engine`, which mints a proof deterministically from the payload's
 request root and the proof type. It is not an always-`VALID` stub: bytes it did not mint verify as
-`INVALID`, so the consumer's reject path stays reachable.
+`INVALID`, so the consumer's reject path stays reachable. The BLS signature over each proof is
+real, because consumers check it.
 
 ## Prerequisites
 
@@ -53,10 +59,10 @@ docker build -t mock-proof-engine:local -f testing/mock_proof_engine/Dockerfile 
 ./scripts/tests/optional-proofs.sh
 ```
 
-The proof engine is a Kurtosis service, not a container attached to the enclave network afterwards.
+The engines are Kurtosis services, not containers attached to the enclave network afterwards.
 Kurtosis allocates enclave IPs itself, and an outside container joining that network takes an
-address it had reserved, which fails the enclave with `Address already in use`. Being a service
-also means the engine is reachable before the first Gloas payload, which matters: see below.
+address it had reserved, which fails the enclave with `Address already in use`. Being services
+also means they are reachable before the first Gloas payload, which matters: see below.
 
 ## Check it
 
@@ -90,9 +96,9 @@ kurtosis enclave rm -f optional-proofs
 
 ## Notes
 
-The seeder signs with validator 0's key, derived from the `ethereum-package` mnemonic. Consumers
-reject proofs from validators that are not in the active set, so this has to be a real key. To
-regenerate it, or to use a different mnemonic or index:
+The seeding engine signs with validator 0's key, derived from the `ethereum-package` mnemonic, set
+in `optional-proofs.star`. Consumers reject proofs from validators that are not in the active set,
+so this has to be a real key. To regenerate it, or to use a different mnemonic or index:
 
 ```
 python3 scripts/tests/derive_validator_key.py "<mnemonic>" 0

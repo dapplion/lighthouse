@@ -7,7 +7,6 @@ edition = { workspace = true }
 [dependencies]
 beacon_chain = { workspace = true }
 beacon_processor = { workspace = true }
-bls = { workspace = true }
 directory = { workspace = true }
 dirs = { workspace = true }
 environment = { workspace = true }
@@ -17,7 +16,6 @@ ethereum_ssz = { workspace = true }
 execution_layer = { workspace = true }
 futures = { workspace = true }
 genesis = { workspace = true }
-hex = { workspace = true }
 http_api = { workspace = true }
 http_metrics = { path = "../http_metrics" }
 kzg = { workspace = true }
