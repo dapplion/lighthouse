@@ -353,6 +353,13 @@ Options:
       --quic-port6 <PORT>
           The UDP port that quic will listen on over IPv6 if listening over both
           IPv4 and IPv6. Defaults to `port6` + 1
+      --required-execution-proofs <COUNT>
+          EXPERIMENTAL. Number of distinct EIP-8025 proof systems that must
+          prove a payload before it is imported. Defaults to the built-in
+          requirement when --proof-engine-endpoint is set, and to 0 otherwise.
+          Set 0 to verify and propagate proofs without gating import, which is
+          what a proof producer needs: it cannot wait on a proof it has not made
+          yet.
       --self-limiter-protocols <self-limiter-protocols>
           Enables the outbound rate limiter (requests made by this node).Rate
           limit quotas per protocol can be set in the form of
