@@ -65,8 +65,8 @@ use beacon_processor::{
     DuplicateCache, GossipAggregatePackage, GossipAttestationBatch,
     work_reprocessing_queue::{
         QueuedAggregate, QueuedGossipBlock, QueuedGossipDataColumn, QueuedGossipEnvelope,
-        QueuedLightClientUpdate, QueuedPayloadAttestation, QueuedUnaggregate,
-        ReprocessQueueMessage,
+        QueuedGossipExecutionProof, QueuedLightClientUpdate, QueuedPayloadAttestation,
+        QueuedUnaggregate, ReprocessQueueMessage,
     },
 };
 
@@ -4135,19 +4135,65 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         };
     }
 
+    /// Hold an execution proof until its block arrives, or until the queue times it out.
+    fn queue_execution_proof_awaiting_block(
+        self: &Arc<Self>,
+        message_id: MessageId,
+        peer_id: PeerId,
+        execution_proof: Arc<SignedExecutionProof>,
+        beacon_block_root: Hash256,
+    ) {
+        debug!(
+            ?beacon_block_root,
+            "Queued execution proof awaiting its block"
+        );
+
+        let processor = self.clone();
+        let reprocess_msg =
+            ReprocessQueueMessage::UnknownBlockExecutionProof(QueuedGossipExecutionProof {
+                beacon_block_root,
+                process_fn: Box::pin(async move {
+                    processor
+                        .process_gossip_execution_proof(
+                            message_id,
+                            peer_id,
+                            execution_proof,
+                            // Do not queue this proof a second time.
+                            false,
+                        )
+                        .await
+                }),
+            });
+
+        if self
+            .beacon_processor_send
+            .try_send(WorkEvent {
+                drop_during_sync: false,
+                work: Work::Reprocess(reprocess_msg),
+            })
+            .is_err()
+        {
+            debug!(
+                ?beacon_block_root,
+                "Failed to queue execution proof for reprocessing"
+            );
+        }
+    }
+
     /// Process an EIP-8025 execution proof received over gossip.
     pub async fn process_gossip_execution_proof(
         self: Arc<Self>,
         message_id: MessageId,
         peer_id: PeerId,
         execution_proof: Arc<SignedExecutionProof>,
+        allow_reprocess: bool,
     ) {
         let beacon_block_root = execution_proof.beacon_block_root();
         let proof_type = execution_proof.proof_type();
 
         match self
             .chain
-            .verify_execution_proof_for_gossip(execution_proof)
+            .verify_execution_proof_for_gossip(execution_proof.clone())
             .await
         {
             Ok(verified) => {
@@ -4189,6 +4235,26 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             }
             Err(error) => {
                 debug!(%beacon_block_root, proof_type, ?error, "Could not verify execution proof");
+                if let ExecutionProofError::UnknownBlockRoot { beacon_block_root } = &error
+                    && allow_reprocess
+                {
+                    // The proof reached us before its block did. Proofs have no RPC, so dropping
+                    // one costs the payload its only chance to become available: queue it until
+                    // the block arrives instead.
+                    self.queue_execution_proof_awaiting_block(
+                        message_id.clone(),
+                        peer_id,
+                        execution_proof,
+                        *beacon_block_root,
+                    );
+                    self.propagate_validation_result(
+                        message_id,
+                        peer_id,
+                        MessageAcceptance::Ignore,
+                    );
+                    return;
+                }
+
                 let (acceptance, peer_action) = match &error {
                     // IGNORE: duplicates, unknown or finalized blocks.
                     ExecutionProofError::ProofAlreadySeen

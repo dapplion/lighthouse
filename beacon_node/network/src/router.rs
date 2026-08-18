@@ -544,6 +544,7 @@ impl<T: BeaconChainTypes> Router<T> {
                         message_id,
                         peer_id,
                         execution_proof,
+                        true,
                     ),
                 )
             }

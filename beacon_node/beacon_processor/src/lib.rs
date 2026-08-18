@@ -42,7 +42,7 @@ pub use crate::scheduler::BeaconProcessorQueueLengths;
 use crate::scheduler::work_queue::WorkQueues;
 use crate::work_reprocessing_queue::{
     QueuedBackfillBatch, QueuedColumnReconstruction, QueuedGossipBlock, QueuedGossipDataColumn,
-    QueuedGossipEnvelope, ReprocessQueueMessage,
+    QueuedGossipEnvelope, QueuedGossipExecutionProof, ReprocessQueueMessage,
 };
 use futures::stream::{Stream, StreamExt};
 use futures::task::Poll;
@@ -314,6 +314,12 @@ impl<E: EthSpec> From<ReadyWork> for WorkEvent<E> {
             ReadyWork::DataColumn(QueuedGossipDataColumn { process_fn, .. }) => Self {
                 drop_during_sync: true,
                 work: Work::UnknownBlockDataColumn { process_fn },
+            },
+            // Re-enters the normal gossip proof queue rather than one of its own. Proofs are low
+            // volume next to columns, so a released proof does not crowd out a fresh one.
+            ReadyWork::ExecutionProof(QueuedGossipExecutionProof { process_fn, .. }) => Self {
+                drop_during_sync: true,
+                work: Work::GossipExecutionProof(process_fn),
             },
         }
     }

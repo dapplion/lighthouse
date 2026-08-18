@@ -63,6 +63,10 @@ const QUEUED_DATA_COLUMN_DELAY_SLOTS: u32 = 1;
 /// sent for processing after this many slots worth of time, even if the block hasn't arrived.
 const QUEUED_ENVELOPE_DELAY_SLOTS: u32 = 1;
 
+/// Execution proof timeout as a multiplier of slot duration. Proofs waiting for their block will
+/// be sent for processing after this many slots worth of time, even if the block hasn't arrived.
+const QUEUED_EXECUTION_PROOF_DELAY_SLOTS: u32 = 1;
+
 /// For how long to queue rpc blocks before sending them back for reprocessing.
 pub const QUEUED_RPC_BLOCK_DELAY: Duration = Duration::from_secs(4);
 
@@ -85,6 +89,9 @@ const MAXIMUM_QUEUED_ATTESTATIONS: usize = 16_384;
 
 /// How many columns we keep before new ones get dropped.
 const MAXIMUM_QUEUED_DATA_COLUMNS: usize = 256;
+
+/// How many execution proofs we keep before new ones get dropped.
+const MAXIMUM_QUEUED_EXECUTION_PROOFS: usize = 256;
 
 /// How many light client updates we keep before new ones get dropped.
 const MAXIMUM_QUEUED_LIGHT_CLIENT_UPDATES: usize = 128;
@@ -146,6 +153,8 @@ pub enum ReprocessQueueMessage {
     BackfillSync(QueuedBackfillBatch),
     /// A gossip data column that references an unknown block.
     UnknownBlockDataColumn(QueuedGossipDataColumn),
+    /// A gossip execution proof that references an unknown block.
+    UnknownBlockExecutionProof(QueuedGossipExecutionProof),
     /// A delayed column reconstruction that needs checking
     DelayColumnReconstruction(QueuedColumnReconstruction),
 }
@@ -163,6 +172,7 @@ pub enum ReadyWork {
     BackfillSync(QueuedBackfillBatch),
     ColumnReconstruction(QueuedColumnReconstruction),
     DataColumn(QueuedGossipDataColumn),
+    ExecutionProof(QueuedGossipExecutionProof),
 }
 
 /// An Attestation for which the corresponding block was not seen while processing, queued for
@@ -238,6 +248,13 @@ pub struct QueuedGossipDataColumn {
     pub process_fn: BlockingFn,
 }
 
+/// An execution proof for which the referenced block was not known while processing, queued for
+/// later. Verification is async because it calls out to the proof engine.
+pub struct QueuedGossipExecutionProof {
+    pub beacon_block_root: Hash256,
+    pub process_fn: AsyncFn,
+}
+
 impl<E: EthSpec> TryFrom<WorkEvent<E>> for QueuedBackfillBatch {
     type Error = WorkEvent<E>;
 
@@ -282,6 +299,8 @@ enum InboundEvent {
     ReadyColumnReconstruction(QueuedColumnReconstruction),
     /// A gossip data column that is ready for re-processing.
     ReadyDataColumn(Hash256),
+    /// Gossip execution proofs that are ready for re-processing.
+    ReadyExecutionProof(Hash256),
     /// A message sent to the `ReprocessQueue`
     Msg(ReprocessQueueMessage),
 }
@@ -310,6 +329,8 @@ struct ReprocessQueue<S> {
     column_reconstructions_delay_queue: DelayQueue<QueuedColumnReconstruction>,
     /// Queue to manage gossip data column timeouts.
     data_columns_delay_queue: DelayQueue<Hash256>,
+    /// Queue to manage gossip execution proof timeouts.
+    execution_proofs_delay_queue: DelayQueue<Hash256>,
 
     /* Queued items */
     /// Queued blocks.
@@ -341,6 +362,11 @@ struct ReprocessQueue<S> {
     awaiting_data_columns_per_root: HashMap<Hash256, (Vec<QueuedGossipDataColumn>, DelayKey)>,
     /// Total number of queued gossip data columns across all roots.
     queued_data_columns_count: usize,
+    /// Queued gossip execution proofs awaiting their block, keyed by block root.
+    awaiting_execution_proofs_per_root:
+        HashMap<Hash256, (Vec<QueuedGossipExecutionProof>, DelayKey)>,
+    /// Total number of queued gossip execution proofs across all roots.
+    queued_execution_proofs_count: usize,
 
     /* Aux */
     /// Next attestation id, used for both aggregated and unaggregated attestations
@@ -353,6 +379,7 @@ struct ReprocessQueue<S> {
     attestation_delay_debounce: TimeLatch,
     lc_update_delay_debounce: TimeLatch,
     data_column_delay_debounce: TimeLatch,
+    execution_proof_delay_debounce: TimeLatch,
     next_backfill_batch_event: Option<Pin<Box<tokio::time::Sleep>>>,
     slot_clock: Arc<S>,
 }
@@ -485,6 +512,15 @@ impl<S: SlotClock> Stream for ReprocessQueue<S> {
             Poll::Ready(None) | Poll::Pending => (),
         }
 
+        match self.execution_proofs_delay_queue.poll_expired(cx) {
+            Poll::Ready(Some(block_root)) => {
+                return Poll::Ready(Some(InboundEvent::ReadyExecutionProof(
+                    block_root.into_inner(),
+                )));
+            }
+            Poll::Ready(None) | Poll::Pending => (),
+        }
+
         if let Some(next_backfill_batch_event) = self.next_backfill_batch_event.as_mut() {
             match next_backfill_batch_event.as_mut().poll(cx) {
                 Poll::Ready(_) => {
@@ -555,6 +591,7 @@ impl<S: SlotClock> ReprocessQueue<S> {
             lc_updates_delay_queue: DelayQueue::new(),
             column_reconstructions_delay_queue: DelayQueue::new(),
             data_columns_delay_queue: DelayQueue::new(),
+            execution_proofs_delay_queue: DelayQueue::new(),
             queued_gossip_block_roots: HashSet::new(),
             awaiting_envelopes_per_root: HashMap::new(),
             queued_early_envelope_block_roots: HashSet::new(),
@@ -569,6 +606,8 @@ impl<S: SlotClock> ReprocessQueue<S> {
             queued_column_reconstructions: HashMap::new(),
             awaiting_data_columns_per_root: HashMap::new(),
             queued_data_columns_count: 0,
+            awaiting_execution_proofs_per_root: HashMap::new(),
+            queued_execution_proofs_count: 0,
             next_attestation: 0,
             next_lc_update: 0,
             early_block_debounce: TimeLatch::default(),
@@ -578,6 +617,7 @@ impl<S: SlotClock> ReprocessQueue<S> {
             attestation_delay_debounce: TimeLatch::default(),
             lc_update_delay_debounce: TimeLatch::default(),
             data_column_delay_debounce: TimeLatch::default(),
+            execution_proof_delay_debounce: TimeLatch::default(),
             next_backfill_batch_event: None,
             slot_clock,
         }
@@ -898,6 +938,37 @@ impl<S: SlotClock> ReprocessQueue<S> {
 
                 self.queued_data_columns_count += 1;
             }
+            InboundEvent::Msg(UnknownBlockExecutionProof(queued_execution_proof)) => {
+                let block_root = queued_execution_proof.beacon_block_root;
+
+                if self.queued_execution_proofs_count >= MAXIMUM_QUEUED_EXECUTION_PROOFS {
+                    if self.execution_proof_delay_debounce.elapsed() {
+                        warn!(
+                            queue_size = MAXIMUM_QUEUED_EXECUTION_PROOFS,
+                            msg = "system resources may be saturated",
+                            "Execution proof delay queue is full, dropping proof"
+                        );
+                    }
+                    return;
+                }
+
+                if let Some((proofs, _delay_key)) =
+                    self.awaiting_execution_proofs_per_root.get_mut(&block_root)
+                {
+                    // Append to existing entry; the timer for this root is already running.
+                    proofs.push(queued_execution_proof);
+                } else {
+                    let delay_key = self.execution_proofs_delay_queue.insert(
+                        block_root,
+                        self.slot_clock.slot_duration() * QUEUED_EXECUTION_PROOF_DELAY_SLOTS,
+                    );
+
+                    self.awaiting_execution_proofs_per_root
+                        .insert(block_root, (vec![queued_execution_proof], delay_key));
+                }
+
+                self.queued_execution_proofs_count += 1;
+            }
             InboundEvent::Msg(UnknownLightClientOptimisticUpdate(
                 queued_light_client_optimistic_update,
             )) => {
@@ -1031,6 +1102,28 @@ impl<S: SlotClock> ReprocessQueue<S> {
                             .is_err()
                         {
                             error!(?block_root, "Failed to send data column for reprocessing");
+                        }
+                    }
+                }
+
+                // Unqueue the execution proofs we have for this root, if any.
+                if let Some((execution_proofs, delay_key)) =
+                    self.awaiting_execution_proofs_per_root.remove(&block_root)
+                {
+                    self.execution_proofs_delay_queue.remove(&delay_key);
+                    self.queued_execution_proofs_count = self
+                        .queued_execution_proofs_count
+                        .saturating_sub(execution_proofs.len());
+                    for execution_proof in execution_proofs {
+                        if self
+                            .ready_work_tx
+                            .try_send(ReadyWork::ExecutionProof(execution_proof))
+                            .is_err()
+                        {
+                            error!(
+                                ?block_root,
+                                "Failed to send execution proof for reprocessing"
+                            );
                         }
                     }
                 }
@@ -1392,6 +1485,31 @@ impl<S: SlotClock> ReprocessQueue<S> {
                             error!(
                                 hint = "system may be overloaded",
                                 "Ignored expired gossip data column"
+                            );
+                        }
+                    }
+                }
+            }
+            InboundEvent::ReadyExecutionProof(block_root) => {
+                if let Some((execution_proofs, _)) =
+                    self.awaiting_execution_proofs_per_root.remove(&block_root)
+                {
+                    debug!(
+                        ?block_root,
+                        "Execution proofs timed out waiting for block, sending for processing"
+                    );
+                    self.queued_execution_proofs_count = self
+                        .queued_execution_proofs_count
+                        .saturating_sub(execution_proofs.len());
+                    for execution_proof in execution_proofs {
+                        if self
+                            .ready_work_tx
+                            .try_send(ReadyWork::ExecutionProof(execution_proof))
+                            .is_err()
+                        {
+                            error!(
+                                hint = "system may be overloaded",
+                                "Ignored expired gossip execution proof"
                             );
                         }
                     }
@@ -2236,6 +2354,69 @@ mod tests {
 
         // The entry for the block root should be gone.
         assert!(queue.awaiting_envelopes_per_root.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execution_proofs_released_on_block_imported() {
+        create_test_tracing_subscriber();
+
+        let mut queue = test_queue();
+        tokio::time::pause();
+
+        let beacon_block_root = Hash256::repeat_byte(0xbe);
+
+        // Two proofs for the same block, as a gated node needs before it can import a payload.
+        for _ in 0..2 {
+            queue.handle_message(InboundEvent::Msg(
+                ReprocessQueueMessage::UnknownBlockExecutionProof(QueuedGossipExecutionProof {
+                    beacon_block_root,
+                    process_fn: Box::pin(async {}),
+                }),
+            ));
+        }
+
+        // Both share one entry, and one timer.
+        assert_eq!(queue.awaiting_execution_proofs_per_root.len(), 1);
+        assert_eq!(queue.queued_execution_proofs_count, 2);
+
+        // The block arriving releases both, rather than either being dropped.
+        queue.handle_message(InboundEvent::Msg(ReprocessQueueMessage::BlockImported {
+            block_root: beacon_block_root,
+        }));
+
+        assert!(queue.awaiting_execution_proofs_per_root.is_empty());
+        assert_eq!(queue.queued_execution_proofs_count, 0);
+    }
+
+    #[tokio::test]
+    async fn prune_awaiting_execution_proofs_per_root() {
+        create_test_tracing_subscriber();
+
+        let mut queue = test_queue();
+        tokio::time::pause();
+
+        let beacon_block_root = Hash256::repeat_byte(0xbf);
+
+        queue.handle_message(InboundEvent::Msg(
+            ReprocessQueueMessage::UnknownBlockExecutionProof(QueuedGossipExecutionProof {
+                beacon_block_root,
+                process_fn: Box::pin(async {}),
+            }),
+        ));
+        assert_eq!(queue.awaiting_execution_proofs_per_root.len(), 1);
+
+        // A block that never arrives must not pin the proof in the queue forever.
+        advance_time(
+            &queue.slot_clock,
+            queue.slot_clock.slot_duration() * QUEUED_EXECUTION_PROOF_DELAY_SLOTS * 2,
+        )
+        .await;
+        let ready_msg = queue.next().await.unwrap();
+        assert!(matches!(ready_msg, InboundEvent::ReadyExecutionProof(_)));
+        queue.handle_message(ready_msg);
+
+        assert!(queue.awaiting_execution_proofs_per_root.is_empty());
+        assert_eq!(queue.queued_execution_proofs_count, 0);
     }
 
     #[tokio::test]

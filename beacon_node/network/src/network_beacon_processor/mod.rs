@@ -463,16 +463,25 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     }
 
     /// Create a new `Work` event for some execution proof.
+    ///
+    /// `allow_reprocess` is false when this proof is already coming back from the reprocess queue,
+    /// so that a proof whose block never arrives cannot be queued forever.
     pub fn send_gossip_execution_proof(
         self: &Arc<Self>,
         message_id: MessageId,
         peer_id: PeerId,
         execution_proof: Arc<SignedExecutionProof>,
+        allow_reprocess: bool,
     ) -> Result<(), Error<T::EthSpec>> {
         let processor = self.clone();
         let process_fn = async move {
             processor
-                .process_gossip_execution_proof(message_id, peer_id, execution_proof)
+                .process_gossip_execution_proof(
+                    message_id,
+                    peer_id,
+                    execution_proof,
+                    allow_reprocess,
+                )
                 .await
         };
 
