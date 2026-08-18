@@ -241,6 +241,7 @@ where
             .event_handler(event_handler)
             .execution_layer(execution_layer)
             .proof_engine(proof_engine)
+            .required_execution_proofs(config.required_execution_proofs)
             .execution_proof_producer(execution_proof_producer)
             .node_custody_type(config.chain.node_custody_type)
             .ordered_custody_column_indices(ordered_custody_column_indices)

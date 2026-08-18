@@ -95,6 +95,7 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     execution_layer: Option<ExecutionLayer<T::EthSpec>>,
     proof_engine: Option<Arc<ProofEngine>>,
     execution_proof_producer: Option<ExecutionProofProducer>,
+    required_execution_proofs: Option<usize>,
     event_handler: Option<ServerSentEventHandler<T::EthSpec>>,
     slot_clock: Option<T::SlotClock>,
     shutdown_sender: Option<Sender<ShutdownReason>>,
@@ -139,6 +140,7 @@ where
             execution_layer: None,
             proof_engine: None,
             execution_proof_producer: None,
+            required_execution_proofs: None,
             event_handler: None,
             slot_clock: None,
             shutdown_sender: None,
@@ -646,6 +648,12 @@ where
         self
     }
 
+    /// Overrides how many distinct proof systems must prove a payload before it is imported.
+    pub fn required_execution_proofs(mut self, required_execution_proofs: Option<usize>) -> Self {
+        self.required_execution_proofs = required_execution_proofs;
+        self
+    }
+
     /// Sets the node custody type for data column import.
     pub fn node_custody_type(mut self, node_custody_type: NodeCustodyType) -> Self {
         self.node_custody_type = node_custody_type;
@@ -997,12 +1005,16 @@ where
         debug!(?custody_context, "Loaded persisted custody context");
         let custody_context = Arc::new(custody_context);
 
-        // Without a proof engine we can't verify proofs, so we don't require them.
-        let required_execution_proofs = if self.proof_engine.is_some() {
-            REQUIRED_EXECUTION_PROOFS
-        } else {
-            0
-        };
+        // Without a proof engine we can't verify proofs, so we don't require them. A producer
+        // has an engine but must be able to import payloads it has not yet proven, so it sets
+        // the override to zero.
+        let required_execution_proofs = self.required_execution_proofs.unwrap_or({
+            if self.proof_engine.is_some() {
+                REQUIRED_EXECUTION_PROOFS
+            } else {
+                0
+            }
+        });
 
         let beacon_chain = BeaconChain {
             spec: self.spec.clone(),

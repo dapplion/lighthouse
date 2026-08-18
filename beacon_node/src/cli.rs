@@ -882,6 +882,19 @@ pub fn cli_app() -> Command {
                 .display_order(0)
         )
         .arg(
+            Arg::new("required-execution-proofs")
+                .long("required-execution-proofs")
+                .value_name("COUNT")
+                .help("EXPERIMENTAL. Number of distinct EIP-8025 proof systems that must prove a \
+                       payload before it is imported. Defaults to the built-in requirement when \
+                       --proof-engine-endpoint is set, and to 0 otherwise. Set 0 to verify and \
+                       propagate proofs without gating import, which is what a proof producer \
+                       needs: it cannot wait on a proof it has not made yet.")
+                .action(ArgAction::Set)
+                .requires("proof-engine-endpoint")
+                .display_order(0)
+        )
+        .arg(
             Arg::new("proof-engine-endpoint")
                 .long("proof-engine-endpoint")
                 .value_name("PROOF-ENGINE-ENDPOINT")

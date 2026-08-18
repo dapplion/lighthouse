@@ -4066,7 +4066,12 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 self.notify_payload_envelope_imported(*block_root, EnvelopeSource::Gossip);
                 self.publish_execution_proofs(*block_root).await;
             }
-            Ok(_) => {}
+            Ok(AvailabilityProcessingStatus::MissingComponents(_, block_root)) => {
+                // The envelope executed and is cached, it just isn't importable yet. A producer
+                // proves what it executed, so it must not wait for import: on a node that gates
+                // import on proofs, waiting for import would be waiting for its own proof.
+                self.publish_execution_proofs(*block_root).await;
+            }
             Err(e) => {
                 debug!(
                     ?beacon_block_root,
@@ -4078,7 +4083,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         }
     }
 
-    /// Produce execution proofs for an imported payload and gossip them, on devnet seeder nodes.
+    /// Produce execution proofs for an executed payload and gossip them, on devnet seeder nodes.
     ///
     /// A no-op unless this node is configured as a proof producer.
     async fn publish_execution_proofs(&self, block_root: Hash256) {

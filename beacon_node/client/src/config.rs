@@ -78,6 +78,8 @@ pub struct Config {
     pub chain: beacon_chain::ChainConfig,
     pub execution_layer: Option<execution_layer::Config>,
     pub proof_engine_endpoint: Option<SensitiveUrl>,
+    /// Overrides how many distinct proof systems must prove a payload before it is imported.
+    pub required_execution_proofs: Option<usize>,
     /// Devnet-only: BLS secret key, validator index and proof types used to seed execution proofs.
     pub execution_proof_producer: Option<ExecutionProofProducerConfig>,
     pub trusted_setup: Vec<u8>,
@@ -106,6 +108,7 @@ impl Default for Config {
             chain: <_>::default(),
             execution_layer: None,
             proof_engine_endpoint: None,
+            required_execution_proofs: None,
             execution_proof_producer: None,
             trusted_setup: get_trusted_setup(),
             beacon_graffiti: GraffitiOrigin::default(),

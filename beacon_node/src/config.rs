@@ -343,6 +343,9 @@ pub fn get_config<E: EthSpec>(
         client_config.network.enable_execution_proof = true;
     }
 
+    client_config.required_execution_proofs =
+        clap_utils::parse_optional(cli_args, "required-execution-proofs")?;
+
     // Parse and set the devnet-only execution proof producer, if any.
     if let Some(secret_key) = cli_args.get_one::<String>("proof-producer-secret-key") {
         let validator_index =
