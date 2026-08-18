@@ -6000,6 +6000,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9366861eb2a2c436c20b12c8dbec5f798cea6b47ad99216be0282942e2c81ea0"
 
 [[package]]
+name = "mock_proof_engine"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "bls",
+ "clap",
+ "ethereum_ssz",
+ "hex",
+ "reqwest",
+ "serde",
+ "sha2",
+ "tokio",
+ "tree_hash",
+ "types",
+ "zip",
+]
+
+[[package]]
 name = "mockall"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7154,6 +7172,7 @@ dependencies = [
 name = "proof_engine"
 version = "0.1.0"
 dependencies = [
+ "ethereum_ssz",
  "reqwest",
  "sensitive_url",
  "serde",

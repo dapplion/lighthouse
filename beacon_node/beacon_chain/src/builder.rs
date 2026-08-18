@@ -629,7 +629,6 @@ where
         self
     }
 
-    /// Sets the `BeaconChain` proof engine.
     pub fn proof_engine(mut self, proof_engine: Option<Arc<ProofEngine>>) -> Self {
         self.proof_engine = proof_engine;
         self

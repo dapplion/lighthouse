@@ -4059,13 +4059,19 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         // register_process_result_metrics(&result, metrics::BlockSource::Gossip, "envelope");
 
         match &result {
-            Ok(AvailabilityProcessingStatus::Imported(_, block_root)) => {
+            Ok(AvailabilityProcessingStatus::Imported(slot, block_root)) => {
                 self.chain.recompute_head_at_current_slot().await;
                 // The payload envelope is imported (`is_payload_received` is now true); release any
                 // attestations awaiting this block's payload so they can be re-processed.
                 self.notify_payload_envelope_imported(*block_root, EnvelopeSource::Gossip);
+                self.publish_execution_proofs(*block_root, *slot).await;
             }
-            Ok(_) => {}
+            Ok(AvailabilityProcessingStatus::MissingComponents(slot, block_root)) => {
+                // The envelope executed and is cached, it just isn't importable yet. Seed from it
+                // anyway: a node that gates import on proofs would otherwise never reach the point
+                // where it seeds the proofs it is holding.
+                self.publish_execution_proofs(*block_root, *slot).await;
+            }
             Err(e) => {
                 debug!(
                     ?beacon_block_root,
@@ -4075,6 +4081,50 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 );
             }
         }
+    }
+
+    /// Gossip the execution proofs our proof engine holds for an executed payload.
+    ///
+    /// A no-op unless the engine produces proofs as well as verifying them. The proofs are also
+    /// imported here: they are already signed by the engine and need no gossip verification, and
+    /// a seeding node would otherwise gate its own payload on a proof it has already been given.
+    async fn publish_execution_proofs(&self, block_root: Hash256, block_slot: Slot) {
+        let proofs = self.chain.fetch_execution_proofs(block_root).await;
+        if proofs.is_empty() {
+            return;
+        }
+
+        let mut messages = Vec::with_capacity(proofs.len());
+        for proof in proofs {
+            let proof = Arc::new(proof);
+            debug!(
+                ?block_root,
+                proof_type = proof.proof_type(),
+                "Publishing execution proof"
+            );
+            messages.push(PubsubMessage::ExecutionProof(proof.clone()));
+
+            match self
+                .chain
+                .check_execution_proof_availability_and_import(proof, block_slot)
+                .await
+            {
+                Ok(AvailabilityProcessingStatus::Imported(slot, block_root)) => {
+                    info!(?block_root, %slot, "Execution payload envelope imported after execution proof");
+                    self.chain.recompute_head_at_current_slot().await;
+                    self.notify_payload_envelope_imported(block_root, EnvelopeSource::Gossip);
+                }
+                Ok(AvailabilityProcessingStatus::MissingComponents(..)) => {}
+                Err(error) => {
+                    debug!(
+                        ?block_root,
+                        ?error,
+                        "Could not cache our own execution proof"
+                    );
+                }
+            }
+        }
+        self.send_network_message(NetworkMessage::Publish { messages });
     }
 
     /// Inform the reprocess queue that a fully available block (or its payload envelope, post-gloas)
@@ -4162,7 +4212,10 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 // This may be the proof the block's envelope was waiting on.
                 match self
                     .chain
-                    .check_execution_proof_availability_and_import(verified)
+                    .check_execution_proof_availability_and_import(
+                        verified.proof,
+                        verified.block_slot,
+                    )
                     .await
                 {
                     Ok(AvailabilityProcessingStatus::Imported(slot, block_root)) => {
