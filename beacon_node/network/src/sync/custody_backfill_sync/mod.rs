@@ -6,7 +6,7 @@ use std::{
 
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use lighthouse_network::{
-    NetworkGlobals, PeerAction, PeerId,
+    NetworkGlobals, PeerId,
     service::api_types::{CustodyBackFillBatchRequestId, CustodyBackfillBatchId},
     types::CustodyBackFillState,
 };
@@ -23,9 +23,8 @@ use crate::sync::{
         BatchConfig, BatchId, BatchInfo, BatchMetricsState, BatchOperationOutcome,
         BatchProcessingResult, BatchState, ByRangeRequestType,
     },
-    block_sidecar_coupling::CouplingError,
     manager::CustodyBatchProcessResult,
-    network_context::{RpcResponseError, SyncNetworkContext},
+    network_context::{CustodyByRootResult, SyncNetworkContext},
 };
 
 /// The maximum number of batches to queue before requesting more.
@@ -390,13 +389,29 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
             .custody_context
             .column_data_availability_boundary()?;
 
-        // Skip all batches (Epochs) that don't have missing columns.
+        // Skip all batches (Epochs) with nothing to download: either we already custody every
+        // column we need, or no block of the epoch has data.
+        let mut next_batch_request = None;
         for epoch in Epoch::range_inclusive_rev(self.to_be_downloaded, column_da_boundary) {
             let missing_columns = self.beacon_chain.get_missing_columns_for_epoch(epoch);
 
             if !missing_columns.is_empty() {
-                self.to_be_downloaded = epoch;
-                break;
+                let block_roots = match self.beacon_chain.data_bearing_block_roots_for_epoch(epoch)
+                {
+                    Ok(block_roots) => block_roots,
+                    Err(e) => {
+                        // The blocks of this epoch are already in the database, so this should
+                        // never happen. Stop including batches and retry on the next round.
+                        error!(%epoch, error = ?e, "Unable to read the block roots of a custody backfill epoch");
+                        return None;
+                    }
+                };
+
+                if !block_roots.is_empty() {
+                    self.to_be_downloaded = epoch;
+                    next_batch_request = Some((missing_columns, block_roots));
+                    break;
+                }
             }
 
             // This batch is being skipped, insert it into the skipped batches mapping.
@@ -451,11 +466,16 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                 self.include_next_batch()
             }
             Entry::Vacant(entry) => {
-                let missing_columns = self.beacon_chain.get_missing_columns_for_epoch(batch_id);
+                // The loop above breaks with the request of `self.to_be_downloaded` before
+                // reaching this point, so this is always `Some`.
+                let (missing_columns, block_roots) = next_batch_request?;
                 entry.insert(BatchInfo::new(
                     &batch_id,
                     CUSTODY_BACKFILL_EPOCHS_PER_BATCH,
-                    ByRangeRequestType::Columns(missing_columns),
+                    ByRangeRequestType::CustodyColumns {
+                        indices: missing_columns.into_iter().collect(),
+                        block_roots,
+                    },
                 ));
                 if self.would_complete(batch_id) {
                     self.last_batch_downloaded = true;
@@ -546,8 +566,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
         &mut self,
         network: &mut SyncNetworkContext<T>,
         req_id: CustodyBackFillBatchRequestId,
-        peer_id: &PeerId,
-        resp: Result<DataColumnSidecarList<T::EthSpec>, RpcResponseError>,
+        resp: CustodyByRootResult<T::EthSpec>,
     ) -> Result<ProcessResult, CustodyBackfillError> {
         if req_id.batch_id.run_id != self.run_id {
             debug!(%req_id, "Ignoring custody backfill download response from different run_id");
@@ -573,10 +592,18 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
         }
 
         match resp {
-            Ok(data_columns) => {
-                let received = data_columns.len();
+            Ok(download_result) => {
+                let received = download_result.value.len();
+                // A custody-by-root request may be served by many peers. The batch tracks a single
+                // peer for logging and for the processing attempt, so pick one of the group.
+                let peer_id = download_result
+                    .peer_group
+                    .all()
+                    .next()
+                    .copied()
+                    .unwrap_or_else(PeerId::random);
 
-                match batch.download_completed(data_columns, *peer_id) {
+                match batch.download_completed(download_result.value, peer_id) {
                     Ok(_) => {
                         let awaiting_batches = self.processing_target.saturating_sub(batch_id)
                             / CUSTODY_BACKFILL_EPOCHS_PER_BATCH;
@@ -600,33 +627,10 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
             Err(err) => {
                 debug!(batch_epoch = %batch_id, error = ?err, "Batch download failed");
 
-                // If there are any coupling errors, penalize the appropriate peers.
-                if let RpcResponseError::BlockComponentCouplingError(coupling_error) = err
-                    && let CouplingError::DataColumnPeerFailure {
-                        error,
-                        faulty_peers,
-                    } = coupling_error
-                {
-                    let mut failed_peers = HashSet::new();
-                    for (column_index, faulty_peer) in faulty_peers {
-                        debug!(
-                            ?error,
-                            ?column_index,
-                            ?faulty_peer,
-                            "Custody backfill sync: peer failed to serve column"
-                        );
-                        failed_peers.insert(faulty_peer);
-                    }
-                    for peer in failed_peers {
-                        network.report_peer(
-                            peer,
-                            PeerAction::LowToleranceError,
-                            "Peer failed to serve column",
-                        );
-                    }
-                }
-
-                match batch.download_failed(Some(*peer_id)) {
+                // Peers are scored by the `data_columns_by_root` request machinery, which knows
+                // which peer served which column. The batch has no single peer to attribute the
+                // failure to.
+                match batch.download_failed(None) {
                     Err(e) => {
                         self.fail_sync(CustodyBackfillError::BatchInvalidState(batch_id, e.0))?;
                     }
@@ -1043,21 +1047,30 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                 .cloned()
                 .collect::<HashSet<_>>();
 
-            let request = batch.to_data_columns_by_range_request().map_err(|_| {
-                CustodyBackfillError::InvalidSyncState(
-                    "Can't convert to data column by range request".to_string(),
-                )
-            })?;
-            let failed_peers = batch.failed_peers();
+            if synced_peers.is_empty() {
+                debug!(
+                    "reason" = "insufficient_synced_peers",
+                    "Custody sync paused"
+                );
+                self.pause("Insufficient peers".to_string());
+                return Err(CustodyBackfillError::Paused);
+            }
 
-            match network.custody_backfill_data_columns_batch_request(
-                request,
+            let (columns_to_fetch, block_roots) =
+                batch.to_custody_columns_request().map_err(|_| {
+                    CustodyBackfillError::InvalidSyncState(
+                        "Can't convert to custody columns by root request".to_string(),
+                    )
+                })?;
+
+            match network.custody_backfill_columns_request(
                 CustodyBackfillBatchId {
                     epoch: batch_id,
                     run_id: self.run_id,
                 },
+                &block_roots,
+                columns_to_fetch,
                 &synced_peers,
-                &failed_peers,
             ) {
                 Ok(request_id) => {
                     // inform the batch about the new request

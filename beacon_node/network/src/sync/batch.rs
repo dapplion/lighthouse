@@ -2,7 +2,6 @@ use beacon_chain::block_verification_types::RangeSyncBlock;
 use educe::Educe;
 use lighthouse_network::PeerId;
 use lighthouse_network::rpc::methods::BlocksByRangeRequest;
-use lighthouse_network::rpc::methods::DataColumnsByRangeRequest;
 use lighthouse_network::service::api_types::Id;
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -12,7 +11,7 @@ use std::time::Duration;
 use std::time::Instant;
 use strum::{Display, EnumIter, IntoStaticStr};
 use types::Slot;
-use types::{DataColumnSidecarList, Epoch, EthSpec};
+use types::{ColumnIndex, DataColumnSidecarList, Epoch, EthSpec, Hash256};
 
 /// Batch states used as metrics labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter, IntoStaticStr)]
@@ -36,7 +35,12 @@ pub enum ByRangeRequestType {
     BlocksAndBlobs,
     BlocksAndEnvelopesAndColumns,
     Blocks,
-    Columns(HashSet<u64>),
+    /// Custody columns fetched by root for blocks already in the database. Used by custody
+    /// backfill sync.
+    CustodyColumns {
+        indices: Vec<ColumnIndex>,
+        block_roots: Vec<Hash256>,
+    },
 }
 
 /// Allows customisation of the above constants used in other sync methods such as BackFillSync.
@@ -471,18 +475,17 @@ impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B, Vec<RangeSyncBlock<E>>> {
 
 // BatchInfo implementation for CustodyBackFillSync
 impl<E: EthSpec, B: BatchConfig> BatchInfo<E, B, DataColumnSidecarList<E>> {
-    /// Returns a DataColumnsByRange request associated with the batch.
-    pub fn to_data_columns_by_range_request(
+    /// Returns the columns to fetch by root and the roots of the blocks they belong to.
+    pub fn to_custody_columns_request(
         &self,
-    ) -> Result<DataColumnsByRangeRequest, WrongState> {
+    ) -> Result<(Vec<ColumnIndex>, Vec<Hash256>), WrongState> {
         match &self.batch_type {
-            ByRangeRequestType::Columns(columns) => Ok(DataColumnsByRangeRequest {
-                start_slot: self.start_slot.into(),
-                count: self.end_slot.sub(self.start_slot).into(),
-                columns: columns.clone().into_iter().collect(),
-            }),
+            ByRangeRequestType::CustodyColumns {
+                indices,
+                block_roots,
+            } => Ok((indices.clone(), block_roots.clone())),
             _ => Err(WrongState(
-                "Custody backfill sync can only make data columns by range requests.".to_string(),
+                "Custody backfill sync can only make custody columns by root requests.".to_string(),
             )),
         }
     }

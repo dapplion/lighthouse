@@ -1,5 +1,4 @@
 use crate::rpc::methods::{ResponseTermination, RpcResponse, RpcSuccessResponse, StatusMessage};
-use libp2p::PeerId;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use types::{
@@ -29,8 +28,6 @@ pub enum SyncRequestId {
     BlocksByRange(BlocksByRangeRequestId),
     /// Blobs by range request
     BlobsByRange(BlobsByRangeRequestId),
-    /// Data columns by range request
-    DataColumnsByRange(DataColumnsByRangeRequestId),
     /// Payload envelopes by range request
     PayloadEnvelopesByRange(PayloadEnvelopesByRangeRequestId),
 }
@@ -63,24 +60,6 @@ pub struct BlobsByRangeRequestId {
 pub struct PayloadEnvelopesByRangeRequestId {
     pub id: Id,
     pub parent_request_id: ComponentsByRangeRequestId,
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub struct DataColumnsByRangeRequestId {
-    /// Id to identify this attempt at a data_columns_by_range request for `parent_request_id`
-    pub id: Id,
-    /// The Id of the overall By Range request for either a components by range request or a custody backfill request.
-    pub parent_request_id: DataColumnsByRangeRequester,
-    /// The peer id associated with the request.
-    ///
-    /// This is useful to penalize the peer at a later point if it returned data columns that
-    /// did not match with the verified block.
-    pub peer: PeerId,
-}
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum DataColumnsByRangeRequester {
-    CustodyBackfillSync(CustodyBackFillBatchRequestId),
 }
 
 /// Block components by range request for range sync. Includes an ID for downstream consumers to
@@ -143,6 +122,7 @@ pub struct CustodyId {
 pub enum CustodyRequester {
     SingleLookup(SingleLookupReqId),
     RangeSync(ComponentsByRangeRequestId),
+    CustodyBackfillSync(CustodyBackFillBatchRequestId),
 }
 
 /// Application level requests sent to the network.
@@ -268,7 +248,6 @@ macro_rules! impl_display {
 // not losing information
 impl_display!(BlocksByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(BlobsByRangeRequestId, "{}/{}", id, parent_request_id);
-impl_display!(DataColumnsByRangeRequestId, "{}/{}", id, parent_request_id);
 impl_display!(
     PayloadEnvelopesByRangeRequestId,
     "{}/{}",
@@ -295,6 +274,7 @@ impl Display for CustodyRequester {
         match self {
             Self::SingleLookup(id) => write!(f, "{id}"),
             Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
+            Self::CustodyBackfillSync(id) => write!(f, "CustodyBackfill/{id}"),
         }
     }
 }
@@ -304,14 +284,6 @@ impl Display for RangeRequestId {
         match self {
             Self::RangeSync { chain_id, batch_id } => write!(f, "RangeSync/{batch_id}/{chain_id}"),
             Self::BackfillSync { batch_id } => write!(f, "BackfillSync/{batch_id}"),
-        }
-    }
-}
-
-impl Display for DataColumnsByRangeRequester {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CustodyBackfillSync(id) => write!(f, "CustodyBackfill/{id}"),
         }
     }
 }
@@ -335,20 +307,19 @@ mod tests {
     }
 
     #[test]
-    fn display_id_data_columns_by_range() {
-        let id = DataColumnsByRangeRequestId {
+    fn display_id_data_columns_by_root_custody_backfill() {
+        let id = DataColumnsByRootRequestId {
             id: 123,
-            parent_request_id: DataColumnsByRangeRequester::CustodyBackfillSync(
-                CustodyBackFillBatchRequestId {
+            requester: DataColumnsByRootRequester::Custody(CustodyId {
+                requester: CustodyRequester::CustodyBackfillSync(CustodyBackFillBatchRequestId {
                     id: 122,
                     batch_id: CustodyBackfillBatchId {
                         epoch: Epoch::new(0),
                         run_id: 54,
                     },
-                },
-            ),
-            peer: PeerId::random(),
+                }),
+            }),
         };
-        assert_eq!(format!("{id}"), "123/CustodyBackfill/122/0/54");
+        assert_eq!(format!("{id}"), "123/Custody/CustodyBackfill/122/0/54");
     }
 }

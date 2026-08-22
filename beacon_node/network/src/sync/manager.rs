@@ -47,7 +47,7 @@ use crate::service::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::block_lookups::{BlockComponent, DownloadResult};
 use crate::sync::custody_backfill_sync::CustodyBackFillSync;
-use crate::sync::network_context::{PeerGroup, RpcResponseResult};
+use crate::sync::network_context::PeerGroup;
 use beacon_chain::block_verification_types::AsBlock;
 use beacon_chain::{BeaconChain, BeaconChainTypes, EngineState};
 use futures::StreamExt;
@@ -55,8 +55,7 @@ use lighthouse_network::SyncInfo;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
     BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
+    CustodyBackfillBatchId, CustodyRequester, DataColumnsByRootRequestId,
     DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
     SyncRequestId,
 };
@@ -347,11 +346,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn network_context(&mut self) -> &mut SyncNetworkContext<T> {
-        &mut self.network
-    }
-
-    #[cfg(test)]
     pub(crate) fn get_range_sync_chains(
         &self,
     ) -> Result<Option<(RangeSyncType, Slot, Slot)>, &'static str> {
@@ -514,9 +508,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             }
             SyncRequestId::BlobsByRange(req_id) => {
                 self.on_blobs_by_range_response(req_id, peer_id, RpcEvent::RPCError(error))
-            }
-            SyncRequestId::DataColumnsByRange(req_id) => {
-                self.on_data_columns_by_range_response(req_id, peer_id, RpcEvent::RPCError(error))
             }
             SyncRequestId::PayloadEnvelopesByRange(req_id) => self
                 .on_payload_envelopes_by_range_response(req_id, peer_id, RpcEvent::RPCError(error)),
@@ -1240,13 +1231,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     RpcEvent::from_chunk(data_column),
                 );
             }
-            SyncRequestId::DataColumnsByRange(req_id) => {
-                self.on_data_columns_by_range_response(
-                    req_id,
-                    peer_id,
-                    RpcEvent::from_chunk(data_column),
-                );
-            }
             _ => {
                 crit!(%peer_id, "bad request id for data_column");
             }
@@ -1343,22 +1327,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         }
     }
 
-    fn on_data_columns_by_range_response(
-        &mut self,
-        id: DataColumnsByRangeRequestId,
-        peer_id: PeerId,
-        data_column: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
-    ) {
-        if let Some(resp) = self
-            .network
-            .on_data_columns_by_range_response(id, peer_id, data_column)
-        {
-            let DataColumnsByRangeRequester::CustodyBackfillSync(custody_backfill_req_id) =
-                id.parent_request_id;
-            self.on_custody_backfill_columns_response(custody_backfill_req_id, id, peer_id, resp);
-        }
-    }
-
     fn on_custody_by_root_result(
         &mut self,
         requester: CustodyRequester,
@@ -1383,6 +1351,20 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     PeerId::random(),
                     RangeBlockComponent::CustodyResult(response, peer_group),
                 );
+            }
+            CustodyRequester::CustodyBackfillSync(id) => {
+                match self.custody_backfill_sync.on_data_column_response(
+                    &mut self.network,
+                    id,
+                    response,
+                ) {
+                    Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
+                    Ok(ProcessResult::Successful) => {}
+                    Err(_e) => {
+                        // The custody sync has failed, errors are reported within.
+                        self.update_sync_state();
+                    }
+                }
             }
         }
     }
@@ -1458,36 +1440,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                         }
                     }
                 },
-            }
-        }
-    }
-
-    /// Handles receiving a response for a custody range sync request that has columns.
-    fn on_custody_backfill_columns_response(
-        &mut self,
-        custody_sync_request_id: CustodyBackFillBatchRequestId,
-        req_id: DataColumnsByRangeRequestId,
-        peer_id: PeerId,
-        data_columns: RpcResponseResult<Vec<Arc<DataColumnSidecar<T::EthSpec>>>>,
-    ) {
-        if let Some(resp) = self.network.custody_backfill_data_columns_response(
-            custody_sync_request_id,
-            req_id,
-            data_columns,
-        ) {
-            match self.custody_backfill_sync.on_data_column_response(
-                &mut self.network,
-                custody_sync_request_id,
-                &peer_id,
-                resp,
-            ) {
-                Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
-                Ok(ProcessResult::Successful) => {}
-                Err(_e) => {
-                    // The custody sync has failed, errors are reported
-                    // within.
-                    self.update_sync_state();
-                }
             }
         }
     }

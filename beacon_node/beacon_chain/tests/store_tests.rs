@@ -3928,6 +3928,89 @@ async fn test_import_historical_data_columns_batch() {
     }
 }
 
+// Custody backfill sync builds its `DataColumnsByRoot` requests from the blocks already in the
+// database. Check that only the blocks of the epoch that carry data are listed, once each.
+#[tokio::test]
+async fn test_data_bearing_block_roots_for_epoch() {
+    let spec = ForkName::Fulu.make_genesis_spec(E::default_spec());
+    let db_path = tempdir().unwrap();
+    let store = get_store_generic(&db_path, StoreConfig::default(), spec);
+    let harness = get_harness_import_all_data_columns(store.clone(), LOW_VALIDATOR_COUNT);
+
+    let slots_per_epoch = E::slots_per_epoch();
+    let skip_slots = 2;
+
+    // Fill epochs 0 and 1, and the first slot of epoch 2.
+    harness
+        .extend_chain(
+            (slots_per_epoch * 2) as usize,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+
+    // Skip two slots of epoch 2, then fill the rest of it.
+    for _ in 0..skip_slots {
+        harness.advance_slot();
+    }
+    harness
+        .extend_chain(
+            (slots_per_epoch - skip_slots) as usize,
+            BlockStrategy::ForkCanonicalChainAt {
+                previous_slot: Slot::new(slots_per_epoch * 2),
+                first_slot: Slot::new(slots_per_epoch * 2 + skip_slots + 1),
+            },
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+    harness.advance_slot();
+
+    for epoch in [Epoch::new(0), Epoch::new(1), Epoch::new(2)] {
+        let expected = harness
+            .chain
+            .forwards_iter_block_roots_until(
+                epoch.start_slot(E::slots_per_epoch()),
+                epoch.end_slot(E::slots_per_epoch()),
+            )
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(block_root, slot)| {
+                let block = harness.get_block((*block_root).into()).unwrap();
+                // The iterator repeats the prior block root on skipped slots.
+                block.slot() == *slot
+                    && !block
+                        .message()
+                        .body()
+                        .blob_kzg_commitments()
+                        .unwrap()
+                        .is_empty()
+            })
+            .map(|(block_root, _)| block_root)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            harness
+                .chain
+                .data_bearing_block_roots_for_epoch(epoch)
+                .unwrap(),
+            expected,
+            "unexpected data bearing block roots for epoch {epoch}"
+        );
+    }
+
+    // Epoch 2 contains skipped slots, whose repeated block root must be listed only once.
+    let epoch_2_roots = harness
+        .chain
+        .data_bearing_block_roots_for_epoch(Epoch::new(2))
+        .unwrap();
+    assert!(!epoch_2_roots.is_empty());
+    assert_eq!(
+        epoch_2_roots.iter().collect::<HashSet<_>>().len(),
+        epoch_2_roots.len(),
+        "data bearing block roots must be unique"
+    );
+}
+
 // This should verify that a data column sidecar containing mismatched block roots should fail to be imported.
 // This also covers any test cases related to data columns with incorrect/invalid/mismatched block roots.
 #[tokio::test]

@@ -5,12 +5,10 @@ use crate::common::spec_with_all_forks_enabled;
 use crate::common::{Protocol, build_tracing_subscriber};
 use bls::Signature;
 use fixed_bytes::FixedBytesExtended;
-use libp2p::PeerId;
 use lighthouse_network::rpc::{RequestType, methods::*};
 use lighthouse_network::service::api_types::{
     AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, DataColumnsByRangeRequestId,
-    DataColumnsByRangeRequester, RangeRequestId, SyncRequestId,
+    RangeRequestId, SyncRequestId,
 };
 use lighthouse_network::{NetworkEvent, ReportSource, Response};
 use ssz::Encode;
@@ -1951,21 +1949,7 @@ fn test_request_too_large_blobs_by_range() {
 #[test]
 fn test_request_too_large_data_columns_by_range() {
     test_request_too_large(
-        AppRequestId::Sync(SyncRequestId::DataColumnsByRange(
-            DataColumnsByRangeRequestId {
-                id: 1,
-                parent_request_id: DataColumnsByRangeRequester::CustodyBackfillSync(
-                    CustodyBackFillBatchRequestId {
-                        id: 1,
-                        batch_id: CustodyBackfillBatchId {
-                            epoch: Epoch::new(1),
-                            run_id: 1,
-                        },
-                    },
-                ),
-                peer: PeerId::random(),
-            },
-        )),
+        AppRequestId::Router,
         RequestType::DataColumnsByRange(DataColumnsByRangeRequest {
             start_slot: 0,
             count: 0,

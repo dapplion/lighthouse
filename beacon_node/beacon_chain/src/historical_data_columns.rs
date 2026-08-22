@@ -159,4 +159,45 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         Ok(total_imported)
     }
+
+    /// Returns the roots of the blocks in `epoch` that are expected to have data columns, i.e.
+    /// blocks with at least one blob commitment.
+    ///
+    /// Custody backfill sync uses this to build `DataColumnsByRoot` requests: the blocks of the
+    /// epoch are already in the database, only their columns are missing.
+    pub fn data_bearing_block_roots_for_epoch(
+        &self,
+        epoch: Epoch,
+    ) -> Result<Vec<Hash256>, BeaconChainError> {
+        let mut block_roots = vec![];
+
+        for block_iter_result in self.forwards_iter_block_roots_until(
+            epoch.start_slot(T::EthSpec::slots_per_epoch()),
+            epoch.end_slot(T::EthSpec::slots_per_epoch()),
+        )? {
+            let (block_root, slot) = block_iter_result?;
+
+            let Some(block) = self.get_blinded_block(&block_root)? else {
+                continue;
+            };
+
+            // Post-Gloas the blobs are carried by the payload envelope, and `num_expected_blobs`
+            // falls back to the bid's commitments, which are also set for a withheld payload. An
+            // envelope in the database proves the payload was revealed, so the columns exist.
+            let payload_revealed = block
+                .message()
+                .body()
+                .signed_execution_payload_bid()
+                .is_err()
+                || self.store.payload_envelope_exists(&block_root)?;
+
+            // The iterator repeats the prior block root on skip slots. Only count a root on the
+            // slot its block was proposed in.
+            if block.slot() == slot && block.num_expected_blobs() > 0 && payload_revealed {
+                block_roots.push(block_root);
+            }
+        }
+
+        Ok(block_roots)
+    }
 }

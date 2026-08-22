@@ -23,7 +23,9 @@ use types::{
     Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope,
 };
 
-use crate::sync::network_context::{LookupRequestResult, PeerGroup, SyncNetworkContext};
+use crate::sync::network_context::{
+    CustodyColumnsToFetch, LookupRequestResult, PeerGroup, SyncNetworkContext,
+};
 
 /// Accumulates and couples beacon blocks with their associated data (blobs or data columns)
 /// from range sync network responses.
@@ -253,8 +255,8 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
             CustodyRequester::RangeSync(id),
             &block_roots,
             block_epoch,
-            // ignore_cache: range blocks are historical and won't have gossip-imported columns
-            true,
+            // Range blocks are historical and won't have gossip-imported columns
+            CustodyColumnsToFetch::Sampling,
             // The peer that provided the blocks is a signal that some peer has the block's data.
             Arc::new(RwLock::new(HashSet::from([*block_peer]))),
         ) {

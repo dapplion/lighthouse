@@ -5,8 +5,8 @@ use crate::sync::block_lookups::{
 };
 use crate::sync::manager::BlockProcessType;
 use crate::sync::network_context::{
-    LookupRequestResult, PeerGroup, ReqId, RpcRequestSendError, RpcResponseError,
-    SendErrorProcessor, SyncNetworkContext,
+    CustodyColumnsToFetch, LookupRequestResult, PeerGroup, ReqId, RpcRequestSendError,
+    RpcResponseError, SendErrorProcessor, SyncNetworkContext,
 };
 use beacon_chain::BeaconChainTypes;
 use beacon_chain::block_verification_types::AsBlock;
@@ -425,7 +425,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                             &[self.block_root],
                             slot.epoch(<T as BeaconChainTypes>::EthSpec::slots_per_epoch()),
                             // single lookups consult the DA cache to skip gossip-imported columns
-                            false,
+                            CustodyColumnsToFetch::SamplingNotImported,
                             peers.clone(),
                         )
                     })?;

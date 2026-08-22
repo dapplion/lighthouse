@@ -17,15 +17,12 @@ use crate::status::ToStatusMessage;
 use crate::sync::batch::ByRangeRequestType;
 use crate::sync::block_lookups::{DownloadResult, SingleLookupId};
 use crate::sync::block_sidecar_coupling::CouplingError;
-use crate::sync::range_data_column_batch_request::RangeDataColumnBatchRequest;
 use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::block_verification_types::{AsBlock, RangeSyncBlock};
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
-use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, DataColumnsByRangeRequest, PayloadEnvelopesByRangeRequest,
-};
+use lighthouse_network::rpc::methods::{BlobsByRangeRequest, PayloadEnvelopesByRangeRequest};
 use lighthouse_network::rpc::{
     BlocksByRangeRequest, GoodbyeReason, MAX_CONCURRENT_REQUESTS, RPCError, RequestType,
 };
@@ -33,17 +30,16 @@ pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
     AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
     CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
-    SyncRequestId,
+    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId,
+    SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
 pub use requests::LookupVerifyError;
 use requests::{
     ActiveRequestItems, ActiveRequests, BlobsByRangeRequestItems, BlocksByRangeRequestItems,
-    BlocksByRootRequestItems, DataColumnsByRangeRequestItems, DataColumnsByRootRequestItems,
-    PayloadEnvelopesByRangeRequestItems, PayloadEnvelopesByRootRequestItems,
+    BlocksByRootRequestItems, DataColumnsByRootRequestItems, PayloadEnvelopesByRangeRequestItems,
+    PayloadEnvelopesByRootRequestItems,
 };
 #[cfg(test)]
 use slot_clock::SlotClock;
@@ -199,6 +195,19 @@ impl PeerGroup {
 /// Sequential ID that uniquely identifies ReqResp outgoing requests
 pub type ReqId = u32;
 
+/// Which custody columns [`SyncNetworkContext::custody_lookup_request`] must download.
+pub enum CustodyColumnsToFetch {
+    /// All sampling columns of the epoch, minus those already imported through gossip. Used by
+    /// single block lookups.
+    SamplingNotImported,
+    /// All sampling columns of the epoch. Used by range sync, where blocks are historical and
+    /// won't have gossip-imported columns in the cache.
+    Sampling,
+    /// An explicit set of columns. Used by custody backfill sync, which only fetches the columns
+    /// missing from the database for the epoch.
+    Explicit(Vec<ColumnIndex>),
+}
+
 pub enum LookupRequestResult<T, I = ReqId> {
     /// A request is sent. Sync MUST receive an event from the network in the future for either:
     /// completed response or failed request
@@ -236,9 +245,6 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active BlobsByRange requests
     blobs_by_range_requests:
         ActiveRequests<BlobsByRangeRequestId, BlobsByRangeRequestItems<T::EthSpec>>,
-    /// A mapping of active DataColumnsByRange requests
-    data_columns_by_range_requests:
-        ActiveRequests<DataColumnsByRangeRequestId, DataColumnsByRangeRequestItems<T::EthSpec>>,
     /// A mapping of active PayloadEnvelopesByRange requests
     payload_envelopes_by_range_requests: ActiveRequests<
         PayloadEnvelopesByRangeRequestId,
@@ -250,10 +256,6 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// BlocksByRange requests paired with other ByRange requests for data components
     components_by_range_requests:
         FnvHashMap<ComponentsByRangeRequestId, RangeBlockComponentsRequest<T::EthSpec>>,
-
-    /// A batch of data columns by range request for custody sync
-    custody_backfill_data_column_batch_requests:
-        FnvHashMap<CustodyBackFillBatchRequestId, RangeDataColumnBatchRequest<T>>,
 
     /// Whether the ee is online. If it's not, we don't allow access to the
     /// `beacon_processor_send`.
@@ -332,11 +334,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             data_columns_by_root_requests: ActiveRequests::new("data_columns_by_root"),
             blocks_by_range_requests: ActiveRequests::new("blocks_by_range"),
             blobs_by_range_requests: ActiveRequests::new("blobs_by_range"),
-            data_columns_by_range_requests: ActiveRequests::new("data_columns_by_range"),
             payload_envelopes_by_range_requests: ActiveRequests::new("payload_envelopes_by_range"),
             custody_by_root_requests: <_>::default(),
             components_by_range_requests: FnvHashMap::default(),
-            custody_backfill_data_column_batch_requests: FnvHashMap::default(),
             network_beacon_processor,
             chain,
             fork_context,
@@ -365,13 +365,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             data_columns_by_root_requests,
             blocks_by_range_requests,
             blobs_by_range_requests,
-            data_columns_by_range_requests,
             payload_envelopes_by_range_requests,
             // custody_by_root_requests is a meta request of data_columns_by_root_requests
             custody_by_root_requests: _,
             // components_by_range_requests is a meta request of various _by_range requests
             components_by_range_requests: _,
-            custody_backfill_data_column_batch_requests: _,
             execution_engine_state: _,
             network_beacon_processor: _,
             chain: _,
@@ -398,10 +396,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .active_requests_of_peer(peer_id)
             .into_iter()
             .map(|req_id| SyncRequestId::BlobsByRange(*req_id));
-        let data_column_by_range_ids = data_columns_by_range_requests
-            .active_requests_of_peer(peer_id)
-            .into_iter()
-            .map(|req_id| SyncRequestId::DataColumnsByRange(*req_id));
         let payload_envelope_by_range_ids = payload_envelopes_by_range_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
@@ -411,7 +405,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .chain(data_column_by_root_ids)
             .chain(blocks_by_range_ids)
             .chain(blobs_by_range_ids)
-            .chain(data_column_by_range_ids)
             .chain(payload_envelope_by_range_ids)
             .collect()
     }
@@ -575,60 +568,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.components_by_range_requests.insert(id, info);
 
         Ok(id.id)
-    }
-
-    fn select_columns_by_range_peers_to_request(
-        &self,
-        custody_indexes: &HashSet<ColumnIndex>,
-        peers: &HashSet<PeerId>,
-        peers_to_deprioritize: &HashSet<PeerId>,
-    ) -> Result<HashMap<PeerId, Vec<ColumnIndex>>, RpcRequestSendError> {
-        let mut columns_to_request_by_peer = HashMap::<PeerId, Vec<ColumnIndex>>::new();
-        let data_columns_by_range_per_peer =
-            ActiveRequestsPerPeer::new(&self.data_columns_by_range_requests);
-
-        for column_index in custody_indexes {
-            // Strictly consider peers that are custodials of this column AND are part of this
-            // syncing chain. If the forward range sync chain has few peers, it's likely that this
-            // function will not be able to find peers on our custody columns.
-            let Some(custody_peer) = peers
-                .iter()
-                .filter(|peer| {
-                    self.network_globals()
-                        .is_custody_peer_of(*column_index, peer)
-                })
-                .map(|peer| {
-                    (
-                        // If contains -> 1 (order after), not contains -> 0 (order first)
-                        peers_to_deprioritize.contains(peer),
-                        // Strictly de-prioritize peers already at the per-protocol concurrency limit
-                        // Note: do not account for to-be-sent requests on
-                        // `data_columns_by_range_by_peer` as we always send at most one request
-                        data_columns_by_range_per_peer.at_concurrency_limit(peer),
-                        // Random factor to break ties, otherwise the PeerID breaks ties
-                        rand::random::<u32>(),
-                        peer,
-                    )
-                })
-                .min()
-                .map(|(_, _, _, peer)| *peer)
-            else {
-                // TODO(das): this will be pretty bad UX. To improve we should:
-                // - Handle the no peers case gracefully, maybe add some timeout and give a few
-                //   minutes / seconds to the peer manager to locate peers on this subnet before
-                //   abandoing progress on the chain completely.
-                return Err(RpcRequestSendError::NoPeer(NoPeerError::CustodyPeer(
-                    *column_index,
-                )));
-            };
-
-            columns_to_request_by_peer
-                .entry(custody_peer)
-                .or_default()
-                .push(*column_index);
-        }
-
-        Ok(columns_to_request_by_peer)
     }
 
     /// Received a blocks by range, blobs by range, or custody-by-root response for a request
@@ -952,15 +891,13 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     /// requests.
     ///
     /// A single request may span multiple `block_roots`; callers must ensure all of them are within
-    /// `block_epoch`. When `ignore_cache` is true, the DA checker cache is not consulted and all
-    /// custody columns are fetched. This is used by range sync where blocks are historical and
-    /// won't have gossip-imported columns in the cache.
+    /// `block_epoch`.
     pub fn custody_lookup_request(
         &mut self,
         requester: CustodyRequester,
         block_roots: &[Hash256],
         block_epoch: Epoch,
-        ignore_cache: bool,
+        columns_to_fetch: CustodyColumnsToFetch,
         lookup_peers: Arc<RwLock<HashSet<PeerId>>>,
     ) -> Result<LookupRequestResult<DataColumnSidecarList<T::EthSpec>>, RpcRequestSendError> {
         // Code below will issue column requests even if `lookup_peers` is empty. This is not okay,
@@ -970,27 +907,32 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             return Ok(LookupRequestResult::Pending("no peers"));
         }
 
-        let custody_indexes_imported = if ignore_cache {
-            Default::default()
-        } else {
-            block_roots
-                .first()
-                .and_then(|block_root| {
-                    self.chain
-                        .cached_data_column_indexes(block_root, block_epoch)
-                })
-                .unwrap_or_default()
-        };
+        let mut custody_indexes_to_fetch = match columns_to_fetch {
+            CustodyColumnsToFetch::SamplingNotImported => {
+                let custody_indexes_imported = block_roots
+                    .first()
+                    .and_then(|block_root| {
+                        self.chain
+                            .cached_data_column_indexes(block_root, block_epoch)
+                    })
+                    .unwrap_or_default();
 
-        // Include only the column indexes not yet imported (received through gossip)
-        let mut custody_indexes_to_fetch = self
-            .chain
-            .custody_context
-            .sampling_columns_for_epoch(block_epoch)
-            .iter()
-            .copied()
-            .filter(|index| !custody_indexes_imported.contains(index))
-            .collect::<Vec<_>>();
+                // Include only the column indexes not yet imported (received through gossip)
+                self.chain
+                    .custody_context
+                    .sampling_columns_for_epoch(block_epoch)
+                    .iter()
+                    .copied()
+                    .filter(|index| !custody_indexes_imported.contains(index))
+                    .collect::<Vec<_>>()
+            }
+            CustodyColumnsToFetch::Sampling => self
+                .chain
+                .custody_context
+                .sampling_columns_for_epoch(block_epoch)
+                .to_vec(),
+            CustodyColumnsToFetch::Explicit(indexes) => indexes,
+        };
         custody_indexes_to_fetch.sort_unstable();
 
         if block_roots.is_empty() || custody_indexes_to_fetch.is_empty() {
@@ -1014,6 +956,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let caller_req_id = match &requester {
             CustodyRequester::SingleLookup(id) => id.req_id,
             CustodyRequester::RangeSync(id) => id.id,
+            CustodyRequester::CustodyBackfillSync(id) => id.id,
         };
 
         let mut request = ActiveCustodyRequest::new(
@@ -1137,49 +1080,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_span,
         );
         Ok(id)
-    }
-
-    fn send_data_columns_by_range_request(
-        &mut self,
-        peer_id: PeerId,
-        request: DataColumnsByRangeRequest,
-        parent_request_id: DataColumnsByRangeRequester,
-        request_span: Span,
-    ) -> Result<(DataColumnsByRangeRequestId, Vec<u64>), RpcRequestSendError> {
-        let requested_columns = request.columns.clone();
-        let id = DataColumnsByRangeRequestId {
-            id: self.next_id(),
-            parent_request_id,
-            peer: peer_id,
-        };
-
-        self.send_network_msg(NetworkMessage::SendRequest {
-            peer_id,
-            request: RequestType::DataColumnsByRange(request.clone()),
-            app_request_id: AppRequestId::Sync(SyncRequestId::DataColumnsByRange(id)),
-        })
-        .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
-
-        debug!(
-            method = "DataColumnsByRange",
-            slots = request.count,
-            epoch = %Slot::new(request.start_slot).epoch(T::EthSpec::slots_per_epoch()),
-            columns = ?request.columns,
-            peer = %peer_id,
-            %id,
-            "Sync RPC request sent"
-        );
-
-        self.data_columns_by_range_requests.insert(
-            id,
-            peer_id,
-            // false = do not enforce max_requests are returned for *_by_range methods. We don't
-            // know if there are missed blocks.
-            false,
-            DataColumnsByRangeRequestItems::new(request),
-            request_span,
-        );
-        Ok((id, requested_columns))
     }
 
     fn send_payload_envelopes_by_range_request(
@@ -1422,19 +1322,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     }
 
     #[allow(clippy::type_complexity)]
-    pub(crate) fn on_data_columns_by_range_response(
-        &mut self,
-        id: DataColumnsByRangeRequestId,
-        peer_id: PeerId,
-        rpc_event: RpcEvent<Arc<DataColumnSidecar<T::EthSpec>>>,
-    ) -> Option<RpcResponseResult<DataColumnSidecarList<T::EthSpec>>> {
-        let resp = self
-            .data_columns_by_range_requests
-            .on_response(id, rpc_event);
-        self.on_rpc_response_result(resp, peer_id)
-    }
-
-    #[allow(clippy::type_complexity)]
     pub(crate) fn on_payload_envelopes_by_range_response(
         &mut self,
         id: PayloadEnvelopesByRangeRequestId,
@@ -1598,122 +1485,40 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             })
     }
 
-    /// data column by range requests sent by the custody sync algorithm
-    pub fn custody_backfill_data_columns_batch_request(
+    /// Custody-by-root request issued by custody backfill sync to fetch the columns missing for
+    /// `batch_id.epoch`. The blocks of the epoch are already in the database, so unlike range sync
+    /// the block roots are read from the store instead of downloaded.
+    pub fn custody_backfill_columns_request(
         &mut self,
-        request: DataColumnsByRangeRequest,
         batch_id: CustodyBackfillBatchId,
+        block_roots: &[Hash256],
+        columns_to_fetch: Vec<ColumnIndex>,
         peers: &HashSet<PeerId>,
-        peers_to_deprioritize: &HashSet<PeerId>,
     ) -> Result<CustodyBackFillBatchRequestId, RpcRequestSendError> {
-        // Attempt to find all required custody peers before sending any request or creating an ID
-        let columns_by_range_peers_to_request = {
-            let column_indexes = self
-                .chain
-                .custody_context
-                .sampling_columns_for_epoch(batch_id.epoch)
-                .iter()
-                .cloned()
-                .collect();
-
-            self.select_columns_by_range_peers_to_request(
-                &column_indexes,
-                peers,
-                peers_to_deprioritize,
-            )?
-        };
-
-        // Create the overall `custody_by_range` request id
         let id = CustodyBackFillBatchRequestId {
             id: self.next_id(),
             batch_id,
         };
 
-        let result = columns_by_range_peers_to_request
-            .keys()
-            .filter_map(|peer_id| {
-                self.send_data_columns_by_range_request(
-                    *peer_id,
-                    request.clone(),
-                    DataColumnsByRangeRequester::CustodyBackfillSync(id),
-                    Span::none(),
-                )
-                .ok()
-            })
-            .collect::<Vec<_>>();
-
-        let range_data_column_batch_request =
-            RangeDataColumnBatchRequest::new(result, self.chain.clone(), batch_id.epoch);
-
-        self.custody_backfill_data_column_batch_requests
-            .insert(id, range_data_column_batch_request);
-
-        Ok(id)
-    }
-
-    /// Received a data columns by range response from a custody sync request which batches them.
-    pub fn custody_backfill_data_columns_response(
-        &mut self,
-        // Identifies the custody backfill request for all data columns on this epoch
-        custody_sync_request_id: CustodyBackFillBatchRequestId,
-        // Identifies a specific data_columns_by_range request for *some* columns in this epoch. We
-        // pass them separately as DataColumnsByRangeRequestId parent is an enum and would require
-        // matching again.
-        req_id: DataColumnsByRangeRequestId,
-        data_columns: RpcResponseResult<DataColumnSidecarList<T::EthSpec>>,
-    ) -> Option<Result<DataColumnSidecarList<T::EthSpec>, RpcResponseError>> {
-        // Remove first so a failed request is not left in the map.
-        let Some(mut request) = self
-            .custody_backfill_data_column_batch_requests
-            .remove(&custody_sync_request_id)
-        else {
-            metrics::inc_counter_vec(
-                &metrics::SYNC_UNKNOWN_NETWORK_REQUESTS,
-                &["range_data_columns"],
-            );
-            return None;
-        };
-
-        if let Err(e) = data_columns.and_then(|data_columns| {
-            request
-                .add_custody_columns(req_id, data_columns)
-                .map_err(|e| {
-                    RpcResponseError::BlockComponentCouplingError(CouplingError::InternalError(e))
-                })
-        }) {
-            return Some(Err(e));
+        match self.custody_lookup_request(
+            CustodyRequester::CustodyBackfillSync(id),
+            block_roots,
+            batch_id.epoch,
+            CustodyColumnsToFetch::Explicit(columns_to_fetch),
+            // Peers that are synced past this epoch and advertise data availability for it. They
+            // are the signal that some peer has the columns of these historical blocks.
+            Arc::new(RwLock::new(peers.clone())),
+        )? {
+            LookupRequestResult::RequestSent(_) => Ok(id),
+            // The caller only requests batches with a non-empty set of block roots, columns and
+            // peers, so neither of these outcomes is reachable.
+            LookupRequestResult::NoRequestNeeded(reason, _) => Err(
+                RpcRequestSendError::InternalError(format!("no request needed: {reason}")),
+            ),
+            LookupRequestResult::Pending(reason) => Err(RpcRequestSendError::InternalError(
+                format!("request pending: {reason}"),
+            )),
         }
-
-        match request.responses() {
-            Some(data_column_result) => {
-                Some(data_column_result.map_err(RpcResponseError::BlockComponentCouplingError))
-            }
-            None => {
-                self.custody_backfill_data_column_batch_requests
-                    .insert(custody_sync_request_id, request);
-                None
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn custody_backfill_batch_request_count(&self) -> usize {
-        self.custody_backfill_data_column_batch_requests.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn insert_test_custody_backfill_entry(
-        &mut self,
-        batch_req_id: CustodyBackFillBatchRequestId,
-        requests: Vec<(DataColumnsByRangeRequestId, Vec<ColumnIndex>)>,
-    ) {
-        let request = RangeDataColumnBatchRequest::new(
-            requests,
-            self.chain.clone(),
-            batch_req_id.batch_id.epoch,
-        );
-        self.custody_backfill_data_column_batch_requests
-            .insert(batch_req_id, request);
     }
 
     pub(crate) fn register_metrics(&self) {
@@ -1725,10 +1530,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             ),
             ("blocks_by_range", self.blocks_by_range_requests.len()),
             ("blobs_by_range", self.blobs_by_range_requests.len()),
-            (
-                "data_columns_by_range",
-                self.data_columns_by_range_requests.len(),
-            ),
             ("custody_by_root", self.custody_by_root_requests.len()),
             (
                 "components_by_range",
