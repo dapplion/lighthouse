@@ -355,18 +355,23 @@ impl<E: EthSpec> ForwardSync<E> {
         }
 
         // A peer holding `root` holds every ancestor, so admit it all the way down.
-        self.ascend(root, peers);
+        if let Some(parent) = self
+            .block_to_chain
+            .get(&root)
+            .and_then(|chain_id| self.chains.get(chain_id))
+            .and_then(|chain| chain.parent())
+        {
+            self.admit_ancestors(parent, peers);
+        }
         self.prune();
         self.promote(env);
     }
 
-    fn ascend(&mut self, from: Hash256, peers: &HashSet<PeerId>) {
+    /// Adds `peers` to the chain owning `root` and to every chain below it. A peer that
+    /// claimed a root has claimed its ancestors, so this is sound at every level.
+    fn admit_ancestors(&mut self, root: Hash256, peers: &HashSet<PeerId>) {
         let mut visited: HashSet<ChainId> = HashSet::new();
-        let mut next = self
-            .block_to_chain
-            .get(&from)
-            .and_then(|chain_id| self.chains.get(chain_id))
-            .and_then(|chain| chain.parent());
+        let mut next = Some(root);
         while let Some(root) = next {
             let Some(chain_id) = self.block_to_chain.get(&root).copied() else {
                 return;
@@ -424,6 +429,7 @@ impl<E: EthSpec> ForwardSync<E> {
         };
 
         let (finalized_root, finalized_slot) = env.finalized();
+        let mut unresolved: Option<Hash256> = None;
         for header in headers {
             let root = header.canonical_root();
             if header.slot <= finalized_slot && root != finalized_root {
@@ -445,15 +451,44 @@ impl<E: EthSpec> ForwardSync<E> {
             chain.roots_mut().push_back((root, header.slot));
             let parent = header.parent_root;
 
-            if env.is_known(&parent) || self.block_to_chain.contains_key(&parent) {
+            if env.is_known(&parent) {
                 if let Chain::Backfill { state, .. } = chain {
                     *state = Backfill::Anchored(parent);
                 }
+                unresolved = None;
                 break;
+            }
+
+            match self.block_to_chain.get(&parent).copied() {
+                Some(owner) if owner != chain_id => {
+                    if let Some(chain) = self.chains.get_mut(&chain_id) {
+                        if let Chain::Backfill { state, .. } = chain {
+                            *state = Backfill::Anchored(parent);
+                        }
+                    }
+                    // The peers that claimed this chain's tip hold the ancestors too, and
+                    // `Search`'s ascent could not reach them: they did not exist yet.
+                    let peers: HashSet<PeerId> = self
+                        .chains
+                        .get(&chain_id)
+                        .map(|chain| chain.peers().clone())
+                        .unwrap_or_default();
+                    self.admit_ancestors(parent, &peers);
+                    unresolved = None;
+                    break;
+                }
+                _ => {}
             }
             // Claim `parent` before it is in `roots`, so a second search cannot spawn a
             // duplicate chain for it (Inv 1).
             self.block_to_chain.insert(parent, chain_id);
+            unresolved = Some(parent);
+        }
+
+        // One request for the whole response. Sending one per intermediate parent would
+        // re-request headers already in hand and leave several responses racing for a
+        // single `Discovering(next)`.
+        if let Some(parent) = unresolved {
             self.send_headers(chain_id, parent, env);
         }
 
