@@ -16,9 +16,7 @@ use crate::sync::block_sidecar_coupling::RangeBlockComponentsRequest;
 use beacon_chain::BeaconChainTypes;
 use beacon_chain::block_verification_types::RangeSyncBlock;
 use lighthouse_network::PeerId;
-use lighthouse_network::service::api_types::{
-    BlocksByRootBatchRequestId, CustodyRequester, Id, SingleLookupReqId,
-};
+use lighthouse_network::service::api_types::{CustodyRequester, Id, SingleLookupReqId};
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -57,7 +55,7 @@ pub struct BlockComponentsByRootRequest<T: BeaconChainTypes> {
 }
 
 enum BlocksState<E: EthSpec> {
-    Active(BlocksByRootBatchRequestId),
+    Active(SingleLookupReqId),
     Complete(Vec<Arc<SignedBeaconBlock<E>>>),
 }
 
@@ -94,14 +92,14 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
     }
 
     /// True if this request issued `req_id`, so the caller can route a response.
-    pub fn owns(&self, req_id: &BlocksByRootBatchRequestId) -> bool {
-        req_id.requester == self.id
+    pub fn owns(&self, req_id: &SingleLookupReqId) -> bool {
+        req_id.lookup_id == self.id
     }
 
     /// Handles the batched `blocks_by_root` response.
     pub fn on_blocks_response(
         &mut self,
-        req_id: BlocksByRootBatchRequestId,
+        req_id: SingleLookupReqId,
         peer_id: PeerId,
         result: Result<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>, RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,

@@ -9,10 +9,21 @@
 //! what licenses asking any one of them for all of `roots`; a peer covering only part of
 //! a chain forces a split.
 
+use super::manager::BatchProcessResult;
+use super::network_context::block_components_by_root::{
+    BlockComponentsByRootRequest, Error as ComponentsError,
+};
+use super::network_context::{RpcResponseResult, SyncNetworkContext};
+use crate::network_beacon_processor::ChainSegmentProcessId;
+use beacon_chain::BeaconChainTypes;
 use beacon_chain::block_verification_types::RangeSyncBlock;
-use lighthouse_network::PeerId;
+use lighthouse_network::service::api_types::{Id, SingleLookupReqId};
+use lighthouse_network::{PeerAction, PeerId};
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
-use types::{BeaconBlockHeader, EthSpec, Hash256, Slot};
+use std::sync::Arc;
+use tracing::debug;
+use types::{DataColumnSidecarList, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 /// Roots promoted at a time. Protocol cap is 128. Spec: `B`.
 pub const BATCH_SIZE: usize = 32;
@@ -25,21 +36,9 @@ pub const ROOTS_MAX: usize = 1_000_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChainId(pub u32);
 
-/// Everything outside the state machine. Each `download_*` / `process_*` guarantees the
-/// matching `on_*` is called, with `Ok` already validated as the spec requires.
-pub trait Env<E: EthSpec> {
-    /// Is `root` in fork choice?
-    fn is_known(&self, root: &Hash256) -> bool;
-    fn finalized(&self) -> (Hash256, Slot);
-    fn report_peer(&mut self, peer: &PeerId);
-    /// Guarantees `on_headers(chain_id, _)`. `Ok(headers)` has `headers[0].root = root`,
-    /// `headers[i].root = headers[i - 1].parent_root`, and strictly decreasing slots.
-    fn download_headers(&mut self, chain_id: ChainId, root: Hash256, peers: &HashSet<PeerId>);
-    /// Guarantees `on_download(roots, _)`. `Ok(blocks)` covers exactly `roots`.
-    fn download_blocks(&mut self, roots: Vec<Hash256>, peers: &HashSet<PeerId>);
-    /// Guarantees `on_process(roots, _)`. `Ok` means all `blocks` are in fork choice.
-    fn process_blocks(&mut self, roots: Vec<Hash256>, blocks: Vec<RangeSyncBlock<E>>);
-}
+/// Peers claiming a chain. Shared so a peer admitted mid-flight is usable by a request
+/// already outstanding, which is what the spec means by `peers` being live.
+type Peers = Arc<RwLock<HashSet<PeerId>>>;
 
 /// Discovery phase: walking back for ancestors.
 pub enum Backfill {
@@ -51,34 +50,12 @@ pub enum Backfill {
 
 /// Import phase.
 pub enum Sync<E: EthSpec> {
-    /// A block request for `roots` is in flight.
+    /// A coupled block request for `roots` is in flight.
     Downloading,
     /// Blocks held, waiting for `parent` to be imported.
     Ready(Vec<RangeSyncBlock<E>>),
     /// Submitted to the processor.
-    Processing(Vec<RangeSyncBlock<E>>),
-}
-
-impl<E: EthSpec> Sync<E> {
-    /// Hands each half of a split the blocks for the roots it kept.
-    fn partition(self, kept_by_older: &HashSet<Hash256>) -> (Self, Self) {
-        let split = |blocks: Vec<RangeSyncBlock<E>>| {
-            blocks
-                .into_iter()
-                .partition(|block| kept_by_older.contains(&block.block_root()))
-        };
-        match self {
-            Sync::Downloading => (Sync::Downloading, Sync::Downloading),
-            Sync::Ready(blocks) => {
-                let (older, newer) = split(blocks);
-                (Sync::Ready(older), Sync::Ready(newer))
-            }
-            Sync::Processing(blocks) => {
-                let (older, newer) = split(blocks);
-                (Sync::Processing(older), Sync::Processing(newer))
-            }
-        }
-    }
+    Processing,
 }
 
 pub enum Chain<E: EthSpec> {
@@ -86,13 +63,13 @@ pub enum Chain<E: EthSpec> {
         /// Tip first; `slot` strictly decreases (Inv 4).
         roots: VecDeque<(Hash256, Slot)>,
         /// Each has claimed every root (Inv 3).
-        peers: HashSet<PeerId>,
+        peers: Peers,
         errors: u8,
         state: Backfill,
     },
     ForwardSync {
         roots: VecDeque<(Hash256, Slot)>,
-        peers: HashSet<PeerId>,
+        peers: Peers,
         parent: Hash256,
         errors: u8,
         state: Sync<E>,
@@ -112,16 +89,18 @@ impl<E: EthSpec> Chain<E> {
         }
     }
 
-    fn peers(&self) -> &HashSet<PeerId> {
+    fn peers(&self) -> &Peers {
         match self {
             Chain::Backfill { peers, .. } | Chain::ForwardSync { peers, .. } => peers,
         }
     }
 
-    fn peers_mut(&mut self) -> &mut HashSet<PeerId> {
-        match self {
-            Chain::Backfill { peers, .. } | Chain::ForwardSync { peers, .. } => peers,
-        }
+    fn admit(&self, new_peers: &HashSet<PeerId>) {
+        self.peers().write().extend(new_peers.iter().copied());
+    }
+
+    fn peer_count(&self) -> usize {
+        self.peers().read().len()
     }
 
     /// Returns true once the retry budget is spent.
@@ -169,11 +148,12 @@ impl<E: EthSpec> Chain<E> {
         }
     }
 
-    /// Builds both halves of a split outright. `roots` is cut at `index`, `peers` is
-    /// copied to each, and held blocks are partitioned by which half kept their root.
-    /// The older half is `[pivot … oldest]`; the newer is `[tip … pivot⁺]` and waits on
+    /// Builds both halves of a split outright. `roots` is cut at `index`; each half gets
+    /// its own copy of the peer set, and held blocks go to whichever half kept their root.
+    /// The older half is `[pivot … oldest]`; the newer is `[tip … pivot⁺]`, waiting on
     /// `pivot`.
     fn split_at(self, index: usize, pivot: Hash256) -> (Self, Self) {
+        let copy_peers = |peers: &Peers| Arc::new(RwLock::new(peers.read().clone()));
         match self {
             Chain::Backfill {
                 mut roots,
@@ -183,16 +163,17 @@ impl<E: EthSpec> Chain<E> {
             } => {
                 // `roots` is tip first, so [index..] is the pivot and everything older.
                 let older_roots = roots.split_off(index);
+                let newer_peers = copy_peers(&peers);
                 (
                     Chain::Backfill {
                         roots: older_roots,
-                        peers: peers.clone(),
+                        peers,
                         errors,
                         state,
                     },
                     Chain::Backfill {
                         roots,
-                        peers,
+                        peers: newer_peers,
                         errors,
                         state: Backfill::Anchored(pivot),
                     },
@@ -206,20 +187,20 @@ impl<E: EthSpec> Chain<E> {
                 state,
             } => {
                 let older_roots = roots.split_off(index);
-                let kept_by_older: HashSet<Hash256> =
-                    older_roots.iter().map(|(root, _)| *root).collect();
-                let (older_state, newer_state) = state.partition(&kept_by_older);
+                let kept: HashSet<Hash256> = older_roots.iter().map(|(root, _)| *root).collect();
+                let (older_state, newer_state) = state.partition(&kept);
+                let newer_peers = copy_peers(&peers);
                 (
                     Chain::ForwardSync {
                         roots: older_roots,
-                        peers: peers.clone(),
+                        peers,
                         parent,
                         errors,
                         state: older_state,
                     },
                     Chain::ForwardSync {
                         roots,
-                        peers,
+                        peers: newer_peers,
                         parent: pivot,
                         errors,
                         state: newer_state,
@@ -230,49 +211,68 @@ impl<E: EthSpec> Chain<E> {
     }
 }
 
-pub struct ForwardSync<E: EthSpec> {
+impl<E: EthSpec> Sync<E> {
+    /// Hands each half of a split the blocks for the roots it kept.
+    fn partition(self, kept_by_older: &HashSet<Hash256>) -> (Self, Self) {
+        match self {
+            Sync::Downloading => (Sync::Downloading, Sync::Downloading),
+            Sync::Processing => (Sync::Processing, Sync::Processing),
+            Sync::Ready(blocks) => {
+                let (older, newer) = blocks
+                    .into_iter()
+                    .partition(|block| kept_by_older.contains(&block.block_root()));
+                (Sync::Ready(older), Sync::Ready(newer))
+            }
+        }
+    }
+}
+
+pub struct ForwardSync<T: BeaconChainTypes> {
     /// Which chain owns each root we intend to sync (Inv 1).
     block_to_chain: HashMap<Hash256, ChainId>,
-    chains: HashMap<ChainId, Chain<E>>,
+    chains: HashMap<ChainId, Chain<T::EthSpec>>,
+    /// Outstanding header walks, by request id.
+    header_requests: HashMap<Id, ChainId>,
+    /// Outstanding coupled downloads, by request id.
+    downloads: HashMap<Id, (ChainId, BlockComponentsByRootRequest<T>)>,
     next_id: u32,
 }
 
-impl<E: EthSpec> Default for ForwardSync<E> {
+impl<T: BeaconChainTypes> Default for ForwardSync<T> {
     fn default() -> Self {
         Self {
             block_to_chain: HashMap::new(),
             chains: HashMap::new(),
+            header_requests: HashMap::new(),
+            downloads: HashMap::new(),
             next_id: 0,
         }
     }
 }
 
-impl<E: EthSpec> ForwardSync<E> {
+impl<T: BeaconChainTypes> ForwardSync<T> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    fn alloc(&mut self) -> ChainId {
-        let chain_id = ChainId(self.next_id);
+    fn alloc(&mut self) -> u32 {
+        let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        chain_id
+        id
     }
 
-    /// `owners(R)` — chains currently holding any of `roots`, oldest first.
-    fn owners(&self, roots: &[Hash256]) -> Vec<ChainId> {
-        let mut chain_ids: Vec<ChainId> = roots
-            .iter()
-            .filter_map(|root| self.block_to_chain.get(root).copied())
-            .collect();
-        chain_ids.sort_unstable();
-        chain_ids.dedup();
-        chain_ids.sort_by_key(|chain_id| {
-            self.chains
-                .get(chain_id)
-                .and_then(|chain| chain.oldest_slot())
-                .unwrap_or_else(|| Slot::new(u64::MAX))
-        });
-        chain_ids
+    fn is_known(cx: &SyncNetworkContext<T>, root: &Hash256) -> bool {
+        cx.chain.block_is_known_to_fork_choice(root)
+    }
+
+    fn finalized(cx: &SyncNetworkContext<T>) -> (Hash256, Slot) {
+        let checkpoint = cx.chain.canonical_head.cached_head().finalized_checkpoint();
+        (
+            checkpoint.root,
+            checkpoint
+                .epoch
+                .start_slot(<T::EthSpec as EthSpec>::slots_per_epoch()),
+        )
     }
 
     fn syncing_blocks(&self) -> usize {
@@ -305,7 +305,7 @@ impl<E: EthSpec> ForwardSync<E> {
         if index == 0 {
             return None;
         }
-        let newer_id = self.alloc();
+        let newer_id = ChainId(self.alloc());
         let (older, newer) = self.chains.remove(&chain_id)?.split_at(index, root);
 
         for (block_root, _) in newer.roots() {
@@ -317,13 +317,18 @@ impl<E: EthSpec> ForwardSync<E> {
     }
 
     /// `Search(root, peers)` — a peer set claims `root`.
-    pub fn search(&mut self, root: Hash256, peers: &HashSet<PeerId>, env: &mut impl Env<E>) {
-        if env.is_known(&root) {
+    pub fn search(
+        &mut self,
+        root: Hash256,
+        peers: &HashSet<PeerId>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        if Self::is_known(cx, &root) {
             return;
         }
         // The slot is only known for a root we already track; elsewhere this guard is
         // best-effort and `on_headers` is authoritative once a header is in hand.
-        let (_, finalized_slot) = env.finalized();
+        let (_, finalized_slot) = Self::finalized(cx);
         if self
             .slot_of(&root)
             .is_some_and(|slot| slot <= finalized_slot)
@@ -333,26 +338,26 @@ impl<E: EthSpec> ForwardSync<E> {
 
         match self.block_to_chain.get(&root).copied() {
             None => {
-                let chain_id = self.alloc();
+                let chain_id = ChainId(self.alloc());
                 self.chains.insert(
                     chain_id,
                     Chain::Backfill {
                         roots: VecDeque::new(),
-                        peers: peers.clone(),
+                        peers: Arc::new(RwLock::new(peers.clone())),
                         errors: 0,
                         state: Backfill::Discovering(root),
                     },
                 );
                 self.block_to_chain.insert(root, chain_id);
-                env.download_headers(chain_id, root, peers);
+                self.send_headers(chain_id, root, cx);
             }
             Some(chain_id) => {
                 // Split unless the peer set already covers the whole chain.
                 if self.chains.get(&chain_id).and_then(|chain| chain.tip()) != Some(root) {
                     self.split(chain_id, root);
                 }
-                if let Some(chain) = self.chains.get_mut(&chain_id) {
-                    chain.peers_mut().extend(peers.iter().copied());
+                if let Some(chain) = self.chains.get(&chain_id) {
+                    chain.admit(peers);
                 }
             }
         }
@@ -367,7 +372,7 @@ impl<E: EthSpec> ForwardSync<E> {
             self.admit_ancestors(parent, peers);
         }
         self.prune();
-        self.promote(env);
+        self.promote(cx);
     }
 
     /// Adds `peers` to the chain owning `root` and to every chain below it. A peer that
@@ -382,30 +387,56 @@ impl<E: EthSpec> ForwardSync<E> {
             if !visited.insert(chain_id) {
                 return;
             }
-            let Some(chain) = self.chains.get_mut(&chain_id) else {
+            let Some(chain) = self.chains.get(&chain_id) else {
                 return;
             };
-            chain.peers_mut().extend(peers.iter().copied());
+            chain.admit(peers);
             next = chain.parent();
         }
     }
 
-    /// `SendHeaders(chain, root)`.
-    fn send_headers(&mut self, chain_id: ChainId, root: Hash256, env: &mut impl Env<E>) {
-        let Some(Chain::Backfill { state, peers, .. }) = self.chains.get_mut(&chain_id) else {
+    /// `SendHeaders(chain, root)`. No `HeadersByRoot` RPC exists, so this asks for the
+    /// block and takes its header.
+    fn send_headers(&mut self, chain_id: ChainId, root: Hash256, cx: &mut SyncNetworkContext<T>) {
+        let Some(chain) = self.chains.get_mut(&chain_id) else {
             return;
         };
-        *state = Backfill::Discovering(root);
-        let peers = peers.clone();
-        env.download_headers(chain_id, root, &peers);
+        let peers = chain.peers().clone();
+        if let Chain::Backfill { state, .. } = chain {
+            *state = Backfill::Discovering(root);
+        }
+        match cx.blocks_by_root_batch_request(chain_id.0, vec![root], peers, &HashSet::new()) {
+            Ok(id) => {
+                self.header_requests.insert(id.lookup_id, chain_id);
+            }
+            Err(e) => {
+                debug!(?e, chain = chain_id.0, "Forward sync header request failed");
+                self.drop_chain(chain_id);
+            }
+        }
+    }
+
+    /// Routes a batched `BlocksByRoot` response to whichever request issued it.
+    pub fn on_blocks_by_root_batch(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        result: RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        if let Some(chain_id) = self.header_requests.remove(&id.lookup_id) {
+            self.on_headers(chain_id, result, cx);
+        } else if self.downloads.contains_key(&id.lookup_id) {
+            self.on_download_blocks(id, peer_id, result, cx);
+        }
     }
 
     /// `OnHeaders(chain, result)`.
-    pub fn on_headers(
+    fn on_headers(
         &mut self,
         chain_id: ChainId,
-        result: Result<Vec<BeaconBlockHeader>, ()>,
-        env: &mut impl Env<E>,
+        result: RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>,
+        cx: &mut SyncNetworkContext<T>,
     ) {
         let Some(next) = self
             .chains
@@ -415,8 +446,8 @@ impl<E: EthSpec> ForwardSync<E> {
             return;
         };
 
-        let headers = match result {
-            Err(()) => {
+        let blocks = match result {
+            Err(_) => {
                 if self
                     .chains
                     .get_mut(&chain_id)
@@ -424,28 +455,22 @@ impl<E: EthSpec> ForwardSync<E> {
                 {
                     self.drop_chain(chain_id);
                 } else {
-                    self.send_headers(chain_id, next, env);
+                    self.send_headers(chain_id, next, cx);
                 }
-                return self.promote(env);
+                return self.promote(cx);
             }
-            Ok(headers) => headers,
+            Ok(blocks) => blocks,
         };
 
-        let (finalized_root, finalized_slot) = env.finalized();
+        let (finalized_root, finalized_slot) = Self::finalized(cx);
         let mut unresolved: Option<Hash256> = None;
-        for header in headers {
+        for block in blocks {
+            let header = block.message().block_header();
             let root = header.canonical_root();
             if header.slot <= finalized_slot && root != finalized_root {
-                let peers: Vec<PeerId> = self
-                    .chains
-                    .get(&chain_id)
-                    .map(|chain| chain.peers().iter().copied().collect())
-                    .unwrap_or_default();
-                for peer in &peers {
-                    env.report_peer(peer);
-                }
+                self.report_chain(chain_id, cx);
                 self.drop_chain(chain_id);
-                return self.promote(env);
+                return self.promote(cx);
             }
 
             let Some(chain) = self.chains.get_mut(&chain_id) else {
@@ -454,7 +479,7 @@ impl<E: EthSpec> ForwardSync<E> {
             chain.roots_mut().push_back((root, header.slot));
             let parent = header.parent_root;
 
-            if env.is_known(&parent) {
+            if Self::is_known(cx, &parent) {
                 if let Chain::Backfill { state, .. } = chain {
                     *state = Backfill::Anchored(parent);
                 }
@@ -464,18 +489,18 @@ impl<E: EthSpec> ForwardSync<E> {
 
             match self.block_to_chain.get(&parent).copied() {
                 Some(owner) if owner != chain_id => {
-                    if let Some(chain) = self.chains.get_mut(&chain_id) {
-                        if let Chain::Backfill { state, .. } = chain {
-                            *state = Backfill::Anchored(parent);
-                        }
-                    }
+                    let peers = self
+                        .chains
+                        .get_mut(&chain_id)
+                        .map(|chain| {
+                            if let Chain::Backfill { state, .. } = chain {
+                                *state = Backfill::Anchored(parent);
+                            }
+                            chain.peers().read().clone()
+                        })
+                        .unwrap_or_default();
                     // The peers that claimed this chain's tip hold the ancestors too, and
                     // `Search`'s ascent could not reach them: they did not exist yet.
-                    let peers: HashSet<PeerId> = self
-                        .chains
-                        .get(&chain_id)
-                        .map(|chain| chain.peers().clone())
-                        .unwrap_or_default();
                     self.admit_ancestors(parent, &peers);
                     unresolved = None;
                     break;
@@ -492,15 +517,15 @@ impl<E: EthSpec> ForwardSync<E> {
         // re-request headers already in hand and leave several responses racing for a
         // single `Discovering(next)`.
         if let Some(parent) = unresolved {
-            self.send_headers(chain_id, parent, env);
+            self.send_headers(chain_id, parent, cx);
         }
 
         self.prune();
-        self.promote(env);
+        self.promote(cx);
     }
 
     /// `Promote` — runs after every transition.
-    fn promote(&mut self, env: &mut impl Env<E>) {
+    fn promote(&mut self, cx: &mut SyncNetworkContext<T>) {
         let ready: Vec<ChainId> = self
             .chains
             .iter()
@@ -509,17 +534,17 @@ impl<E: EthSpec> ForwardSync<E> {
                     state: Sync::Ready(_),
                     parent,
                     ..
-                } => env.is_known(parent),
+                } => Self::is_known(cx, parent),
                 _ => false,
             })
             .map(|(chain_id, _)| *chain_id)
             .collect();
         for chain_id in ready {
-            self.send_process(chain_id, env);
+            self.send_process(chain_id, cx);
         }
 
         while self.syncing_blocks() < MAX_SYNCING_BLOCKS {
-            let Some(chain_id) = self.pick(env) else {
+            let Some(chain_id) = self.pick(cx) else {
                 break;
             };
             let length = self
@@ -563,29 +588,28 @@ impl<E: EthSpec> ForwardSync<E> {
                     state: Sync::Downloading,
                 },
             );
-            self.send_download(chain_id, env);
+            self.send_download(chain_id, cx);
         }
     }
 
     /// A `Backfill` chain whose parent is imported or already forward syncing, closest to
     /// the import frontier first.
-    fn pick(&self, env: &impl Env<E>) -> Option<ChainId> {
+    fn pick(&self, cx: &SyncNetworkContext<T>) -> Option<ChainId> {
         self.chains
             .iter()
             .filter(|(_, chain)| {
                 let Chain::Backfill {
                     state: Backfill::Anchored(parent),
-                    peers,
                     roots,
                     ..
                 } = chain
                 else {
                     return false;
                 };
-                if peers.is_empty() || roots.is_empty() {
+                if chain.peer_count() == 0 || roots.is_empty() {
                     return false;
                 }
-                env.is_known(parent)
+                Self::is_known(cx, parent)
                     || self
                         .block_to_chain
                         .get(parent)
@@ -596,144 +620,177 @@ impl<E: EthSpec> ForwardSync<E> {
             .map(|(chain_id, _)| *chain_id)
     }
 
-    /// `SendDownload(chain)`.
-    fn send_download(&mut self, chain_id: ChainId, env: &mut impl Env<E>) {
-        let Some(chain) = self.chains.get_mut(&chain_id) else {
+    /// `SendDownload(chain)` — one coupled request for the chain's whole root set.
+    fn send_download(&mut self, chain_id: ChainId, cx: &mut SyncNetworkContext<T>) {
+        let Some(chain) = self.chains.get(&chain_id) else {
             return;
         };
-        if let Chain::ForwardSync { state, .. } = chain {
-            *state = Sync::Downloading;
-        }
-        let roots = chain.roots().iter().map(|(root, _)| *root).collect();
+        let roots: Vec<Hash256> = chain.roots().iter().rev().map(|(root, _)| *root).collect();
+        let Some(oldest_slot) = chain.oldest_slot() else {
+            return;
+        };
         let peers = chain.peers().clone();
-        env.download_blocks(roots, &peers);
-    }
-
-    /// `OnDownload(R, result)` — dispatched per owning chain, since `roots` may have been
-    /// split across several since the request went out.
-    pub fn on_download(
-        &mut self,
-        roots: &[Hash256],
-        result: Result<Vec<RangeSyncBlock<E>>, ()>,
-        env: &mut impl Env<E>,
-    ) {
-        for chain_id in self.owners(roots) {
-            match &result {
-                Ok(blocks) => {
-                    let Some(chain) = self.chains.get_mut(&chain_id) else {
-                        continue;
-                    };
-                    // `roots` is tip first, so reversing gives import order.
-                    let ordered: Vec<RangeSyncBlock<E>> = chain
-                        .roots()
-                        .iter()
-                        .rev()
-                        .filter_map(|(root, _)| {
-                            blocks
-                                .iter()
-                                .find(|block| block.block_root() == *root)
-                                .cloned()
-                        })
-                        .collect();
-                    if let Chain::ForwardSync { state, .. } = chain {
-                        *state = Sync::Ready(ordered);
-                    }
-                }
-                Err(()) => {
-                    if self
-                        .chains
-                        .get_mut(&chain_id)
-                        .is_some_and(|chain| chain.bump_errors())
-                    {
-                        self.drop_chain(chain_id);
-                    } else {
-                        self.send_download(chain_id, env);
-                    }
-                }
+        let request_id = self.alloc();
+        match BlockComponentsByRootRequest::new(
+            request_id,
+            roots,
+            oldest_slot.epoch(<T::EthSpec as EthSpec>::slots_per_epoch()),
+            peers,
+            cx,
+        ) {
+            Ok(request) => {
+                self.downloads.insert(request_id, (chain_id, request));
+            }
+            Err(e) => {
+                debug!(?e, chain = chain_id.0, "Forward sync block request failed");
+                self.on_download_failed(chain_id, cx);
             }
         }
-        self.promote(env);
+    }
+
+    fn on_download_blocks(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        result: RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        let Some((chain_id, mut request)) = self.downloads.remove(&id.lookup_id) else {
+            return;
+        };
+        let outcome = request.on_blocks_response(id, peer_id, result, cx);
+        self.finish_download(id.lookup_id, chain_id, request, outcome, cx);
+    }
+
+    /// Routes a custody result for a coupled download.
+    pub fn on_custody_result(
+        &mut self,
+        requester: Id,
+        peer_id: PeerId,
+        result: Result<DataColumnSidecarList<T::EthSpec>, super::network_context::RpcResponseError>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        let Some((chain_id, mut request)) = self.downloads.remove(&requester) else {
+            return;
+        };
+        let outcome = request.on_custody_response(peer_id, result, cx);
+        self.finish_download(requester, chain_id, request, outcome, cx);
+    }
+
+    fn finish_download(
+        &mut self,
+        requester: Id,
+        chain_id: ChainId,
+        request: BlockComponentsByRootRequest<T>,
+        outcome: Option<Result<Vec<RangeSyncBlock<T::EthSpec>>, ComponentsError>>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        match outcome {
+            // Still in flight.
+            None => {
+                self.downloads.insert(requester, (chain_id, request));
+            }
+            Some(Ok(blocks)) => {
+                if let Some(Chain::ForwardSync { state, .. }) = self.chains.get_mut(&chain_id) {
+                    *state = Sync::Ready(blocks);
+                }
+                self.promote(cx);
+            }
+            Some(Err(e)) => {
+                debug!(?e, chain = chain_id.0, "Forward sync download failed");
+                self.on_download_failed(chain_id, cx);
+            }
+        }
+    }
+
+    fn on_download_failed(&mut self, chain_id: ChainId, cx: &mut SyncNetworkContext<T>) {
+        if self
+            .chains
+            .get_mut(&chain_id)
+            .is_some_and(|chain| chain.bump_errors())
+        {
+            self.drop_chain(chain_id);
+        } else {
+            self.send_download(chain_id, cx);
+        }
+        self.promote(cx);
     }
 
     /// `SendProcess(chain)`.
-    fn send_process(&mut self, chain_id: ChainId, env: &mut impl Env<E>) {
-        let Some(Chain::ForwardSync {
-            state,
-            parent,
-            roots,
-            ..
-        }) = self.chains.get_mut(&chain_id)
-        else {
+    fn send_process(&mut self, chain_id: ChainId, cx: &mut SyncNetworkContext<T>) {
+        let Some(Chain::ForwardSync { state, parent, .. }) = self.chains.get_mut(&chain_id) else {
             return;
         };
-        if !env.is_known(parent) {
+        if !cx.chain.block_is_known_to_fork_choice(parent) {
             return;
         }
         let Sync::Ready(blocks) = state else {
             return;
         };
         let blocks = std::mem::take(blocks);
-        let roots = roots.iter().map(|(root, _)| *root).collect();
-        *state = Sync::Processing(blocks.clone());
-        env.process_blocks(roots, blocks);
+        *state = Sync::Processing;
+
+        let Some(processor) = cx.beacon_processor_if_enabled() else {
+            return;
+        };
+        if let Err(e) =
+            processor.send_chain_segment(ChainSegmentProcessId::ForwardSync(chain_id.0), blocks)
+        {
+            debug!(?e, chain = chain_id.0, "Forward sync process send failed");
+            self.drop_chain(chain_id);
+        }
     }
 
-    /// `OnProcess(R, result)`.
-    pub fn on_process(&mut self, roots: &[Hash256], result: Result<(), ()>, env: &mut impl Env<E>) {
-        let owners = self.owners(roots);
-        if result.is_err() {
-            // Oldest only: import stops at the first bad block, and split halves share a
-            // peer set, so blaming each would double count.
-            let peers: Vec<PeerId> = owners
-                .first()
-                .and_then(|chain_id| self.chains.get(chain_id))
-                .map(|chain| chain.peers().iter().copied().collect())
-                .unwrap_or_default();
-            for peer in &peers {
-                env.report_peer(peer);
+    /// `OnProcess(chain, result)`.
+    pub fn on_process_result(
+        &mut self,
+        chain_id: ChainId,
+        result: BatchProcessResult,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        match result {
+            BatchProcessResult::Success { .. } => {
+                // Every root is in fork choice, so this is a clean removal — the
+                // descendants are now eligible, not dead.
+                if let Some(chain) = self.chains.remove(&chain_id) {
+                    for (root, _) in chain.roots() {
+                        self.block_to_chain.remove(root);
+                    }
+                }
+            }
+            BatchProcessResult::FaultyFailure { .. } => {
+                self.report_chain(chain_id, cx);
+                self.on_download_failed(chain_id, cx);
+            }
+            BatchProcessResult::NonFaultyFailure => {
+                self.on_download_failed(chain_id, cx);
             }
         }
+        self.promote(cx);
+    }
 
-        for chain_id in owners {
-            match result {
-                Ok(()) => {
-                    // Every root is in fork choice, so this is a clean removal — the
-                    // descendants are now eligible, not dead.
-                    if let Some(chain) = self.chains.remove(&chain_id) {
-                        for (root, _) in chain.roots() {
-                            self.block_to_chain.remove(root);
-                        }
-                    }
-                }
-                Err(()) => {
-                    if self
-                        .chains
-                        .get_mut(&chain_id)
-                        .is_some_and(|chain| chain.bump_errors())
-                    {
-                        self.drop_chain(chain_id);
-                    } else {
-                        self.send_download(chain_id, env);
-                    }
-                }
-            }
+    fn report_chain(&self, chain_id: ChainId, cx: &SyncNetworkContext<T>) {
+        let Some(chain) = self.chains.get(&chain_id) else {
+            return;
+        };
+        for peer in chain.peers().read().iter() {
+            cx.report_peer(*peer, PeerAction::LowToleranceError, "forward_sync");
         }
-        self.promote(env);
     }
 
     /// `Disconnect(peer)`.
-    pub fn disconnect(&mut self, peer: &PeerId, env: &mut impl Env<E>) {
+    pub fn disconnect(&mut self, peer: &PeerId, cx: &mut SyncNetworkContext<T>) {
         let mut orphaned = Vec::new();
-        for (chain_id, chain) in self.chains.iter_mut() {
-            chain.peers_mut().remove(peer);
-            if chain.peers().is_empty() {
+        for (chain_id, chain) in self.chains.iter() {
+            chain.peers().write().remove(peer);
+            if chain.peer_count() == 0 {
                 orphaned.push(*chain_id);
             }
         }
         for chain_id in orphaned {
             self.drop_chain(chain_id);
         }
-        self.promote(env);
+        self.promote(cx);
     }
 
     /// `Drop(chain)` — the chain and, transitively, every chain anchored on one of its
@@ -744,6 +801,9 @@ impl<E: EthSpec> ForwardSync<E> {
             let Some(chain) = self.chains.remove(&next_id) else {
                 continue;
             };
+            self.header_requests.retain(|_, owner| *owner != next_id);
+            self.downloads.retain(|_, (owner, _)| *owner != next_id);
+
             let dropped: HashSet<Hash256> = chain.roots().iter().map(|(root, _)| *root).collect();
             for root in &dropped {
                 self.block_to_chain.remove(root);
@@ -771,7 +831,7 @@ impl<E: EthSpec> ForwardSync<E> {
             let Some(chain_id) = self
                 .chains
                 .iter()
-                .min_by_key(|(_, chain)| chain.peers().len())
+                .min_by_key(|(_, chain)| chain.peer_count())
                 .map(|(chain_id, _)| *chain_id)
             else {
                 return;

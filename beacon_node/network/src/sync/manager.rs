@@ -35,6 +35,7 @@
 
 use super::backfill_sync::{BackFillSync, ProcessResult, SyncStart};
 use super::block_lookups::BlockLookups;
+use super::forward_sync::{ChainId as ForwardChainId, ForwardSync};
 use super::network_context::{
     CustodyByRootResult, RangeBlockComponent, RangeRequestId, RpcEvent, SyncNetworkContext,
 };
@@ -54,17 +55,18 @@ use futures::StreamExt;
 use lighthouse_network::SyncInfo;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
-    BlobsByRangeRequestId, BlocksByRangeRequestId, BlocksByRootBatchRequestId,
-    ComponentsByRangeRequestId, CustodyBackFillBatchRequestId, CustodyBackfillBatchId,
-    CustodyRequester, DataColumnsByRangeRequestId, DataColumnsByRangeRequester,
-    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId,
-    SingleLookupReqId, SyncRequestId,
+    BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
+    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyRequester,
+    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
+    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
+    SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::{PeerAction, PeerId};
 use logging::crit;
 use lru_cache::LRUTimeCache;
 use slot_clock::SlotClock;
+use std::collections::HashSet;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Duration;
@@ -257,6 +259,8 @@ pub struct SyncManager<T: BeaconChainTypes> {
     custody_backfill_sync: CustodyBackFillSync<T>,
 
     block_lookups: BlockLookups<T>,
+    /// Experimental tree sync, running alongside regular sync. `None` unless enabled.
+    forward_sync: Option<ForwardSync<T>>,
     /// debounce duplicated `UnknownBlockHashFromAttestation` for the same root peer tuple. A peer
     /// may forward us thousands of a attestations, each one triggering an individual event. Only
     /// one event is useful, the rest generating log noise and wasted cycles
@@ -320,8 +324,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             ),
             range_sync: RangeSync::new(beacon_chain.clone()),
             backfill_sync: BackFillSync::new(beacon_chain.clone(), network_globals.clone()),
-            custody_backfill_sync: CustodyBackFillSync::new(beacon_chain.clone(), network_globals),
+            custody_backfill_sync: CustodyBackFillSync::new(
+                beacon_chain.clone(),
+                network_globals.clone(),
+            ),
             block_lookups: BlockLookups::new(),
+            forward_sync: network_globals.config.tree_sync.then(ForwardSync::new),
             notified_unknown_roots: LRUTimeCache::new(Duration::from_secs(
                 NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS,
             )),
@@ -408,6 +416,12 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             finalized_root: *status.finalized_root(),
             earliest_available_slot: status.earliest_available_slot().ok().cloned(),
         };
+
+        // Tree sync runs alongside the branches below and does not change them: every
+        // peer with an unknown head is a root to walk back from.
+        if !self.chain.block_is_known_to_fork_choice(&remote.head_root) {
+            self.forward_sync_search(remote.head_root, peer_id);
+        }
 
         let sync_type = remote_sync_type(&local, &remote, &self.chain);
 
@@ -536,6 +550,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         self.range_sync.peer_disconnect(&mut self.network, peer_id);
         let _ = self.backfill_sync.peer_disconnected(peer_id);
         self.block_lookups.peer_disconnected(peer_id);
+        if let Some(forward_sync) = self.forward_sync.as_mut() {
+            forward_sync.disconnect(peer_id, &mut self.network);
+        }
 
         // Inject a Disconnected error on all requests associated with the disconnected peer
         // to retry all batches/lookups. Only after removing the peer from the data structures to
@@ -860,6 +877,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncMessage::UnknownParentBlock(peer_id, block, block_root) => {
                 let block_slot = block.slot();
                 let parent_root = block.parent_root();
+                self.forward_sync_search(parent_root, peer_id);
                 let parent_block_hash = block.payload_bid_parent_block_hash().ok();
                 debug!(%block_root, %parent_root, "Received unknown parent block message");
                 self.handle_unknown_parent(
@@ -893,6 +911,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 );
             }
             SyncMessage::UnknownBlockHashFromAttestation(peer_id, block_root) => {
+                self.forward_sync_search(block_root, peer_id);
                 if !self.notified_unknown_roots.contains(&(peer_id, block_root)) {
                     self.notified_unknown_roots.insert((peer_id, block_root));
                     debug!(?block_root, ?peer_id, "Received unknown block hash message");
@@ -940,8 +959,14 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     self.update_sync_state();
                 }
                 ChainSegmentProcessId::ForwardSync(chain_id) => {
-                    // TODO(tree-sync): route to forward sync once it owns these segments.
-                    debug!(chain_id, ?result, "Forward sync segment processed");
+                    if let Some(forward_sync) = self.forward_sync.as_mut() {
+                        forward_sync.on_process_result(
+                            ForwardChainId(chain_id),
+                            result,
+                            &mut self.network,
+                        );
+                    }
+                    self.update_sync_state();
                 }
                 ChainSegmentProcessId::BackSyncBatchId(epoch) => {
                     match self.backfill_sync.on_batch_process_result(
@@ -1008,6 +1033,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             Err(reason) => {
                 debug!(%block_root, %parent_root, reason, "Ignoring unknown parent request");
             }
+        }
+    }
+
+    /// Feeds a root to tree sync, if enabled. A no-op otherwise.
+    fn forward_sync_search(&mut self, block_root: Hash256, peer_id: PeerId) {
+        if let Some(forward_sync) = self.forward_sync.as_mut() {
+            forward_sync.search(block_root, &HashSet::from([peer_id]), &mut self.network);
         }
     }
 
@@ -1185,17 +1217,17 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     /// Batched `BlocksByRoot`, issued by forward sync for a whole chain at once.
     fn on_blocks_by_root_batch_response(
         &mut self,
-        id: BlocksByRootBatchRequestId,
+        id: SingleLookupReqId,
         peer_id: PeerId,
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
-        if self
+        if let Some(resp) = self
             .network
             .on_blocks_by_root_batch_response(id, peer_id, block)
-            .is_some()
         {
-            // TODO(tree-sync): route to forward sync once it owns these requests.
-            debug!(%id, "Batched blocks by root response with no requester");
+            if let Some(forward_sync) = self.forward_sync.as_mut() {
+                forward_sync.on_blocks_by_root_batch(id, peer_id, resp, &mut self.network);
+            }
         }
     }
 
