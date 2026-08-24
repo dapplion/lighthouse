@@ -640,6 +640,15 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     process_id: (chain_id, epoch.as_u64()),
                 }
             }
+            ChainSegmentProcessId::ForwardSync(chain_id) => {
+                let process_fn = async move {
+                    processor.process_chain_segment(process_id, blocks).await;
+                };
+                Work::ChainSegment {
+                    process_fn: Box::pin(process_fn),
+                    process_id: (chain_id, 0),
+                }
+            }
             ChainSegmentProcessId::BackSyncBatchId(_) => {
                 let process_fn =
                     move || processor.process_chain_segment_backfill(process_id, blocks);

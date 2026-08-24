@@ -33,6 +33,16 @@ pub enum SyncRequestId {
     DataColumnsByRange(DataColumnsByRangeRequestId),
     /// Payload envelopes by range request
     PayloadEnvelopesByRange(PayloadEnvelopesByRangeRequestId),
+    /// Batched blocks by root, issued by forward sync for a whole chain at once.
+    BlocksByRootBatch(BlocksByRootBatchRequestId),
+}
+
+/// Identifies one batched `BlocksByRoot`. `requester` names the coupled download it
+/// belongs to; `req_id` distinguishes a retry's response from the superseded original's.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BlocksByRootBatchRequestId {
+    pub requester: Id,
+    pub req_id: Id,
 }
 
 /// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
@@ -281,6 +291,12 @@ impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
 impl_display!(CustodyId, "{}", requester);
 impl_display!(CustodyBackFillBatchRequestId, "{}/{}", id, batch_id);
 impl_display!(CustodyBackfillBatchId, "{}/{}", epoch, run_id);
+
+impl Display for BlocksByRootBatchRequestId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/BlocksByRootBatch/{}", self.req_id, self.requester)
+    }
+}
 
 impl Display for DataColumnsByRootRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

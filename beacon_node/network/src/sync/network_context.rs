@@ -3,7 +3,8 @@
 
 use self::custody::{ActiveCustodyRequest, Error as CustodyRequestError};
 pub use self::requests::{
-    BlocksByRootSingleRequest, DataColumnsByRootRequestParams, PayloadEnvelopesByRootSingleRequest,
+    BlocksByRootBatchRequest, BlocksByRootBatchRequestItems, BlocksByRootSingleRequest,
+    DataColumnsByRootRequestParams, PayloadEnvelopesByRootSingleRequest,
 };
 use super::SyncMessage;
 use super::block_sidecar_coupling::RangeBlockComponentsRequest;
@@ -31,11 +32,11 @@ use lighthouse_network::rpc::{
 };
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
-    SyncRequestId,
+    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, BlocksByRootBatchRequestId,
+    ComponentsByRangeRequestId, CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyId,
+    CustodyRequester, DataColumnsByRangeRequestId, DataColumnsByRangeRequester,
+    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId,
+    SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
@@ -59,6 +60,7 @@ use types::{
     ForkContext, Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
 };
 
+pub mod block_components_by_root;
 pub mod custody;
 mod requests;
 
@@ -224,6 +226,11 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
     blocks_by_root_requests:
         ActiveRequests<SingleLookupReqId, BlocksByRootRequestItems<T::EthSpec>>,
+    /// A mapping of active batched BlocksByRoot requests. Forward sync asks for a whole
+    /// chain in one request, so its items type differs from the single-root lookups above
+    /// and it needs its own map.
+    blocks_by_root_batch_requests:
+        ActiveRequests<BlocksByRootBatchRequestId, BlocksByRootBatchRequestItems<T::EthSpec>>,
     /// A mapping of active PayloadEnvelopesByRoot requests
     payload_envelopes_by_root_requests:
         ActiveRequests<SingleLookupReqId, PayloadEnvelopesByRootRequestItems<T::EthSpec>>,
@@ -328,6 +335,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             execution_engine_state: EngineState::Online, // always assume `Online` at the start
             request_id: 1,
             blocks_by_root_requests: ActiveRequests::new("blocks_by_root"),
+            blocks_by_root_batch_requests: ActiveRequests::new("blocks_by_root_batch"),
             payload_envelopes_by_root_requests: ActiveRequests::new("payload_envelopes_by_root"),
             data_columns_by_root_requests: ActiveRequests::new("data_columns_by_root"),
             blocks_by_range_requests: ActiveRequests::new("blocks_by_range"),
@@ -361,6 +369,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             network_send: _,
             request_id: _,
             blocks_by_root_requests,
+            blocks_by_root_batch_requests,
             payload_envelopes_by_root_requests,
             data_columns_by_root_requests,
             blocks_by_range_requests,
@@ -382,6 +391,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .active_requests_of_peer(peer_id)
             .into_iter()
             .map(|id| SyncRequestId::SingleBlock { id: *id });
+        let blocks_by_root_batch_ids = blocks_by_root_batch_requests
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|id| SyncRequestId::BlocksByRootBatch(*id));
         let payload_envelopes_by_root_ids = payload_envelopes_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
@@ -407,6 +420,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .into_iter()
             .map(|req_id| SyncRequestId::PayloadEnvelopesByRange(*req_id));
         blocks_by_root_ids
+            .chain(blocks_by_root_batch_ids)
             .chain(payload_envelopes_by_root_ids)
             .chain(data_column_by_root_ids)
             .chain(blocks_by_range_ids)
@@ -813,6 +827,76 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         );
 
         Ok(LookupRequestResult::RequestSent(id.req_id))
+    }
+
+    /// Request a batch of block roots in one `BlocksByRoot`. Forward sync asks for a whole
+    /// chain at once rather than one root at a time; the response must cover exactly
+    /// `roots`, so a short response is an error rather than a partial result.
+    pub fn blocks_by_root_batch_request(
+        &mut self,
+        lookup_id: SingleLookupId,
+        roots: Vec<Hash256>,
+        peers: Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Result<BlocksByRootBatchRequestId, RpcRequestSendError> {
+        let per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_batch_requests);
+        let Some(peer_id) = peers
+            .read()
+            .iter()
+            .map(|peer| {
+                (
+                    // De-prioritize peers that have already failed this request
+                    peers_to_deprioritize.contains(peer),
+                    per_peer.at_concurrency_limit(peer),
+                    // Random factor to break ties, otherwise the PeerID breaks ties
+                    rand::random::<u32>(),
+                    peer,
+                )
+            })
+            .min()
+            .map(|(_, _, _, peer)| *peer)
+        else {
+            return Err(RpcRequestSendError::NoPeer(NoPeerError::BlockPeer));
+        };
+
+        let id = BlocksByRootBatchRequestId {
+            requester: lookup_id,
+            req_id: self.next_id(),
+        };
+        let request = BlocksByRootBatchRequest(roots);
+        let items = BlocksByRootBatchRequestItems::new(&request);
+        let network_request = RequestType::BlocksByRoot(
+            request
+                .into_request(&self.fork_context)
+                .map_err(RpcRequestSendError::InternalError)?,
+        );
+        self.network_send
+            .send(NetworkMessage::SendRequest {
+                peer_id,
+                request: network_request,
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRootBatch(id)),
+            })
+            .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        let request_span = debug_span!(
+            parent: Span::current(),
+            "lh_outgoing_blocks_by_root_batch_request",
+        );
+        self.blocks_by_root_batch_requests
+            .insert(id, peer_id, true, items, request_span);
+        Ok(id)
+    }
+
+    pub(crate) fn on_blocks_by_root_batch_response(
+        &mut self,
+        id: BlocksByRootBatchRequestId,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>> {
+        let resp = self
+            .blocks_by_root_batch_requests
+            .on_response(id, rpc_event);
+        self.on_rpc_response_result(resp, peer_id)
     }
 
     /// Request a payload envelope for a block root via PayloadEnvelopesByRoot RPC.

@@ -704,6 +704,7 @@ impl<T: BeaconChainTypes> Router<T> {
         let sync_request_id = match app_request_id {
             AppRequestId::Sync(sync_id) => match sync_id {
                 id @ SyncRequestId::SingleBlock { .. } => id,
+                id @ SyncRequestId::BlocksByRootBatch(_) => id,
                 other => {
                     crit!(request = ?other, "BlocksByRoot response on incorrect request");
                     return;

@@ -54,11 +54,11 @@ use futures::StreamExt;
 use lighthouse_network::SyncInfo;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
-    BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
-    SyncRequestId,
+    BlobsByRangeRequestId, BlocksByRangeRequestId, BlocksByRootBatchRequestId,
+    ComponentsByRangeRequestId, CustodyBackFillBatchRequestId, CustodyBackfillBatchId,
+    CustodyRequester, DataColumnsByRangeRequestId, DataColumnsByRangeRequester,
+    DataColumnsByRootRequestId, DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId,
+    SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::{PeerAction, PeerId};
@@ -503,6 +503,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncRequestId::SingleBlock { id } => {
                 self.on_single_block_response(id, peer_id, RpcEvent::RPCError(error))
             }
+            SyncRequestId::BlocksByRootBatch(id) => {
+                self.on_blocks_by_root_batch_response(id, peer_id, RpcEvent::RPCError(error))
+            }
             SyncRequestId::SinglePayloadEnvelope { id } => {
                 self.on_single_payload_envelope_response(id, peer_id, RpcEvent::RPCError(error))
             }
@@ -936,6 +939,10 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     );
                     self.update_sync_state();
                 }
+                ChainSegmentProcessId::ForwardSync(chain_id) => {
+                    // TODO(tree-sync): route to forward sync once it owns these segments.
+                    debug!(chain_id, ?result, "Forward sync segment processed");
+                }
                 ChainSegmentProcessId::BackSyncBatchId(epoch) => {
                     match self.backfill_sync.on_batch_process_result(
                         &mut self.network,
@@ -1163,12 +1170,32 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncRequestId::SingleBlock { id } => {
                 self.on_single_block_response(id, peer_id, RpcEvent::from_chunk(block))
             }
+            SyncRequestId::BlocksByRootBatch(id) => {
+                self.on_blocks_by_root_batch_response(id, peer_id, RpcEvent::from_chunk(block))
+            }
             SyncRequestId::BlocksByRange(id) => {
                 self.on_blocks_by_range_response(id, peer_id, RpcEvent::from_chunk(block))
             }
             _ => {
                 crit!(%peer_id, "bad request id for block");
             }
+        }
+    }
+
+    /// Batched `BlocksByRoot`, issued by forward sync for a whole chain at once.
+    fn on_blocks_by_root_batch_response(
+        &mut self,
+        id: BlocksByRootBatchRequestId,
+        peer_id: PeerId,
+        block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) {
+        if self
+            .network
+            .on_blocks_by_root_batch_response(id, peer_id, block)
+            .is_some()
+        {
+            // TODO(tree-sync): route to forward sync once it owns these requests.
+            debug!(%id, "Batched blocks by root response with no requester");
         }
     }
 

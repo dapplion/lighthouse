@@ -28,7 +28,9 @@ use lighthouse_network::service::api_types::CustodyBackfillBatchId;
 use logging::crit;
 use std::sync::Arc;
 use tracing::{debug, debug_span, error, info, instrument, warn};
-use types::{BlockImportSource, DataColumnSidecarList, Epoch, ExecutionBlockHash, Hash256};
+use types::{
+    BlockImportSource, DataColumnSidecarList, Epoch, EthSpec, ExecutionBlockHash, Hash256,
+};
 
 /// Id associated to a batch processing request, either a sync batch or a parent lookup.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +39,8 @@ pub enum ChainSegmentProcessId {
     RangeBatchId(ChainId, Epoch),
     /// Processing ID for a backfill syncing batch.
     BackSyncBatchId(Epoch),
+    /// Processing ID for a forward sync chain, identified by the chain that submitted it.
+    ForwardSync(u32),
 }
 
 /// Returned when a chain segment import fails.
@@ -476,13 +480,24 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         process_id: ChainSegmentProcessId,
         downloaded_blocks: Vec<RangeSyncBlock<T::EthSpec>>,
     ) {
-        let ChainSegmentProcessId::RangeBatchId(chain_id, epoch) = process_id else {
-            // This is a request from range sync, this should _never_ happen
-            crit!(
-                error = "process_chain_segment called on a variant other than RangeBatchId",
-                "Please notify the devs"
-            );
-            return;
+        let (chain_id, epoch) = match process_id {
+            ChainSegmentProcessId::RangeBatchId(chain_id, epoch) => (chain_id, epoch),
+            // Forward sync submits a run of consecutive blocks rather than an epoch. Both
+            // values here are only used for logging and metrics.
+            ChainSegmentProcessId::ForwardSync(chain_id) => (
+                chain_id,
+                downloaded_blocks
+                    .first()
+                    .map(|block| block.slot().epoch(T::EthSpec::slots_per_epoch()))
+                    .unwrap_or_default(),
+            ),
+            ChainSegmentProcessId::BackSyncBatchId(_) => {
+                crit!(
+                    error = "process_chain_segment called on a variant other than RangeBatchId",
+                    "Please notify the devs"
+                );
+                return;
+            }
         };
 
         let start_slot = downloaded_blocks.first().map(|b| b.slot().as_u64());

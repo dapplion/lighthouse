@@ -324,7 +324,10 @@ impl<E: EthSpec> ForwardSync<E> {
         // The slot is only known for a root we already track; elsewhere this guard is
         // best-effort and `on_headers` is authoritative once a header is in hand.
         let (_, finalized_slot) = env.finalized();
-        if self.slot_of(&root).is_some_and(|slot| slot <= finalized_slot) {
+        if self
+            .slot_of(&root)
+            .is_some_and(|slot| slot <= finalized_slot)
+        {
             return;
         }
 
@@ -750,7 +753,10 @@ impl<E: EthSpec> ForwardSync<E> {
                 self.block_to_chain.remove(&pending);
             }
             for (child_id, child) in self.chains.iter() {
-                if child.parent().is_some_and(|parent| dropped.contains(&parent)) {
+                if child
+                    .parent()
+                    .is_some_and(|parent| dropped.contains(&parent))
+                {
                     queue.push(*child_id);
                 }
             }
