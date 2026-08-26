@@ -93,6 +93,10 @@ impl<T> RpcEvent<T> {
 
 pub type RpcResponseResult<T> = Result<T, RpcResponseError>;
 
+/// The blocks of one batched `BlocksByRoot`, or the error that ended it. `None` while the
+/// request is still collecting responses.
+pub type BlocksByRootBatchResult<E> = Option<RpcResponseResult<Vec<Arc<SignedBeaconBlock<E>>>>>;
+
 pub type CustodyByRootResult<T> =
     Result<DownloadResult<DataColumnSidecarList<T>>, RpcResponseError>;
 
@@ -874,7 +878,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         id: SingleLookupReqId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) -> Option<RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>> {
+    ) -> BlocksByRootBatchResult<T::EthSpec> {
         let resp = self.blocks_by_root_requests.on_response(id, rpc_event);
         self.on_rpc_response_result(resp, peer_id)
     }

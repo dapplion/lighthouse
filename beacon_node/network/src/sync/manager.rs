@@ -1246,10 +1246,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         if let Some(resp) = self
             .network
             .on_blocks_by_root_batch_response(id, peer_id, block)
+            && let Some(forward_sync) = self.forward_sync.as_mut()
         {
-            if let Some(forward_sync) = self.forward_sync.as_mut() {
-                forward_sync.on_blocks_by_root_batch(id, peer_id, resp, &mut self.network);
-            }
+            forward_sync.on_blocks_by_root_batch(id, peer_id, resp, &mut self.network);
         }
     }
 
