@@ -36,6 +36,16 @@ pub enum Error {
     Internal(String),
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::TooManyAttempts(request) => write!(f, "too many attempts: {request}"),
+            Error::Coupling(reason) => write!(f, "coupling: {reason}"),
+            Error::Internal(reason) => write!(f, "internal: {reason}"),
+        }
+    }
+}
+
 /// One coupled download. Lives in `SyncNetworkContext`, keyed by `id`, which is also the
 /// `lookup_id` of every request it issues — so the presence of that key is what tells the
 /// manager a response belongs to forward sync rather than to lookup sync.

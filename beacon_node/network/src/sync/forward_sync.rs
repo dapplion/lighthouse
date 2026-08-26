@@ -726,7 +726,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 self.promote(cx);
             }
             Some(Err(e)) => {
-                debug!(?e, chain = chain_id.0, "Forward sync download failed");
+                debug!(%e, chain = chain_id.0, "Forward sync download failed");
                 self.on_download_failed(chain_id, cx);
             }
         }
