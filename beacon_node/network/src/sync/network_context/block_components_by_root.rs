@@ -91,11 +91,6 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
         })
     }
 
-    /// True if this request issued `req_id`, so the caller can route a response.
-    pub fn owns(&self, req_id: &SingleLookupReqId) -> bool {
-        req_id.lookup_id == self.id
-    }
-
     /// Handles the batched `blocks_by_root` response.
     pub fn on_blocks_response(
         &mut self,
@@ -196,8 +191,15 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
 
         if matches!(self.columns, ColumnsState::NotStarted) {
             let fork = cx.chain.spec.fork_name_at_epoch(self.epoch);
-            let has_data = blocks.iter().any(|block| block.num_expected_blobs() > 0);
-            if !fork.fulu_enabled() || !has_data {
+            // Only blocks carrying data have columns. Asking for the whole set would make an
+            // honest peer's response look short, and a short custody response is a verify
+            // error that downscores the peer.
+            let roots_with_data = blocks
+                .iter()
+                .filter(|block| block.num_expected_blobs() > 0)
+                .map(|block| block.canonical_root())
+                .collect::<Vec<_>>();
+            if !fork.fulu_enabled() || roots_with_data.is_empty() {
                 self.columns = ColumnsState::NotNeeded;
             } else {
                 let requester = CustodyRequester::SingleLookup(SingleLookupReqId {
@@ -206,7 +208,7 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
                 });
                 match cx.custody_lookup_request(
                     requester,
-                    &self.roots,
+                    &roots_with_data,
                     self.epoch,
                     false,
                     self.peers.clone(),
