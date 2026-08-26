@@ -112,6 +112,14 @@ impl<E: EthSpec> Chain<E> {
         *errors > RETRY_MAX
     }
 
+    /// Progress resets the retry budget: `RETRY_MAX` bounds the retries of one step, not
+    /// the lifetime of a chain that walks thousands of roots.
+    fn clear_errors(&mut self) {
+        match self {
+            Chain::Backfill { errors, .. } | Chain::ForwardSync { errors, .. } => *errors = 0,
+        }
+    }
+
     /// Newest root.
     fn tip(&self) -> Option<Hash256> {
         self.roots().front().map(|(root, _)| *root)
@@ -349,7 +357,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                     },
                 );
                 self.block_to_chain.insert(root, chain_id);
-                self.send_headers(chain_id, root, cx);
+                self.send_headers(chain_id, root, cx, &HashSet::new());
             }
             Some(chain_id) => {
                 // Split unless the peer set already covers the whole chain.
@@ -397,7 +405,13 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
     /// `SendHeaders(chain, root)`. No `HeadersByRoot` RPC exists, so this asks for the
     /// block and takes its header.
-    fn send_headers(&mut self, chain_id: ChainId, root: Hash256, cx: &mut SyncNetworkContext<T>) {
+    fn send_headers(
+        &mut self,
+        chain_id: ChainId,
+        root: Hash256,
+        cx: &mut SyncNetworkContext<T>,
+        failed_peers: &HashSet<PeerId>,
+    ) {
         let Some(chain) = self.chains.get_mut(&chain_id) else {
             return;
         };
@@ -405,7 +419,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         if let Chain::Backfill { state, .. } = chain {
             *state = Backfill::Discovering(root);
         }
-        match cx.blocks_by_root_batch_request(chain_id.0, vec![root], peers, &HashSet::new()) {
+        match cx.blocks_by_root_batch_request(chain_id.0, vec![root], peers, failed_peers) {
             Ok(id) => {
                 self.header_requests.insert(id.lookup_id, chain_id);
             }
@@ -425,7 +439,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         cx: &mut SyncNetworkContext<T>,
     ) {
         if let Some(chain_id) = self.header_requests.remove(&id.lookup_id) {
-            self.on_headers(chain_id, result, cx);
+            self.on_headers(chain_id, peer_id, result, cx);
         } else if self.downloads.contains_key(&id.lookup_id) {
             self.on_download_blocks(id, peer_id, result, cx);
         }
@@ -435,6 +449,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     fn on_headers(
         &mut self,
         chain_id: ChainId,
+        peer_id: PeerId,
         result: RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>,
         cx: &mut SyncNetworkContext<T>,
     ) {
@@ -447,7 +462,11 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         };
 
         let blocks = match result {
-            Err(_) => {
+            Ok(blocks) if !blocks.is_empty() => blocks,
+            // A peer answering with nothing for a root it claimed leaves the walk exactly
+            // where it was. Retry on another peer: returning here would leave the chain
+            // `Discovering` with no request in flight, which nothing else can restart.
+            _ => {
                 if self
                     .chains
                     .get_mut(&chain_id)
@@ -455,12 +474,15 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 {
                     self.drop_chain(chain_id);
                 } else {
-                    self.send_headers(chain_id, next, cx);
+                    self.send_headers(chain_id, next, cx, &HashSet::from([peer_id]));
                 }
                 return self.promote(cx);
             }
-            Ok(blocks) => blocks,
         };
+
+        if let Some(chain) = self.chains.get_mut(&chain_id) {
+            chain.clear_errors();
+        }
 
         let (finalized_root, finalized_slot) = Self::finalized(cx);
         let mut unresolved: Option<Hash256> = None;
@@ -517,7 +539,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         // re-request headers already in hand and leave several responses racing for a
         // single `Discovering(next)`.
         if let Some(parent) = unresolved {
-            self.send_headers(chain_id, parent, cx);
+            self.send_headers(chain_id, parent, cx, &HashSet::new());
         }
 
         self.prune();
