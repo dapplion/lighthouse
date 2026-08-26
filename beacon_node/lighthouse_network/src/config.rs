@@ -343,7 +343,7 @@ impl Default for Config {
 
         // NOTE: Some of these get overridden by the corresponding CLI default values.
         Config {
-            tree_sync: true,
+            tree_sync: false,
             network_dir,
             listen_addresses,
             enr_address: (None, None),
