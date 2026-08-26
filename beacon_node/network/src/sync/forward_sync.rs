@@ -430,6 +430,14 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         }
     }
 
+    /// True if `id` was issued by forward sync. On disconnect `peer_disconnected` labels
+    /// every `blocks_by_root` request `SingleBlock` — it cannot see which map an id came
+    /// from — so the manager asks here before routing the injected error.
+    pub fn owns_request(&self, id: &SingleLookupReqId) -> bool {
+        self.header_requests.contains_key(&id.lookup_id)
+            || self.downloads.contains_key(&id.lookup_id)
+    }
+
     /// Routes a batched `BlocksByRoot` response to whichever request issued it.
     pub fn on_blocks_by_root_batch(
         &mut self,

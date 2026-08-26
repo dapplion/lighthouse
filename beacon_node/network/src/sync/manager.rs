@@ -559,6 +559,21 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         // to retry all batches/lookups. Only after removing the peer from the data structures to
         // avoid sending retry requests to the disconnecting peer.
         for sync_request_id in self.network.peer_disconnected(peer_id) {
+            // Forward sync's batched requests live in the same `blocks_by_root` map as lookup
+            // sync's, so `peer_disconnected` labels them all `SingleBlock`. Restore the
+            // variant, or the error routes to lookup sync and the chain waits forever on a
+            // request that is already dead.
+            let sync_request_id = match sync_request_id {
+                SyncRequestId::SingleBlock { id }
+                    if self
+                        .forward_sync
+                        .as_ref()
+                        .is_some_and(|forward_sync| forward_sync.owns_request(&id)) =>
+                {
+                    SyncRequestId::BlocksByRootBatch(id)
+                }
+                other => other,
+            };
             self.inject_error(*peer_id, sync_request_id, RPCError::Disconnected);
         }
 
