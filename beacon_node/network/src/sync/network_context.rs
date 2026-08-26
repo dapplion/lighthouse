@@ -715,23 +715,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peers_to_deprioritize: &HashSet<PeerId>,
         block_root: Hash256,
     ) -> Result<LookupRequestResult<Arc<SignedBeaconBlock<T::EthSpec>>>, RpcRequestSendError> {
-        let blocks_by_root_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
-        let Some(peer_id) = lookup_peers
-            .read()
-            .iter()
-            .map(|peer| {
-                (
-                    // De-prioritize peers that have already failed this request
-                    peers_to_deprioritize.contains(peer),
-                    // Strictly de-prioritize peers already at the per-protocol concurrency limit
-                    blocks_by_root_per_peer.at_concurrency_limit(peer),
-                    // Random factor to break ties, otherwise the PeerID breaks ties
-                    rand::random::<u32>(),
-                    peer,
-                )
-            })
-            .min()
-            .map(|(_, _, _, peer)| *peer)
+        let Some(peer_id) = self.select_blocks_by_root_peer(&lookup_peers, peers_to_deprioritize)
         else {
             // Allow lookup to not have any peers and do nothing. This is an optimization to not
             // lose progress of lookups created from a block with unknown parent before we receive
@@ -820,6 +804,29 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     /// Request a batch of block roots in one `BlocksByRoot`. Forward sync asks for a whole
     /// chain at once rather than one root at a time; the response must cover exactly
     /// `roots`, so a short response is an error rather than a partial result.
+    /// Picks who to ask for blocks by root: a peer that has not already failed this
+    /// request and is not at its per-protocol concurrency limit, ties broken at random.
+    fn select_blocks_by_root_peer(
+        &self,
+        peers: &Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Option<PeerId> {
+        let per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
+        peers
+            .read()
+            .iter()
+            .map(|peer| {
+                (
+                    peers_to_deprioritize.contains(peer),
+                    per_peer.at_concurrency_limit(peer),
+                    rand::random::<u32>(),
+                    peer,
+                )
+            })
+            .min()
+            .map(|(_, _, _, peer)| *peer)
+    }
+
     pub fn blocks_by_root_batch_request(
         &mut self,
         lookup_id: SingleLookupId,
@@ -827,23 +834,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peers: Arc<RwLock<HashSet<PeerId>>>,
         peers_to_deprioritize: &HashSet<PeerId>,
     ) -> Result<SingleLookupReqId, RpcRequestSendError> {
-        let per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
-        let Some(peer_id) = peers
-            .read()
-            .iter()
-            .map(|peer| {
-                (
-                    // De-prioritize peers that have already failed this request
-                    peers_to_deprioritize.contains(peer),
-                    per_peer.at_concurrency_limit(peer),
-                    // Random factor to break ties, otherwise the PeerID breaks ties
-                    rand::random::<u32>(),
-                    peer,
-                )
-            })
-            .min()
-            .map(|(_, _, _, peer)| *peer)
-        else {
+        let Some(peer_id) = self.select_blocks_by_root_peer(&peers, peers_to_deprioritize) else {
             return Err(RpcRequestSendError::NoPeer(NoPeerError::BlockPeer));
         };
 

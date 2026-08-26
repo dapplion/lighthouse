@@ -484,13 +484,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             ChainSegmentProcessId::RangeBatchId(chain_id, epoch) => (chain_id, epoch),
             // Forward sync submits a run of consecutive blocks rather than an epoch. Both
             // values here are only used for logging and metrics.
-            ChainSegmentProcessId::ForwardSync(chain_id) => (
-                chain_id,
-                downloaded_blocks
-                    .first()
-                    .map(|block| block.slot().epoch(T::EthSpec::slots_per_epoch()))
-                    .unwrap_or_default(),
-            ),
+            // Forward sync submits a run of consecutive blocks rather than an epoch; both
+            // values are only used for logging and metrics.
+            ChainSegmentProcessId::ForwardSync(chain_id) => (chain_id, Epoch::new(0)),
             ChainSegmentProcessId::BackSyncBatchId(_) => {
                 crit!(
                     error = "process_chain_segment called on a variant other than RangeBatchId",
