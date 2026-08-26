@@ -206,11 +206,14 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
                     lookup_id: self.id,
                     req_id: 0,
                 });
+                // `ignore_cache`: the cache lookup keys off the first root only, so for a
+                // batch it would skip indexes held for that block but missing for the rest,
+                // leaving the set short of the custody columns coupling requires.
                 match cx.custody_lookup_request(
                     requester,
                     &roots_with_data,
                     self.epoch,
-                    false,
+                    true,
                     self.peers.clone(),
                 ) {
                     Ok(LookupRequestResult::RequestSent(_)) => {
