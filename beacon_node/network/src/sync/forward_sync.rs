@@ -666,14 +666,13 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     pub fn on_custody_result(
         &mut self,
         requester: Id,
-        peer_id: PeerId,
         result: Result<DataColumnSidecarList<T::EthSpec>, super::network_context::RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) {
         let Some((chain_id, mut request)) = self.downloads.remove(&requester) else {
             return;
         };
-        let outcome = request.on_custody_response(peer_id, result, cx);
+        let outcome = request.on_custody_response(result, cx);
         self.finish_download(requester, chain_id, request, outcome, cx);
     }
 

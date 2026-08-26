@@ -870,8 +870,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             parent: Span::current(),
             "lh_outgoing_blocks_by_root_batch_request",
         );
+        // false: a peer omitting a root it does not have is legal, so the RPC layer must
+        // not penalize it. Completeness is checked by the requester instead, which retries
+        // elsewhere rather than downscoring.
         self.blocks_by_root_requests
-            .insert(id, peer_id, true, items, request_span);
+            .insert(id, peer_id, false, items, request_span);
         Ok(id)
     }
 

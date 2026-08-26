@@ -417,17 +417,18 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             earliest_available_slot: status.earliest_available_slot().ok().cloned(),
         };
 
-        // Tree sync runs alongside the branches below and does not change them: every
-        // peer with an unknown head is a root to walk back from.
-        if !self.chain.block_is_known_to_fork_choice(&remote.head_root) {
-            self.forward_sync_search(remote.head_root, peer_id);
-        }
-
         let sync_type = remote_sync_type(&local, &remote, &self.chain);
 
         // update the state of the peer.
         let is_still_connected = self.update_peer_sync_state(&peer_id, &local, &remote, &sync_type);
-        if is_still_connected {
+
+        // Tree sync replaces range and lookup sync: a peer with an unknown head is a root
+        // to walk back from, and no peer is routed to the other two.
+        if self.forward_sync.is_some() {
+            if is_still_connected && !self.chain.block_is_known_to_fork_choice(&remote.head_root) {
+                self.forward_sync_search(remote.head_root, peer_id);
+            }
+        } else if is_still_connected {
             match sync_type {
                 PeerSyncType::Behind => {} // Do nothing
                 PeerSyncType::Advanced => {
@@ -877,7 +878,10 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncMessage::UnknownParentBlock(peer_id, block, block_root) => {
                 let block_slot = block.slot();
                 let parent_root = block.parent_root();
-                self.forward_sync_search(parent_root, peer_id);
+                if self.forward_sync.is_some() {
+                    self.forward_sync_search(parent_root, peer_id);
+                    return;
+                }
                 let parent_block_hash = block.payload_bid_parent_block_hash().ok();
                 debug!(%block_root, %parent_root, "Received unknown parent block message");
                 self.handle_unknown_parent(
@@ -911,7 +915,10 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 );
             }
             SyncMessage::UnknownBlockHashFromAttestation(peer_id, block_root) => {
-                self.forward_sync_search(block_root, peer_id);
+                if self.forward_sync.is_some() {
+                    self.forward_sync_search(block_root, peer_id);
+                    return;
+                }
                 if !self.notified_unknown_roots.contains(&(peer_id, block_root)) {
                     self.notified_unknown_roots.insert((peer_id, block_root));
                     debug!(?block_root, ?peer_id, "Received unknown block hash message");
@@ -1425,8 +1432,21 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     ) {
         match requester {
             CustodyRequester::SingleLookup(id) => {
-                self.block_lookups
-                    .on_custody_download_response(id, response, &mut self.network);
+                // Forward sync issues custody requests under the same requester, keyed by
+                // the coupled download that owns them.
+                if let Some(forward_sync) = self.forward_sync.as_mut() {
+                    forward_sync.on_custody_result(
+                        id.lookup_id,
+                        response.map(|downloaded| downloaded.value),
+                        &mut self.network,
+                    );
+                } else {
+                    self.block_lookups.on_custody_download_response(
+                        id,
+                        response,
+                        &mut self.network,
+                    );
+                }
             }
             CustodyRequester::RangeSync(components_by_range_id) => {
                 // Route custody-by-root results through the standard range components

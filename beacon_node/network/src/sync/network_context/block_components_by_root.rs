@@ -112,7 +112,30 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
         }
 
         match result {
-            Ok(blocks) => self.blocks = BlocksState::Complete(blocks),
+            // A short response is not a protocol violation — the peer may simply not have
+            // a root — but it is not usable either, so retry elsewhere without penalty.
+            Ok(blocks) if blocks.len() == self.roots.len() => {
+                self.blocks = BlocksState::Complete(blocks)
+            }
+            Ok(_) => {
+                self.failed_peers.insert(peer_id);
+                if self.block_attempts >= MAX_ATTEMPTS {
+                    return Some(Err(Error::TooManyAttempts("blocks")));
+                }
+                return match cx.blocks_by_root_batch_request(
+                    self.id,
+                    self.roots.clone(),
+                    self.peers.clone(),
+                    &self.failed_peers,
+                ) {
+                    Ok(req_id) => {
+                        self.blocks = BlocksState::Active(req_id);
+                        self.block_attempts = self.block_attempts.saturating_add(1);
+                        None
+                    }
+                    Err(e) => Some(Err(Error::Internal(format!("{e:?}")))),
+                };
+            }
             Err(_) => {
                 self.failed_peers.insert(peer_id);
                 if self.block_attempts >= MAX_ATTEMPTS {
@@ -139,9 +162,10 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
     }
 
     /// Handles the custody response covering the whole set.
+    /// A custody request spans several peers, so a failure is not attributable to one of
+    /// them and none is deprioritized here.
     pub fn on_custody_response(
         &mut self,
-        peer_id: PeerId,
         result: Result<DataColumnSidecarList<T::EthSpec>, RpcResponseError>,
         cx: &mut SyncNetworkContext<T>,
     ) -> Option<BlockComponentsByRootResult<T::EthSpec>> {
@@ -151,7 +175,6 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
                 self.continue_request(cx)
             }
             Err(_) => {
-                self.failed_peers.insert(peer_id);
                 if self.column_attempts >= MAX_ATTEMPTS {
                     return Some(Err(Error::TooManyAttempts("columns")));
                 }
