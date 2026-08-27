@@ -720,14 +720,49 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
                 self.downloads.insert(requester, (chain_id, request));
             }
             Some(Ok(blocks)) => {
-                if let Some(Chain::ForwardSync { state, .. }) = self.chains.get_mut(&chain_id) {
-                    *state = Sync::Ready(blocks);
-                }
+                self.deliver_blocks(blocks);
                 self.promote(cx);
             }
             Some(Err(e)) => {
                 debug!(%e, chain = chain_id.0, "Forward sync download failed");
-                self.on_download_failed(chain_id, cx);
+                for owner in self.owners(request.roots()) {
+                    self.on_download_failed(owner, cx);
+                }
+            }
+        }
+    }
+
+    /// `owners(R)` — the chains now holding these roots, deduped. A `Split` while the
+    /// request was in flight moves some of `R` to a chain that never issued one, so the
+    /// issuing id alone is not who the result belongs to.
+    fn owners(&self, roots: &[Hash256]) -> Vec<ChainId> {
+        let mut owners = Vec::new();
+        for root in roots {
+            if let Some(owner) = self.block_to_chain.get(root).copied()
+                && !owners.contains(&owner)
+            {
+                owners.push(owner);
+            }
+        }
+        owners
+    }
+
+    /// Hands each owner the blocks for the roots it holds. A chain takes them only if they
+    /// cover it whole, so a root re-claimed by an unrelated chain cannot leave a partial
+    /// `Ready` behind (Inv 5).
+    fn deliver_blocks(&mut self, blocks: Vec<RangeSyncBlock<T::EthSpec>>) {
+        let mut by_owner: HashMap<ChainId, Vec<RangeSyncBlock<T::EthSpec>>> = HashMap::new();
+        for block in blocks {
+            if let Some(owner) = self.block_to_chain.get(&block.block_root()).copied() {
+                by_owner.entry(owner).or_default().push(block);
+            }
+        }
+        for (owner, owned) in by_owner {
+            let Some(Chain::ForwardSync { roots, state, .. }) = self.chains.get_mut(&owner) else {
+                continue;
+            };
+            if matches!(state, Sync::Downloading) && owned.len() == roots.len() {
+                *state = Sync::Ready(owned);
             }
         }
     }

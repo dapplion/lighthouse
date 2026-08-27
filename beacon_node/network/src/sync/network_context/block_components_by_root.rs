@@ -101,6 +101,11 @@ impl<T: BeaconChainTypes> BlockComponentsByRootRequest<T> {
         })
     }
 
+    /// The roots this download covers, oldest first.
+    pub fn roots(&self) -> &[Hash256] {
+        &self.roots
+    }
+
     /// Handles the batched `blocks_by_root` response.
     pub fn on_blocks_response(
         &mut self,
