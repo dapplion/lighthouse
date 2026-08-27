@@ -838,8 +838,15 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peers_to_deprioritize: &HashSet<PeerId>,
     ) -> Option<PeerId> {
         let per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
+        Self::select_peer(&per_peer, &peers.read(), peers_to_deprioritize)
+    }
+
+    fn select_peer(
+        per_peer: &ActiveRequestsPerPeer,
+        peers: &HashSet<PeerId>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Option<PeerId> {
         peers
-            .read()
             .iter()
             .map(|peer| {
                 (
@@ -851,6 +858,43 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             })
             .min()
             .map(|(_, _, _, peer)| *peer)
+    }
+
+    /// Walks `count` ancestors back from `beacon_root` in one request. This is forward sync's
+    /// discovery: one round trip per batch of roots rather than one per slot, which is what
+    /// `blocks_by_root` forced. Only peers advertising the protocol are considered, so a peer
+    /// that cannot serve it never costs a retry.
+    pub fn blocks_by_head_request(
+        &mut self,
+        lookup_id: SingleLookupId,
+        beacon_root: Hash256,
+        count: u64,
+        peers: Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Result<SingleLookupReqId, RpcRequestSendError> {
+        let candidates: HashSet<PeerId> = {
+            let peer_db = self.network_globals().peers.read();
+            peers
+                .read()
+                .iter()
+                .filter(|peer| {
+                    peer_db
+                        .peer_info(peer)
+                        .is_some_and(|info| info.supports_protocol(Protocol::BlocksByHead))
+                })
+                .copied()
+                .collect()
+        };
+        let per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_head_requests);
+        let Some(peer_id) = Self::select_peer(&per_peer, &candidates, peers_to_deprioritize) else {
+            return Err(RpcRequestSendError::NoPeer(NoPeerError::BlockPeer));
+        };
+        let req_id = self.send_blocks_by_head(
+            peer_id,
+            lookup_id,
+            BlocksByHeadRequest { beacon_root, count },
+        )?;
+        Ok(SingleLookupReqId { lookup_id, req_id })
     }
 
     pub fn blocks_by_root_batch_request(

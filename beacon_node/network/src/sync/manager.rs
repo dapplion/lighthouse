@@ -1284,8 +1284,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         peer_id: PeerId,
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
-        // The response is not consumed yet: a follow-up will inject the blocks into lookup sync.
-        self.network.on_blocks_by_head_response(id, peer_id, block);
+        if let Some(resp) = self.network.on_blocks_by_head_response(id, peer_id, block)
+            && let Some(forward_sync) = self.forward_sync.as_mut()
+        {
+            forward_sync.on_blocks_by_head(id, peer_id, resp, &mut self.network);
+        }
     }
 
     fn rpc_blob_received(

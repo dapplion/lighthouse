@@ -607,6 +607,22 @@ impl TestRig {
                 self.send_rpc_blocks_response(req_id, peer_id, &blocks);
             }
 
+            (RequestType::BlocksByHead(req), AppRequestId::Sync(req_id)) => {
+                // Walk the parent chain from `beacon_root`, as the responder does, stopping
+                // at `count` or when an ancestor is unknown.
+                let mut blocks = Vec::new();
+                let mut next = req.beacon_root;
+                while (blocks.len() as u64) < req.count {
+                    let Some(block) = self.network_blocks_by_root.get(&next) else {
+                        break;
+                    };
+                    let block = block.block_cloned();
+                    next = block.parent_root();
+                    blocks.push(block);
+                }
+                self.send_rpc_blocks_response(req_id, peer_id, &blocks);
+            }
+
             (RequestType::DataColumnsByRoot(req), AppRequestId::Sync(req_id)) => {
                 if self.complete_strategy.return_no_data_n_times > 0 {
                     self.complete_strategy.return_no_data_n_times -= 1;

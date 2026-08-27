@@ -15,6 +15,7 @@ use super::network_context::block_components_by_root::{
 };
 use super::network_context::{RpcResponseResult, SyncNetworkContext};
 use crate::network_beacon_processor::ChainSegmentProcessId;
+use crate::sync::network_context::RpcRequestSendError;
 use beacon_chain::BeaconChainTypes;
 use beacon_chain::block_verification_types::RangeSyncBlock;
 use lighthouse_network::service::api_types::{Id, SingleLookupReqId};
@@ -30,6 +31,9 @@ pub const BATCH_SIZE: usize = 32;
 /// Max blocks forward syncing — 8 chains in flight. Spec: `N`.
 pub const MAX_SYNCING_BLOCKS: usize = 256;
 pub const RETRY_MAX: u8 = 5;
+/// Ancestors asked for per discovery request. The responder caps at
+/// `MAX_REQUEST_BLOCKS_DENEB`, so asking for more buys nothing.
+pub const HEADERS_COUNT: u64 = 128;
 /// Tracked roots before pruning.
 pub const ROOTS_MAX: usize = 1_000_000;
 
@@ -426,7 +430,18 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         if let Chain::Backfill { state, .. } = chain {
             *state = Backfill::Discovering(root);
         }
-        match cx.blocks_by_root_batch_request(chain_id.0, vec![root], peers, failed_peers) {
+        // `blocks_by_head` walks the whole run in one request, but it is new in Fulu and a
+        // chain's peerset is only those peers that claimed its tip (Inv 3) — none of them may
+        // serve it. Fall back to fetching the single root, which every peer serves.
+        let sent = cx
+            .blocks_by_head_request(chain_id.0, root, HEADERS_COUNT, peers.clone(), failed_peers)
+            .or_else(|e| match e {
+                RpcRequestSendError::NoPeer(_) => {
+                    cx.blocks_by_root_batch_request(chain_id.0, vec![root], peers, failed_peers)
+                }
+                other => Err(other),
+            });
+        match sent {
             Ok(id) => {
                 self.header_requests.insert(id.lookup_id, chain_id);
             }
@@ -443,6 +458,20 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
     pub fn owns_request(&self, id: &SingleLookupReqId) -> bool {
         self.header_requests.contains_key(&id.lookup_id)
             || self.downloads.contains_key(&id.lookup_id)
+    }
+
+    /// `OnHeaders`, fed by `blocks_by_head`. The response is the requested root followed by
+    /// its ancestors in descending slot order, which is exactly what the walk consumes.
+    pub fn on_blocks_by_head(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        result: RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        if let Some(chain_id) = self.header_requests.remove(&id.lookup_id) {
+            self.on_headers(chain_id, peer_id, result, cx);
+        }
     }
 
     /// Routes a batched `BlocksByRoot` response to whichever request issued it.
