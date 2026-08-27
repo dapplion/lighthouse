@@ -395,6 +395,13 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             if !visited.insert(chain_id) {
                 return;
             }
+            // Only `root` and its ancestors were claimed. Whatever descends from `root`
+            // inside this chain may be on another branch, so split it off first rather
+            // than admitting peers to roots they never claimed (Inv 3). `split` leaves the
+            // older half — `root` and below — under `chain_id`.
+            if self.chains.get(&chain_id).and_then(|chain| chain.tip()) != Some(root) {
+                self.split(chain_id, root);
+            }
             let Some(chain) = self.chains.get(&chain_id) else {
                 return;
             };
