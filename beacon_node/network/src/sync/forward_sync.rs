@@ -875,14 +875,16 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             self.header_requests.retain(|_, owner| *owner != next_id);
             self.downloads.retain(|_, (owner, _)| *owner != next_id);
 
-            let dropped: HashSet<Hash256> = chain.roots().iter().map(|(root, _)| *root).collect();
-            for root in &dropped {
-                self.block_to_chain.remove(root);
-            }
-            // The claimed-but-unfetched root, which is in the index but not in `roots`.
+            let mut dropped: HashSet<Hash256> =
+                chain.roots().iter().map(|(root, _)| *root).collect();
+            // The claimed-but-unfetched root, which is in the index but not in `roots`. A
+            // chain anchored on it must go too, or it waits on a root nothing will fetch.
             if let Some(pending) = chain.discovering() {
-                self.block_to_chain.remove(&pending);
+                dropped.insert(pending);
             }
+            // Every entry pointing here, not an enumerated list: a walk aborted mid-response
+            // leaves a claimed root that is in neither `roots` nor `discovering`.
+            self.block_to_chain.retain(|_, owner| *owner != next_id);
             for (child_id, child) in self.chains.iter() {
                 if child
                     .parent()
