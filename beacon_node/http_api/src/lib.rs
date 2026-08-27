@@ -2950,6 +2950,23 @@ pub async fn serve<T: BeaconChainTypes>(
             },
         );
 
+    // GET lighthouse/tree_sync
+    let get_lighthouse_tree_sync = warp::path("lighthouse")
+        .and(warp::path("tree_sync"))
+        .and(warp::path::end())
+        .and(task_spawner_filter.clone())
+        .and(network_globals.clone())
+        .then(
+            |task_spawner: TaskSpawner<T::EthSpec>,
+             network_globals: Arc<NetworkGlobals<T::EthSpec>>| {
+                task_spawner.blocking_json_task(Priority::P0, move || {
+                    Ok(api_types::GenericResponse::from(
+                        network_globals.tree_sync.read().clone(),
+                    ))
+                })
+            },
+        );
+
     // GET lighthouse/syncing
     let get_lighthouse_syncing = warp::path("lighthouse")
         .and(warp::path("syncing"))
@@ -3432,6 +3449,7 @@ pub async fn serve<T: BeaconChainTypes>(
                 .uor(get_lighthouse_ui_health)
                 .uor(get_lighthouse_ui_validator_count)
                 .uor(get_lighthouse_syncing)
+                .uor(get_lighthouse_tree_sync)
                 .uor(get_lighthouse_nat)
                 .uor(get_lighthouse_peers)
                 .uor(get_lighthouse_peers_connected)

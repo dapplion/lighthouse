@@ -18,11 +18,13 @@ use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::sync::network_context::RpcRequestSendError;
 use beacon_chain::BeaconChainTypes;
 use beacon_chain::block_verification_types::RangeSyncBlock;
+use lighthouse_network::TreeSyncChainInfo;
 use lighthouse_network::service::api_types::{Id, SingleLookupReqId};
 use lighthouse_network::{PeerAction, PeerId};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::debug;
 use types::{DataColumnSidecarList, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
@@ -114,6 +116,12 @@ impl<E: EthSpec> Chain<E> {
         };
         *errors = errors.saturating_add(1);
         *errors > RETRY_MAX
+    }
+
+    fn errors(&self) -> u8 {
+        match self {
+            Chain::Backfill { errors, .. } | Chain::ForwardSync { errors, .. } => *errors,
+        }
     }
 
     /// Progress resets the retry budget: `RETRY_MAX` bounds the retries of one step, not
@@ -245,6 +253,8 @@ pub struct ForwardSync<T: BeaconChainTypes> {
     chains: HashMap<ChainId, Chain<T::EthSpec>>,
     /// Outstanding header walks, by request id.
     header_requests: HashMap<Id, ChainId>,
+    /// Last time the forest snapshot was published for `/lighthouse/tree_sync`.
+    forest_published: Instant,
     /// Outstanding coupled downloads, by request id.
     downloads: HashMap<Id, (ChainId, BlockComponentsByRootRequest<T>)>,
     next_id: u32,
@@ -256,6 +266,7 @@ impl<T: BeaconChainTypes> Default for ForwardSync<T> {
             block_to_chain: HashMap::new(),
             chains: HashMap::new(),
             header_requests: HashMap::new(),
+            forest_published: Instant::now(),
             downloads: HashMap::new(),
             next_id: 0,
         }
@@ -590,8 +601,65 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         self.promote(cx);
     }
 
+    /// Publishes the forest for `/lighthouse/tree_sync`. The sync task owns this state and
+    /// nothing else can see it, so without this the forest is unauditable from outside.
+    fn publish_forest(&mut self, cx: &SyncNetworkContext<T>) {
+        // `promote` runs after every transition, and this formats every root in every
+        // chain. At 11k roots that costs more than the sync it is reporting on, so it is
+        // rebuilt at most once a second.
+        let now = Instant::now();
+        if now.duration_since(self.forest_published) < Duration::from_secs(1) {
+            return;
+        }
+        self.forest_published = now;
+        let forest = self
+            .chains
+            .iter()
+            .map(|(chain_id, chain)| {
+                let (kind, state) = match chain {
+                    Chain::Backfill {
+                        state: Backfill::Discovering(root),
+                        ..
+                    } => ("backfill", format!("discovering({root:?})")),
+                    Chain::Backfill {
+                        state: Backfill::Anchored(parent),
+                        ..
+                    } => ("backfill", format!("anchored({parent:?})")),
+                    Chain::ForwardSync { state, .. } => (
+                        "forward_sync",
+                        match state {
+                            Sync::Downloading => "downloading".to_owned(),
+                            Sync::Ready(blocks) => format!("ready({})", blocks.len()),
+                            Sync::Processing => "processing".to_owned(),
+                        },
+                    ),
+                };
+                let roots = chain.roots();
+                TreeSyncChainInfo {
+                    id: chain_id.0,
+                    kind: kind.to_owned(),
+                    state,
+                    parent: chain.parent().map(|parent| format!("{parent:?}")),
+                    newest_slot: roots.front().map(|(_, slot)| slot.as_u64()),
+                    oldest_slot: roots.back().map(|(_, slot)| slot.as_u64()),
+                    root_count: roots.len(),
+                    roots: roots.iter().map(|(root, _)| format!("{root:?}")).collect(),
+                    peers: chain
+                        .peers()
+                        .read()
+                        .iter()
+                        .map(|peer| peer.to_string())
+                        .collect(),
+                    errors: chain.errors(),
+                }
+            })
+            .collect();
+        *cx.network_globals().tree_sync.write() = forest;
+    }
+
     /// `Promote` — runs after every transition.
     fn promote(&mut self, cx: &mut SyncNetworkContext<T>) {
+        self.publish_forest(cx);
         let ready: Vec<ChainId> = self
             .chains
             .iter()
