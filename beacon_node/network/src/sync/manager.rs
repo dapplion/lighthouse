@@ -917,6 +917,10 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 parent_root,
                 slot,
             } => {
+                if self.forward_sync.is_some() {
+                    self.forward_sync_search(parent_root, peer_id);
+                    return;
+                }
                 debug!(%block_root, %parent_root, "Received unknown parent sidecar header message");
                 self.handle_unknown_parent(
                     peer_id,
