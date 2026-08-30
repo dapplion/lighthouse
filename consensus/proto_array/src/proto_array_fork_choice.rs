@@ -322,6 +322,11 @@ where
 {
     fn ensure(&mut self, i: usize) {
         if self.0.len() <= i {
+            // Grow capacity in bounded increments: `Vec`'s amortized doubling wastes ~150 MB
+            // on the vote list at mainnet validator counts.
+            if self.0.capacity() <= i {
+                self.0.reserve_exact(i + 1 + (1 << 16) - self.0.len());
+            }
             self.0.resize_with(i + 1, Default::default);
         }
     }
