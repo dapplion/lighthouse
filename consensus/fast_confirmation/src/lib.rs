@@ -88,8 +88,11 @@ impl From<ArithError> for Error {
     }
 }
 
-/// Per-mille adjustment factor for committee weight estimates that don't cover a full epoch.
-const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
+impl From<fast_confirmation_core::ArithError> for Error {
+    fn from(_: fast_confirmation_core::ArithError) -> Self {
+        Error::ArithError(ArithError::Overflow)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -700,12 +703,11 @@ impl FastConfirmationRule {
         &self,
         balance_source: &BalanceSourceData,
     ) -> Result<u64, Error> {
-        let committee_weight = balance_source
-            .total_active_balance
-            .safe_div(E::slots_per_epoch())?;
-        Ok(committee_weight
-            .safe_mul(self.proposer_score_boost)?
-            .safe_div(100)?)
+        Ok(fast_confirmation_core::compute_proposer_score(
+            balance_source.total_active_balance,
+            E::slots_per_epoch(),
+            self.proposer_score_boost,
+        )?)
     }
 
     /// Spec: `compute_empty_slot_support_discount`.
@@ -801,16 +803,12 @@ impl FastConfirmationRule {
             equivocating_indices,
         )?;
 
-        let threshold_numerator = maximum_support
-            .safe_add(proposer_score)?
-            .safe_add(adversarial_weight.safe_mul(2)?)?;
-        if support_discount < threshold_numerator {
-            Ok(threshold_numerator
-                .safe_sub(support_discount)?
-                .safe_div(2)?)
-        } else {
-            Ok(0)
-        }
+        Ok(fast_confirmation_core::safety_threshold(
+            maximum_support,
+            proposer_score,
+            adversarial_weight,
+            support_discount,
+        )?)
     }
 
     /// Spec: `get_adversarial_weight`.
@@ -858,9 +856,10 @@ impl FastConfirmationRule {
             start_slot,
             end_slot,
         )?;
-        let max_adversarial_weight = maximum_weight
-            .safe_div(100)?
-            .safe_mul(self.byzantine_threshold)?;
+        let max_adversarial_weight = fast_confirmation_core::max_adversarial_weight(
+            maximum_weight,
+            self.byzantine_threshold,
+        )?;
 
         let equivocation_score = self.get_equivocation_score(
             balance_source,
@@ -869,11 +868,10 @@ impl FastConfirmationRule {
             equivocating_indices,
         )?;
 
-        if max_adversarial_weight > equivocation_score {
-            Ok(max_adversarial_weight.safe_sub(equivocation_score)?)
-        } else {
-            Ok(0)
-        }
+        Ok(fast_confirmation_core::adversarial_weight(
+            max_adversarial_weight,
+            equivocation_score,
+        ))
     }
 
     /// Spec: `get_equivocation_score`.
@@ -1300,7 +1298,11 @@ struct OneConfirmation {
 
 impl OneConfirmation {
     fn is_one_confirmed(&self) -> bool {
-        !self.optimistic_or_invalid && self.support > self.safety_threshold
+        fast_confirmation_core::is_one_confirmed(
+            self.optimistic_or_invalid,
+            self.support,
+            self.safety_threshold,
+        )
     }
 
     fn not_confirmed(&self) -> NotOneConfirmed {
@@ -1357,75 +1359,19 @@ pub(crate) fn dependent_root<E: EthSpec>(
         .map_err(|e| Error::BlockRootsOutOfBounds(format!("dep_root lookup: {e:?}")))?)
 }
 
-/// Spec: `is_full_validator_set_covered`.
-fn is_full_validator_set_covered<E: EthSpec>(
-    start_slot: Slot,
-    end_slot: Slot,
-) -> Result<bool, Error> {
-    let spe = E::slots_per_epoch();
-    let start_full_epoch = start_slot.safe_add(spe.safe_sub(1)?)?.epoch(spe);
-    let end_full_epoch = end_slot.safe_add(1)?.epoch(spe);
-    Ok(start_full_epoch < end_full_epoch)
-}
-
-/// Spec: `adjust_committee_weight_estimate_to_ensure_safety`.
-///
-/// Spec uses ceiling division: `(estimate + 999) // 1000`. The function exists to
-/// conservatively over-estimate committee weight; flooring would under-estimate and
-/// weaken the safety threshold.
-fn adjust_committee_weight_estimate_to_ensure_safety(estimate: u64) -> Result<u64, Error> {
-    let ceil = estimate.div_ceil(1000);
-    Ok(ceil.safe_mul(1000u64.safe_add(COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR)?)?)
-}
-
 /// Spec: `estimate_committee_weight_between_slots`.
 fn estimate_committee_weight_between_slots<E: EthSpec>(
     total_active_balance: u64,
     start_slot: Slot,
     end_slot: Slot,
 ) -> Result<u64, Error> {
-    let spe = E::slots_per_epoch();
-
-    if start_slot > end_slot {
-        return Ok(0);
-    }
-
-    if is_full_validator_set_covered::<E>(start_slot, end_slot)? {
-        return Ok(total_active_balance);
-    }
-
-    let start_epoch = start_slot.as_u64().safe_div(spe)?;
-    let end_epoch = end_slot.as_u64().safe_div(spe)?;
-
-    if start_epoch == end_epoch {
-        let num_slots = end_slot
-            .as_u64()
-            .safe_sub(start_slot.as_u64())?
-            .safe_add(1)?;
-        return Ok(total_active_balance.safe_div(spe)?.safe_mul(num_slots)?);
-    }
-
-    // Cross-epoch boundary but not covering a full epoch.
-    let slots_since_start_epoch = start_slot.as_u64().safe_rem(spe)?;
-    let num_slots_in_start_epoch = spe.safe_sub(slots_since_start_epoch)?;
-
-    let slots_since_end_epoch = end_slot.as_u64().safe_rem(spe)?;
-    let num_slots_in_end_epoch = slots_since_end_epoch.safe_add(1)?;
-    let remaining_slots_in_end_epoch = spe.safe_sub(num_slots_in_end_epoch)?;
-
-    let start_epoch_weight = total_active_balance
-        .safe_div(spe)?
-        .safe_mul(num_slots_in_start_epoch)?;
-    let end_epoch_weight = total_active_balance
-        .safe_div(spe)?
-        .safe_mul(num_slots_in_end_epoch)?;
-
-    let start_epoch_weight_pro_rated = start_epoch_weight
-        .safe_div(spe)?
-        .safe_mul(remaining_slots_in_end_epoch)?;
-
-    adjust_committee_weight_estimate_to_ensure_safety(
-        start_epoch_weight_pro_rated.safe_add(end_epoch_weight)?,
+    Ok(
+        fast_confirmation_core::estimate_committee_weight_between_slots(
+            total_active_balance,
+            start_slot.as_u64(),
+            end_slot.as_u64(),
+            E::slots_per_epoch(),
+        )?,
     )
 }
 
@@ -1442,18 +1388,6 @@ mod tests {
         assert!(is_start_slot_at_epoch::<E>(Slot::new(32)));
         assert!(!is_start_slot_at_epoch::<E>(Slot::new(1)));
         assert!(!is_start_slot_at_epoch::<E>(Slot::new(31)));
-    }
-
-    #[test]
-    fn test_is_full_validator_set_covered() {
-        // 32 slots = full epoch
-        assert!(is_full_validator_set_covered::<E>(Slot::new(0), Slot::new(31)).unwrap());
-        // 33 slots crossing boundary
-        assert!(is_full_validator_set_covered::<E>(Slot::new(0), Slot::new(32)).unwrap());
-        // Single slot — not full
-        assert!(!is_full_validator_set_covered::<E>(Slot::new(0), Slot::new(0)).unwrap());
-        // 31 slots — not full
-        assert!(!is_full_validator_set_covered::<E>(Slot::new(1), Slot::new(31)).unwrap());
     }
 
     #[test]
@@ -1479,29 +1413,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(w, 0);
-    }
-
-    #[test]
-    fn test_adjustment_factor() {
-        // Ceiling division: ceil(1000/1000) * 1005 = 1 * 1005 = 1005
-        assert_eq!(
-            adjust_committee_weight_estimate_to_ensure_safety(1000).unwrap(),
-            1005
-        );
-        // Ceiling division: ceil(999/1000) * 1005 = 1 * 1005 = 1005 (NOT 0)
-        assert_eq!(
-            adjust_committee_weight_estimate_to_ensure_safety(999).unwrap(),
-            1005
-        );
-        // Ceiling division: ceil(1500/1000) * 1005 = 2 * 1005 = 2010
-        assert_eq!(
-            adjust_committee_weight_estimate_to_ensure_safety(1500).unwrap(),
-            2010
-        );
-        // Edge case: 0 -> ceil(0/1000) = 0
-        assert_eq!(
-            adjust_committee_weight_estimate_to_ensure_safety(0).unwrap(),
-            0
-        );
     }
 }

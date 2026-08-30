@@ -3537,6 +3537,7 @@ name = "fast_confirmation"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "fast_confirmation_core",
  "fixed_bytes",
  "metrics",
  "proto_array",
@@ -3546,6 +3547,10 @@ dependencies = [
  "tracing",
  "types",
 ]
+
+[[package]]
+name = "fast_confirmation_core"
+version = "0.1.0"
 
 [[package]]
 name = "fastbloom"
