@@ -90,6 +90,7 @@ pub struct RateLimiterConfig {
     pub(super) blocks_by_range_quota: Quota,
     pub(super) blocks_by_root_quota: Quota,
     pub(super) blocks_by_head_quota: Quota,
+    pub(super) block_headers_by_root_quota: Quota,
     pub(super) payload_envelopes_by_range_quota: Quota,
     pub(super) payload_envelopes_by_root_quota: Quota,
     pub(super) blobs_by_range_quota: Quota,
@@ -116,6 +117,9 @@ impl RateLimiterConfig {
         Quota::n_every(NonZeroU64::new(128).unwrap(), 10);
     pub const DEFAULT_BLOCKS_BY_HEAD_QUOTA: Quota =
         Quota::n_every(NonZeroU64::new(128).unwrap(), 10);
+    /// Headers are ~112 B, so a far higher count costs less bandwidth than one block batch.
+    pub const DEFAULT_BLOCK_HEADERS_BY_ROOT_QUOTA: Quota =
+        Quota::n_every(NonZeroU64::new(4096).unwrap(), 10);
     pub const DEFAULT_PAYLOAD_ENVELOPES_BY_RANGE_QUOTA: Quota =
         Quota::n_every(NonZeroU64::new(128).unwrap(), 10);
     pub const DEFAULT_PAYLOAD_ENVELOPES_BY_ROOT_QUOTA: Quota =
@@ -147,6 +151,7 @@ impl Default for RateLimiterConfig {
             blocks_by_range_quota: Self::DEFAULT_BLOCKS_BY_RANGE_QUOTA,
             blocks_by_root_quota: Self::DEFAULT_BLOCKS_BY_ROOT_QUOTA,
             blocks_by_head_quota: Self::DEFAULT_BLOCKS_BY_HEAD_QUOTA,
+            block_headers_by_root_quota: Self::DEFAULT_BLOCK_HEADERS_BY_ROOT_QUOTA,
             payload_envelopes_by_range_quota: Self::DEFAULT_PAYLOAD_ENVELOPES_BY_RANGE_QUOTA,
             payload_envelopes_by_root_quota: Self::DEFAULT_PAYLOAD_ENVELOPES_BY_ROOT_QUOTA,
             blobs_by_range_quota: Self::DEFAULT_BLOBS_BY_RANGE_QUOTA,
@@ -182,6 +187,10 @@ impl Debug for RateLimiterConfig {
             .field("blocks_by_range", fmt_q!(&self.blocks_by_range_quota))
             .field("blocks_by_root", fmt_q!(&self.blocks_by_root_quota))
             .field("blocks_by_head", fmt_q!(&self.blocks_by_head_quota))
+            .field(
+                "block_headers_by_root",
+                fmt_q!(&self.block_headers_by_root_quota),
+            )
             .field(
                 "payload_envelopes_by_range",
                 fmt_q!(&self.payload_envelopes_by_range_quota),
@@ -219,6 +228,7 @@ impl FromStr for RateLimiterConfig {
         let mut blocks_by_range_quota = None;
         let mut blocks_by_root_quota = None;
         let mut blocks_by_head_quota = None;
+        let mut block_headers_by_root_quota = None;
         let mut payload_envelopes_by_range_quota = None;
         let mut payload_envelopes_by_root_quota = None;
         let mut blobs_by_range_quota = None;
@@ -239,6 +249,9 @@ impl FromStr for RateLimiterConfig {
                 Protocol::BlocksByRange => blocks_by_range_quota = blocks_by_range_quota.or(quota),
                 Protocol::BlocksByRoot => blocks_by_root_quota = blocks_by_root_quota.or(quota),
                 Protocol::BlocksByHead => blocks_by_head_quota = blocks_by_head_quota.or(quota),
+                Protocol::BlockHeadersByRoot => {
+                    block_headers_by_root_quota = block_headers_by_root_quota.or(quota)
+                }
                 Protocol::PayloadEnvelopesByRange => {
                     payload_envelopes_by_range_quota = payload_envelopes_by_range_quota.or(quota)
                 }
@@ -279,6 +292,8 @@ impl FromStr for RateLimiterConfig {
             goodbye_quota: goodbye_quota.unwrap_or(Self::DEFAULT_GOODBYE_QUOTA),
             blocks_by_range_quota: blocks_by_range_quota
                 .unwrap_or(Self::DEFAULT_BLOCKS_BY_RANGE_QUOTA),
+            block_headers_by_root_quota: block_headers_by_root_quota
+                .unwrap_or(Self::DEFAULT_BLOCK_HEADERS_BY_ROOT_QUOTA),
             blocks_by_root_quota: blocks_by_root_quota
                 .unwrap_or(Self::DEFAULT_BLOCKS_BY_ROOT_QUOTA),
             blocks_by_head_quota: blocks_by_head_quota

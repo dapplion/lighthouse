@@ -7,8 +7,9 @@ use beacon_chain::payload_envelope_streamer::EnvelopeRequestSource;
 use beacon_chain::{BeaconChainError, BeaconChainTypes, BlockProcessStatus, WhenSlotSkipped};
 use itertools::{Itertools, process_results};
 use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, BlobsByRootRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
-    DataColumnsByRootRequest, PayloadEnvelopesByRangeRequest, PayloadEnvelopesByRootRequest,
+    BlobsByRangeRequest, BlobsByRootRequest, BlockHeadersByRootRequest, BlocksByHeadRequest,
+    DataColumnsByRangeRequest, DataColumnsByRootRequest, MAX_REQUEST_BLOCK_HEADERS,
+    PayloadEnvelopesByRangeRequest, PayloadEnvelopesByRootRequest,
 };
 use lighthouse_network::rpc::*;
 use lighthouse_network::{PeerId, ReportSource, Response, SyncInfo};
@@ -253,6 +254,93 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         }
         log_results(peer_id, requested_blocks, send_block_count);
 
+        Ok(())
+    }
+
+    /// Handle a `BeaconBlockHeadersByRoot` request from the peer.
+    ///
+    /// Walks the parent chain of `request.beacon_root` (inclusive) and emits up to
+    /// `min(request.count, MAX_REQUEST_BLOCK_HEADERS)` headers in descending slot order,
+    /// stopping early at `request.min_slot`. See consensus-specs PR 5179.
+    pub async fn handle_block_headers_by_root_request(
+        self: Arc<Self>,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        request: BlockHeadersByRootRequest,
+    ) {
+        self.terminate_response_stream(
+            peer_id,
+            inbound_request_id,
+            self.clone()
+                .handle_block_headers_by_root_request_inner(peer_id, inbound_request_id, request)
+                .await,
+            Response::BlockHeadersByRoot,
+        );
+    }
+
+    async fn handle_block_headers_by_root_request_inner(
+        self: Arc<Self>,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        request: BlockHeadersByRootRequest,
+    ) -> Result<(), (RpcErrorResponse, &'static str)> {
+        let cap = request.count.min(MAX_REQUEST_BLOCK_HEADERS);
+        let beacon_root = request.beacon_root;
+
+        debug!(
+            %peer_id,
+            beacon_root = ?beacon_root,
+            count = request.count,
+            cap,
+            min_slot = %request.min_slot,
+            "Received BlockHeadersByRoot Request"
+        );
+
+        if cap == 0 {
+            return Ok(());
+        }
+
+        let network_beacon_processor = self.clone();
+        let block_roots = self
+            .executor
+            .spawn_blocking_handle(
+                move || network_beacon_processor.get_block_roots_ancestor_of_head(beacon_root, cap),
+                "get_block_roots_ancestor_of_head_for_headers",
+            )
+            .ok_or((RpcErrorResponse::ServerError, "shutting down"))?
+            .await
+            .map_err(|_| (RpcErrorResponse::ServerError, "tokio join"))??;
+
+        let requested = block_roots.len();
+        let mut sent = 0;
+        // Blinded blocks carry the header, so this never touches the execution layer.
+        for root in block_roots {
+            match self.chain.get_blinded_block(&root) {
+                Ok(Some(block)) => {
+                    if block.slot() < request.min_slot {
+                        break;
+                    }
+                    self.send_response(
+                        peer_id,
+                        inbound_request_id,
+                        Response::BlockHeadersByRoot(Some(Arc::new(block.signed_block_header()))),
+                    );
+                    sent += 1;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    error!(?root, error = ?e, "Error reading block for headers request");
+                    return Err((RpcErrorResponse::ServerError, "database error"));
+                }
+            }
+        }
+
+        debug!(
+            %peer_id,
+            requested,
+            returned = sent,
+            "BlockHeadersByRoot outgoing response processed"
+        );
         Ok(())
     }
 

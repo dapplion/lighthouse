@@ -24,7 +24,7 @@ use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineStat
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
+    BlobsByRangeRequest, BlockHeadersByRootRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
     PayloadEnvelopesByRangeRequest,
 };
 use lighthouse_network::rpc::{
@@ -42,10 +42,10 @@ use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSourc
 use parking_lot::RwLock;
 pub use requests::LookupVerifyError;
 use requests::{
-    ActiveRequestItems, ActiveRequests, BlobsByRangeRequestItems, BlocksByHeadRequestItems,
-    BlocksByRangeRequestItems, BlocksByRootRequestItems, DataColumnsByRangeRequestItems,
-    DataColumnsByRootRequestItems, PayloadEnvelopesByRangeRequestItems,
-    PayloadEnvelopesByRootRequestItems,
+    ActiveRequestItems, ActiveRequests, BlobsByRangeRequestItems, BlockHeadersByRootRequestItems,
+    BlocksByHeadRequestItems, BlocksByRangeRequestItems, BlocksByRootRequestItems,
+    DataColumnsByRangeRequestItems, DataColumnsByRootRequestItems,
+    PayloadEnvelopesByRangeRequestItems, PayloadEnvelopesByRootRequestItems,
 };
 #[cfg(test)]
 use slot_clock::SlotClock;
@@ -58,7 +58,8 @@ use tokio::sync::mpsc;
 use tracing::{Span, debug, debug_span, error, warn};
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Epoch, EthSpec,
-    ForkContext, Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
+    ForkContext, Hash256, SignedBeaconBlock, SignedBeaconBlockHeader,
+    SignedExecutionPayloadEnvelope, Slot,
 };
 
 pub mod block_components_by_root;
@@ -234,6 +235,9 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active BlocksByHead requests, used by block lookups to walk a block's ancestors.
     blocks_by_head_requests:
         ActiveRequests<SingleLookupReqId, BlocksByHeadRequestItems<T::EthSpec>>,
+    /// A mapping of active BlockHeadersByRoot requests: tree sync's ancestor walk.
+    block_headers_by_root_requests:
+        ActiveRequests<SingleLookupReqId, BlockHeadersByRootRequestItems>,
     /// A mapping of active PayloadEnvelopesByRoot requests
     payload_envelopes_by_root_requests:
         ActiveRequests<SingleLookupReqId, PayloadEnvelopesByRootRequestItems<T::EthSpec>>,
@@ -339,6 +343,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_id: 1,
             blocks_by_root_requests: ActiveRequests::new("blocks_by_root"),
             blocks_by_head_requests: ActiveRequests::new("blocks_by_head"),
+            block_headers_by_root_requests: ActiveRequests::new("block_headers_by_root"),
             payload_envelopes_by_root_requests: ActiveRequests::new("payload_envelopes_by_root"),
             data_columns_by_root_requests: ActiveRequests::new("data_columns_by_root"),
             blocks_by_range_requests: ActiveRequests::new("blocks_by_range"),
@@ -373,6 +378,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_id: _,
             blocks_by_root_requests,
             blocks_by_head_requests,
+            block_headers_by_root_requests,
             payload_envelopes_by_root_requests,
             data_columns_by_root_requests,
             blocks_by_range_requests,
@@ -398,6 +404,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .active_requests_of_peer(peer_id)
             .into_iter()
             .map(|id| SyncRequestId::BlocksByHead(*id));
+        let block_headers_by_root_ids = block_headers_by_root_requests
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|id| SyncRequestId::BlockHeadersByRoot(*id));
         let payload_envelopes_by_root_ids = payload_envelopes_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
@@ -424,6 +434,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .map(|req_id| SyncRequestId::PayloadEnvelopesByRange(*req_id));
         blocks_by_root_ids
             .chain(blocks_by_head_ids)
+            .chain(block_headers_by_root_ids)
             .chain(payload_envelopes_by_root_ids)
             .chain(data_column_by_root_ids)
             .chain(blocks_by_range_ids)
@@ -946,6 +957,89 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) -> BlocksByRootBatchResult<T::EthSpec> {
         let resp = self.blocks_by_root_requests.on_response(id, rpc_event);
+        self.on_rpc_response_result(resp, peer_id)
+    }
+
+    /// Walks `count` ancestors back from `beacon_root`, returning headers only. A header is
+    /// ~112 B against ~100 KB for a block, so one round trip covers far more slots — and the
+    /// root, slot and parent it carries are all tree sync's discovery needs.
+    pub fn block_headers_by_root_request(
+        &mut self,
+        lookup_id: SingleLookupId,
+        beacon_root: Hash256,
+        count: u64,
+        min_slot: Slot,
+        peers: Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Result<SingleLookupReqId, RpcRequestSendError> {
+        let candidates: HashSet<PeerId> = {
+            let peer_db = self.network_globals().peers.read();
+            peers
+                .read()
+                .iter()
+                .filter(|peer| {
+                    peer_db
+                        .peer_info(peer)
+                        .is_some_and(|info| info.supports_protocol(Protocol::BlockHeadersByRoot))
+                })
+                .copied()
+                .collect()
+        };
+        let per_peer = ActiveRequestsPerPeer::new(&self.block_headers_by_root_requests);
+        let Some(peer_id) = Self::select_peer(&per_peer, &candidates, peers_to_deprioritize) else {
+            return Err(RpcRequestSendError::NoPeer(NoPeerError::BlockPeer));
+        };
+        let id = SingleLookupReqId {
+            lookup_id,
+            req_id: self.next_id(),
+        };
+        let request = BlockHeadersByRootRequest {
+            beacon_root,
+            count,
+            min_slot,
+        };
+        self.network_send
+            .send(NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::BlockHeadersByRoot(request.clone()),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlockHeadersByRoot(id)),
+            })
+            .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        debug!(
+            method = "BlockHeadersByRoot",
+            block_root = ?beacon_root,
+            count,
+            peer = %peer_id,
+            %id,
+            "Sync RPC request sent"
+        );
+
+        let request_span = debug_span!(
+            parent: Span::current(),
+            "lh_outgoing_block_headers_by_root_request",
+            block_root = %beacon_root,
+        );
+        self.block_headers_by_root_requests.insert(
+            id,
+            peer_id,
+            // false: the walk may stop early at `min_slot` or the peer's serving range.
+            false,
+            BlockHeadersByRootRequestItems::new(beacon_root, count as usize),
+            request_span,
+        );
+        Ok(id)
+    }
+
+    pub(crate) fn on_block_headers_by_root_response(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<Arc<SignedBeaconBlockHeader>>,
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedBeaconBlockHeader>>>> {
+        let resp = self
+            .block_headers_by_root_requests
+            .on_response(id, rpc_event);
         self.on_rpc_response_result(resp, peer_id)
     }
 

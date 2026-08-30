@@ -251,6 +251,10 @@ impl<T: BeaconChainTypes> Router<T> {
                     request,
                 ),
             ),
+            RequestType::BlockHeadersByRoot(request) => self.handle_beacon_processor_send_result(
+                self.network_beacon_processor
+                    .send_block_headers_by_root_request(peer_id, inbound_request_id, request),
+            ),
             RequestType::PayloadEnvelopesByRoot(request) => self
                 .handle_beacon_processor_send_result(
                     self.network_beacon_processor
@@ -357,6 +361,20 @@ impl<T: BeaconChainTypes> Router<T> {
             }
             Response::BlocksByHead(beacon_block) => {
                 self.on_blocks_by_head_response(peer_id, app_request_id, beacon_block);
+            }
+            Response::BlockHeadersByRoot(header) => {
+                let sync_request_id = match app_request_id {
+                    AppRequestId::Sync(id @ SyncRequestId::BlockHeadersByRoot { .. }) => id,
+                    other => {
+                        crit!(request = ?other, "BlockHeadersByRoot response on incorrect request");
+                        return;
+                    }
+                };
+                self.send_to_sync(SyncMessage::RpcBlockHeader {
+                    peer_id,
+                    sync_request_id,
+                    header,
+                });
             }
             // Light client responses should not be received
             Response::LightClientBootstrap(_)

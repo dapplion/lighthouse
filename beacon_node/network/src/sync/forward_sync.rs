@@ -19,6 +19,7 @@ use crate::sync::network_context::RpcRequestSendError;
 use beacon_chain::BeaconChainTypes;
 use beacon_chain::block_verification_types::RangeSyncBlock;
 use lighthouse_network::TreeSyncChainInfo;
+use lighthouse_network::rpc::methods::MAX_REQUEST_BLOCK_HEADERS;
 use lighthouse_network::service::api_types::{Id, SingleLookupReqId};
 use lighthouse_network::{PeerAction, PeerId};
 use parking_lot::RwLock;
@@ -26,6 +27,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::debug;
+use types::SignedBeaconBlockHeader;
 use types::{DataColumnSidecarList, EthSpec, Hash256, SignedBeaconBlock, Slot};
 
 /// Roots promoted at a time. Protocol cap is 128. Spec: `B`.
@@ -36,6 +38,10 @@ pub const RETRY_MAX: u8 = 5;
 /// Ancestors asked for per discovery request. The responder caps at
 /// `MAX_REQUEST_BLOCKS_DENEB`, so asking for more buys nothing.
 pub const HEADERS_COUNT: u64 = 128;
+
+/// What the walk needs from each ancestor: its root, slot and parent. Both
+/// `blocks_by_head` and `beacon_block_headers_by_root` map into this.
+type Ancestor = (Hash256, Slot, Hash256);
 /// Tracked roots before pruning.
 pub const ROOTS_MAX: usize = 1_000_000;
 
@@ -441,11 +447,31 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         if let Chain::Backfill { state, .. } = chain {
             *state = Backfill::Discovering(root);
         }
-        // `blocks_by_head` walks the whole run in one request, but it is new in Fulu and a
-        // chain's peerset is only those peers that claimed its tip (Inv 3) — none of them may
-        // serve it. Fall back to fetching the single root, which every peer serves.
+        // Three ways to walk, cheapest first. `block_headers_by_root` moves ~112 B per
+        // ancestor against ~100 KB for a block, so it covers 16x more slots per round trip;
+        // `blocks_by_head` covers a batch but ships whole blocks; `blocks_by_root` fetches the
+        // single root. A chain's peerset is only those peers that claimed its tip (Inv 3), so
+        // none of them may serve the newer routes — hence the fallbacks.
+        let min_slot = Self::finalized(cx).1;
         let sent = cx
-            .blocks_by_head_request(chain_id.0, root, HEADERS_COUNT, peers.clone(), failed_peers)
+            .block_headers_by_root_request(
+                chain_id.0,
+                root,
+                MAX_REQUEST_BLOCK_HEADERS,
+                min_slot,
+                peers.clone(),
+                failed_peers,
+            )
+            .or_else(|e| match e {
+                RpcRequestSendError::NoPeer(_) => cx.blocks_by_head_request(
+                    chain_id.0,
+                    root,
+                    HEADERS_COUNT,
+                    peers.clone(),
+                    failed_peers,
+                ),
+                other => Err(other),
+            })
             .or_else(|e| match e {
                 RpcRequestSendError::NoPeer(_) => {
                     cx.blocks_by_root_batch_request(chain_id.0, vec![root], peers, failed_peers)
@@ -471,6 +497,32 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             || self.downloads.contains_key(&id.lookup_id)
     }
 
+    /// `OnHeaders`, fed by `beacon_block_headers_by_root` — the cheap path. Same walk as
+    /// `blocks_by_head`, but the response carries headers rather than whole blocks.
+    pub fn on_block_headers(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        result: RpcResponseResult<Vec<Arc<SignedBeaconBlockHeader>>>,
+        cx: &mut SyncNetworkContext<T>,
+    ) {
+        if let Some(chain_id) = self.header_requests.remove(&id.lookup_id) {
+            let ancestors = result.map(|headers| {
+                headers
+                    .into_iter()
+                    .map(|header| {
+                        (
+                            header.message.canonical_root(),
+                            header.message.slot,
+                            header.message.parent_root,
+                        )
+                    })
+                    .collect()
+            });
+            self.on_headers(chain_id, peer_id, ancestors, cx);
+        }
+    }
+
     /// `OnHeaders`, fed by `blocks_by_head`. The response is the requested root followed by
     /// its ancestors in descending slot order, which is exactly what the walk consumes.
     pub fn on_blocks_by_head(
@@ -481,8 +533,23 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         cx: &mut SyncNetworkContext<T>,
     ) {
         if let Some(chain_id) = self.header_requests.remove(&id.lookup_id) {
-            self.on_headers(chain_id, peer_id, result, cx);
+            self.on_headers(chain_id, peer_id, Self::ancestors_of(result), cx);
         }
+    }
+
+    /// The walk only needs each block's root, slot and parent.
+    fn ancestors_of(
+        result: RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>,
+    ) -> RpcResponseResult<Vec<Ancestor>> {
+        result.map(|blocks| {
+            blocks
+                .into_iter()
+                .map(|block| {
+                    let header = block.message().block_header();
+                    (header.canonical_root(), header.slot, header.parent_root)
+                })
+                .collect()
+        })
     }
 
     /// Routes a batched `BlocksByRoot` response to whichever request issued it.
@@ -494,7 +561,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         cx: &mut SyncNetworkContext<T>,
     ) {
         if let Some(chain_id) = self.header_requests.remove(&id.lookup_id) {
-            self.on_headers(chain_id, peer_id, result, cx);
+            self.on_headers(chain_id, peer_id, Self::ancestors_of(result), cx);
         } else if self.downloads.contains_key(&id.lookup_id) {
             self.on_download_blocks(id, peer_id, result, cx);
         }
@@ -505,7 +572,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
         &mut self,
         chain_id: ChainId,
         peer_id: PeerId,
-        result: RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>,
+        result: RpcResponseResult<Vec<Ancestor>>,
         cx: &mut SyncNetworkContext<T>,
     ) {
         let Some(next) = self
@@ -516,8 +583,8 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             return;
         };
 
-        let blocks = match result {
-            Ok(blocks) if !blocks.is_empty() => blocks,
+        let ancestors = match result {
+            Ok(ancestors) if !ancestors.is_empty() => ancestors,
             // A peer answering with nothing for a root it claimed leaves the walk exactly
             // where it was. Retry on another peer: returning here would leave the chain
             // `Discovering` with no request in flight, which nothing else can restart.
@@ -541,10 +608,8 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
 
         let (finalized_root, finalized_slot) = Self::finalized(cx);
         let mut unresolved: Option<Hash256> = None;
-        for block in blocks {
-            let header = block.message().block_header();
-            let root = header.canonical_root();
-            if header.slot <= finalized_slot && root != finalized_root {
+        for (root, slot, parent) in ancestors {
+            if slot <= finalized_slot && root != finalized_root {
                 self.report_chain(chain_id, cx);
                 self.drop_chain(chain_id);
                 return self.promote(cx);
@@ -553,8 +618,7 @@ impl<T: BeaconChainTypes> ForwardSync<T> {
             let Some(chain) = self.chains.get_mut(&chain_id) else {
                 return;
             };
-            chain.roots_mut().push_back((root, header.slot));
-            let parent = header.parent_root;
+            chain.roots_mut().push_back((root, slot));
 
             if Self::is_known(cx, &parent) {
                 if let Chain::Backfill { state, .. } = chain {

@@ -75,7 +75,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace};
 use types::{
     BlobSidecar, DataColumnSidecar, EthSpec, ExecutionBlockHash, ForkContext, Hash256,
-    SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
+    SignedBeaconBlock, SignedBeaconBlockHeader, SignedExecutionPayloadEnvelope, Slot,
 };
 
 /// The number of slots ahead of us that is allowed before requesting a long-range (batch)  Sync
@@ -115,6 +115,13 @@ pub enum SyncMessage<E: EthSpec> {
         sync_request_id: SyncRequestId,
         peer_id: PeerId,
         beacon_block: Option<Arc<SignedBeaconBlock<E>>>,
+    },
+
+    /// A block header has been received from the RPC (`beacon_block_headers_by_root`).
+    RpcBlockHeader {
+        sync_request_id: SyncRequestId,
+        peer_id: PeerId,
+        header: Option<Arc<SignedBeaconBlockHeader>>,
     },
 
     /// A blob has been received from the RPC.
@@ -524,6 +531,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncRequestId::BlocksByHead(id) => {
                 self.on_blocks_by_head_response(id, peer_id, RpcEvent::RPCError(error))
             }
+            SyncRequestId::BlockHeadersByRoot(id) => {
+                self.on_block_headers_by_root_response(id, peer_id, RpcEvent::RPCError(error))
+            }
             SyncRequestId::SinglePayloadEnvelope { id } => {
                 self.on_single_payload_envelope_response(id, peer_id, RpcEvent::RPCError(error))
             }
@@ -878,6 +888,22 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             } => {
                 self.rpc_block_received(sync_request_id, peer_id, beacon_block);
             }
+            SyncMessage::RpcBlockHeader {
+                sync_request_id,
+                peer_id,
+                header,
+            } => match sync_request_id {
+                SyncRequestId::BlockHeadersByRoot(id) => {
+                    self.on_block_headers_by_root_response(
+                        id,
+                        peer_id,
+                        RpcEvent::from_chunk(header),
+                    );
+                }
+                other => {
+                    crit!(request = ?other, "bad request id for block header");
+                }
+            },
             SyncMessage::RpcBlob {
                 sync_request_id,
                 peer_id,
@@ -1275,6 +1301,22 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 resp.map(|value| DownloadResult::new(value, PeerGroup::from_single(peer_id))),
                 &mut self.network,
             )
+        }
+    }
+
+    /// `beacon_block_headers_by_root`, issued by forward sync to walk ancestors cheaply.
+    fn on_block_headers_by_root_response(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        header: RpcEvent<Arc<SignedBeaconBlockHeader>>,
+    ) {
+        if let Some(resp) = self
+            .network
+            .on_block_headers_by_root_response(id, peer_id, header)
+            && let Some(forward_sync) = self.forward_sync.as_mut()
+        {
+            forward_sync.on_block_headers(id, peer_id, resp, &mut self.network);
         }
     }
 
