@@ -32,6 +32,10 @@ pub struct GossipsubConfigParams {
 #[serde(default)]
 /// Network configuration for lighthouse.
 pub struct Config {
+    /// Experimental: run tree sync alongside regular sync. Off by default; regular sync
+    /// is unaffected either way.
+    pub tree_sync: bool,
+
     /// Data directory where node's keyfile is stored
     pub network_dir: PathBuf,
 
@@ -339,6 +343,7 @@ impl Default for Config {
 
         // NOTE: Some of these get overridden by the corresponding CLI default values.
         Config {
+            tree_sync: false,
             network_dir,
             listen_addresses,
             enr_address: (None, None),

@@ -1707,6 +1707,17 @@ impl<E: EthSpec> Network<E> {
                             request_type,
                         })
                     }
+                    RequestType::BlockHeadersByRoot(_) => {
+                        metrics::inc_counter_vec(
+                            &metrics::TOTAL_RPC_REQUESTS,
+                            &["block_headers_by_root"],
+                        );
+                        Some(NetworkEvent::RequestReceived {
+                            peer_id,
+                            inbound_request_id,
+                            request_type,
+                        })
+                    }
                     RequestType::BlocksByHead(_) => {
                         metrics::inc_counter_vec(&metrics::TOTAL_RPC_REQUESTS, &["blocks_by_head"]);
                         Some(NetworkEvent::RequestReceived {
@@ -1851,6 +1862,9 @@ impl<E: EthSpec> Network<E> {
                     RpcSuccessResponse::BlocksByRoot(resp) => {
                         self.build_response(id, peer_id, Response::BlocksByRoot(Some(resp)))
                     }
+                    RpcSuccessResponse::BlockHeadersByRoot(resp) => {
+                        self.build_response(id, peer_id, Response::BlockHeadersByRoot(Some(resp)))
+                    }
                     RpcSuccessResponse::BlocksByHead(resp) => {
                         self.build_response(id, peer_id, Response::BlocksByHead(Some(resp)))
                     }
@@ -1899,6 +1913,7 @@ impl<E: EthSpec> Network<E> {
                     ResponseTermination::BlocksByRange => Response::BlocksByRange(None),
                     ResponseTermination::BlocksByRoot => Response::BlocksByRoot(None),
                     ResponseTermination::BlocksByHead => Response::BlocksByHead(None),
+                    ResponseTermination::BlockHeadersByRoot => Response::BlockHeadersByRoot(None),
                     ResponseTermination::PayloadEnvelopesByRange => {
                         Response::PayloadEnvelopesByRange(None)
                     }

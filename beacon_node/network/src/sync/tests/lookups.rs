@@ -237,6 +237,9 @@ pub(crate) struct TestRigConfig {
     fulu_test_type: FuluTestType,
     /// Override the node custody type derived from `fulu_test_type`
     node_custody_type_override: Option<NodeCustodyType>,
+    /// Tree sync replaces range and lookup sync, so a rig exercising either of those runs
+    /// with it off. Tests that target tree sync set it.
+    tree_sync: bool,
 }
 
 struct FullEmptyFork {
@@ -282,7 +285,9 @@ impl TestRig {
         let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncMessage<E>>();
         // TODO(das): make the generation of the ENR use the deterministic rng to have consistent
         // column assignments
-        let network_config = Arc::new(NetworkConfig::default());
+        let mut network_config = NetworkConfig::default();
+        network_config.tree_sync = test_rig_config.tree_sync;
+        let network_config = Arc::new(network_config);
         let globals = Arc::new(NetworkGlobals::new_test_globals(
             Vec::new(),
             network_config,
@@ -354,6 +359,17 @@ impl TestRig {
         Self::new(TestRigConfig {
             fulu_test_type: FuluTestType::WeFullnodeThemSupernode,
             node_custody_type_override: None,
+            tree_sync: false,
+        })
+    }
+
+    /// A rig with tree sync in place of range and lookup sync.
+    #[allow(dead_code)]
+    pub fn tree_sync() -> Self {
+        Self::new(TestRigConfig {
+            fulu_test_type: FuluTestType::WeFullnodeThemSupernode,
+            node_custody_type_override: None,
+            tree_sync: true,
         })
     }
 
@@ -362,6 +378,7 @@ impl TestRig {
         Self::new(TestRigConfig {
             fulu_test_type: FuluTestType::WeFullnodeThemSupernode,
             node_custody_type_override: Some(node_custody_type),
+            tree_sync: false,
         })
     }
 
@@ -562,27 +579,47 @@ impl TestRig {
 
         match (request, app_req_id) {
             (RequestType::BlocksByRoot(req), AppRequestId::Sync(req_id)) => {
-                let blocks =
-                    req.block_roots()
-                        .iter()
-                        .filter_map(|block_root| {
-                            if self.complete_strategy.return_no_blocks_n_times > 0 {
-                                self.complete_strategy.return_no_blocks_n_times -= 1;
-                                None
-                            } else if self.complete_strategy.return_wrong_blocks_n_times > 0 {
-                                self.complete_strategy.return_wrong_blocks_n_times -= 1;
-                                Some(Arc::new(self.rand_block()))
-                            } else {
-                                Some(self.network_blocks_by_root
-                                .get(block_root)
-                                .unwrap_or_else(|| {
+                // A peer that does not have a root simply omits it. Forward sync asks for
+                // roots it learned from a peer's status, which may be a fork we never see.
+                let is_forward_sync = matches!(req_id, SyncRequestId::BlocksByRootBatch(_));
+                let blocks = req
+                    .block_roots()
+                    .iter()
+                    .filter_map(|block_root| {
+                        if self.complete_strategy.return_no_blocks_n_times > 0 {
+                            self.complete_strategy.return_no_blocks_n_times -= 1;
+                            None
+                        } else if self.complete_strategy.return_wrong_blocks_n_times > 0 {
+                            self.complete_strategy.return_wrong_blocks_n_times -= 1;
+                            Some(Arc::new(self.rand_block()))
+                        } else {
+                            match self.network_blocks_by_root.get(block_root) {
+                                Some(block) => Some(block.block_cloned()),
+                                None if is_forward_sync => None,
+                                None => {
                                     panic!("Test consumer requested unknown block: {block_root:?}")
-                                })
-                                .block_cloned())
+                                }
                             }
-                        })
-                        .collect::<Vec<_>>();
+                        }
+                    })
+                    .collect::<Vec<_>>();
 
+                self.send_rpc_blocks_response(req_id, peer_id, &blocks);
+            }
+
+            (RequestType::BlocksByHead(req), AppRequestId::Sync(req_id)) => {
+                // Walk the parent chain from `beacon_root`, as the responder does, stopping
+                // at `count` or when an ancestor is unknown.
+                let mut blocks = Vec::new();
+                let mut next = req.beacon_root;
+                while (blocks.len() as u64) < req.count {
+                    let Some(block) = self.network_blocks_by_root.get(&next) else {
+                        break;
+                    };
+                    let block = block.block_cloned();
+                    next = block.parent_root();
+                    blocks.push(block);
+                }
                 self.send_rpc_blocks_response(req_id, peer_id, &blocks);
             }
 
@@ -1261,7 +1298,7 @@ impl TestRig {
         self.upsert_block(block, blobs, Some(columns));
     }
 
-    fn get_last_block(&self) -> &RangeSyncBlock<E> {
+    pub(super) fn get_last_block(&self) -> &RangeSyncBlock<E> {
         let (_, last_block) = self
             .network_blocks_by_root
             .iter()
@@ -1446,6 +1483,10 @@ impl TestRig {
 
     pub(super) fn assert_head_slot(&self, slot: u64) {
         assert_eq!(self.head_slot(), Slot::new(slot), "Unexpected head slot");
+    }
+
+    pub(super) async fn recompute_head(&self) {
+        self.harness.chain.recompute_head_at_current_slot().await;
     }
 
     pub(super) fn max_known_slot(&self) -> Slot {
@@ -1652,6 +1693,7 @@ impl TestRig {
             Self::new(TestRigConfig {
                 fulu_test_type,
                 node_custody_type_override: None,
+                tree_sync: false,
             })
         })
     }

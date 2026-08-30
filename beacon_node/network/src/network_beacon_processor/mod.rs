@@ -17,9 +17,9 @@ use beacon_processor::{
 };
 use lighthouse_network::rpc::InboundRequestId;
 use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, BlobsByRootRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
-    DataColumnsByRootRequest, LightClientUpdatesByRangeRequest, PayloadEnvelopesByRangeRequest,
-    PayloadEnvelopesByRootRequest,
+    BlobsByRangeRequest, BlobsByRootRequest, BlockHeadersByRootRequest, BlocksByHeadRequest,
+    DataColumnsByRangeRequest, DataColumnsByRootRequest, LightClientUpdatesByRangeRequest,
+    PayloadEnvelopesByRangeRequest, PayloadEnvelopesByRootRequest,
 };
 use lighthouse_network::service::api_types::CustodyBackfillBatchId;
 use lighthouse_network::{
@@ -640,6 +640,15 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     process_id: (chain_id, epoch.as_u64()),
                 }
             }
+            ChainSegmentProcessId::ForwardSync(chain_id) => {
+                let process_fn = async move {
+                    processor.process_chain_segment(process_id, blocks).await;
+                };
+                Work::ChainSegment {
+                    process_fn: Box::pin(process_fn),
+                    process_id: (chain_id, 0),
+                }
+            }
             ChainSegmentProcessId::BackSyncBatchId(_) => {
                 let process_fn =
                     move || processor.process_chain_segment_backfill(process_id, blocks);
@@ -705,6 +714,26 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
             work: Work::BlocksByHeadRequest(Box::pin(process_fn)),
+        })
+    }
+
+    /// Create a new work event to process `BlockHeadersByRootRequest`s from the RPC network.
+    pub fn send_block_headers_by_root_request(
+        self: &Arc<Self>,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        request: BlockHeadersByRootRequest,
+    ) -> Result<(), Error<T::EthSpec>> {
+        let processor = self.clone();
+        let process_fn = async move {
+            processor
+                .handle_block_headers_by_root_request(peer_id, inbound_request_id, request)
+                .await;
+        };
+
+        self.try_send(BeaconWorkEvent {
+            drop_during_sync: false,
+            work: Work::BlockHeadersByRootRequest(Box::pin(process_fn)),
         })
     }
 

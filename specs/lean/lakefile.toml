@@ -1,0 +1,10 @@
+name = "TreeSync"
+version = "0.1.0"
+defaultTargets = ["TreeSync"]
+
+[leanOptions]
+autoImplicit = false
+relaxedAutoImplicit = false
+
+[[lean_lib]]
+name = "TreeSync"

@@ -641,3 +641,55 @@ async fn custody_backfill_entry_cleaned_up_on_peer_failure() {
     r.assert_custody_backfill_peer_failure_cleans_up_request()
         .await;
 }
+
+/// Tree sync replaces range and lookup sync: a peer advertising a real head is walked
+/// back by parent root to a block we know, then imported forward.
+#[tokio::test]
+async fn tree_sync_head_completes() {
+    let mut r = TestRig::tree_sync();
+    if !r.fork_name.fulu_enabled() {
+        return;
+    }
+    r.build_chain(SLOTS_PER_EPOCH).await;
+    let head = r.get_last_block().clone();
+    let local_info = r.local_info();
+    r.add_supernode_peer(SyncInfo {
+        head_root: head.block_root(),
+        head_slot: head.as_block().slot(),
+        ..local_info
+    });
+    r.simulate(SimulateConfig::happy_path()).await;
+    r.recompute_head().await;
+    assert_eq!(
+        r.head_slot(),
+        r.max_known_slot(),
+        "tree sync should import every built block"
+    );
+    r.assert_no_penalties();
+}
+
+/// Tree sync over a chain longer than `BATCH_SIZE`, so `Promote` splits it into batches
+/// and imports them in order.
+#[tokio::test]
+async fn tree_sync_multi_batch_completes() {
+    let mut r = TestRig::tree_sync();
+    if !r.fork_name.fulu_enabled() {
+        return;
+    }
+    r.build_chain(SLOTS_PER_EPOCH * 6).await;
+    let head = r.get_last_block().clone();
+    let local_info = r.local_info();
+    r.add_supernode_peer(SyncInfo {
+        head_root: head.block_root(),
+        head_slot: head.as_block().slot(),
+        ..local_info
+    });
+    r.simulate(SimulateConfig::happy_path()).await;
+    r.recompute_head().await;
+    assert_eq!(
+        r.head_slot(),
+        r.max_known_slot(),
+        "tree sync should import every built block across batches"
+    );
+    r.assert_no_penalties();
+}
