@@ -1149,7 +1149,7 @@ impl<E: EthSpec> BeaconState<E> {
     pub fn get_cached_active_validator_indices(
         &self,
         relative_epoch: RelativeEpoch,
-    ) -> Result<&[usize], BeaconStateError> {
+    ) -> Result<&[u32], BeaconStateError> {
         let cache = self.committee_cache(relative_epoch)?;
 
         Ok(cache.active_validator_indices())
@@ -1175,10 +1175,7 @@ impl<E: EthSpec> BeaconState<E> {
     /// Note: the indices are shuffled (i.e., not in ascending order).
     ///
     /// Returns an error if that epoch is not cached, or the cache is not initialized.
-    pub fn get_shuffling(
-        &self,
-        relative_epoch: RelativeEpoch,
-    ) -> Result<&[usize], BeaconStateError> {
+    pub fn get_shuffling(&self, relative_epoch: RelativeEpoch) -> Result<&[u32], BeaconStateError> {
         let cache = self.committee_cache(relative_epoch)?;
 
         Ok(cache.shuffling())
@@ -3608,7 +3605,7 @@ impl<E: EthSpec> BeaconState<E> {
 
         let committee_indices: Vec<usize> = committees
             .iter()
-            .flat_map(|committee| committee.committee.iter().copied())
+            .flat_map(|committee| committee.committee.iter().map(|&i| i as usize))
             .collect();
         let selected_indices = self.compute_balance_weighted_selection(
             &committee_indices,

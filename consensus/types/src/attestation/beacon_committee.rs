@@ -4,7 +4,8 @@ use crate::{attestation::CommitteeIndex, core::Slot};
 pub struct BeaconCommittee<'a> {
     pub slot: Slot,
     pub index: CommitteeIndex,
-    pub committee: &'a [usize],
+    /// Validator indices, `u32` to halve the memory footprint of the committee caches.
+    pub committee: &'a [u32],
 }
 
 impl BeaconCommittee<'_> {
@@ -22,5 +23,5 @@ impl BeaconCommittee<'_> {
 pub struct OwnedBeaconCommittee {
     pub slot: Slot,
     pub index: CommitteeIndex,
-    pub committee: Vec<usize>,
+    pub committee: Vec<u32>,
 }

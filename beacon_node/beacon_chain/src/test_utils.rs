@@ -1819,8 +1819,9 @@ where
                 bc.committee
                     .par_iter()
                     .enumerate()
-                    .filter_map(|(i, validator_index)| {
-                        if !attesting_validators.contains(validator_index) {
+                    .filter_map(|(i, &validator_index)| {
+                        let validator_index = validator_index as usize;
+                        if !attesting_validators.contains(&validator_index) {
                             return None;
                         }
 
@@ -1841,7 +1842,7 @@ where
                                 Cow::Borrowed(state),
                                 state_root,
                                 i,
-                                *validator_index,
+                                validator_index,
                             )
                             .unwrap();
 
@@ -1858,7 +1859,7 @@ where
                             let mut agg_sig = AggregateSignature::infinity();
 
                             agg_sig.add_assign(
-                                &self.validator_keypairs[*validator_index].sk.sign(message),
+                                &self.validator_keypairs[validator_index].sk.sign(message),
                             );
 
                             agg_sig
@@ -1916,8 +1917,9 @@ where
                 bc.committee
                     .par_iter()
                     .enumerate()
-                    .filter_map(|(i, validator_index)| {
-                        if !attesting_validators.contains(validator_index) {
+                    .filter_map(|(i, &validator_index)| {
+                        let validator_index = validator_index as usize;
+                        if !attesting_validators.contains(&validator_index) {
                             return None;
                         }
 
@@ -1956,7 +1958,7 @@ where
                             let mut agg_sig = AggregateSignature::infinity();
 
                             agg_sig.add_assign(
-                                &self.validator_keypairs[*validator_index].sk.sign(message),
+                                &self.validator_keypairs[validator_index].sk.sign(message),
                             );
 
                             agg_sig
@@ -2178,14 +2180,14 @@ where
                         let aggregator_index = bc
                             .committee
                             .iter()
-                            .find(|&validator_index| {
-                                if !attesters.contains(validator_index) {
+                            .find(|&&validator_index| {
+                                if !attesters.contains(&(validator_index as usize)) {
                                     return false;
                                 }
 
                                 let selection_proof = SelectionProof::new::<E>(
                                     slot,
-                                    &self.validator_keypairs[*validator_index].sk,
+                                    &self.validator_keypairs[validator_index as usize].sk,
                                     &fork,
                                     state.genesis_validators_root(),
                                     &self.spec,
@@ -2227,7 +2229,7 @@ where
                             aggregator_index as u64,
                             aggregate.to_ref(),
                             None,
-                            &self.validator_keypairs[aggregator_index].sk,
+                            &self.validator_keypairs[aggregator_index as usize].sk,
                             &fork,
                             state.genesis_validators_root(),
                             &self.spec,
