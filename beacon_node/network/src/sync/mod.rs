@@ -11,8 +11,12 @@ mod network_context;
 mod peer_sync_info;
 mod range_data_column_batch_request;
 mod range_sync;
+// TODO(sigp/lighthouse#7678): wire tree sync into the `SyncManager` once a `headers_by_root`
+// network route exists, replacing range sync and lookup sync.
 #[cfg(test)]
 mod tests;
+#[allow(dead_code)]
+mod tree_sync;
 
 pub use manager::{BatchProcessResult, SyncMessage};
 pub use network_context::{PeerGroup, SyncNetworkContext};
