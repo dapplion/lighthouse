@@ -69,8 +69,6 @@ enum DropReason {
     Processor(#[allow(dead_code)] String),
     /// Discovery reached a block at or below finality that is not the finalized root.
     FinalityConflict,
-    /// Its roots were in a batch that failed to process.
-    FaultyBatch,
     NoPeers,
     Pruned,
 }
