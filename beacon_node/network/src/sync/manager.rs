@@ -62,7 +62,7 @@ use lighthouse_network::service::api_types::{
     CustodyBackfillBatchId, CustodyRequester, DataColumnsByRangeRequestId,
     DataColumnsByRangeRequester, DataColumnsByRootRequestId, DataColumnsByRootRequester, Id,
     PayloadEnvelopesByRangeRequestId, PayloadEnvelopesByRootRequestId,
-    PayloadEnvelopesByRootRequester, SyncRequestId,
+    PayloadEnvelopesByRootRequester, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::{PeerAction, PeerId};
@@ -519,6 +519,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         match sync_request_id {
             SyncRequestId::SingleBlock { id } => {
                 self.on_blocks_by_root_response(id, peer_id, RpcEvent::RPCError(error))
+            }
+            SyncRequestId::BlocksByHead(id) => {
+                self.on_blocks_by_head_response(id, peer_id, RpcEvent::RPCError(error))
             }
             SyncRequestId::SinglePayloadEnvelope { id } => {
                 self.on_payload_envelopes_by_root_response(id, peer_id, RpcEvent::RPCError(error))
@@ -1215,6 +1218,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             SyncRequestId::SingleBlock { id } => {
                 self.on_blocks_by_root_response(id, peer_id, RpcEvent::from_chunk(block))
             }
+            SyncRequestId::BlocksByHead(id) => {
+                self.on_blocks_by_head_response(id, peer_id, RpcEvent::from_chunk(block))
+            }
             SyncRequestId::BlocksByRange(id) => {
                 self.on_blocks_by_range_response(id, peer_id, RpcEvent::from_chunk(block))
             }
@@ -1262,6 +1268,16 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 }
             }
         }
+    }
+
+    fn on_blocks_by_head_response(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) {
+        // The response is not consumed yet: a follow-up will inject the blocks into lookup sync.
+        self.network.on_blocks_by_head_response(id, peer_id, block);
     }
 
     fn rpc_blob_received(
