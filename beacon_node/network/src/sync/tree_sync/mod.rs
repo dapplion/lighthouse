@@ -33,15 +33,36 @@ use parking_lot::RwLock;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tracing::{debug, error, instrument};
+use std::time::{Duration, Instant};
+use tracing::{debug, error, instrument, warn};
 use types::{EthSpec, Hash256, SignedBeaconBlock, Slot};
 
-/// Roots imported at a time. Below the by-root cap of 128. Spec: `B`.
-const BATCH_SIZE: usize = 32;
-/// Maximum blocks in the import pipeline across all chains. Spec: `N`.
-const MAX_SYNCING_BLOCKS: usize = 256;
-/// Roots are untrusted peer claims, so bound how many we hold.
-const ROOTS_MAX: usize = 1_000_000;
+/// Tuning for the forest. Injectable so tests can reach the batch, budget and pruning
+/// boundaries without building thousand-block chains.
+#[derive(Clone, Copy, Debug)]
+pub struct TreeSyncConfig {
+    /// Roots imported at a time. Below the by-root cap of 128. Spec: `B`.
+    pub batch_size: usize,
+    /// Maximum blocks in the import pipeline across all chains. Spec: `N`.
+    pub max_syncing_blocks: usize,
+    /// Roots are untrusted peer claims, so bound how many we hold.
+    pub roots_max: usize,
+    /// How long a chain may go without moving before it is assumed stuck. Long enough never
+    /// to fire while a walk is making round trips, short enough to unstick a node without a
+    /// restart.
+    pub chain_stuck_timeout: Duration,
+}
+
+impl Default for TreeSyncConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 32,
+            max_syncing_blocks: 256,
+            roots_max: 1_000_000,
+            chain_stuck_timeout: Duration::from_secs(300),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChainId(pub u32);
@@ -69,6 +90,10 @@ enum DropReason {
     Processor(#[allow(dead_code)] String),
     /// Discovery reached a block at or below finality that is not the finalized root.
     FinalityConflict,
+    /// An ancestor was served at a slot at or above the block it is the parent of.
+    NonDecreasingSlot,
+    /// Nothing moved it before the stuck timeout, so no event ever will.
+    Stuck,
     NoPeers,
     Pruned,
 }
@@ -104,9 +129,18 @@ struct Chain<E: EthSpec> {
     /// Each has claimed every root (Inv 2).
     peers: Peers,
     state: ChainState<E>,
+    /// When the chain last moved. Only `set_state` writes it, so a transition cannot
+    /// forget to, and a chain that stops moving is dropped by `drop_stuck_chains`.
+    last_progress: Instant,
 }
 
 impl<E: EthSpec> Chain<E> {
+    /// Moves the chain on and records that it did.
+    fn set_state(&mut self, state: ChainState<E>) {
+        self.state = state;
+        self.last_progress = Instant::now();
+    }
+
     /// The parent root this chain waits on. `None` while still discovering.
     fn parent(&self) -> Option<Hash256> {
         match self.state {
@@ -124,6 +158,7 @@ impl<E: EthSpec> Chain<E> {
                 next: root,
                 request: DownloadRequest::new(),
             },
+            last_progress: Instant::now(),
         }
     }
 
@@ -173,7 +208,10 @@ impl<E: EthSpec> Chain<E> {
         chain_id: ChainId,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), DropReason> {
-        match &mut self.state {
+        // An arm holds `&mut self.state`, so a transition it decides on is applied once
+        // that borrow ends — which keeps it going through `set_state`.
+        let mut next_state = None;
+        let result = match &mut self.state {
             ChainState::Discovering { next, request } => {
                 let root = *next;
                 // A fresh chain has no roots yet; its tip-to-be is the search target
@@ -223,14 +261,21 @@ impl<E: EthSpec> Chain<E> {
                                 blocks.clone(),
                             )
                             .map_err(|e| DropReason::Processor(format!("{e:?}")))?;
-                        self.state = ChainState::ForwardSync(*anchor, ForwardSyncState::Processing);
+                        next_state = Some(ChainState::ForwardSync(
+                            *anchor,
+                            ForwardSyncState::Processing,
+                        ));
                     }
                     Ok(())
                 }
                 // Waiting on the beacon processor
                 ForwardSyncState::Processing => Ok(()),
             },
+        };
+        if let Some(state) = next_state {
+            self.set_state(state);
         }
+        result
     }
 
     /// Keeps `[pivot..oldest]` and returns the newer `[tip..]` half, which waits on
@@ -296,6 +341,7 @@ impl<E: EthSpec> Chain<E> {
             roots: newer_roots,
             peers: Arc::new(RwLock::new(self.peers.read().clone())),
             state: newer_state,
+            last_progress: Instant::now(),
         }))
     }
 }
@@ -321,6 +367,7 @@ pub struct TreeSync<T: BeaconChainTypes> {
     block_to_chain: HashMap<Hash256, ChainId>,
     chains: HashMap<ChainId, Chain<T::EthSpec>>,
     next_id: u32,
+    config: TreeSyncConfig,
 }
 
 impl<T: BeaconChainTypes> TreeSync<T> {
@@ -329,6 +376,7 @@ impl<T: BeaconChainTypes> TreeSync<T> {
             block_to_chain: HashMap::new(),
             chains: HashMap::new(),
             next_id: 0,
+            config: TreeSyncConfig::default(),
         }
     }
 
@@ -468,6 +516,17 @@ impl<T: BeaconChainTypes> TreeSync<T> {
                 return Ok(());
             }
 
+            // Walking back, so slots strictly decrease (Inv 3). A peer breaking this is
+            // feeding us a fabricated ancestry, which without this check walks until the
+            // finality guard or the root cap stops it.
+            if let Some(newest) = chain.roots.back()
+                && header.slot >= newest.slot
+            {
+                chain.report_peers(cx);
+                self.drop_chain_and_children(chain_id, DropReason::NonDecreasingSlot);
+                return Ok(());
+            }
+
             chain.roots.push_back(BlockSummary {
                 block_root: root,
                 slot: header.slot,
@@ -483,7 +542,7 @@ impl<T: BeaconChainTypes> TreeSync<T> {
             // The parent is in fork-choice: discovery is done
             if cx.block_is_known_to_fork_choice(&parent) {
                 debug!(roots = chain.roots.len(), "Chain anchored on fork-choice");
-                chain.state = ChainState::Anchored(parent);
+                chain.set_state(ChainState::Anchored(parent));
                 return Ok(());
             }
 
@@ -492,7 +551,7 @@ impl<T: BeaconChainTypes> TreeSync<T> {
             if let Some(&parent_chain) = self.block_to_chain.get(&parent)
                 && parent_chain != chain_id
             {
-                chain.state = ChainState::Anchored(parent);
+                chain.set_state(ChainState::Anchored(parent));
                 let peers = chain.peers.read().iter().copied().collect::<Vec<_>>();
                 debug!(%parent_chain, peers = peers.len(), "Chain anchored");
                 self.add_peers_to_ancestors(parent, &peers)?;
@@ -506,10 +565,10 @@ impl<T: BeaconChainTypes> TreeSync<T> {
         // More to fetch. A step is progress, so the next request gets a full budget
         let oldest = blocks.last().ok_or(InternalError::from("empty response"))?;
         let next = oldest.message().parent_root();
-        chain.state = ChainState::Discovering {
+        chain.set_state(ChainState::Discovering {
             next,
             request: DownloadRequest::new(),
-        };
+        });
         Ok(())
     }
 
@@ -728,21 +787,21 @@ impl<T: BeaconChainTypes> TreeSync<T> {
             .map(|chain| chain.roots.len())
             .sum();
 
-        while syncing_blocks < MAX_SYNCING_BLOCKS {
+        while syncing_blocks < self.config.max_syncing_blocks {
             let Some(chain_id) = self.next_importable_chain(cx) else {
                 break;
             };
-            // Import at most BATCH_SIZE blocks at once
-            self.split_at_count(chain_id, BATCH_SIZE)?;
+            // Import at most `batch_size` blocks at once
+            self.split_at_count(chain_id, self.config.batch_size)?;
 
             let chain = self.chain_mut(chain_id)?;
             let ChainState::Anchored(anchor) = &chain.state else {
                 return Err(InternalError::from("promoted chain is not anchored"));
             };
-            chain.state = ChainState::ForwardSync(
+            chain.set_state(ChainState::ForwardSync(
                 *anchor,
                 ForwardSyncState::Downloading(DownloadRequest::new()),
-            );
+            ));
             syncing_blocks += chain.roots.len();
             debug!(%chain_id, roots = chain.roots.len(), "Chain started importing");
         }
@@ -826,8 +885,29 @@ impl<T: BeaconChainTypes> TreeSync<T> {
         }
     }
 
+    /// Drops chains that stopped moving, mirroring lookup sync's `drop_stuck_lookups`. The
+    /// forest is event driven, so a bug anywhere upstream can leave a chain nothing will ever
+    /// drive again. Dropping it lets peer status messages rebuild the walk instead of the
+    /// node stalling until it restarts.
+    pub fn drop_stuck_chains(&mut self, cx: &mut SyncNetworkContext<T>) {
+        let timeout = self.config.chain_stuck_timeout;
+        while let Some((chain_id, roots)) = self
+            .chains
+            .iter()
+            .find(|(_, chain)| chain.last_progress.elapsed() > timeout)
+            .map(|(chain_id, chain)| (*chain_id, chain.roots.len()))
+        {
+            warn!(%chain_id, roots, "Notify the devs a tree sync chain is stuck");
+            self.drop_chain_and_children(chain_id, DropReason::Stuck);
+        }
+        if let Err(e) = self.update(cx) {
+            self.reset(e, "drop_stuck_chains");
+        }
+    }
+
     /// Drops the chain and every chain anchored on one of its roots, which now waits on
-    /// a parent that will never arrive.
+    /// a parent that will never arrive. In-flight requests are the network context's to
+    /// retire, not ours.
     // TODO(tree-sync): peers that claimed roots and never served them are not downscored
     // here, so a slow-loris occupies import budget for free.
     fn drop_chain_and_children(&mut self, initial_chain_id: ChainId, reason: DropReason) {
@@ -853,9 +933,9 @@ impl<T: BeaconChainTypes> TreeSync<T> {
         }
     }
 
-    /// Bounds the total roots tracked across all chains to `ROOTS_MAX`.
+    /// Bounds the total roots tracked across all chains.
     fn prune(&mut self) {
-        while self.block_to_chain.len() > ROOTS_MAX {
+        while self.block_to_chain.len() > self.config.roots_max {
             // Least corroborated first: one peer is a fork nobody else has
             let Some(chain_id) = self
                 .chains

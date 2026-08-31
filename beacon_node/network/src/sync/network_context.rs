@@ -912,36 +912,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             Err(e) => Err(RpcRequestSendError::InternalError(format!("{e:?}"))),
         }
     }
-
-    /// Attempt to make progress on all block component downloads. Some request may be stale
-    /// waiting for peers. Returns a Vec of results as zero or more requests may fail in this
-    /// attempt.
-    pub fn continue_components_by_root_requests(
-        &mut self,
-    ) -> Vec<(
-        ComponentsByRootRequestId,
-        ComponentsByRootResult<T::EthSpec>,
-    )> {
-        let ids = self
-            .components_by_root_requests
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-
-        // Need to collect ids and results in separate steps to re-borrow self.
-        ids.into_iter()
-            .filter_map(|id| {
-                let mut request = self
-                    .components_by_root_requests
-                    .remove(&id)
-                    .expect("key of hashmap");
-                let result = request.continue_requests(self);
-                self.handle_components_by_root_result(id, request, result)
-                    .map(|result| (id, result))
-            })
-            .collect()
-    }
-
     pub(crate) fn on_components_by_root_response(
         &mut self,
         req_id: ComponentsByRootRequestId,
@@ -1722,7 +1692,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peer_id: PeerId,
     ) -> Option<RpcResponseResult<R>> {
         if let Some(Err(RpcResponseError::VerifyError(e))) = &resp {
-            self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
+            // A peer may legally omit a block it does not have — it may have checkpoint
+            // synced and not backfilled — so we still require the full set but do not
+            // treat a short response as we treat a response that breaks the protocol.
+            let action = match e {
+                LookupVerifyError::NotEnoughResponsesReturned { .. } => {
+                    PeerAction::HighToleranceError
+                }
+                _ => PeerAction::LowToleranceError,
+            };
+            self.report_peer(peer_id, action, e.into());
         }
         resp
     }

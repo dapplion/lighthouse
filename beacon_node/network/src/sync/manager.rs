@@ -573,6 +573,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         for (id, result) in self.network.continue_custody_by_root_requests() {
             self.on_custody_by_root_result(id, result);
         }
+        // Tree sync is event driven too, so it needs the same safety net as lookup sync: a
+        // chain nothing will ever drive again is dropped rather than stalling the node.
+        if let Some(tree_sync) = self.tree_sync.as_mut() {
+            tree_sync.drop_stuck_chains(&mut self.network);
+        }
     }
 
     /// Updates the syncing state of a peer.
