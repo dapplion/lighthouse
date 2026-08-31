@@ -50,7 +50,7 @@ impl From<DownloadError> for Error {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockSummary {
     pub block_root: Hash256,
     pub slot: Slot,

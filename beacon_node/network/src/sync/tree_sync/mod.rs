@@ -15,6 +15,9 @@
 //! 1. Every root known to tree sync is owned by exactly one chain (`block_to_chain`).
 //! 2. Every peer of a chain has claimed every root of the chain.
 
+#[cfg(test)]
+mod tests;
+
 use super::manager::BatchProcessResult;
 use super::network_context::components_by_root::BlockSummary;
 use super::network_context::components_by_root::Error as ComponentsError;
