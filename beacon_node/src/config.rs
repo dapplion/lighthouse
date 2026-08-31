@@ -1175,6 +1175,10 @@ pub fn set_network_config(
         config.network_dir = data_dir.join(DEFAULT_NETWORK_DIR);
     };
 
+    if parse_flag(cli_args, "tree-sync") {
+        config.tree_sync = true;
+    }
+
     if parse_flag(cli_args, "subscribe-all-subnets") {
         config.subscribe_all_subnets = true;
     }

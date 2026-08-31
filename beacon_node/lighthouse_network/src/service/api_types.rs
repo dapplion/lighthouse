@@ -3,7 +3,7 @@ use libp2p::PeerId;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use types::{
-    BlobSidecar, DataColumnSidecar, Epoch, EthSpec, LightClientBootstrap,
+    BlobSidecar, DataColumnSidecar, Epoch, EthSpec, Hash256, LightClientBootstrap,
     LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock,
     SignedExecutionPayloadEnvelope,
 };
@@ -20,9 +20,9 @@ pub struct SingleLookupReqId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum SyncRequestId {
     /// Request searching for a block given a hash.
-    SingleBlock { id: SingleLookupReqId },
+    SingleBlock { id: BeaconBlocksByRootRequestId },
     /// Request searching for a payload envelope given a hash.
-    SinglePayloadEnvelope { id: SingleLookupReqId },
+    SinglePayloadEnvelope { id: PayloadEnvelopesByRootRequestId },
     /// Request searching for a set of data columns given a hash and list of column indices.
     DataColumnsByRoot(DataColumnsByRootRequestId),
     /// Blocks by range request
@@ -35,8 +35,25 @@ pub enum SyncRequestId {
     PayloadEnvelopesByRange(PayloadEnvelopesByRangeRequestId),
 }
 
-/// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
-/// Wrapping this particular req_id, ensures not mixing this request with a custody req_id.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BeaconBlocksByRootRequestId {
+    pub id: Id,
+    pub requester: BeaconBlocksByRootRequester,
+}
+
+/// Identifies a coupled components-by-root download, and the tree sync chain that wants it.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct ComponentsByRootRequestId {
+    pub id: Id,
+    pub chain_id: Id,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct PayloadEnvelopesByRootRequestId {
+    pub id: Id,
+    pub requester: PayloadEnvelopesByRootRequester,
+}
+
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct DataColumnsByRootRequestId {
     pub id: Id,
@@ -119,6 +136,21 @@ pub enum RangeRequestId {
     BackfillSync { batch_id: Epoch },
 }
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum BeaconBlocksByRootRequester {
+    Lookup(SingleLookupReqId),
+    ComponentsByRoot(ComponentsByRootRequestId),
+    /// The tip root that triggered the search: stable across chain splits and re-forms,
+    /// unlike a chain id.
+    TreeSyncHeaders(Hash256),
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum PayloadEnvelopesByRootRequester {
+    Lookup(SingleLookupReqId),
+    ComponentsByRoot(ComponentsByRootRequestId),
+}
+
 // TODO(das) refactor in a separate PR. We might be able to remove this and replace
 // [`DataColumnsByRootRequestId`] with a [`SingleLookupReqId`].
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -143,6 +175,7 @@ pub struct CustodyId {
 pub enum CustodyRequester {
     SingleLookup(SingleLookupReqId),
     RangeSync(ComponentsByRangeRequestId),
+    ComponentsByRoot(ComponentsByRootRequestId),
 }
 
 /// Application level requests sent to the network.
@@ -277,10 +310,32 @@ impl_display!(
 );
 impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
 impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
+impl_display!(BeaconBlocksByRootRequestId, "{}/{}", id, requester);
+impl_display!(PayloadEnvelopesByRootRequestId, "{}/{}", id, requester);
+impl_display!(ComponentsByRootRequestId, "{}/Chain/{}", id, chain_id);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
 impl_display!(CustodyId, "{}", requester);
 impl_display!(CustodyBackFillBatchRequestId, "{}/{}", id, batch_id);
 impl_display!(CustodyBackfillBatchId, "{}/{}", epoch, run_id);
+
+impl Display for BeaconBlocksByRootRequester {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lookup(id) => write!(f, "Lookup/{id}"),
+            Self::ComponentsByRoot(id) => write!(f, "ComponentsByRoot/{id}"),
+            Self::TreeSyncHeaders(tip) => write!(f, "TreeSyncHeaders/{tip}"),
+        }
+    }
+}
+
+impl Display for PayloadEnvelopesByRootRequester {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lookup(id) => write!(f, "Lookup/{id}"),
+            Self::ComponentsByRoot(id) => write!(f, "ComponentsByRoot/{id}"),
+        }
+    }
+}
 
 impl Display for DataColumnsByRootRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -295,6 +350,7 @@ impl Display for CustodyRequester {
         match self {
             Self::SingleLookup(id) => write!(f, "{id}"),
             Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
+            Self::ComponentsByRoot(id) => write!(f, "ComponentsByRoot/{id}"),
         }
     }
 }
