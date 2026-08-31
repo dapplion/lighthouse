@@ -140,6 +140,15 @@ pub const FORK_NAME_ENV_VAR: &str = "FORK_NAME";
 // Environment variable specifying the log output directory in CI.
 pub const CI_LOGGER_DIR_ENV_VAR: &str = "CI_LOGGER_DIR";
 
+/// Environment variable that runs the suite against tree sync in place of range and lookup
+/// sync. `make test-network` runs it both ways, so the same tests cover both strategies.
+pub const TREE_SYNC_ENV_VAR: &str = "TREE_SYNC";
+
+/// Whether this run exercises tree sync.
+pub fn tree_sync_from_env() -> bool {
+    std::env::var(TREE_SYNC_ENV_VAR).is_ok_and(|value| value == "1" || value == "true")
+}
+
 static INIT_TRACING: Once = Once::new();
 
 pub fn init_tracing() {
@@ -176,7 +185,12 @@ impl<'a> MakeWriter<'a> for CILogWriter {
             .unwrap_or("unnamed")
             .replace(|c: char| !c.is_alphanumeric(), "_");
 
-        let file_path = format!("{log_dir}/{fork_name}{test_name}.log");
+        let sync_strategy = if tree_sync_from_env() {
+            "tree_sync_"
+        } else {
+            ""
+        };
+        let file_path = format!("{log_dir}/{sync_strategy}{fork_name}{test_name}.log");
         let file = OpenOptions::new()
             .append(true)
             .create(true)

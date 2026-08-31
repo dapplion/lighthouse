@@ -249,6 +249,10 @@ struct FullEmptyFork {
 
 impl TestRig {
     pub(crate) fn new(test_rig_config: TestRigConfig) -> Self {
+        // Before the harness: it installs a global subscriber of its own, and whichever
+        // registers first wins. Registering after it meant `CI_LOGGER_DIR` wrote nothing.
+        init_tracing();
+
         // Use `fork_from_env` logic to set correct fork epochs
         let spec = Arc::new(test_spec::<E>());
         let clock = TestingSlotClock::new(
@@ -282,7 +286,11 @@ impl TestRig {
         let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncMessage<E>>();
         // TODO(das): make the generation of the ENR use the deterministic rng to have consistent
         // column assignments
-        let network_config = Arc::new(NetworkConfig::default());
+        // `TREE_SYNC=1` runs the whole suite with tree sync in place of range and lookup
+        // sync, so both strategies are covered by the same tests. See `make test-network`.
+        let mut network_config = NetworkConfig::default();
+        network_config.tree_sync = tree_sync_from_env();
+        let network_config = Arc::new(network_config);
         let globals = Arc::new(NetworkGlobals::new_test_globals(
             Vec::new(),
             network_config,
@@ -315,8 +323,6 @@ impl TestRig {
 
         // deterministic seed
         let rng_08 = <rand_chacha_03::ChaCha20Rng as rand_08::SeedableRng>::from_seed([0u8; 32]);
-
-        init_tracing();
 
         TestRig {
             beacon_processor_rx,

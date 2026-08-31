@@ -225,11 +225,15 @@ test-op-pool-%:
 		--features "beacon_chain/fork_from_env,$(TEST_FEATURES)"\
 		-p operation_pool
 
-# Run the tests in the `network` crate for all known forks.
+# Run the tests in the `network` crate for all known forks, once with range and lookup
+# sync and once with tree sync in their place (TREE_SYNC=1).
 test-network: $(patsubst %,test-network-%,$(TEST_NETWORK_FORKS))
 
 test-network-%:
 	env FORK_NAME=$* cargo nextest run --no-fail-fast --release \
+		--features "fork_from_env,fake_crypto,$(TEST_FEATURES)" \
+		-p network
+	env FORK_NAME=$* TREE_SYNC=1 cargo nextest run --no-fail-fast --release \
 		--features "fork_from_env,fake_crypto,$(TEST_FEATURES)" \
 		-p network
 	env FORK_NAME=$* cargo nextest run --no-fail-fast --release \
