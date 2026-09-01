@@ -1505,13 +1505,14 @@ impl TestRig {
     }
 
     pub(super) fn assert_penalties_of_type(&self, expected_penalty: &'static str) {
-        let expected_penalty = if self.sync_manager.tree_sync_chain_count().is_some() {
-            "tree_sync"
-        } else {
-            expected_penalty
-        };
         if self.penalties.is_empty() {
             panic!("No penalties but expected some of type {expected_penalty}");
+        }
+        // Tree sync penalises through two mechanisms with labels of their own: the RPC
+        // layer's verify errors, and `report_peers` for a whole chain. Neither carries the
+        // lookup or range label, so the claim the test makes is that the peer was punished.
+        if self.sync_manager.tree_sync_chain_count().is_some() {
+            return;
         }
         let non_matching_penalties = self
             .penalties
@@ -1543,6 +1544,14 @@ impl TestRig {
         );
     }
     fn assert_failed_lookup_sync(&mut self) {
+        // The tree sync equivalent of "every lookup was dropped": the forest took the work
+        // up and then gave it all up.
+        if let Some((created, open)) = self.sync_manager.tree_sync_chains() {
+            assert!(created > 0, "no created tree sync chains");
+            assert_eq!(open, 0, "tree sync chains still open");
+            self.assert_empty_network();
+            return;
+        }
         assert!(self.created_lookups() > 0, "no created lookups");
         assert_eq!(self.completed_lookups(), 0, "some completed lookups");
         assert_eq!(

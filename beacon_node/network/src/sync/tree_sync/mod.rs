@@ -546,8 +546,9 @@ impl<T: BeaconChainTypes> TreeSync<T> {
             });
             let parent = header.parent_root;
 
-            // The parent is in fork-choice: discovery is done
-            if cx.block_is_known_to_fork_choice(&parent) {
+            // The parent is in fork-choice, or there is none because this is genesis:
+            // discovery is done
+            if parent.is_zero() || cx.block_is_known_to_fork_choice(&parent) {
                 debug!(roots = chain.roots.len(), "Chain anchored on fork-choice");
                 chain.set_state(ChainState::Anchored(parent));
                 return Ok(());
