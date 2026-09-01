@@ -54,11 +54,12 @@ use futures::StreamExt;
 use lighthouse_network::SyncInfo;
 use lighthouse_network::rpc::RPCError;
 use lighthouse_network::service::api_types::{
-    BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
-    SyncRequestId,
+    BeaconBlocksByRootRequestId, BeaconBlocksByRootRequester, BlobsByRangeRequestId,
+    BlocksByRangeRequestId, ComponentsByRangeRequestId, CustodyBackFillBatchRequestId,
+    CustodyBackfillBatchId, CustodyRequester, DataColumnsByRangeRequestId,
+    DataColumnsByRangeRequester, DataColumnsByRootRequestId, DataColumnsByRootRequester, Id,
+    PayloadEnvelopesByRangeRequestId, PayloadEnvelopesByRootRequestId,
+    PayloadEnvelopesByRootRequester, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::{PeerAction, PeerId};
@@ -500,11 +501,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     fn inject_error(&mut self, peer_id: PeerId, sync_request_id: SyncRequestId, error: RPCError) {
         trace!("Sync manager received a failed RPC");
         match sync_request_id {
-            SyncRequestId::SingleBlock { id } => {
-                self.on_single_block_response(id, peer_id, RpcEvent::RPCError(error))
+            SyncRequestId::BlocksByRoot(id) => {
+                self.on_blocks_by_root_response(id, peer_id, RpcEvent::RPCError(error))
             }
-            SyncRequestId::SinglePayloadEnvelope { id } => {
-                self.on_single_payload_envelope_response(id, peer_id, RpcEvent::RPCError(error))
+            SyncRequestId::PayloadEnvelopesByRoot(id) => {
+                self.on_payload_envelopes_by_root_response(id, peer_id, RpcEvent::RPCError(error))
             }
             SyncRequestId::DataColumnsByRoot(req_id) => {
                 self.on_data_columns_by_root_response(req_id, peer_id, RpcEvent::RPCError(error))
@@ -1160,8 +1161,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         block: Option<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
         match sync_request_id {
-            SyncRequestId::SingleBlock { id } => {
-                self.on_single_block_response(id, peer_id, RpcEvent::from_chunk(block))
+            SyncRequestId::BlocksByRoot(id) => {
+                self.on_blocks_by_root_response(id, peer_id, RpcEvent::from_chunk(block))
             }
             SyncRequestId::BlocksByRange(id) => {
                 self.on_blocks_by_range_response(id, peer_id, RpcEvent::from_chunk(block))
@@ -1172,15 +1173,16 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         }
     }
 
-    fn on_single_block_response(
+    fn on_blocks_by_root_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: BeaconBlocksByRootRequestId,
         peer_id: PeerId,
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
-        if let Some(resp) = self.network.on_single_block_response(id, peer_id, block) {
+        let BeaconBlocksByRootRequester::Lookup(lookup_id) = id.requester;
+        if let Some(resp) = self.network.on_blocks_by_root_response(id, peer_id, block) {
             self.block_lookups.on_block_download_response(
-                id,
+                lookup_id,
                 peer_id,
                 resp.map(|value| DownloadResult::new(value, PeerGroup::from_single(peer_id))),
                 &mut self.network,
@@ -1211,8 +1213,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         envelope: Option<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>,
     ) {
         match sync_request_id {
-            SyncRequestId::SinglePayloadEnvelope { id } => self
-                .on_single_payload_envelope_response(id, peer_id, RpcEvent::from_chunk(envelope)),
+            SyncRequestId::PayloadEnvelopesByRoot(id) => self
+                .on_payload_envelopes_by_root_response(id, peer_id, RpcEvent::from_chunk(envelope)),
             SyncRequestId::PayloadEnvelopesByRange(req_id) => {
                 self.on_payload_envelopes_by_range_response(
                     req_id,
@@ -1253,18 +1255,19 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         }
     }
 
-    fn on_single_payload_envelope_response(
+    fn on_payload_envelopes_by_root_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: PayloadEnvelopesByRootRequestId,
         peer_id: PeerId,
         envelope: RpcEvent<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>,
     ) {
+        let PayloadEnvelopesByRootRequester::Lookup(lookup_id) = id.requester;
         if let Some(resp) = self
             .network
-            .on_single_payload_envelope_response(id, peer_id, envelope)
+            .on_payload_envelopes_by_root_response(id, peer_id, envelope)
         {
             self.block_lookups.on_payload_download_response(
-                id,
+                lookup_id,
                 peer_id,
                 resp.map(|value| DownloadResult::new(value, PeerGroup::from_single(peer_id))),
                 &mut self.network,
@@ -1365,7 +1368,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         response: CustodyByRootResult<T::EthSpec>,
     ) {
         match requester {
-            CustodyRequester::SingleLookup(id) => {
+            CustodyRequester::Lookup(id) => {
                 self.block_lookups
                     .on_custody_download_response(id, response, &mut self.network);
             }

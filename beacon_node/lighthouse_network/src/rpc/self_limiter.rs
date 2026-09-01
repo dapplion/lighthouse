@@ -332,12 +332,22 @@ mod tests {
     use crate::rpc::rate_limiter::Quota;
     use crate::rpc::self_limiter::SelfRateLimiter;
     use crate::rpc::{Ping, Protocol, RPCSend, RequestType};
-    use crate::service::api_types::{AppRequestId, SingleLookupReqId, SyncRequestId};
+    use crate::service::api_types::{
+        AppRequestId, BeaconBlocksByRootRequestId, BeaconBlocksByRootRequester, Id,
+        SingleLookupReqId, SyncRequestId,
+    };
     use libp2p::PeerId;
     use logging::create_test_tracing_subscriber;
     use std::num::NonZeroU64;
     use std::time::Duration;
     use types::{EthSpec, ForkContext, Hash256, MainnetEthSpec, Slot};
+
+    fn blocks_by_root(lookup_id: Id, req_id: Id) -> AppRequestId {
+        AppRequestId::Sync(SyncRequestId::BlocksByRoot(BeaconBlocksByRootRequestId {
+            id: req_id,
+            requester: BeaconBlocksByRootRequester::Lookup(SingleLookupReqId { lookup_id, req_id }),
+        }))
+    }
 
     /// Test that `next_peer_request_ready` correctly maintains the queue.
     #[tokio::test]
@@ -360,12 +370,7 @@ mod tests {
         for i in 1..=5u32 {
             let _ = limiter.allows(
                 peer_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                    id: SingleLookupReqId {
-                        lookup_id,
-                        req_id: i,
-                    },
-                }),
+                blocks_by_root(lookup_id, i),
                 RequestType::Ping(Ping { data: i as u64 }),
             );
         }
@@ -380,12 +385,10 @@ mod tests {
             // Check that requests in the queue are ordered in the sequence 2, 3, 4, 5.
             let mut iter = queue.iter();
             for i in 2..=5u32 {
-                assert!(matches!(
+                assert_eq!(
                     iter.next().unwrap().request_id,
-                    AppRequestId::Sync(SyncRequestId::SingleBlock {
-                        id: SingleLookupReqId { req_id, .. },
-                    }) if req_id == i,
-                ));
+                    blocks_by_root(lookup_id, i)
+                );
             }
 
             assert_eq!(limiter.ready_requests.len(), 0);
@@ -405,12 +408,10 @@ mod tests {
             // Check that requests in the queue are ordered in the sequence 3, 4, 5.
             let mut iter = queue.iter();
             for i in 3..=5 {
-                assert!(matches!(
+                assert_eq!(
                     iter.next().unwrap().request_id,
-                    AppRequestId::Sync(SyncRequestId::SingleBlock {
-                        id: SingleLookupReqId { req_id, .. },
-                    }) if req_id == i,
-                ));
+                    blocks_by_root(lookup_id, i)
+                );
             }
 
             assert_eq!(limiter.ready_requests.len(), 1);
@@ -432,12 +433,7 @@ mod tests {
         for i in 1..=5u32 {
             let result = limiter.allows(
                 peer_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                    id: SingleLookupReqId {
-                        lookup_id: i,
-                        req_id: i,
-                    },
-                }),
+                blocks_by_root(i, i),
                 RequestType::Ping(Ping { data: i as u64 }),
             );
 
@@ -486,12 +482,7 @@ mod tests {
                 unreachable!()
             };
 
-            assert!(matches!(
-                request_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                    id: SingleLookupReqId { req_id, .. },
-                }) if *req_id == i
-            ));
+            assert_eq!(*request_id, blocks_by_root(i, i));
         }
     }
 
@@ -511,12 +502,7 @@ mod tests {
             for i in 1..=5u32 {
                 let result = limiter.allows(
                     peer,
-                    AppRequestId::Sync(SyncRequestId::SingleBlock {
-                        id: SingleLookupReqId {
-                            lookup_id: i,
-                            req_id: i,
-                        },
-                    }),
+                    blocks_by_root(i, i),
                     RequestType::Ping(Ping { data: i as u64 }),
                 );
 
@@ -546,12 +532,7 @@ mod tests {
         let mut failed_requests = limiter.peer_disconnected(peer1);
         for i in 3..=5u32 {
             let (request_id, _) = failed_requests.remove(0);
-            assert!(matches!(
-                request_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                        id: SingleLookupReqId { req_id, .. },
-                }) if req_id == i
-            ));
+            assert_eq!(request_id, blocks_by_root(i, i));
         }
 
         // Check that peer1’s active and delayed requests have been removed.
@@ -590,12 +571,7 @@ mod tests {
         for i in 1..=5u32 {
             let result = limiter.allows(
                 peer_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                    id: SingleLookupReqId {
-                        req_id: i,
-                        lookup_id: i,
-                    },
-                }),
+                blocks_by_root(i, i),
                 RequestType::Ping(Ping { data: i as u64 }),
             );
 
@@ -628,12 +604,7 @@ mod tests {
         assert_eq!(failed_requests.len(), 4);
         for i in 2..=5u32 {
             let (request_id, protocol) = failed_requests.remove(0);
-            assert!(matches!(
-                request_id,
-                AppRequestId::Sync(SyncRequestId::SingleBlock {
-                    id: SingleLookupReqId { req_id, .. },
-                }) if req_id == i
-            ));
+            assert_eq!(request_id, blocks_by_root(i, i));
             assert_eq!(protocol, Protocol::Ping);
         }
     }
