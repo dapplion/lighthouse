@@ -368,6 +368,32 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         self.range_sync.state()
     }
 
+    /// `None` when the flag is off. Tests assert on this where they would otherwise assert
+    /// on range or lookup sync, since tree sync replaces both.
+    #[cfg(test)]
+    pub(crate) fn tree_sync_chain_count(&self) -> Option<usize> {
+        self.tree_sync
+            .as_ref()
+            .map(|tree_sync| tree_sync.chain_count())
+    }
+
+    /// Roots of the batches tree sync currently has with the processor.
+    #[cfg(test)]
+    pub(crate) fn tree_sync_processing_roots(&self) -> Vec<Vec<Hash256>> {
+        self.tree_sync
+            .as_ref()
+            .map(|tree_sync| tree_sync.processing_roots())
+            .unwrap_or_default()
+    }
+
+    /// `(created, still open)`. `None` when the flag is off.
+    #[cfg(test)]
+    pub(crate) fn tree_sync_chains(&self) -> Option<(usize, usize)> {
+        self.tree_sync
+            .as_ref()
+            .map(|tree_sync| (tree_sync.chains_created(), tree_sync.chain_count()))
+    }
+
     #[cfg(test)]
     pub(crate) fn range_sync_state(&self) -> super::range_sync::SyncChainStatus {
         self.range_sync.state()

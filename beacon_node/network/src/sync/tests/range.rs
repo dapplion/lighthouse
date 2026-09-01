@@ -20,6 +20,7 @@
 
 use super::lookups::SimulateConfig;
 use super::*;
+use crate::NetworkMessage;
 use crate::status::ToStatusMessage;
 use crate::sync::{
     SyncMessage, block_sidecar_coupling::CouplingError, manager::SLOT_IMPORT_TOLERANCE,
@@ -29,8 +30,8 @@ use lighthouse_network::{
     PeerId, SyncInfo,
     rpc::{RPCError, methods::StatusMessageV2},
     service::api_types::{
-        CustodyBackFillBatchRequestId, CustodyBackfillBatchId, DataColumnsByRangeRequestId,
-        DataColumnsByRangeRequester,
+        AppRequestId, CustodyBackFillBatchRequestId, CustodyBackfillBatchId,
+        DataColumnsByRangeRequestId, DataColumnsByRangeRequester, SyncRequestId,
     },
 };
 use std::collections::HashSet;
@@ -40,10 +41,10 @@ use types::{Epoch, EthSpec, ForkName, Hash256, MinimalEthSpec as E, Slot};
 const SLOTS_PER_EPOCH: usize = 8;
 
 impl TestRig {
-    fn add_head_peer(&mut self) -> PeerId {
+    fn add_head_peer(&mut self, head_root: Hash256) -> PeerId {
         let local_info = self.local_info();
         self.add_supernode_peer(SyncInfo {
-            head_root: Hash256::random(),
+            head_root,
             head_slot: local_info.head_slot + 1 + Slot::new(SLOT_IMPORT_TOLERANCE as u64),
             ..local_info
         })
@@ -52,11 +53,12 @@ impl TestRig {
     fn finalized_remote_info_advanced_by(&self, advanced_epochs: Epoch) -> SyncInfo {
         let local_info = self.local_info();
         let finalized_epoch = local_info.finalized_epoch + advanced_epochs;
+        let head_slot = finalized_epoch.start_slot(E::slots_per_epoch());
         SyncInfo {
             finalized_epoch,
             finalized_root: Hash256::random(),
-            head_slot: finalized_epoch.start_slot(E::slots_per_epoch()),
-            head_root: Hash256::random(),
+            head_slot,
+            head_root: self.block_root_at_slot(head_slot.min(self.max_known_slot()).as_u64()),
             earliest_available_slot: Some(Slot::new(0)),
         }
     }
@@ -99,6 +101,13 @@ impl TestRig {
     }
 
     fn assert_state(&self, state: RangeSyncType) {
+        if let Some(chains) = self.sync_manager.tree_sync_chain_count() {
+            assert!(
+                chains > 0,
+                "tree sync should be syncing, there are no chains"
+            );
+            return;
+        }
         assert_eq!(
             self.sync_manager
                 .range_sync_state()
@@ -116,6 +125,32 @@ impl TestRig {
         }
     }
 
+    /// The ancestor walk, which is what tree sync issues before any import work.
+    fn is_tree_sync_discovery(event: &NetworkMessage<E>) -> bool {
+        matches!(
+            event,
+            NetworkMessage::SendRequest {
+                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlock { .. }),
+                ..
+            }
+        )
+    }
+
+    /// No import work started. Under tree sync the ancestor walk is already in flight, and
+    /// it needs no custody peer, so only the component requests are held back.
+    fn assert_no_import_requests(&mut self) {
+        if self.sync_manager.tree_sync_chain_count().is_none() {
+            return self.assert_empty_network();
+        }
+        self.drain_network_rx();
+        let imports = self
+            .network_rx_queue
+            .iter()
+            .filter(|event| !Self::is_tree_sync_discovery(event))
+            .count();
+        assert_eq!(imports, 0, "expected no import requests, got {imports}");
+    }
+
     fn assert_no_failed_chains(&mut self) {
         assert_eq!(
             self.sync_manager.__range_failed_chains(),
@@ -129,8 +164,8 @@ impl TestRig {
     /// Head sync: peers whose finalized root/epoch match ours (known to fork choice),
     /// but whose head is ahead. Only head chain is created.
     async fn setup_head_sync(&mut self) {
-        self.build_chain(SLOTS_PER_EPOCH).await;
-        self.add_head_peer();
+        let tip = self.build_chain(SLOTS_PER_EPOCH).await;
+        self.add_head_peer(tip);
         self.assert_state(RangeSyncType::Head);
     }
 
@@ -159,7 +194,7 @@ impl TestRig {
             finalized_epoch,
             finalized_root: Hash256::random(),
             head_slot,
-            head_root: Hash256::random(),
+            head_root: self.block_root_at_slot(head_slot.as_u64()),
             earliest_available_slot: None,
         };
         self.add_fullnode_peers(remote_info.clone(), 100);
@@ -235,9 +270,14 @@ impl TestRig {
     /// Assert chain was removed and peers received faulty_chain penalty
     fn assert_range_sync_chain_failed(&mut self) {
         self.assert_no_chains_exist();
+        let expected = if self.sync_manager.tree_sync_chain_count().is_some() {
+            "tree_sync"
+        } else {
+            "faulty_chain"
+        };
         assert!(
-            self.penalties.iter().any(|p| p.msg == "faulty_chain"),
-            "Expected faulty_chain penalty, got {:?}",
+            self.penalties.iter().any(|p| p.msg == expected),
+            "Expected {expected} penalty, got {:?}",
             self.penalties
         );
     }
@@ -553,7 +593,7 @@ async fn not_enough_custody_peers_then_peers_arrive() {
         return;
     }
     let remote_info = r.setup_finalized_sync_insufficient_peers().await;
-    r.assert_empty_network();
+    r.assert_no_import_requests();
     r.add_remaining_finalized_peers(remote_info);
     r.simulate(SimulateConfig::happy_path()).await;
     r.assert_range_sync_completed();
@@ -600,7 +640,7 @@ async fn finalized_sync_not_enough_custody_peers_resume_after_peer_cgc_update() 
     r.send_sync_message(SyncMessage::AddPeer(peer_2, remote_info.clone()));
     // We expect a finalized chain to be created with peer 2, but no requests sent out yet due to missing custody info.
     r.assert_state(RangeSyncType::Finalized);
-    r.assert_empty_network();
+    r.assert_no_import_requests();
 
     // Peer 3 is connected and advanced
     let peer_3 = r.new_connected_supernode_peer_no_metadata_custody_subnet();
@@ -622,7 +662,7 @@ async fn finalized_sync_not_enough_custody_peers_resume_after_peer_cgc_update() 
     // We still don't have any peers on the syncing chain with custody columns (only peer 1)
     // The node won't send the batch and will remain in the finalized sync state (this was failing before!)
     r.assert_state(RangeSyncType::Finalized);
-    r.assert_empty_network();
+    r.assert_no_import_requests();
 
     // Now we receive peer 2 & 3's CGC updates, the node will resume syncing from these two peers
     r.send_peer_cgc_update_to_sync(&peer_2, all_custody_subnets.clone());

@@ -477,8 +477,19 @@ impl TestRig {
                         process_fn,
                         process_id: (chain_id, batch_epoch),
                     } => {
-                        let sync_type =
-                            ChainSegmentProcessId::RangeBatchId(chain_id, batch_epoch.into());
+                        // Tree sync's work event carries no id — `send_chain_segment` maps
+                        // it to `(0, 0)` — so the target is read back from the forest.
+                        let sync_type = match self
+                            .sync_manager
+                            .tree_sync_processing_roots()
+                            .into_iter()
+                            .next()
+                        {
+                            Some(roots) => ChainSegmentProcessId::TreeSync(roots),
+                            None => {
+                                ChainSegmentProcessId::RangeBatchId(chain_id, batch_epoch.into())
+                            }
+                        };
                         if self.complete_strategy.range_faulty_failures > 0 {
                             self.complete_strategy.range_faulty_failures -= 1;
                             self.push_sync_message(SyncMessage::BatchProcessed {
@@ -544,6 +555,20 @@ impl TestRig {
         ))
     }
 
+    /// Counts down the offline window and brings the engine back. Driven by whichever
+    /// request the active strategy makes, since tree sync issues no by-range requests.
+    fn maybe_bring_ee_online(&mut self) {
+        if let Some(ref mut remaining) = self.complete_strategy.ee_offline_for_n_range_responses {
+            if *remaining == 0 {
+                self.sync_manager
+                    .update_execution_engine_state(EngineState::Online);
+                self.complete_strategy.ee_offline_for_n_range_responses = None;
+            } else {
+                *remaining -= 1;
+            }
+        }
+    }
+
     fn simulate_on_request(
         &mut self,
         peer_id: PeerId,
@@ -590,6 +615,7 @@ impl TestRig {
                         .collect::<Vec<_>>();
 
                 self.send_rpc_blocks_response(req_id, peer_id, &blocks);
+                self.maybe_bring_ee_online();
             }
 
             (RequestType::DataColumnsByRoot(req), AppRequestId::Sync(req_id)) => {
@@ -726,18 +752,7 @@ impl TestRig {
                     self.send_rpc_blocks_response(req_id, peer_id, &blocks);
                 }
 
-                // Bring EE back online after N range responses
-                if let Some(ref mut remaining) =
-                    self.complete_strategy.ee_offline_for_n_range_responses
-                {
-                    if *remaining == 0 {
-                        self.sync_manager
-                            .update_execution_engine_state(EngineState::Online);
-                        self.complete_strategy.ee_offline_for_n_range_responses = None;
-                    } else {
-                        *remaining -= 1;
-                    }
-                }
+                self.maybe_bring_ee_online();
             }
 
             (RequestType::BlobsByRange(req), AppRequestId::Sync(req_id)) => {
@@ -1348,7 +1363,7 @@ impl TestRig {
             .block_cloned()
     }
 
-    fn block_root_at_slot(&self, slot: u64) -> Hash256 {
+    pub(super) fn block_root_at_slot(&self, slot: u64) -> Hash256 {
         self.block_at_slot(slot).canonical_root()
     }
 
@@ -1490,6 +1505,11 @@ impl TestRig {
     }
 
     pub(super) fn assert_penalties_of_type(&self, expected_penalty: &'static str) {
+        let expected_penalty = if self.sync_manager.tree_sync_chain_count().is_some() {
+            "tree_sync"
+        } else {
+            expected_penalty
+        };
         if self.penalties.is_empty() {
             panic!("No penalties but expected some of type {expected_penalty}");
         }
@@ -1536,6 +1556,14 @@ impl TestRig {
     }
 
     fn assert_successful_lookup_sync(&mut self) {
+        // Tree sync replaces lookup sync, so the same claim is made of its forest: it took
+        // the work up, and it drained.
+        if let Some((created, open)) = self.sync_manager.tree_sync_chains() {
+            assert!(created > 0, "no created tree sync chains");
+            assert_eq!(open, 0, "not all tree sync chains completed");
+            self.assert_empty_network();
+            return;
+        }
         assert!(self.created_lookups() > 0, "no created lookups");
         assert_eq!(self.dropped_lookups(), 0, "some dropped lookups");
         assert_eq!(
@@ -1563,6 +1591,13 @@ impl TestRig {
 
     /// Assert there is at least one range sync chain created and that all sync chains completed
     pub(super) fn assert_successful_range_sync(&self) {
+        // Tree sync replaces range sync, so the same claim is made of its forest: it took
+        // the work up, and it drained.
+        if let Some((created, open)) = self.sync_manager.tree_sync_chains() {
+            assert!(created > 0, "No created tree sync chains");
+            assert_eq!(open, 0, "Not all tree sync chains completed");
+            return;
+        }
         assert!(
             self.range_sync_chains_added() > 0,
             "No created range sync chains"
@@ -1915,7 +1950,7 @@ impl TestRig {
         }
     }
 
-    fn drain_network_rx(&mut self) {
+    pub(super) fn drain_network_rx(&mut self) {
         while let Ok(event) = self.network_rx.try_recv() {
             self.network_rx_queue.push(event);
         }

@@ -371,6 +371,8 @@ pub struct TreeSync<T: BeaconChainTypes> {
     chains: HashMap<ChainId, Chain<T::EthSpec>>,
     next_id: u32,
     config: TreeSyncConfig,
+    /// Chains ever created. `next_id` wraps, so it cannot stand in for this.
+    chains_created: usize,
 }
 
 impl<T: BeaconChainTypes> TreeSync<T> {
@@ -380,6 +382,7 @@ impl<T: BeaconChainTypes> TreeSync<T> {
             chains: HashMap::new(),
             next_id: 0,
             config: TreeSyncConfig::default(),
+            chains_created: 0,
         }
     }
 
@@ -401,6 +404,7 @@ impl<T: BeaconChainTypes> TreeSync<T> {
             let chain_id = self.next_chain_id();
             self.chains.insert(chain_id, Chain::new(root, peers));
             self.block_to_chain.insert(root, chain_id);
+            self.chains_created = self.chains_created.saturating_add(1);
             debug!(%chain_id, %root, peers = peers.len(), "Created tree sync chain");
         }
 
@@ -892,6 +896,35 @@ impl<T: BeaconChainTypes> TreeSync<T> {
     /// forest is event driven, so a bug anywhere upstream can leave a chain nothing will ever
     /// drive again. Dropping it lets peer status messages rebuild the walk instead of the
     /// node stalling until it restarts.
+    /// Chains currently in the forest. Zero means the forest is drained, which is what
+    /// "sync finished" looks like from the outside.
+    #[cfg(test)]
+    pub fn chain_count(&self) -> usize {
+        self.chains.len()
+    }
+
+    /// Chains ever created, so a test can tell "finished" from "never started".
+    #[cfg(test)]
+    pub fn chains_created(&self) -> usize {
+        self.chains_created
+    }
+
+    /// Roots of each batch currently with the beacon processor. The work event carries no
+    /// id for tree sync, so a test injecting a batch result reads the target from here.
+    #[cfg(test)]
+    pub fn processing_roots(&self) -> Vec<Vec<Hash256>> {
+        self.chains
+            .values()
+            .filter(|chain| {
+                matches!(
+                    chain.state,
+                    ChainState::ForwardSync(_, ForwardSyncState::Processing)
+                )
+            })
+            .map(|chain| chain.roots.iter().map(|block| block.block_root).collect())
+            .collect()
+    }
+
     pub fn drop_stuck_chains(&mut self, cx: &mut SyncNetworkContext<T>) {
         let timeout = self.config.chain_stuck_timeout;
         while let Some((chain_id, roots)) = self
