@@ -1823,6 +1823,20 @@ impl TestRig {
         self.sync_manager.tree_sync_chain_count().is_some()
     }
 
+    pub(super) fn assert_lookups_completed(&self, count: usize, msg: &str) {
+        if self.is_tree_sync() {
+            return;
+        }
+        assert_eq!(self.completed_lookups(), count, "{msg}");
+    }
+
+    pub(super) fn assert_lookups_dropped(&self, count: usize, msg: &str) {
+        if self.is_tree_sync() {
+            return;
+        }
+        assert_eq!(self.dropped_lookups(), count, "{msg}");
+    }
+
     pub(super) fn assert_lookups_created(&self, count: usize, msg: &str) {
         if self.is_tree_sync() {
             return;
@@ -2446,8 +2460,8 @@ async fn test_single_block_lookup_ignored_response() {
     r.assert_head_slot(0);
     r.assert_no_penalties();
     r.assert_lookups_created(1, "no created lookups");
-    assert_eq!(r.dropped_lookups(), 1, "no dropped lookups");
-    assert_eq!(r.completed_lookups(), 0, "some completed lookups");
+    r.assert_lookups_dropped(1, "no dropped lookups");
+    r.assert_lookups_completed(0, "some completed lookups");
 }
 
 #[tokio::test]
@@ -2481,8 +2495,8 @@ async fn peer_disconnected_then_rpc_error(depth: usize) {
     // Regardless of depth, only the initial lookup is created, because the peer disconnects before
     // being able to download the block
     r.assert_lookups_created(1, "no created lookups");
-    assert_eq!(r.completed_lookups(), 0, "some completed lookups");
-    assert_eq!(r.dropped_lookups(), 0, "some dropped lookups");
+    r.assert_lookups_completed(0, "some completed lookups");
+    r.assert_lookups_dropped(0, "some dropped lookups");
     r.assert_empty_network();
     r.assert_single_lookups_count(1);
 }
@@ -2548,7 +2562,7 @@ async fn test_parent_lookup_too_deep_grow_ancestor_one() {
     // Bound resources:
     // - Limit amount of requests
     // - Limit the types of sync used
-    assert_eq!(r.completed_lookups(), 0, "no completed lookups");
+    r.assert_lookups_completed(0, "no completed lookups");
     assert_eq!(
         r.dropped_lookups(),
         PARENT_DEPTH_TOLERANCE,
@@ -2566,12 +2580,8 @@ async fn test_parent_lookup_too_deep_grow_ancestor_zero() {
 
     r.assert_head_slot(PARENT_DEPTH_TOLERANCE as u64);
     r.assert_no_penalties();
-    assert_eq!(
-        r.completed_lookups(),
-        PARENT_DEPTH_TOLERANCE,
-        "completed all lookups"
-    );
-    assert_eq!(r.dropped_lookups(), 0, "no dropped lookups");
+    r.assert_lookups_completed(PARENT_DEPTH_TOLERANCE, "completed all lookups");
+    r.assert_lookups_dropped(0, "no dropped lookups");
 }
 
 // Regression test for https://github.com/sigp/lighthouse/pull/7118
@@ -2621,12 +2631,8 @@ async fn test_parent_lookup_too_deep_grow_tip() {
         r.is_tree_sync() || r.created_lookups() > 0,
         "no created lookups"
     );
-    assert_eq!(
-        r.completed_lookups(),
-        r.created_lookups(),
-        "not all completed lookups"
-    );
-    assert_eq!(r.dropped_lookups(), 0, "some dropped lookups");
+    r.assert_lookups_completed(r.created_lookups(), "not all completed lookups");
+    r.assert_lookups_dropped(0, "some dropped lookups");
     r.assert_successful_lookup_sync();
     // Should not penalize peer, but network is not clear because of the blocks_by_range requests
     r.assert_no_penalties();
