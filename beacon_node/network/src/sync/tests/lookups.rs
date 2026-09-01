@@ -490,6 +490,44 @@ impl TestRig {
                                 ChainSegmentProcessId::RangeBatchId(chain_id, batch_epoch.into())
                             }
                         };
+
+                        // A mocked per-block result is written for lookup sync's single
+                        // block path. Tree sync imports whole segments, so the same intent
+                        // is delivered as the batch result it corresponds to.
+                        let tree_sync_roots = self
+                            .sync_manager
+                            .tree_sync_processing_roots()
+                            .into_iter()
+                            .next();
+                        if let Some(roots) = tree_sync_roots
+                            && let Some(f) =
+                                self.complete_strategy.process_result_conditional.as_ref()
+                            && let Some(first) = roots.first().copied()
+                            && let Some(mocked) = f(first)
+                        {
+                            let result = match mocked {
+                                BlockProcessingResult::Imported(..) => {
+                                    BatchProcessResult::Success {
+                                        sent_blocks: roots.len(),
+                                        imported_blocks: 0,
+                                    }
+                                }
+                                BlockProcessingResult::Error {
+                                    penalty: Some((penalty, _, _)),
+                                    ..
+                                } => BatchProcessResult::FaultyFailure {
+                                    imported_blocks: 0,
+                                    penalty,
+                                },
+                                _ => BatchProcessResult::NonFaultyFailure,
+                            };
+                            self.log(&format!("Batch result to tree sync: {result:?}"));
+                            self.push_sync_message(SyncMessage::BatchProcessed {
+                                sync_type,
+                                result,
+                            });
+                            continue;
+                        }
                         if self.complete_strategy.range_faulty_failures > 0 {
                             self.complete_strategy.range_faulty_failures -= 1;
                             self.push_sync_message(SyncMessage::BatchProcessed {

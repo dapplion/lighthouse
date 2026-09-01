@@ -28,10 +28,12 @@ use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::sync::network_context::DownloadRequest;
 use beacon_chain::BeaconChainTypes;
 use beacon_chain::block_verification_types::RangeSyncBlock;
+use lighthouse_network::rpc::GoodbyeReason;
 use lighthouse_network::service::api_types::{
     BeaconBlocksByRootRequestId, BeaconBlocksByRootRequester, ComponentsByRootRequestId,
 };
 use lighthouse_network::{PeerAction, PeerId};
+use lru_cache::LRUTimeCache;
 use parking_lot::RwLock;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -54,6 +56,11 @@ pub struct TreeSyncConfig {
     /// to fire while a walk is making round trips, short enough to unstick a node without a
     /// restart.
     pub chain_stuck_timeout: Duration,
+    /// Batches a chain may have rejected by the processor before it is given up on. Without
+    /// a bound the re-download loop is endless: every retry builds a fresh request budget.
+    pub max_batch_failures: u8,
+    /// How long the tip of a failed chain is refused, mirroring range sync's `failed_chains`.
+    pub failed_chain_expiry: Duration,
 }
 
 impl Default for TreeSyncConfig {
@@ -63,6 +70,8 @@ impl Default for TreeSyncConfig {
             max_syncing_blocks: 256,
             roots_max: 1_000_000,
             chain_stuck_timeout: Duration::from_secs(300),
+            max_batch_failures: 3,
+            failed_chain_expiry: Duration::from_secs(60),
         }
     }
 }
@@ -97,6 +106,8 @@ enum DropReason {
     NonDecreasingSlot,
     /// Nothing moved it before the stuck timeout, so no event ever will.
     Stuck,
+    /// Its batches were rejected by the processor too many times.
+    FaultyBatch,
     NoPeers,
     Pruned,
 }
@@ -129,6 +140,8 @@ enum ForwardSyncState<E: EthSpec> {
 struct Chain<E: EthSpec> {
     /// Tip first.
     roots: VecDeque<BlockSummary>,
+    /// Batches this chain has had rejected by the processor.
+    failed_batches: u8,
     /// Each has claimed every root (Inv 2).
     peers: Peers,
     state: ChainState<E>,
@@ -156,6 +169,7 @@ impl<E: EthSpec> Chain<E> {
     fn new(root: Hash256, peers: &[PeerId]) -> Self {
         Self {
             roots: VecDeque::new(),
+            failed_batches: 0,
             peers: Arc::new(RwLock::new(peers.iter().copied().collect())),
             state: ChainState::Discovering {
                 next: root,
@@ -342,6 +356,7 @@ impl<E: EthSpec> Chain<E> {
         };
         Ok(Some(Chain {
             roots: newer_roots,
+            failed_batches: self.failed_batches,
             peers: Arc::new(RwLock::new(self.peers.read().clone())),
             state: newer_state,
             last_progress: Instant::now(),
@@ -371,17 +386,22 @@ pub struct TreeSync<T: BeaconChainTypes> {
     chains: HashMap<ChainId, Chain<T::EthSpec>>,
     next_id: u32,
     config: TreeSyncConfig,
+    /// Tips of chains given up on, refused for a while so a peer cannot feed us the same
+    /// unimportable chain in a loop. Mirrors range sync's `failed_chains`.
+    failed_chains: LRUTimeCache<Hash256>,
     /// Chains ever created. `next_id` wraps, so it cannot stand in for this.
     chains_created: usize,
 }
 
 impl<T: BeaconChainTypes> TreeSync<T> {
     pub fn new() -> Self {
+        let config = TreeSyncConfig::default();
         Self {
             block_to_chain: HashMap::new(),
             chains: HashMap::new(),
             next_id: 0,
-            config: TreeSyncConfig::default(),
+            failed_chains: LRUTimeCache::new(config.failed_chain_expiry),
+            config,
             chains_created: 0,
         }
     }
@@ -400,6 +420,13 @@ impl<T: BeaconChainTypes> TreeSync<T> {
 
     /// A peer claims `root`: walk its ancestors, or join the chains already covering it.
     pub fn search(&mut self, root: Hash256, peers: &[PeerId], cx: &mut SyncNetworkContext<T>) {
+        if self.failed_chains.contains(&root) {
+            debug!(%root, "Disconnecting peers that belong to a previously failed chain");
+            for peer in peers {
+                cx.goodbye_peer(*peer, GoodbyeReason::IrrelevantNetwork);
+            }
+            return;
+        }
         if !self.block_to_chain.contains_key(&root) {
             let chain_id = self.next_chain_id();
             self.chains.insert(chain_id, Chain::new(root, peers));
@@ -683,6 +710,7 @@ impl<T: BeaconChainTypes> TreeSync<T> {
         result: BatchProcessResult,
         cx: &mut SyncNetworkContext<T>,
     ) -> Result<(), InternalError> {
+        let mut give_up_on = None;
         let mut covered: HashMap<ChainId, usize> = HashMap::new();
         let mut unowned = 0usize;
         for root in &roots {
@@ -726,8 +754,12 @@ impl<T: BeaconChainTypes> TreeSync<T> {
                         if matches!(result, BatchProcessResult::FaultyFailure { .. }) {
                             chain.report_peers(cx);
                         }
+                        let max_failures = self.config.max_batch_failures;
                         let chain = self.chain_mut(chain_id)?;
-                        if let ChainState::ForwardSync(_, state) = &mut chain.state {
+                        chain.failed_batches = chain.failed_batches.saturating_add(1);
+                        if chain.failed_batches > max_failures {
+                            give_up_on = Some(chain_id);
+                        } else if let ChainState::ForwardSync(_, state) = &mut chain.state {
                             *state = ForwardSyncState::Downloading(DownloadRequest::new());
                         } else {
                             return Err(InternalError::from("not in processing state"));
@@ -738,6 +770,19 @@ impl<T: BeaconChainTypes> TreeSync<T> {
                 // Not this batch's chain: its own pending event resolves it
                 debug!(%chain_id, "Batch overlaps an unrelated chain");
             }
+        }
+        if let Some(chain_id) = give_up_on {
+            if let Some(tip) = self.chain(chain_id)?.roots.front() {
+                warn!(
+                    %chain_id,
+                    tip = %tip.block_root,
+                    "Chain failed to import, not retried for {:?}",
+                    self.config.failed_chain_expiry
+                );
+                let tip = tip.block_root;
+                self.failed_chains.insert(tip);
+            }
+            self.drop_chain_and_children(chain_id, DropReason::FaultyBatch);
         }
         Ok(())
     }

@@ -38,6 +38,7 @@ fn ancestors(len: usize, gaps: &[u64]) -> VecDeque<BlockSummary> {
 fn chain(roots: VecDeque<BlockSummary>, state: ChainState<E>) -> Chain<E> {
     Chain {
         roots,
+        failed_batches: 0,
         peers: Arc::new(RwLock::new(HashSet::from([PeerId::random()]))),
         state,
         last_progress: Instant::now(),
