@@ -387,6 +387,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         self.network.network_globals()
     }
 
+    /// Returns true if block and custody backfill sync must never be started or resumed.
+    fn backfill_disabled(&self) -> bool {
+        self.network_globals().config.minimal
+    }
+
     /* Input Handling Functions */
 
     /// A peer has connected which has blocks that are unknown to us.
@@ -591,7 +596,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
 
                 // A peer has transitioned its sync state. If the new state is "synced" we
                 // inform the backfill sync that a new synced peer has joined us.
-                if new_state.is_synced() {
+                if new_state.is_synced() && !self.backfill_disabled() {
                     self.backfill_sync.fully_synced_peer_joined();
                     self.custody_backfill_sync.fully_synced_peer_joined();
                 }
@@ -653,7 +658,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     // If we would otherwise be synced, first check if we need to perform or
                     // complete a backfill sync.
                     #[cfg(not(feature = "disable-backfill"))]
-                    if matches!(sync_state, SyncState::Synced) {
+                    if matches!(sync_state, SyncState::Synced) && !self.backfill_disabled() {
                         // Determine if we need to start/resume/restart a backfill sync.
                         match self.backfill_sync.start(&mut self.network) {
                             Ok(SyncStart::Syncing {

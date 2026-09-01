@@ -129,6 +129,10 @@ impl<T: BeaconChainTypes> SubnetService<T> {
                 permanent_attestation_subscriptions
                     .insert(Subnet::Attestation(SubnetId::from(index)));
             }
+        } else if config.minimal {
+            // Minimal mode: do not subscribe to any long-lived ("backbone") attestation subnet.
+            // Short-lived subscriptions for aggregator duties are unaffected.
+            info!("Not subscribing to any backbone attestation subnets");
         } else {
             // Not subscribed to all subnets, so just calculate the required subnets from the node
             // id.
