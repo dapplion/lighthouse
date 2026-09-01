@@ -418,7 +418,7 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                     state.maybe_start_downloading(|_| {
                         let req_id = cx.next_id();
                         cx.custody_lookup_request(
-                            CustodyRequester::SingleLookup(SingleLookupReqId {
+                            CustodyRequester::Lookup(SingleLookupReqId {
                                 lookup_id: self.id,
                                 req_id,
                             }),

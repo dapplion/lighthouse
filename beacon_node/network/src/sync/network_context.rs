@@ -29,11 +29,12 @@ use lighthouse_network::rpc::{
 };
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
-    CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyId, CustodyRequester,
-    DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
-    SyncRequestId,
+    AppRequestId, BeaconBlocksByRootRequestId, BeaconBlocksByRootRequester, BlobsByRangeRequestId,
+    BlocksByRangeRequestId, ComponentsByRangeRequestId, CustodyBackFillBatchRequestId,
+    CustodyBackfillBatchId, CustodyId, CustodyRequester, DataColumnsByRangeRequestId,
+    DataColumnsByRangeRequester, DataColumnsByRootRequestId, DataColumnsByRootRequester, Id,
+    PayloadEnvelopesByRangeRequestId, PayloadEnvelopesByRootRequestId,
+    PayloadEnvelopesByRootRequester, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
@@ -221,10 +222,12 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
 
     /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
     blocks_by_root_requests:
-        ActiveRequests<SingleLookupReqId, BlocksByRootRequestItems<T::EthSpec>>,
+        ActiveRequests<BeaconBlocksByRootRequestId, BlocksByRootRequestItems<T::EthSpec>>,
     /// A mapping of active PayloadEnvelopesByRoot requests
-    payload_envelopes_by_root_requests:
-        ActiveRequests<SingleLookupReqId, PayloadEnvelopesByRootRequestItems<T::EthSpec>>,
+    payload_envelopes_by_root_requests: ActiveRequests<
+        PayloadEnvelopesByRootRequestId,
+        PayloadEnvelopesByRootRequestItems<T::EthSpec>,
+    >,
     /// A mapping of active DataColumnsByRoot requests
     data_columns_by_root_requests:
         ActiveRequests<DataColumnsByRootRequestId, DataColumnsByRootRequestItems<T::EthSpec>>,
@@ -379,11 +382,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let blocks_by_root_ids = blocks_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
-            .map(|id| SyncRequestId::SingleBlock { id: *id });
+            .map(|id| SyncRequestId::BlocksByRoot(*id));
         let payload_envelopes_by_root_ids = payload_envelopes_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
-            .map(|id| SyncRequestId::SinglePayloadEnvelope { id: *id });
+            .map(|id| SyncRequestId::PayloadEnvelopesByRoot(*id));
         let data_column_by_root_ids = data_columns_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
@@ -761,9 +764,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             }
         }
 
-        let id = SingleLookupReqId {
-            lookup_id,
-            req_id: self.next_id(),
+        let req_id = self.next_id();
+        let id = BeaconBlocksByRootRequestId {
+            id: req_id,
+            requester: BeaconBlocksByRootRequester::Lookup(SingleLookupReqId { lookup_id, req_id }),
         };
 
         let request = BlockRootsRequest::new(block_root);
@@ -784,7 +788,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .send(NetworkMessage::SendRequest {
                 peer_id,
                 request: network_request,
-                app_request_id: AppRequestId::Sync(SyncRequestId::SingleBlock { id }),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRoot(id)),
             })
             .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
 
@@ -811,7 +815,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             request_span,
         );
 
-        Ok(LookupRequestResult::RequestSent(id.req_id))
+        Ok(LookupRequestResult::RequestSent(id.id))
     }
 
     /// Request a payload envelope for a block root via PayloadEnvelopesByRoot RPC.
@@ -857,9 +861,13 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             return Ok(LookupRequestResult::Pending("no peers"));
         };
 
-        let id = SingleLookupReqId {
-            lookup_id,
-            req_id: self.next_id(),
+        let req_id = self.next_id();
+        let id = PayloadEnvelopesByRootRequestId {
+            id: req_id,
+            requester: PayloadEnvelopesByRootRequester::Lookup(SingleLookupReqId {
+                lookup_id,
+                req_id,
+            }),
         };
 
         let request = PayloadRootsRequest::new(block_root);
@@ -875,7 +883,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .send(NetworkMessage::SendRequest {
                 peer_id,
                 request: network_request,
-                app_request_id: AppRequestId::Sync(SyncRequestId::SinglePayloadEnvelope { id }),
+                app_request_id: AppRequestId::Sync(SyncRequestId::PayloadEnvelopesByRoot(id)),
             })
             .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
 
@@ -897,7 +905,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             Span::none(),
         );
 
-        Ok(LookupRequestResult::RequestSent(id.req_id))
+        Ok(LookupRequestResult::RequestSent(id.id))
     }
     /// Request to send a `data_columns_by_root` request to the network. The request may cover the
     /// custody columns of one or more block roots.
@@ -1012,7 +1020,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         // self.request_id internally. For single lookups, the caller stores this req_id in
         // State::Downloading and later matches it against response req_ids.
         let caller_req_id = match &requester {
-            CustodyRequester::SingleLookup(id) => id.req_id,
+            CustodyRequester::Lookup(id) => id.req_id,
             CustodyRequester::RangeSync(id) => id.id,
         };
 
@@ -1343,9 +1351,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     // Request handlers
 
-    pub(crate) fn on_single_block_response(
+    pub(crate) fn on_blocks_by_root_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: BeaconBlocksByRootRequestId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<Arc<SignedBeaconBlock<T::EthSpec>>>> {
@@ -1365,9 +1373,9 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.on_rpc_response_result(resp, peer_id)
     }
 
-    pub(crate) fn on_single_payload_envelope_response(
+    pub(crate) fn on_payload_envelopes_by_root_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: PayloadEnvelopesByRootRequestId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>,
     ) -> Option<RpcResponseResult<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>> {

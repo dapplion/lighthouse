@@ -19,10 +19,10 @@ pub struct SingleLookupReqId {
 /// Id of rpc requests sent by sync to the network.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum SyncRequestId {
-    /// Request searching for a block given a hash.
-    SingleBlock { id: SingleLookupReqId },
-    /// Request searching for a payload envelope given a hash.
-    SinglePayloadEnvelope { id: SingleLookupReqId },
+    /// Request for blocks by their roots.
+    BlocksByRoot(BeaconBlocksByRootRequestId),
+    /// Request for payload envelopes by their block roots.
+    PayloadEnvelopesByRoot(PayloadEnvelopesByRootRequestId),
     /// Request searching for a set of data columns given a hash and list of column indices.
     DataColumnsByRoot(DataColumnsByRootRequestId),
     /// Blocks by range request
@@ -33,6 +33,30 @@ pub enum SyncRequestId {
     DataColumnsByRange(DataColumnsByRangeRequestId),
     /// Payload envelopes by range request
     PayloadEnvelopesByRange(PayloadEnvelopesByRangeRequestId),
+}
+
+/// Request ID for beacon_blocks_by_root requests, naming who wants the blocks.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct BeaconBlocksByRootRequestId {
+    pub id: Id,
+    pub requester: BeaconBlocksByRootRequester,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum BeaconBlocksByRootRequester {
+    Lookup(SingleLookupReqId),
+}
+
+/// Request ID for payload_envelopes_by_root requests, naming who wants the envelopes.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct PayloadEnvelopesByRootRequestId {
+    pub id: Id,
+    pub requester: PayloadEnvelopesByRootRequester,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum PayloadEnvelopesByRootRequester {
+    Lookup(SingleLookupReqId),
 }
 
 /// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
@@ -141,7 +165,7 @@ pub struct CustodyId {
 /// custody columns of an entire batch (identified by its `ComponentsByRangeRequestId`) in one go.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum CustodyRequester {
-    SingleLookup(SingleLookupReqId),
+    Lookup(SingleLookupReqId),
     RangeSync(ComponentsByRangeRequestId),
 }
 
@@ -277,10 +301,28 @@ impl_display!(
 );
 impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
 impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
+impl_display!(BeaconBlocksByRootRequestId, "{}/{}", id, requester);
+impl_display!(PayloadEnvelopesByRootRequestId, "{}/{}", id, requester);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
 impl_display!(CustodyId, "{}", requester);
 impl_display!(CustodyBackFillBatchRequestId, "{}/{}", id, batch_id);
 impl_display!(CustodyBackfillBatchId, "{}/{}", epoch, run_id);
+
+impl Display for BeaconBlocksByRootRequester {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lookup(id) => write!(f, "Lookup/{id}"),
+        }
+    }
+}
+
+impl Display for PayloadEnvelopesByRootRequester {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lookup(id) => write!(f, "Lookup/{id}"),
+        }
+    }
+}
 
 impl Display for DataColumnsByRootRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -293,7 +335,7 @@ impl Display for DataColumnsByRootRequester {
 impl Display for CustodyRequester {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SingleLookup(id) => write!(f, "{id}"),
+            Self::Lookup(id) => write!(f, "{id}"),
             Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
         }
     }
@@ -325,7 +367,7 @@ mod tests {
         let id = DataColumnsByRootRequestId {
             id: 123,
             requester: DataColumnsByRootRequester::Custody(CustodyId {
-                requester: CustodyRequester::SingleLookup(SingleLookupReqId {
+                requester: CustodyRequester::Lookup(SingleLookupReqId {
                     req_id: 121,
                     lookup_id: 101,
                 }),

@@ -703,7 +703,7 @@ impl<T: BeaconChainTypes> Router<T> {
     ) {
         let sync_request_id = match app_request_id {
             AppRequestId::Sync(sync_id) => match sync_id {
-                id @ SyncRequestId::SingleBlock { .. } => id,
+                id @ SyncRequestId::BlocksByRoot(_) => id,
                 other => {
                     crit!(request = ?other, "BlocksByRoot response on incorrect request");
                     return;
@@ -790,7 +790,7 @@ impl<T: BeaconChainTypes> Router<T> {
         envelope: Option<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>,
     ) {
         let sync_request_id = match app_request_id {
-            AppRequestId::Sync(id @ SyncRequestId::SinglePayloadEnvelope { .. }) => id,
+            AppRequestId::Sync(id @ SyncRequestId::PayloadEnvelopesByRoot(_)) => id,
             other => {
                 crit!(request = ?other, %peer_id, "PayloadEnvelopesByRoot response on incorrect request");
                 return;
