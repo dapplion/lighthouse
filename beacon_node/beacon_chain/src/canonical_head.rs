@@ -601,6 +601,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let head_block_root = head.head_block_root();
         self.fork_choice_read_lock()
             .get_node_execution_status(&head_block_root, head.head_payload_status())
+            .map_err(Error::ForkChoiceError)?
             .ok_or(Error::HeadMissingFromForkChoice(head_block_root))
     }
 
@@ -617,6 +618,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let execution_status = self
             .fork_choice_read_lock()
             .get_node_execution_status(&head_block_root, head.head_payload_status())
+            .map_err(Error::ForkChoiceError)?
             .ok_or(Error::HeadMissingFromForkChoice(head_block_root))?;
         Ok((head, execution_status))
     }

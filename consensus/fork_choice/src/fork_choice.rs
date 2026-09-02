@@ -1699,12 +1699,13 @@ where
         &self,
         block_root: &Hash256,
         payload_status: PayloadStatus,
-    ) -> Option<ExecutionStatus> {
+    ) -> Result<Option<ExecutionStatus>, Error<T::Error>> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
             self.proto_array
                 .get_node_execution_status(block_root, payload_status)
+                .map_err(Error::ProtoArrayError)
         } else {
-            None
+            Ok(None)
         }
     }
 
