@@ -418,15 +418,22 @@ impl FastConfirmationRule {
             None
         };
         if let Some(reason) = should_fall_back_reason {
-            debug!(
-                prev_confirmed = %confirmed_root,
-                finalized = %finalized_checkpoint.root,
-                slot = %current_slot,
-                reason = reason,
-                "FCR fell back to finalized"
-            );
-            confirmed_root = finalized_checkpoint.root;
-            metrics::inc_counter_vec(&metrics::FAST_CONFIRMATION_FALLBACKS, &[reason]);
+            // Only a fallback that moves the confirmed root is an event. While FCR sits at the
+            // finalized block, `epoch_too_old` keeps matching on every run, because the finalized
+            // block always trails the current epoch by at least two epochs. Counting those would
+            // report a single fallback once per `recompute_head` until the next epoch boundary.
+            if confirmed_root != finalized_checkpoint.root {
+                debug!(
+                    prev_confirmed = %confirmed_root,
+                    finalized = %finalized_checkpoint.root,
+                    slot = %current_slot,
+                    reason = reason,
+                    "FCR fell back to finalized"
+                );
+                metrics::inc_counter(&metrics::FAST_CONFIRMATION_FALLBACKS);
+                metrics::inc_counter_vec(&metrics::FCR_FALLBACK_REASONS, &[reason]);
+                confirmed_root = finalized_checkpoint.root;
+            }
         }
 
         // Restart the confirmation chain if each of the following conditions are true:

@@ -8,7 +8,7 @@
 //!
 //! ## Deadlock safety
 //!
-//! This module contains five locks:
+//! This module contains four locks:
 //!
 //! 1. `RwLock<BeaconForkChoice>`: Contains `proto_array` fork choice.
 //! 2. `RwLock<CachedHead>`: Contains a cached block/state from the last run of `proto_array`.
@@ -16,8 +16,6 @@
 //! 4. `Option<Mutex<FastConfirmationRule>>`: FCR state (None when disabled), only locked inside
 //!    `recompute_head_at_slot_internal` while the fork choice read lock (1) is held and
 //!    `recompute_head_lock` (3) serializes access.
-//! 5. `Mutex<Option<Hash256>>`: The last confirmed root reported by FCR, locked under the same
-//!    conditions as (4) and never held across another lock acquisition.
 //!
 //! This module has to take great efforts to avoid causing a deadlock with these three methods. Any
 //! developers working in this module should tread carefully and seek a detailed review.
@@ -272,6 +270,8 @@ struct FcrOutcome {
     confirmed_block_hash: ExecutionBlockHash,
     new_confirmed_root: bool,
     new_update_slot: bool,
+    /// Set when the run made a previously confirmed block non-canonical.
+    unconfirmed_root: Option<Hash256>,
 }
 
 /// Provides a series of cached values from the last time `BeaconChain::recompute_head` was run.
@@ -460,14 +460,6 @@ pub struct CanonicalHead<T: BeaconChainTypes> {
     pub fast_confirmation: Option<Mutex<FastConfirmationRule>>,
     /// Per-validator committee slot assignments across the last 3 epochs.
     pub slot_assignments: Mutex<SlotAssignments>,
-    /// The confirmed root most recently reported to the execution layer and the event stream.
-    ///
-    /// Kept here rather than in `FastConfirmationRule` because only the reported values can tell
-    /// an unconfirmation apart from ordinary progress: inside `get_latest_confirmed` the confirmed
-    /// root is free to fall back to the finalized block and be advanced forward again within a
-    /// single run. Only written from `recompute_head`, which is serialized by
-    /// `recompute_head_lock`.
-    last_confirmed_root: Mutex<Option<Hash256>>,
 }
 
 impl<T: BeaconChainTypes> CanonicalHead<T> {
@@ -517,7 +509,6 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             recompute_head_lock: Mutex::new(()),
             fast_confirmation: fcr,
             slot_assignments: Mutex::new(slot_assignments),
-            last_confirmed_root: Mutex::new(None),
         })
     }
 
@@ -598,7 +589,6 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             )
             .map_err(|e| Error::DBInconsistent(format!("fast confirmation rule reset: {e:?}")))?;
         }
-        *self.last_confirmed_root.lock() = None;
         *self.slot_assignments.lock() = slot_assignments;
 
         Ok(())
@@ -985,6 +975,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     confirmed_block_hash,
                     new_confirmed_root,
                     new_update_slot,
+                    unconfirmed_root,
                 }) => {
                     // FC update params are only updated after successful FCR runs. This is
                     // conservative and will revert the `safe` tag to justified instead of using a
@@ -1011,30 +1002,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_CHANGES);
                     }
 
-                    // An unconfirmation: the block we last reported as confirmed is no longer
-                    // covered by what we are about to report, either because the head reorged off
-                    // it or because the confirmed root fell back behind it. A previously confirmed
-                    // root that fork choice has pruned is an ancestor of the finalized block,
-                    // which is the healthy case, and `is_descendant` cannot tell that apart from a
-                    // reorg, so skip it.
-                    let previous_confirmed_root = self
-                        .canonical_head
-                        .last_confirmed_root
-                        .lock()
-                        .replace(confirmed_root);
-                    if let Some(previous) = previous_confirmed_root
-                        && previous != confirmed_root
-                        && fork_choice_read_lock.get_block(&previous).is_some()
-                        && (!fork_choice_read_lock
-                            .is_descendant(previous, new_view.head_block_root)
-                            || !fork_choice_read_lock.is_descendant(previous, confirmed_root))
-                    {
+                    if let Some(unconfirmed_root) = unconfirmed_root {
                         warn!(
-                            unconfirmed = ?previous,
+                            unconfirmed = ?unconfirmed_root,
                             head = ?new_view.head_block_root,
                             confirmed = ?confirmed_root,
                             slot = %current_slot,
-                            "FCR unconfirmed a previously confirmed block"
+                            "FCR confirmed block was reorged out"
                         );
                         metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
                     }
@@ -1413,12 +1387,23 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 fcr.confirmed_root,
             ))?;
 
+        // An unconfirmation: a reorg made a block we had confirmed non-canonical. Compared across
+        // the whole run, because inside `get_latest_confirmed` the confirmed root may fall back to
+        // the finalized block and be advanced forward again, which confirms nothing new and takes
+        // nothing back. An `old_confirmed_root` that fork choice has pruned is an ancestor of the
+        // finalized block, the healthy case, and `is_descendant` is false for unknown roots.
+        let unconfirmed_root = (fcr.confirmed_root != old_confirmed_root
+            && fork_choice.get_block(&old_confirmed_root).is_some()
+            && !fork_choice.is_descendant(old_confirmed_root, head_root))
+        .then_some(old_confirmed_root);
+
         Ok(FcrOutcome {
             confirmed_root: fcr.confirmed_root,
             confirmed_slot: confirmed_node.slot,
             confirmed_block_hash,
             new_confirmed_root: fcr.confirmed_root != old_confirmed_root,
             new_update_slot: fcr.last_update_slot() != old_update_slot,
+            unconfirmed_root,
         })
     }
 

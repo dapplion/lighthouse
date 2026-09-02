@@ -46,20 +46,25 @@ pub static FCR_SETTLED_CONFIRMATION_DELAY_SLOTS: LazyLock<Result<Histogram>> = L
         )
     },
 );
-pub(crate) static FAST_CONFIRMATION_FALLBACKS: LazyLock<Result<IntCounterVec>> =
-    LazyLock::new(|| {
-        try_create_int_counter_vec(
-            "beacon_fast_confirmation_fallbacks_total",
-            "Count of fallbacks of the confirmed root to the finalized block, by reason",
-            &["reason"],
-        )
-    });
+pub(crate) static FAST_CONFIRMATION_FALLBACKS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "beacon_fast_confirmation_fallbacks_total",
+        "Count of fallbacks of the confirmed root to the finalized block",
+    )
+});
+pub(crate) static FCR_FALLBACK_REASONS: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+    try_create_int_counter_vec(
+        "beacon_fcr_fallback_reasons_total",
+        "Breakdown of `beacon_fast_confirmation_fallbacks_total` by reason. Kept separate because \
+         the standardised metric is specified without labels",
+        &["reason"],
+    )
+});
 pub static FAST_CONFIRMATION_REORGS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
     try_create_int_counter(
         "beacon_fast_confirmation_reorgs_total",
-        "Count of unconfirmations: a block reported as confirmed that a later run no longer \
-         confirms, either because it left the canonical chain or because the confirmed root moved \
-         back behind it",
+        "Count of unconfirmations: a chain reorg made a previously confirmed block non-canonical. \
+         Should always be zero under the FCR safety assumptions",
     )
 });
 pub(crate) static FCR_FALLBACK_SUPPORT_RATIO: LazyLock<Result<Histogram>> = LazyLock::new(|| {
