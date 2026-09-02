@@ -315,18 +315,15 @@ pub(crate) fn aggregate_vote_balances<V: Votes + ?Sized>(
 ) -> Result<RootBalanceMap<Hash256>, Error> {
     let mut balance_by_vote_root = RootBalanceMap::<Hash256>::new();
 
-    for val_idx in 0..votes.len() {
-        let Some(vote_root) = votes.root(val_idx).map(|root| Hash256(*root)) else {
-            continue;
-        };
-        if vote_root.is_zero() || equivocating_indices.contains(&(val_idx as u64)) {
+    for (val_idx, vote_root) in votes.roots().enumerate() {
+        if *vote_root == [0; 32] || equivocating_indices.contains(&(val_idx as u64)) {
             continue;
         }
         let balance = balance_source.unslashed_balance(val_idx);
         if balance == 0 {
             continue;
         }
-        balance_by_vote_root.add(vote_root, balance)?;
+        balance_by_vote_root.add(Hash256(*vote_root), balance)?;
     }
 
     Ok(balance_by_vote_root)

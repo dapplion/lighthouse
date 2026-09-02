@@ -239,6 +239,12 @@ pub trait Votes {
     /// costs a trip through the stack that a reference does not.
     fn root(&self, index: usize) -> Option<&[u8; 32]>;
 
+    /// Every root in index order, borrowed. A host backed by a slice walks it
+    /// by pointer, which is the loop the original code compiled to.
+    fn roots(&self) -> impl Iterator<Item = &[u8; 32]> + '_ {
+        (0..self.len()).filter_map(|i| self.root(i))
+    }
+
     /// Every vote, in index order. `get` is total on `0..len`, so nothing is skipped.
     fn iter(&self) -> impl Iterator<Item = VoteTracker> + '_ {
         (0..self.len()).map(|i| self.get(i).unwrap_or_default())
@@ -256,5 +262,9 @@ impl Votes for [VoteTracker] {
 
     fn root(&self, index: usize) -> Option<&[u8; 32]> {
         <[VoteTracker]>::get(self, index).map(|vote| &vote.current_root.0)
+    }
+
+    fn roots(&self) -> impl Iterator<Item = &[u8; 32]> + '_ {
+        self.iter().map(|vote| &vote.current_root.0)
     }
 }

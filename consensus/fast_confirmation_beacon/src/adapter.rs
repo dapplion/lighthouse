@@ -132,6 +132,11 @@ impl core_rule::Votes for VoteTrackers<'_> {
     fn root(&self, index: usize) -> Option<&[u8; 32]> {
         self.0.get(index).map(|v| &v.current_root_ref().0)
     }
+
+    #[inline(always)]
+    fn roots(&self) -> impl Iterator<Item = &[u8; 32]> + '_ {
+        self.0.iter().map(|v| &v.current_root_ref().0)
+    }
 }
 
 /// `types::SlotAssignments`, answering the rule's one question of it.
