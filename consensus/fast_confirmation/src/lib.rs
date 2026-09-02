@@ -37,7 +37,7 @@
 //! The visible algorithm deliberately keeps the spec function names and control-flow shape;
 //! the caches are implementation details behind those helpers.
 
-mod adapter;
+pub mod adapter;
 mod balance_source;
 pub mod metrics;
 pub mod optimizations;

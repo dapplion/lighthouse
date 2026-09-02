@@ -44,14 +44,24 @@ pub fn from_checkpoint(c: core_rule::Checkpoint) -> Checkpoint {
     }
 }
 
-pub fn votes(votes: &[VoteTracker]) -> Vec<core_rule::Vote> {
-    votes
-        .iter()
-        .map(|v| core_rule::Vote {
+/// `proto_array`'s vote trackers, read where they already live.
+///
+/// Copying the set into the core's `Vote` would allocate proportionally to the
+/// validator set on every evaluation; at mainnet size that is tens of megabytes
+/// per slot. The rule only ever reads one vote at a time, so it borrows.
+pub struct VoteTrackers<'a>(pub &'a [VoteTracker]);
+
+impl core_rule::Votes for VoteTrackers<'_> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn get(&self, index: usize) -> Option<core_rule::Vote> {
+        self.0.get(index).map(|v| core_rule::Vote {
             current_root: root(v.current_root()),
             current_slot: slot(v.current_slot()),
         })
-        .collect()
+    }
 }
 
 /// A `ProtoArray` answering the six questions the rule asks.
@@ -88,7 +98,7 @@ impl core_rule::store::ForkChoiceStore for ProtoArrayStore<'_> {
     fn justified_checkpoint(&self, r: core_rule::Root) -> core_rule::Result<core_rule::Checkpoint> {
         self.proto_array
             .get_block(hash(r))
-            .map(|node| checkpoint(&node.justified_checkpoint()))
+            .map(|node| checkpoint(node.justified_checkpoint()))
             .ok_or(core_rule::Error::NodeNotFound(r))
     }
 

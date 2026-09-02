@@ -21,7 +21,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::cell::OnceCell;
 
-use crate::primitives::{Checkpoint, Epoch, Root, Slot, Vote};
+use crate::primitives::{Checkpoint, Epoch, Root, Slot, Votes};
 use crate::store::{self, ForkChoiceStore};
 use crate::{Arith, Error, Result};
 
@@ -233,12 +233,12 @@ pub struct ChainAttestationScores {
 }
 
 impl ChainAttestationScores {
-    pub fn for_chain<S: ForkChoiceStore>(
+    pub fn for_chain<S: ForkChoiceStore, V: Votes + ?Sized>(
         store: &S,
         chain: &[Root],
         terminal_slot: Slot,
         balance_source: &BalanceSourceData,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Self> {
         // Position of each chain member, oldest first.
@@ -251,7 +251,10 @@ impl ChainAttestationScores {
         // and an equivocator's is discounted -- the same two skips as upstream.
         let mut balance_by_root: alloc::collections::BTreeMap<Root, u64> =
             alloc::collections::BTreeMap::new();
-        for (val_idx, vote) in votes.iter().enumerate() {
+        for val_idx in 0..votes.len() {
+            let Some(vote) = votes.get(val_idx) else {
+                continue;
+            };
             let vote_root = vote.current_root();
             if vote_root == crate::primitives::ZERO_ROOT
                 || equivocating_indices.contains(&(val_idx as u64))
@@ -420,14 +423,14 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// `checkpoint_state.current_epoch() == new_current_cp.epoch` and that check
     /// is load-bearing.
     #[allow(clippy::too_many_arguments)]
-    pub fn on_fast_confirmation<S: ForkChoiceStore>(
+    pub fn on_fast_confirmation<S: ForkChoiceStore, V: Votes + ?Sized>(
         &mut self,
         head_root: Root,
         finalized_checkpoint: &Checkpoint,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
         head_balance_source: BalanceSourceData,
         slot_assignments: A,
@@ -526,14 +529,14 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn get_latest_confirmed<S: ForkChoiceStore>(
+    pub fn get_latest_confirmed<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         head_root: Root,
         finalized_checkpoint: &Checkpoint,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Root> {
         let current_epoch = current_slot.epoch(self.slots_per_epoch);
@@ -630,14 +633,14 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// DIVERGENCE: `is_one_confirmed` below is backed by an attestation-score cache instead of
     /// recomputing `get_attestation_score` per block. The control-flow shape follows the spec.
     #[allow(clippy::too_many_arguments)]
-    fn find_latest_confirmed_descendant<S: ForkChoiceStore>(
+    fn find_latest_confirmed_descendant<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         latest_confirmed_root: Root,
         head_root: Root,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Root> {
         let current_epoch = current_slot.epoch(self.slots_per_epoch);
@@ -800,12 +803,12 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     ///
     /// `Ok(None)` = the confirmed chain is safe (re-confirmable). `Ok(Some(reason))` = it
     /// isn't, with `reason` naming which check failed (surfaced as the revert metric label).
-    fn is_confirmed_chain_safe<S: ForkChoiceStore>(
+    fn is_confirmed_chain_safe<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         confirmed_root: Root,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Option<&'static str>> {
         if get_checkpoint_for_block(
@@ -899,13 +902,13 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     // -----------------------------------------------------------------------
 
     /// Spec: `get_block_support_between_slots`.
-    fn get_block_support_between_slots(
+    fn get_block_support_between_slots<V: Votes + ?Sized>(
         &self,
         balance_source: &BalanceSourceData,
         block_root: Root,
         start_slot: Slot,
         end_slot: Slot,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<u64> {
         // Spec: sum effective balance of validators that:
@@ -937,20 +940,20 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// Uses `(committee_weight * proposer_score_boost) // 100` (multiply-first) to match
     /// the spec and avoid precision loss from divide-first ordering.
     fn compute_proposer_score(&self, balance_source: &BalanceSourceData) -> Result<u64> {
-        crate::compute_proposer_score(
+        Ok(crate::compute_proposer_score(
             balance_source.total_active_balance,
             self.slots_per_epoch,
             self.proposer_score_boost,
-        )
+        )?)
     }
 
     /// Spec: `compute_empty_slot_support_discount`.
-    fn compute_empty_slot_support_discount<S: ForkChoiceStore>(
+    fn compute_empty_slot_support_discount<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         balance_source: &BalanceSourceData,
         block_root: Root,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<u64> {
         // Lighthouse holds `ProtoNode`s here; the core has accessors, so the
@@ -987,12 +990,12 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     }
 
     /// Spec: `get_support_discount`.
-    fn get_support_discount<S: ForkChoiceStore>(
+    fn get_support_discount<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         balance_source: &BalanceSourceData,
         block_root: Root,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<u64> {
         self.compute_empty_slot_support_discount(
@@ -1005,13 +1008,13 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     }
 
     /// Spec: `compute_safety_threshold`.
-    fn compute_safety_threshold<S: ForkChoiceStore>(
+    fn compute_safety_threshold<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         balance_source: &BalanceSourceData,
         block_root: Root,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<u64> {
         let parent_root = parent_root(block_root, store)?;
@@ -1040,12 +1043,12 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
             equivocating_indices,
         )?;
 
-        crate::safety_threshold(
+        Ok(crate::safety_threshold(
             maximum_support,
             proposer_score,
             adversarial_weight,
             support_discount,
-        )
+        )?)
     }
 
     /// Spec: `get_adversarial_weight`.
@@ -1143,13 +1146,13 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
 
     /// Spec: `will_no_conflicting_checkpoint_be_justified`.
     #[allow(clippy::too_many_arguments)]
-    fn will_no_conflicting_checkpoint_be_justified<S: ForkChoiceStore>(
+    fn will_no_conflicting_checkpoint_be_justified<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         head_root: Root,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
         honest_ffg_support: &HonestFfgSupportCache,
     ) -> Result<bool> {
@@ -1173,12 +1176,12 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     }
 
     /// Spec: `will_current_target_be_justified`.
-    fn will_current_target_be_justified<S: ForkChoiceStore>(
+    fn will_current_target_be_justified<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         head_root: Root,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
         honest_ffg_support: &HonestFfgSupportCache,
     ) -> Result<bool> {
@@ -1201,12 +1204,12 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// root at the vote's epoch) matches the current target. Votes are epoch-filtered and
     /// aggregated by `(root, epoch)`, so each checkpoint lookup runs once per distinct vote
     /// rather than once per validator.
-    pub fn get_current_target_score<S: ForkChoiceStore>(
+    pub fn get_current_target_score<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         head_root: Root,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<u64> {
         let target = get_current_target(head_root, current_slot, store, self.slots_per_epoch)?;
@@ -1258,12 +1261,12 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     }
 
     /// Spec: `compute_honest_ffg_support_for_current_target`.
-    fn compute_honest_ffg_support<S: ForkChoiceStore>(
+    fn compute_honest_ffg_support<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         head_root: Root,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<u64> {
         let current_epoch = current_slot.epoch(self.slots_per_epoch);
@@ -1302,19 +1305,19 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
             ffg_support_for_checkpoint,
         ))?;
 
-        min_honest_ffg_support.safe_add(remaining_honest_ffg_weight)
+        Ok(min_honest_ffg_support.safe_add(remaining_honest_ffg_weight)?)
     }
 
     /// Spec: `is_one_confirmed`.
     #[allow(clippy::too_many_arguments)]
-    fn is_one_confirmed<S: ForkChoiceStore>(
+    fn is_one_confirmed<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         balance_source: &BalanceSourceData,
         block_root: Root,
         attestation_scores: &impl AttestationScores,
         current_slot: Slot,
         store: &S,
-        votes: &[Vote],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Confirmation> {
         // Spec MUST: not confirmed if the block's execution status is not VALID.

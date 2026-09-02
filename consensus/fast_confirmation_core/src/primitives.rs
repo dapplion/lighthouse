@@ -106,3 +106,29 @@ impl Vote {
         self.current_slot
     }
 }
+
+/// Read-only access to the latest vote of each validator, by validator index.
+///
+/// The rule reads votes but never owns them. Lighthouse keeps them as
+/// `proto_array::VoteTracker` and the guest keeps them packed; both answer this
+/// without copying the set, which at mainnet size would be tens of megabytes
+/// per evaluation.
+pub trait Votes {
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn get(&self, index: usize) -> Option<Vote>;
+}
+
+impl Votes for [Vote] {
+    fn len(&self) -> usize {
+        <[Vote]>::len(self)
+    }
+
+    fn get(&self, index: usize) -> Option<Vote> {
+        <[Vote]>::get(self, index).copied()
+    }
+}

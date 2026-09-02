@@ -34,7 +34,7 @@ pub mod primitives;
 pub mod rule;
 pub mod store;
 
-pub use primitives::{Checkpoint, Epoch, ExecutionStatus, Root, Slot, Vote, ZERO_ROOT};
+pub use primitives::{Checkpoint, Epoch, ExecutionStatus, Root, Slot, Vote, Votes, ZERO_ROOT};
 
 /// Why the rule could not reach an answer. Mirrors `fast_confirmation::Error`,
 /// less the variants that only a `ProtoArray` can raise.
@@ -69,32 +69,37 @@ impl From<ArithError> for Error {
 
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// The pure-arithmetic helpers below cannot fail by walking a chain, so they
+/// carry the narrow error. `From<ArithError> for Error` lifts them into the
+/// rule's wider `Result` at each `?`.
+pub type ArithResult<T> = core::result::Result<T, ArithError>;
+
 /// Checked arithmetic, named as `safe_arith::SafeArith` names it so both
 /// consumers read the same. That crate is not `no_std`, which is the only
 /// reason this exists.
 pub(crate) trait Arith: Sized {
-    fn safe_add(self, other: Self) -> Result<Self>;
-    fn safe_sub(self, other: Self) -> Result<Self>;
-    fn safe_mul(self, other: Self) -> Result<Self>;
-    fn safe_div(self, other: Self) -> Result<Self>;
-    fn safe_rem(self, other: Self) -> Result<Self>;
+    fn safe_add(self, other: Self) -> ArithResult<Self>;
+    fn safe_sub(self, other: Self) -> ArithResult<Self>;
+    fn safe_mul(self, other: Self) -> ArithResult<Self>;
+    fn safe_div(self, other: Self) -> ArithResult<Self>;
+    fn safe_rem(self, other: Self) -> ArithResult<Self>;
 }
 
 impl Arith for u64 {
-    fn safe_add(self, other: Self) -> Result<Self> {
-        self.checked_add(other).ok_or(Error::Arith(ArithError))
+    fn safe_add(self, other: Self) -> ArithResult<Self> {
+        self.checked_add(other).ok_or(ArithError)
     }
-    fn safe_sub(self, other: Self) -> Result<Self> {
-        self.checked_sub(other).ok_or(Error::Arith(ArithError))
+    fn safe_sub(self, other: Self) -> ArithResult<Self> {
+        self.checked_sub(other).ok_or(ArithError)
     }
-    fn safe_mul(self, other: Self) -> Result<Self> {
-        self.checked_mul(other).ok_or(Error::Arith(ArithError))
+    fn safe_mul(self, other: Self) -> ArithResult<Self> {
+        self.checked_mul(other).ok_or(ArithError)
     }
-    fn safe_div(self, other: Self) -> Result<Self> {
-        self.checked_div(other).ok_or(Error::Arith(ArithError))
+    fn safe_div(self, other: Self) -> ArithResult<Self> {
+        self.checked_div(other).ok_or(ArithError)
     }
-    fn safe_rem(self, other: Self) -> Result<Self> {
-        self.checked_rem(other).ok_or(Error::Arith(ArithError))
+    fn safe_rem(self, other: Self) -> ArithResult<Self> {
+        self.checked_rem(other).ok_or(ArithError)
     }
 }
 
@@ -109,7 +114,7 @@ pub fn is_full_validator_set_covered(
     slots_per_epoch: u64,
     start_slot: u64,
     end_slot: u64,
-) -> Result<bool> {
+) -> ArithResult<bool> {
     let start_full_epoch = start_slot
         .safe_add(slots_per_epoch.safe_sub(1)?)?
         .safe_div(slots_per_epoch)?;
@@ -121,7 +126,7 @@ pub fn is_full_validator_set_covered(
 ///
 /// Ceiling division, deliberately. The function exists to over-estimate
 /// committee weight; flooring would under-estimate and weaken the threshold.
-pub fn adjust_committee_weight_estimate_to_ensure_safety(estimate: u64) -> Result<u64> {
+pub fn adjust_committee_weight_estimate_to_ensure_safety(estimate: u64) -> ArithResult<u64> {
     estimate
         .div_ceil(1000)
         .safe_mul(1000u64.safe_add(COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR)?)
@@ -138,7 +143,7 @@ pub fn estimate_committee_weight_between_slots(
     start_slot: u64,
     end_slot: u64,
     slots_per_epoch: u64,
-) -> Result<u64> {
+) -> ArithResult<u64> {
     if start_slot > end_slot {
         return Ok(0);
     }
@@ -187,7 +192,7 @@ pub fn compute_proposer_score(
     total_active_balance: u64,
     slots_per_epoch: u64,
     proposer_score_boost: u64,
-) -> Result<u64> {
+) -> ArithResult<u64> {
     total_active_balance
         .safe_div(slots_per_epoch)?
         .safe_mul(proposer_score_boost)?
@@ -196,7 +201,7 @@ pub fn compute_proposer_score(
 
 /// The adversary's budget over a window, before equivocating stake is credited
 /// back. Spec: the `max_adversarial_weight` term of `compute_adversarial_weight`.
-pub fn max_adversarial_weight(maximum_weight: u64, byzantine_threshold: u64) -> Result<u64> {
+pub fn max_adversarial_weight(maximum_weight: u64, byzantine_threshold: u64) -> ArithResult<u64> {
     maximum_weight.safe_div(100)?.safe_mul(byzantine_threshold)
 }
 
@@ -217,7 +222,7 @@ pub fn safety_threshold(
     proposer_score: u64,
     adversarial_weight: u64,
     support_discount: u64,
-) -> Result<u64> {
+) -> ArithResult<u64> {
     let numerator = maximum_support
         .safe_add(proposer_score)?
         .safe_add(adversarial_weight.safe_mul(2)?)?;
