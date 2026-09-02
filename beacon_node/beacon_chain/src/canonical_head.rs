@@ -1028,8 +1028,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_REORGS);
                         }
                         warn!(
-                            unconfirmed = ?old_confirmed_root,
-                            unconfirmed_slot = %old_confirmed_slot,
+                            previous_confirmed = ?old_confirmed_root,
+                            previous_confirmed_slot = %old_confirmed_slot,
                             head = ?head_root,
                             confirmed = ?confirmed_root,
                             fcr_reorg,
