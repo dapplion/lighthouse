@@ -283,7 +283,7 @@ fn compute_start_slot_at_epoch<E: EthSpec>(epoch: Epoch) -> Slot {
 
 /// Used for queuing attestations from the current slot. Only contains the minimum necessary
 /// information about the attestation.
-#[derive(Clone, PartialEq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct QueuedAttestation {
     pub slot: Slot,
     pub attesting_indices: Vec<u64>,
@@ -1834,6 +1834,25 @@ where
     /// Returns a reference to the currently queued attestations, keyed by slot.
     pub fn queued_attestations(&self) -> &BTreeMap<Slot, Vec<QueuedAttestation>> {
         &self.queued_attestations
+    }
+
+    /// All queued attestations, flattened, for persistence.
+    pub fn queued_attestations_flat(&self) -> Vec<QueuedAttestation> {
+        self.queued_attestations
+            .values()
+            .flat_map(|attestations| attestations.iter().cloned())
+            .collect()
+    }
+
+    /// Re-queue attestations saved by a previous run. Like any other queued attestation they are
+    /// applied at the next tick, once their slot is in the past.
+    pub fn requeue_attestations(&mut self, attestations: Vec<QueuedAttestation>) {
+        for attestation in attestations {
+            self.queued_attestations
+                .entry(attestation.slot)
+                .or_default()
+                .push(attestation);
+        }
     }
 
     /// Returns the store's `proposer_boost_root`.

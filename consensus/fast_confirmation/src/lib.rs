@@ -212,6 +212,53 @@ impl FastConfirmationRule {
         })
     }
 
+    /// Rebuild the rule from the tracking variables a previous run persisted, so a restart carries
+    /// on where the rule left off instead of re-deriving `confirmed_root` from a checkpoint.
+    ///
+    /// Balance snapshots are rebuilt from the two observed-justified checkpoint states, which must
+    /// each be the checkpoint's state advanced to the checkpoint's epoch. The head-derived caches
+    /// come from `head_state` as in `new`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore<E: EthSpec>(
+        head_root: Hash256,
+        head_state: &BeaconState<E>,
+        slot_assignments: SlotAssignments,
+        confirmed_root: Hash256,
+        previous_epoch_observed_justified: (Checkpoint, &BeaconState<E>),
+        current_epoch_observed_justified: (Checkpoint, &BeaconState<E>),
+        previous_epoch_greatest_unrealized_checkpoint: Checkpoint,
+        previous_slot_head: Hash256,
+        current_slot_head: Hash256,
+        last_update_slot: Option<Slot>,
+        byzantine_threshold: u64,
+        proposer_score_boost: u64,
+    ) -> Result<Self, Error> {
+        let byzantine_threshold = byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD);
+        let observed = |(checkpoint, state): (Checkpoint, &BeaconState<E>)| {
+            if state.current_epoch() != checkpoint.epoch {
+                return Err(Error::MissingCheckpointState(checkpoint));
+            }
+            Ok(CheckpointAndBalance::new(
+                checkpoint,
+                BalanceSourceData::new(state, checkpoint.root)?,
+            ))
+        };
+        Ok(Self {
+            confirmed_root,
+            previous_epoch_observed_justified: observed(previous_epoch_observed_justified)?,
+            current_epoch_observed_justified: observed(current_epoch_observed_justified)?,
+            previous_epoch_greatest_unrealized_checkpoint,
+            previous_slot_head,
+            current_slot_head,
+            byzantine_threshold,
+            proposer_score_boost,
+            slot_assignments,
+            head_balance_source: BalanceSourceData::new(head_state, head_root)?,
+            last_update_slot,
+            spec_test_mode: false,
+        })
+    }
+
     /// Enable spec test mode: `on_fast_confirmation` still tracks variables but
     /// does not update `confirmed_root`. Call `get_latest_confirmed` explicitly
     /// when the test needs the confirmation result.
