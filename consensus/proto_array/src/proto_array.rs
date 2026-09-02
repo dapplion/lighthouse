@@ -185,6 +185,9 @@ impl ProtoNode {
 
     /// Generic version of spec's `parent_payload_status` that works for pre-Gloas nodes by
     /// considering their parents Empty.
+    ///
+    /// The pre-Gloas defaults differ by question: child matching uses `Empty` (one virtual
+    /// node), the execution status walks use `Full` (the block carries its own payload).
     pub fn get_parent_payload_status(&self) -> PayloadStatus {
         self.parent_payload_status().unwrap_or(PayloadStatus::Empty)
     }
