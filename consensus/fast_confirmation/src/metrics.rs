@@ -54,11 +54,12 @@ pub(crate) static FAST_CONFIRMATION_FALLBACKS: LazyLock<Result<IntCounterVec>> =
             &["reason"],
         )
     });
-pub(crate) static FAST_CONFIRMATION_REORGS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+pub static FAST_CONFIRMATION_REORGS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
     try_create_int_counter(
         "beacon_fast_confirmation_reorgs_total",
-        "Count of confirmed blocks that were reorged out, i.e. a previously confirmed block that \
-         is no longer canonical. Should always be zero under the FCR safety assumptions",
+        "Count of unconfirmations: a block reported as confirmed that a later run no longer \
+         confirms, either because it left the canonical chain or because the confirmed root moved \
+         back behind it",
     )
 });
 pub(crate) static FCR_FALLBACK_SUPPORT_RATIO: LazyLock<Result<Histogram>> = LazyLock::new(|| {

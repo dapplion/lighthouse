@@ -8,7 +8,7 @@
 //!
 //! ## Deadlock safety
 //!
-//! This module contains four locks:
+//! This module contains five locks:
 //!
 //! 1. `RwLock<BeaconForkChoice>`: Contains `proto_array` fork choice.
 //! 2. `RwLock<CachedHead>`: Contains a cached block/state from the last run of `proto_array`.
@@ -16,6 +16,8 @@
 //! 4. `Option<Mutex<FastConfirmationRule>>`: FCR state (None when disabled), only locked inside
 //!    `recompute_head_at_slot_internal` while the fork choice read lock (1) is held and
 //!    `recompute_head_lock` (3) serializes access.
+//! 5. `Mutex<Option<Hash256>>`: The last confirmed root reported by FCR, locked under the same
+//!    conditions as (4) and never held across another lock acquisition.
 //!
 //! This module has to take great efforts to avoid causing a deadlock with these three methods. Any
 //! developers working in this module should tread carefully and seek a detailed review.
@@ -458,6 +460,14 @@ pub struct CanonicalHead<T: BeaconChainTypes> {
     pub fast_confirmation: Option<Mutex<FastConfirmationRule>>,
     /// Per-validator committee slot assignments across the last 3 epochs.
     pub slot_assignments: Mutex<SlotAssignments>,
+    /// The confirmed root most recently reported to the execution layer and the event stream.
+    ///
+    /// Kept here rather than in `FastConfirmationRule` because only the reported values can tell
+    /// an unconfirmation apart from ordinary progress: inside `get_latest_confirmed` the confirmed
+    /// root is free to fall back to the finalized block and be advanced forward again within a
+    /// single run. Only written from `recompute_head`, which is serialized by
+    /// `recompute_head_lock`.
+    last_confirmed_root: Mutex<Option<Hash256>>,
 }
 
 impl<T: BeaconChainTypes> CanonicalHead<T> {
@@ -507,6 +517,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             recompute_head_lock: Mutex::new(()),
             fast_confirmation: fcr,
             slot_assignments: Mutex::new(slot_assignments),
+            last_confirmed_root: Mutex::new(None),
         })
     }
 
@@ -587,6 +598,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             )
             .map_err(|e| Error::DBInconsistent(format!("fast confirmation rule reset: {e:?}")))?;
         }
+        *self.last_confirmed_root.lock() = None;
         *self.slot_assignments.lock() = slot_assignments;
 
         Ok(())
@@ -997,6 +1009,34 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     }
                     if new_confirmed_root {
                         metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_CHANGES);
+                    }
+
+                    // An unconfirmation: the block we last reported as confirmed is no longer
+                    // covered by what we are about to report, either because the head reorged off
+                    // it or because the confirmed root fell back behind it. A previously confirmed
+                    // root that fork choice has pruned is an ancestor of the finalized block,
+                    // which is the healthy case, and `is_descendant` cannot tell that apart from a
+                    // reorg, so skip it.
+                    let previous_confirmed_root = self
+                        .canonical_head
+                        .last_confirmed_root
+                        .lock()
+                        .replace(confirmed_root);
+                    if let Some(previous) = previous_confirmed_root
+                        && previous != confirmed_root
+                        && fork_choice_read_lock.get_block(&previous).is_some()
+                        && (!fork_choice_read_lock
+                            .is_descendant(previous, new_view.head_block_root)
+                            || !fork_choice_read_lock.is_descendant(previous, confirmed_root))
+                    {
+                        warn!(
+                            unconfirmed = ?previous,
+                            head = ?new_view.head_block_root,
+                            confirmed = ?confirmed_root,
+                            slot = %current_slot,
+                            "FCR unconfirmed a previously confirmed block"
+                        );
+                        metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
                     }
 
                     // Emit a `fast_confirmation` event on every FCR run, regardless of

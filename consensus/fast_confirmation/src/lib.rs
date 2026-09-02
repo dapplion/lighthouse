@@ -48,7 +48,7 @@ use optimizations::{AttestationScoreCache, HonestFfgSupportCache};
 use proto_array::core::{ProtoArray, ProtoNode, VoteTracker};
 use safe_arith::{ArithError, SafeArith};
 use std::collections::BTreeSet;
-use tracing::{debug, debug_span, warn};
+use tracing::{debug, debug_span};
 use types::{
     BeaconState, BeaconStateError, Checkpoint, Epoch, EthSpec, Hash256, Slot, SlotAssignments,
 };
@@ -106,10 +106,6 @@ impl Confirmation {
 }
 
 const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
-
-/// `beacon_fast_confirmation_fallbacks_total` reason for the one fallback that is an
-/// unconfirmation: the confirmed block is no longer an ancestor of the head.
-const REORG_FALLBACK_REASON: &str = "not_ancestor";
 
 /// The Fast Confirmation Rule state
 #[derive(Debug)]
@@ -405,7 +401,7 @@ impl FastConfirmationRule {
             }
         } else if !is_ancestor(head_root, confirmed_root, proto_array)? {
             // 2) the latest confirmed block does not belong to the canonical chain,
-            Some(REORG_FALLBACK_REASON)
+            Some("not_ancestor")
         } else if is_epoch_start
             && let Some(chain_unsafe_reason) = self.is_confirmed_chain_safe::<E>(
                 // 3) the confirmed chain starting from the current epoch observed justified
@@ -422,20 +418,6 @@ impl FastConfirmationRule {
             None
         };
         if let Some(reason) = should_fall_back_reason {
-            if reason == REORG_FALLBACK_REASON {
-                // An unconfirmation: a block previously reported as confirmed is no longer
-                // canonical. Under the FCR assumptions (synchrony and less than
-                // `byzantine_threshold` adversarial stake) this must never happen, so it is
-                // logged loudly and counted apart from the other fallbacks, which are recoveries
-                // from staleness rather than broken confirmations.
-                warn!(
-                    unconfirmed = %confirmed_root,
-                    head = %head_root,
-                    slot = %current_slot,
-                    "FCR confirmed block was reorged out"
-                );
-                metrics::inc_counter(&metrics::FAST_CONFIRMATION_REORGS);
-            }
             debug!(
                 prev_confirmed = %confirmed_root,
                 finalized = %finalized_checkpoint.root,
