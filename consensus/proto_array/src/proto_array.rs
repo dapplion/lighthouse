@@ -660,17 +660,19 @@ impl ProtoArray {
         };
 
         // If the parent has an invalid execution status, return an error before adding the
-        // block to `self`. This applies only when the parent is a V17 node with execution tracking.
+        // block to `self`.
         if let Some(parent_index) = node.parent() {
             let parent = self
                 .nodes
                 .get(parent_index)
                 .ok_or(Error::InvalidNodeIndex(parent_index))?;
 
-            // Execution status tracking only exists on V17 (pre-Gloas) nodes.
-            if let Ok(v17) = parent.as_v17()
-                && v17.execution_status.is_invalid()
-            {
+            // An invalid Gloas payload condemns only the `FULL` node of the parent. A block that
+            // builds on the `EMPTY` node does not include that payload and is accepted.
+            let builds_on_invalid_payload = parent.execution_status().is_invalid()
+                && node.parent_payload_status().unwrap_or(PayloadStatus::Full)
+                    == PayloadStatus::Full;
+            if builds_on_invalid_payload {
                 return Err(Error::ParentExecutionStatusIsInvalid {
                     block_root: block.root,
                     parent_root: parent.root(),
