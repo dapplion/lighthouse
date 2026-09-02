@@ -268,10 +268,9 @@ struct FcrOutcome {
     confirmed_root: Hash256,
     confirmed_slot: Slot,
     confirmed_block_hash: ExecutionBlockHash,
-    new_confirmed_root: bool,
+    /// The confirmed root as it stood before this run.
+    old_confirmed_root: Hash256,
     new_update_slot: bool,
-    /// Set when the run made a previously confirmed block non-canonical.
-    unconfirmed_root: Option<Hash256>,
 }
 
 /// Provides a series of cached values from the last time `BeaconChain::recompute_head` was run.
@@ -973,9 +972,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     confirmed_root,
                     confirmed_slot,
                     confirmed_block_hash,
-                    new_confirmed_root,
+                    old_confirmed_root,
                     new_update_slot,
-                    unconfirmed_root,
                 }) => {
                     // FC update params are only updated after successful FCR runs. This is
                     // conservative and will revert the `safe` tag to justified instead of using a
@@ -998,19 +996,31 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             delay as f64,
                         );
                     }
-                    if new_confirmed_root {
+                    if confirmed_root != old_confirmed_root {
                         metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_CHANGES);
-                    }
 
-                    if let Some(unconfirmed_root) = unconfirmed_root {
-                        warn!(
-                            unconfirmed = ?unconfirmed_root,
-                            head = ?new_view.head_block_root,
-                            confirmed = ?confirmed_root,
-                            slot = %current_slot,
-                            "FCR confirmed block was reorged out"
-                        );
-                        metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
+                        // An unconfirmation: a reorg made a block we had confirmed non-canonical.
+                        // Compared across the whole run, because inside `get_latest_confirmed` the
+                        // confirmed root may fall back to the finalized block and be advanced
+                        // forward again, which confirms nothing new and takes nothing back. An
+                        // `old_confirmed_root` that fork choice has pruned is an ancestor of the
+                        // finalized block, the healthy case, and `is_descendant` is false for
+                        // unknown roots.
+                        if fork_choice_read_lock
+                            .get_block(&old_confirmed_root)
+                            .is_some()
+                            && !fork_choice_read_lock
+                                .is_descendant(old_confirmed_root, new_view.head_block_root)
+                        {
+                            warn!(
+                                unconfirmed = ?old_confirmed_root,
+                                head = ?new_view.head_block_root,
+                                confirmed = ?confirmed_root,
+                                slot = %current_slot,
+                                "FCR confirmed block was reorged out"
+                            );
+                            metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
+                        }
                     }
 
                     // Emit a `fast_confirmation` event on every FCR run, regardless of
@@ -1387,23 +1397,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 fcr.confirmed_root,
             ))?;
 
-        // An unconfirmation: a reorg made a block we had confirmed non-canonical. Compared across
-        // the whole run, because inside `get_latest_confirmed` the confirmed root may fall back to
-        // the finalized block and be advanced forward again, which confirms nothing new and takes
-        // nothing back. An `old_confirmed_root` that fork choice has pruned is an ancestor of the
-        // finalized block, the healthy case, and `is_descendant` is false for unknown roots.
-        let unconfirmed_root = (fcr.confirmed_root != old_confirmed_root
-            && fork_choice.get_block(&old_confirmed_root).is_some()
-            && !fork_choice.is_descendant(old_confirmed_root, head_root))
-        .then_some(old_confirmed_root);
-
         Ok(FcrOutcome {
             confirmed_root: fcr.confirmed_root,
             confirmed_slot: confirmed_node.slot,
             confirmed_block_hash,
-            new_confirmed_root: fcr.confirmed_root != old_confirmed_root,
+            old_confirmed_root,
             new_update_slot: fcr.last_update_slot() != old_update_slot,
-            unconfirmed_root,
         })
     }
 
