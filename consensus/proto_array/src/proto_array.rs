@@ -114,12 +114,13 @@ pub struct ProtoNode {
     #[superstruct(only(V17), partial_getter(copy))]
     #[ssz(with = "four_byte_option_usize")]
     pub best_descendant: Option<usize>,
-    /// Validity of the payload that this block reveals, and its execution block hash. The status
-    /// is `Irrelevant` until a Gloas envelope reveals the payload.
+    /// Validity of the payload that this block commits to, and its execution block hash. The
+    /// status is `Irrelevant` until a Gloas envelope reveals the payload.
     ///
-    /// This is the status of one payload, not of the block. A head on `(root, EMPTY)` ran the
-    /// payload of an ancestor. Use `ProtoArrayForkChoice::get_node_execution_status` when the
-    /// node is not known.
+    /// This is the status of the payload, not of the block. The `(root, EMPTY)` fork choice node
+    /// does not include this payload, so its validity is that of an ancestor's payload. Use
+    /// `ProtoArrayForkChoice::get_node_execution_status` to read the status of either fork
+    /// choice node of this block.
     #[superstruct(getter(copy))]
     pub execution_status: ExecutionStatus,
     #[superstruct(getter(copy))]
