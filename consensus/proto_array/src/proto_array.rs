@@ -1832,6 +1832,19 @@ impl ProtoArray {
             .unwrap_or(false)
     }
 
+    /// Returns the slot of the most recent common ancestor of `block_root` and `other_root`, i.e.
+    /// the last point at which their two chains agree. Returns `None` if either root is unknown,
+    /// or if the chains diverge before the earliest node still held.
+    ///
+    /// ## Notes
+    ///
+    /// Returns the slot of `block_root` itself when it is an ancestor of `other_root`.
+    pub fn common_ancestor_slot(&self, block_root: Hash256, other_root: Hash256) -> Option<Slot> {
+        self.iter_block_roots(&block_root)
+            .find(|(ancestor_root, _)| self.is_descendant(*ancestor_root, other_root))
+            .map(|(_root, slot)| slot)
+    }
+
     pub fn get_block(&self, root: Hash256) -> Option<&ProtoNode> {
         self.indices.get(&root).and_then(|&idx| self.nodes.get(idx))
     }

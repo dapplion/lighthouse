@@ -268,7 +268,8 @@ struct FcrOutcome {
     confirmed_root: Hash256,
     confirmed_slot: Slot,
     confirmed_block_hash: ExecutionBlockHash,
-    new_confirmed_root: bool,
+    /// The confirmed root as it stood before this run.
+    old_confirmed_root: Hash256,
     new_update_slot: bool,
 }
 
@@ -971,7 +972,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     confirmed_root,
                     confirmed_slot,
                     confirmed_block_hash,
-                    new_confirmed_root,
+                    old_confirmed_root,
                     new_update_slot,
                 }) => {
                     // FC update params are only updated after successful FCR runs. This is
@@ -984,7 +985,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         .saturating_sub(confirmed_slot.as_u64());
                     metrics::set_gauge(&fcr_metrics::FCR_CONFIRMATION_DELAY_SLOTS, delay as i64);
                     metrics::set_gauge(
-                        &fcr_metrics::FCR_CONFIRMED_ROOT_SLOT,
+                        &fcr_metrics::FAST_CONFIRMATION_SLOT,
                         confirmed_slot.as_u64() as i64,
                     );
                     // Sample the settled-delay histogram only on the first recompute that advanced
@@ -995,8 +996,52 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             delay as f64,
                         );
                     }
-                    if new_confirmed_root {
+                    if confirmed_root != old_confirmed_root {
                         metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_CHANGES);
+
+                        // An `old_confirmed_root` that fork choice has pruned is an ancestor of the finalized
+                        // block, which is the healthy case, and `is_descendant` cannot tell that apart from a
+                        // reorg.
+                        let head_root = new_view.head_block_root;
+                        if let Some(old_confirmed_block) =
+                            fork_choice_read_lock.get_block(&old_confirmed_root)
+                            && !fork_choice_read_lock.is_descendant(old_confirmed_root, head_root)
+                        {
+                            let old_confirmed_slot = old_confirmed_block.slot;
+                            // Whether FCR also moved off the old confirmed block, rather than the
+                            // head alone leaving it behind.
+                            let fcr_reorg = !fork_choice_read_lock
+                                .is_descendant(old_confirmed_root, confirmed_root);
+
+                            // Depth of the reorg: how far back the confirmed block sat from where its chain and the
+                            // new head last agreed.
+                            let reorg_distance = fork_choice_read_lock
+                                .proto_array()
+                                .common_ancestor_slot(old_confirmed_root, head_root)
+                                .map(|ancestor_slot| {
+                                    old_confirmed_slot.saturating_sub(ancestor_slot)
+                                });
+
+                            if let Some(reorg_distance) = reorg_distance {
+                                metrics::set_gauge(
+                                    &fcr_metrics::FCR_UNCONFIRMATION_DISTANCE,
+                                    reorg_distance.as_u64() as i64,
+                                );
+                            }
+                            if fcr_reorg {
+                                metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
+                            }
+                            warn!(
+                                unconfirmed = ?old_confirmed_root,
+                                unconfirmed_slot = %old_confirmed_slot,
+                                head = ?head_root,
+                                confirmed = ?confirmed_root,
+                                fcr_reorg,
+                                slot = %current_slot,
+                                ?reorg_distance,
+                                "FCR confirmed block reorged out of the canonical chain"
+                            );
+                        }
                     }
 
                     // Emit a `fast_confirmation` event on every FCR run, regardless of
@@ -1377,7 +1422,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             confirmed_root: fcr.confirmed_root,
             confirmed_slot: confirmed_node.slot,
             confirmed_block_hash,
-            new_confirmed_root: fcr.confirmed_root != old_confirmed_root,
+            old_confirmed_root,
             new_update_slot: fcr.last_update_slot() != old_update_slot,
         })
     }
