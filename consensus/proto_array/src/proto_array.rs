@@ -115,7 +115,7 @@ pub struct ProtoNode {
     #[ssz(with = "four_byte_option_usize")]
     pub best_descendant: Option<usize>,
     /// Validity of the payload that this block commits to, and its execution block hash. The
-    /// status is `Irrelevant` until a Gloas envelope reveals the payload.
+    /// status is `NotYetRevealed` until a Gloas envelope reveals the payload.
     ///
     /// This is the status of the payload, not of the block. The `(root, EMPTY)` fork choice node
     /// does not include this payload, so its validity is that of an ancestor's payload. Use
@@ -642,8 +642,7 @@ impl ProtoArray {
                 full_payload_weight: 0,
                 execution_payload_block_hash,
                 execution_payload_parent_hash,
-                // The payload is revealed later, in an envelope.
-                execution_status: ExecutionStatus::Irrelevant(false),
+                execution_status: ExecutionStatus::NotYetRevealed(execution_payload_block_hash),
                 payload_timeliness_votes: BitVector::default(),
                 payload_data_availability_votes: BitVector::default(),
                 ptc_participation: BitVector::default(),
@@ -936,6 +935,10 @@ impl ProtoArray {
                             ancestor_payload_block_hash,
                         });
                     }
+                    // The chain committed to this payload but its envelope has not arrived here
+                    // yet (envelopes can arrive out of order during sync). Stop: it is promoted
+                    // when its own envelope is validated.
+                    ExecutionStatus::NotYetRevealed(_) => return Ok(()),
                 }
             }
 
@@ -1032,6 +1035,9 @@ impl ProtoArray {
                     }
                 }
                 ExecutionStatus::Irrelevant(_) => break,
+                // The envelope for this payload has not arrived here yet. There is no verdict
+                // to update, and nothing above it changes either.
+                ExecutionStatus::NotYetRevealed(_) => break,
             }
 
             // Only invalidate the head block if either:
@@ -1061,6 +1067,7 @@ impl ProtoArray {
                     // This block is pre-merge, therefore it has no execution status. Nor do its
                     // ancestors.
                     ExecutionStatus::Irrelevant(_) => break,
+                    ExecutionStatus::NotYetRevealed(_) => break,
                 }
             }
 
@@ -1120,21 +1127,16 @@ impl ProtoArray {
                     ExecutionStatus::Optimistic(hash) | ExecutionStatus::Invalid(hash) => {
                         *node.execution_status_mut() = ExecutionStatus::Invalid(hash);
                     }
+                    // The block committed to the invalid ancestry even though its payload never
+                    // arrived. A descendant of an invalid payload is invalid.
+                    ExecutionStatus::NotYetRevealed(hash) => {
+                        *node.execution_status_mut() = ExecutionStatus::Invalid(hash);
+                    }
+                    // A pre-merge descendant of an executed block is a contradiction.
                     ExecutionStatus::Irrelevant(_) => {
-                        // In Gloas this means only that the payload is not revealed yet. The block did
-                        // commit to the invalid ancestry. Pre-Gloas this state is a contradiction.
-                        match node {
-                            ProtoNode::V29(gloas_node) => {
-                                gloas_node.execution_status = ExecutionStatus::Invalid(
-                                    gloas_node.execution_payload_block_hash,
-                                );
-                            }
-                            ProtoNode::V17(_) => {
-                                return Err(Error::IrrelevantDescendant {
-                                    block_root: node.root(),
-                                });
-                            }
-                        }
+                        return Err(Error::IrrelevantDescendant {
+                            block_root: node.root(),
+                        });
                     }
                 }
 
