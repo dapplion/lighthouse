@@ -161,6 +161,14 @@ fn assert_confirmed_root_did_not_regress(before: &Sample, after: &Sample) {
         before.confirmed_slot,
         after.confirmed_slot
     );
+    // Standing still at the same slot must mean the very same block, not a same-height sibling.
+    if after.confirmed_slot == before.confirmed_slot {
+        assert_eq!(
+            after.confirmed_root, before.confirmed_root,
+            "the confirmed root changed to a different block at the same slot {}",
+            before.confirmed_slot
+        );
+    }
 }
 
 /// The confirmed root never goes backwards over a run of samples either, so a restart cannot be
@@ -175,6 +183,13 @@ fn assert_confirmed_root_never_regresses(first: &Sample, timeline: &[Sample]) {
             previous.confirmed_slot,
             sample.confirmed_slot
         );
+        if sample.confirmed_slot == previous.confirmed_slot {
+            assert_eq!(
+                sample.confirmed_root, previous.confirmed_root,
+                "the confirmed root changed to a different block at the same slot {}",
+                previous.confirmed_slot
+            );
+        }
         previous = sample;
     }
 }
