@@ -161,14 +161,24 @@ impl FastConfirmationRule {
     /// Maximum valid value for `byzantine_threshold` (25%).
     const MAX_BYZANTINE_THRESHOLD: u64 = 25;
 
-    /// Initialize FCR from the finalized checkpoint, seeding both observed-justified balance
+    /// Initialize FCR from `anchor_checkpoint`, seeding both observed-justified balance
     /// sources from `checkpoint_state` as the spec does. `byzantine_threshold` is clamped
     /// to [0, 25].
+    ///
+    /// The spec seeds every variable from `store.finalized_checkpoint`, on the assumption that the
+    /// fork choice store is being initialized from a trusted checkpoint at the same time. On a
+    /// restart that assumption does not hold: fork choice is restored from the database with a real
+    /// justified checkpoint, and seeding FCR from the finalized one instead throws that away and
+    /// walks the confirmed root backwards by ~2 epochs. Callers therefore pass the justified
+    /// checkpoint, which equals the finalized one at genesis and after checkpoint sync. Seeding is
+    /// still only a starting point: `get_latest_confirmed` re-validates the confirmed root on every
+    /// run and reverts it to finalized if it is not on the canonical chain or cannot be
+    /// re-confirmed.
     pub fn new<E: EthSpec>(
         head_root: Hash256,
         head_state: &BeaconState<E>,
         slot_assignments: SlotAssignments,
-        finalized_checkpoint: Checkpoint,
+        anchor_checkpoint: Checkpoint,
         checkpoint_state: &BeaconState<E>,
         byzantine_threshold: u64,
         proposer_score_boost: u64,
@@ -176,24 +186,23 @@ impl FastConfirmationRule {
         let byzantine_threshold = byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD);
         // Sanity: the supplied state must be the checkpoint's state, advanced to the
         // checkpoint's epoch.
-        if checkpoint_state.current_epoch() != finalized_checkpoint.epoch {
-            return Err(Error::MissingCheckpointState(finalized_checkpoint));
+        if checkpoint_state.current_epoch() != anchor_checkpoint.epoch {
+            return Err(Error::MissingCheckpointState(anchor_checkpoint));
         }
-        let checkpoint_balance =
-            BalanceSourceData::new(checkpoint_state, finalized_checkpoint.root)?;
+        let checkpoint_balance = BalanceSourceData::new(checkpoint_state, anchor_checkpoint.root)?;
         Ok(Self {
-            confirmed_root: finalized_checkpoint.root,
+            confirmed_root: anchor_checkpoint.root,
             previous_epoch_observed_justified: CheckpointAndBalance::new(
-                finalized_checkpoint,
+                anchor_checkpoint,
                 checkpoint_balance.clone(),
             ),
             current_epoch_observed_justified: CheckpointAndBalance::new(
-                finalized_checkpoint,
+                anchor_checkpoint,
                 checkpoint_balance,
             ),
-            previous_epoch_greatest_unrealized_checkpoint: finalized_checkpoint,
-            previous_slot_head: finalized_checkpoint.root,
-            current_slot_head: finalized_checkpoint.root,
+            previous_epoch_greatest_unrealized_checkpoint: anchor_checkpoint,
+            previous_slot_head: anchor_checkpoint.root,
+            current_slot_head: anchor_checkpoint.root,
             byzantine_threshold,
             proposer_score_boost,
             slot_assignments,

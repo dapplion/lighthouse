@@ -479,7 +479,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let fcr = if fast_confirmation.is_enabled() {
             Some(Mutex::new(
                 <BeaconChain<T>>::new_fast_confirmation_rule(
-                    fork_choice_view.finalized_checkpoint,
+                    fork_choice_view.justified_checkpoint,
                     &snapshot,
                     slot_assignments.clone(),
                     store,
@@ -576,10 +576,10 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         drop(fork_choice_write_lock);
         *self.cached_head.write() = cached_head;
 
-        // Reset FCR to the restored finalized checkpoint so it doesn't carry stale state.
+        // Reset FCR to the restored justified checkpoint so it doesn't carry stale state.
         if let Some(ref fcr_mutex) = self.fast_confirmation {
             *fcr_mutex.lock() = <BeaconChain<T>>::new_fast_confirmation_rule(
-                fork_choice_view.finalized_checkpoint,
+                fork_choice_view.justified_checkpoint,
                 &snapshot,
                 slot_assignments.clone(),
                 store,
@@ -1382,24 +1382,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         })
     }
 
-    /// Build a `FastConfirmationRule` seeded from `finalized_checkpoint`, sourcing its balance
-    /// snapshots from the finalized checkpoint's state (spec: `store.checkpoint_states[checkpoint]`)
+    /// Build a `FastConfirmationRule` seeded from `anchor_checkpoint`, sourcing its balance
+    /// snapshots from that checkpoint's state (spec: `store.checkpoint_states[checkpoint]`)
     /// and its head-derived caches from the `snapshot` state.
     ///
     /// When the head snapshot *is* the checkpoint state — same block root, state at the first slot
     /// of the checkpoint's epoch, as at genesis or checkpoint-sync startup — it is reused directly;
     /// otherwise the checkpoint state is loaded from the `store`.
     fn new_fast_confirmation_rule(
-        finalized_checkpoint: Checkpoint,
+        anchor_checkpoint: Checkpoint,
         snapshot: &BeaconSnapshot<T::EthSpec>,
         slot_assignments: SlotAssignments,
         store: &BeaconStore<T>,
         spec: &ChainSpec,
     ) -> Result<FastConfirmationRule, FastConfirmationError> {
-        let target_slot = finalized_checkpoint
+        let target_slot = anchor_checkpoint
             .epoch
             .start_slot(T::EthSpec::slots_per_epoch());
-        let snapshot_is_checkpoint_state = snapshot.beacon_block_root == finalized_checkpoint.root
+        let snapshot_is_checkpoint_state = snapshot.beacon_block_root == anchor_checkpoint.root
             && snapshot.beacon_state.slot() == target_slot;
         let loaded_checkpoint_state = if snapshot_is_checkpoint_state {
             None
@@ -1407,14 +1407,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             Some(Self::load_fcr_checkpoint_state(
                 store,
                 None,
-                finalized_checkpoint,
+                anchor_checkpoint,
             )?)
         };
         FastConfirmationRule::new(
             snapshot.beacon_block_root,
             &snapshot.beacon_state,
             slot_assignments,
-            finalized_checkpoint,
+            anchor_checkpoint,
             loaded_checkpoint_state
                 .as_ref()
                 .unwrap_or(&snapshot.beacon_state),

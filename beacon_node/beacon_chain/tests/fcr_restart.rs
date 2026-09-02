@@ -1,18 +1,19 @@
 #![cfg(not(debug_assertions))]
 
-//! Reproduction of the Fast Confirmation Rule (FCR) `confirmed_root` regression across a beacon
-//! node restart.
+//! The Fast Confirmation Rule (FCR) `confirmed_root` must not move backwards across a beacon node
+//! restart. It is published as the `fast_confirmation` event and as the engine `safeBlockHash`, so
+//! a node that rewinds it on every boot rewinds an EL's `safe` tag with it.
 //!
 //! The restart here is a real one: the chain is persisted to a disk store and then rebuilt with
-//! `BeaconChainBuilder::resume_from_db`, which is the production boot path. That path runs
-//! `CanonicalHead::new`, which rebuilds the rule from `finalized_checkpoint` — no part of the FCR
-//! state is persisted, so a restart replaces a `confirmed_root` that was tracking the head with the
-//! finalized root.
+//! `BeaconChainBuilder::resume_from_db`, which is the production boot path, so the resumed chain's
+//! FCR state comes entirely from the database. No part of the rule itself is persisted —
+//! `CanonicalHead::new` rebuilds it from the checkpoint fork choice was restored with.
 //!
-//! From there the advance path in `get_latest_confirmed` is gated on
+//! Seeding that rebuild from `finalized_checkpoint` used to drop the confirmed root by ~2 epochs
+//! and leave it there: the advance path in `get_latest_confirmed` is gated on
 //! `get_block_epoch(confirmed_root) + 1 >= current_epoch`, which the finalized root cannot satisfy,
-//! so the only way back is the "restart the confirmation chain" branch at the first slot of an
-//! epoch.
+//! so the only way back was the "restart the confirmation chain" branch at the first slot of an
+//! epoch — one epoch later, or two when the epoch containing the restart failed to justify.
 
 use beacon_chain::{
     BeaconChain, BeaconChainTypes, ChainConfig,
@@ -148,53 +149,34 @@ fn sample<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> Sample {
 /// One slot, in the order a running node does it: the slot tick fires `recompute_head` first (so
 /// FCR's once-per-slot update sees only what arrived in earlier slots), then the block and its
 /// attestations land and the head is recomputed again.
-/// The key property: a restart makes the confirmed root go backwards.
+/// The key property: a restart must not walk the confirmed root backwards.
 ///
-/// `confirmed_root` is supposed to be monotonic along the canonical chain — that is the whole point
-/// of confirming a block, and it is what the `fast_confirmation` event and the engine
-/// `safeBlockHash` both publish. Returns how many slots of confirmed chain the restart threw away.
-fn assert_confirmed_root_regressed(before: &Sample, after: &Sample) -> u64 {
+/// `confirmed_root` is monotonic along the canonical chain — that is the whole point of confirming
+/// a block, and both the `fast_confirmation` event and the engine `safeBlockHash` publish it.
+fn assert_confirmed_root_did_not_regress(before: &Sample, after: &Sample) {
     assert!(
-        after.confirmed_slot < before.confirmed_slot,
-        "the confirmed root must go backwards across a restart: it was slot {} before and is \
+        after.confirmed_slot >= before.confirmed_slot,
+        "the confirmed root went backwards across the restart: it was slot {} before and is \
          slot {} after",
         before.confirmed_slot,
         after.confirmed_slot
     );
-    assert_eq!(
-        after.confirmed_root, after.finalized_root,
-        "the restart drops the confirmed root all the way back to the finalized root"
-    );
-    let regression = before.confirmed_slot.as_u64() - after.confirmed_slot.as_u64();
-    assert!(
-        regression >= E::slots_per_epoch(),
-        "the restart should throw away at least a whole epoch of confirmed chain, threw away {} \
-         slots",
-        regression
-    );
-    regression
 }
 
-/// The regression persists: the confirmed root stays behind its pre-restart value until an epoch
-/// boundary, since the "restart the confirmation chain" branch is the only way back and it only
-/// runs at the first slot of an epoch. Returns how many slots that took.
-fn assert_regression_lasts_until_an_epoch_boundary(
-    restart_slot: Slot,
-    recovered_at: Option<Slot>,
-) -> u64 {
-    let recovered_at = recovered_at
-        .expect("the confirmed root should eventually get back to where it was before the restart");
-    assert!(
-        recovered_at > restart_slot,
-        "the confirmed root cannot recover on the restart slot itself"
-    );
-    assert_eq!(
-        recovered_at.as_u64() % E::slots_per_epoch(),
-        0,
-        "the confirmed root can only recover at the first slot of an epoch, recovered at slot {}",
-        recovered_at
-    );
-    recovered_at.as_u64() - restart_slot.as_u64()
+/// The confirmed root never goes backwards over a run of samples either, so a restart cannot be
+/// papered over by recovering a slot later.
+fn assert_confirmed_root_never_regresses(first: &Sample, timeline: &[Sample]) {
+    let mut previous = first;
+    for sample in timeline {
+        assert!(
+            sample.confirmed_slot >= previous.confirmed_slot,
+            "the confirmed root went backwards at slot {}: was slot {}, now slot {}",
+            sample.current_slot,
+            previous.confirmed_slot,
+            sample.confirmed_slot
+        );
+        previous = sample;
+    }
 }
 
 async fn build_slot(harness: &TestHarness) {
@@ -216,8 +198,8 @@ async fn build_slot_attested_by(harness: &TestHarness, attesters: Option<&[usize
     harness.chain.recompute_head_at_current_slot().await;
 }
 
-/// Build a chain, restart the node at `restart_slot_in_epoch`, and report what the confirmed root
-/// does afterwards.
+/// Build a chain to a steady state, restart the node at `restart_slot_in_epoch`, and check the
+/// confirmed root across and after the restart.
 async fn restart_at_slot_in_epoch(restart_slot_in_epoch: u64) {
     let db_path = tempdir().expect("temp dir");
     let store = get_store(&db_path, test_spec::<E>());
@@ -245,22 +227,15 @@ async fn restart_at_slot_in_epoch(restart_slot_in_epoch: u64) {
     let harness = restart_harness(store, &old_harness);
     harness.chain.recompute_head_at_current_slot().await;
 
-    // THE REGRESSION. The confirmed root is meant to be monotonic: a block, once confirmed, stays
-    // confirmed. A restart breaks that — the announced confirmed root moves backwards.
+    // THE KEY PROPERTY. A block, once confirmed, stays confirmed: rebooting the node must not
+    // announce an older confirmed root than the one it announced a slot earlier.
     let after = sample(&harness.chain);
-    let regression = assert_confirmed_root_regressed(&before, &after);
+    assert_confirmed_root_did_not_regress(&before, &after);
 
-    let restart_slot = after.current_slot;
-    let mut recovered_at = None;
     let mut timeline = Vec::new();
-
     for _ in 0..SLOTS_AFTER_RESTART {
         build_slot(&harness).await;
-        let s = sample(&harness.chain);
-        if recovered_at.is_none() && s.confirmed_slot >= before.confirmed_slot {
-            recovered_at = Some(s.current_slot);
-        }
-        timeline.push(s);
+        timeline.push(sample(&harness.chain));
     }
 
     println!(
@@ -276,11 +251,10 @@ async fn restart_at_slot_in_epoch(restart_slot_in_epoch: u64) {
         before.delay()
     );
     println!(
-        "after restart:   current_slot={} confirmed_slot={} delay={} (regressed {} slots)",
+        "after restart:   current_slot={} confirmed_slot={} delay={}",
         after.current_slot,
         after.confirmed_slot,
-        after.delay(),
-        regression
+        after.delay()
     );
     for s in &timeline {
         println!(
@@ -292,63 +266,60 @@ async fn restart_at_slot_in_epoch(restart_slot_in_epoch: u64) {
             s.confirmed_slot,
             s.delay(),
             if s.confirmed_root == s.finalized_root {
-                "  <- pinned to finalized"
+                "  <- at finalized"
             } else {
                 ""
             }
         );
     }
 
-    // The regression is not transient: it lasts until the next epoch boundary, because that is
-    // where the only recovery path lives.
-    let regressed_for = assert_regression_lasts_until_an_epoch_boundary(restart_slot, recovered_at);
-    println!(
-        "confirmed root regressed {} slots and stayed behind its pre-restart value for {} slots",
-        regression, regressed_for
+    assert_confirmed_root_never_regresses(&after, &timeline);
+    assert!(
+        after.delay() <= 1,
+        "the restart should not cost any confirmation delay, delay was {}",
+        after.delay()
     );
-    assert_eq!(
-        regressed_for,
-        E::slots_per_epoch() - restart_slot_in_epoch,
-        "the regression should last exactly until the next epoch boundary"
+    assert!(
+        timeline.iter().all(|s| s.delay() <= 1),
+        "the chain should stay at its steady-state confirmation delay after the restart"
     );
 
     drop(old_harness);
 }
 
-/// A restart in the middle of an epoch: the confirmed root falls back to the finalized root and
-/// stays there until an epoch boundary.
+/// A restart in the middle of an epoch.
 #[tokio::test]
-async fn confirmed_root_regresses_across_a_restart_mid_epoch() {
+async fn confirmed_root_survives_a_restart_mid_epoch() {
     restart_at_slot_in_epoch(4).await;
 }
 
-/// Restarting on the first slot of an epoch costs a whole epoch, because
-/// `previous_epoch_greatest_unrealized_checkpoint` is only written at the *last* slot of an epoch,
-/// so the rotation that runs on this very slot is a no-op over freshly seeded state.
+/// Restarting on the first slot of an epoch. This used to be the worst case: the epoch-boundary
+/// rotation runs on this very slot, but over freshly seeded state it is a no-op, so recovery had to
+/// wait a further full epoch.
 #[tokio::test]
-async fn confirmed_root_regresses_across_a_restart_on_an_epoch_boundary() {
+async fn confirmed_root_survives_a_restart_on_an_epoch_boundary() {
     restart_at_slot_in_epoch(0).await;
 }
 
-/// Restarting on the last slot of an epoch is the best case: the boundary is one slot away.
+/// Restarting on the last slot of an epoch.
 #[tokio::test]
-async fn confirmed_root_regresses_across_a_restart_at_the_end_of_an_epoch() {
+async fn confirmed_root_survives_a_restart_at_the_end_of_an_epoch() {
     restart_at_slot_in_epoch(E::slots_per_epoch() - 1).await;
 }
 
-/// The devnet case: recovery misses the first epoch boundary entirely and costs two.
+/// The devnet case, where recovery used to miss the first epoch boundary entirely and cost two.
 ///
 /// The rotation at the first slot of an epoch installs
 /// `previous_epoch_greatest_unrealized_checkpoint`, which FCR snapshots at the *last slot of the
 /// previous epoch*. If that epoch has not been unrealized-justified by then, the rotation installs
-/// a checkpoint whose block is two epochs back, the restart branch's
-/// `observed_justified_block_slot.epoch + 1 == current_epoch` fails, and the confirmed root stays
-/// pinned to the finalized root for another whole epoch.
+/// a checkpoint whose block is two epochs back and the restart branch's
+/// `observed_justified_block_slot.epoch + 1 == current_epoch` fails, so a confirmed root that
+/// depends on that branch is stuck for another whole epoch.
 ///
 /// Here the epoch containing the restart is driven with no attestations at all, so it cannot be
 /// justified under any fork's weighting; participation is restored for the following epoch.
 #[tokio::test]
-async fn recovery_slips_a_second_epoch_when_the_restart_epoch_does_not_justify() {
+async fn confirmed_root_survives_a_restart_when_the_restart_epoch_does_not_justify() {
     let restart_slot_in_epoch = 4;
     let db_path = tempdir().expect("temp dir");
     let store = get_store(&db_path, test_spec::<E>());
@@ -373,15 +344,13 @@ async fn recovery_slips_a_second_epoch_when_the_restart_epoch_does_not_justify()
     harness.chain.recompute_head_at_current_slot().await;
 
     let after = sample(&harness.chain);
-    let regression = assert_confirmed_root_regressed(&before, &after);
+    assert_confirmed_root_did_not_regress(&before, &after);
 
     // No attesters at all, so the restart epoch's target cannot reach the 2/3 justification
     // threshold. A partial set would work too, but the fraction that keeps an epoch unjustified
     // depends on the fork's attestation weighting, and this does not.
     let no_attesters: Vec<usize> = vec![];
-    let restart_slot = after.current_slot;
-    let restart_epoch = restart_slot.epoch(E::slots_per_epoch());
-    let mut recovered_at = None;
+    let restart_epoch = after.current_slot.epoch(E::slots_per_epoch());
     let mut timeline = Vec::new();
 
     for _ in 0..SLOTS_AFTER_RESTART {
@@ -390,15 +359,11 @@ async fn recovery_slips_a_second_epoch_when_the_restart_epoch_does_not_justify()
             harness.chain.slot().unwrap().epoch(E::slots_per_epoch()) == restart_epoch;
         let attesters = in_restart_epoch.then_some(no_attesters.as_slice());
         build_slot_attested_by(&harness, attesters).await;
-        let s = sample(&harness.chain);
-        if recovered_at.is_none() && s.confirmed_slot >= before.confirmed_slot {
-            recovered_at = Some(s.current_slot);
-        }
-        timeline.push(s);
+        timeline.push(sample(&harness.chain));
     }
 
     println!(
-        "=== restart at slot_in_epoch {}, restart epoch is left unjustified ===",
+        "=== restart at slot_in_epoch {}, restart epoch left unjustified ===",
         restart_slot_in_epoch
     );
     println!(
@@ -430,21 +395,85 @@ async fn recovery_slips_a_second_epoch_when_the_restart_epoch_does_not_justify()
         );
     }
 
-    let regressed_for = assert_regression_lasts_until_an_epoch_boundary(restart_slot, recovered_at);
-    let rest_of_restart_epoch = E::slots_per_epoch() - restart_slot_in_epoch;
-    println!(
-        "confirmed root regressed {} slots and stayed behind its pre-restart value for {} slots \
-         ({} epoch boundaries missed)",
-        regression,
-        regressed_for,
-        (regressed_for - rest_of_restart_epoch) / E::slots_per_epoch()
-    );
+    // Note that the timeline is *not* monotonic here, and should not be: an epoch with no
+    // attestations cannot be re-confirmed, so `is_confirmed_chain_safe` fails at the next epoch
+    // boundary and the confirmed root drops to finalized. That revert is the spec's safety
+    // behaviour and has nothing to do with the restart — see the control test below, which
+    // reproduces it with no restart at all. What matters here is that the restart itself cost
+    // nothing, and that confirmation returns once participation does.
+    let last = timeline.last().expect("timeline is not empty");
     assert!(
-        regressed_for > rest_of_restart_epoch,
-        "the regression should have outlasted the first epoch boundary after the restart, but \
-         ended after {} slots",
-        regressed_for
+        last.delay() <= 1,
+        "confirmation should be back to its steady-state delay once participation returns, \
+         delay was {}",
+        last.delay()
     );
 
     drop(old_harness);
+}
+
+/// Control for `confirmed_root_survives_a_restart_when_the_restart_epoch_does_not_justify`: an
+/// epoch with no attestations walks the confirmed root back to the finalized root at the next
+/// epoch boundary on its own, with no restart involved. That revert is
+/// `is_confirmed_chain_safe` refusing to re-confirm a chain nobody voted for, and it is why the
+/// unjustified-epoch scenario above cannot assert a monotonic timeline.
+#[tokio::test]
+async fn an_unattested_epoch_reverts_the_confirmed_root_without_any_restart() {
+    let db_path = tempdir().expect("temp dir");
+    let store = get_store(&db_path, test_spec::<E>());
+    let harness = fresh_harness(store);
+
+    for _ in 0..WARMUP_SLOTS {
+        build_slot(&harness).await;
+    }
+    while harness.chain.slot().unwrap().as_u64() % E::slots_per_epoch() != 4 {
+        build_slot(&harness).await;
+    }
+
+    let before = sample(&harness.chain);
+    assert!(
+        before.delay() <= 1,
+        "chain should be in a steady state first, delay was {}",
+        before.delay()
+    );
+
+    let no_attesters: Vec<usize> = vec![];
+    let quiet_epoch = before.current_slot.epoch(E::slots_per_epoch());
+    let mut timeline = Vec::new();
+    for _ in 0..E::slots_per_epoch() {
+        let in_quiet_epoch =
+            harness.chain.slot().unwrap().epoch(E::slots_per_epoch()) == quiet_epoch;
+        build_slot_attested_by(&harness, in_quiet_epoch.then_some(no_attesters.as_slice())).await;
+        timeline.push(sample(&harness.chain));
+    }
+
+    println!("=== an unattested epoch, no restart ===");
+    for s in &timeline {
+        println!(
+            "  slot {:>3} (slot_in_epoch {}) confirmed={:>3} delay={:>3}{}",
+            s.current_slot,
+            s.current_slot.as_u64() % E::slots_per_epoch(),
+            s.confirmed_slot,
+            s.delay(),
+            if s.confirmed_root == s.finalized_root {
+                "  <- at finalized"
+            } else {
+                ""
+            }
+        );
+    }
+
+    let reverted = timeline
+        .iter()
+        .find(|s| s.confirmed_root == s.finalized_root)
+        .expect("an unattested epoch should send the confirmed root back to finalized");
+    assert!(
+        reverted.confirmed_slot < before.confirmed_slot,
+        "the revert should move the confirmed root backwards"
+    );
+    assert_eq!(
+        reverted.current_slot.as_u64() % E::slots_per_epoch(),
+        0,
+        "the revert happens at the epoch boundary, where the chain is re-confirmed"
+    );
 }
