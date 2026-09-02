@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ethereum_hashing::hash_fixed;
-use fast_confirmation::{
+use fast_confirmation_beacon::{
     BalanceSourceData, BalanceSourceKey, CheckpointAndBalance, FastConfirmationRule,
 };
 use fixed_bytes::FixedBytesExtended;
@@ -365,7 +365,7 @@ fn bench_precompute_chain_scores(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
-                fast_confirmation::optimizations::precompute_chain_attestation_scores(
+                fast_confirmation_beacon::optimizations::precompute_chain_attestation_scores(
                     &data.proto_array,
                     &data.block_roots[1..],
                     terminal_slot,

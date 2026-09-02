@@ -49,7 +49,7 @@ use eth2::beacon_response::ForkVersionedResponse;
 use eth2::types::{
     EventKind, SseChainReorg, SseFastConfirmation, SseFinalizedCheckpoint, SseHeadV2,
 };
-use fast_confirmation::{
+use fast_confirmation_beacon::{
     Error as FastConfirmationError, FastConfirmationRule, metrics as fcr_metrics,
 };
 use fork_choice::{

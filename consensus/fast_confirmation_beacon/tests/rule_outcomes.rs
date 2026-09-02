@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use ethereum_hashing::hash_fixed;
-use fast_confirmation::{
+use fast_confirmation_beacon::{
     BalanceSourceData, BalanceSourceKey, CheckpointAndBalance, FastConfirmationRule,
 };
 use fixed_bytes::FixedBytesExtended;

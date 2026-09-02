@@ -50,7 +50,7 @@ members = [
     "common/warp_utils",
     "common/workspace_members",
     "consensus/fast_confirmation",
-    "consensus/fast_confirmation_core",
+    "consensus/fast_confirmation_beacon",
     "consensus/fixed_bytes",
     "consensus/fork_choice",
     "consensus/int_to_bytes",
@@ -153,7 +153,7 @@ ethereum_ssz = { version = "0.10.0", features = ["context_deserialize"] }
 ethereum_ssz_derive = "0.10.0"
 execution_layer = { path = "beacon_node/execution_layer" }
 fast_confirmation = { path = "consensus/fast_confirmation" }
-fast_confirmation_core = { path = "consensus/fast_confirmation_core" }
+fast_confirmation_beacon = { path = "consensus/fast_confirmation_beacon" }
 filesystem = { path = "common/filesystem" }
 fixed_bytes = { path = "consensus/fixed_bytes" }
 fnv = "1"

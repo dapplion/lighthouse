@@ -8,7 +8,7 @@
 //! Nothing here makes a decision. If a behaviour question arises it is answered
 //! in the core, once, for both consumers.
 
-use fast_confirmation_core as core_rule;
+use fast_confirmation as core_rule;
 use proto_array::core::{ProtoArray, VoteTracker};
 use types::{Checkpoint, Epoch, Hash256, Slot, SlotAssignments};
 
@@ -156,7 +156,7 @@ impl core_rule::store::ForkChoiceStore for ProtoArrayStore<'_> {
 #[derive(Debug)]
 pub struct Assignments(pub SlotAssignments);
 
-impl core_rule::rule::SlotAssignments for Assignments {
+impl core_rule::SlotAssignments for Assignments {
     fn is_in_range(
         &self,
         validator_index: usize,
@@ -198,7 +198,7 @@ fn alloc_format(e: core_rule::Error) -> String {
 /// when Lighthouse rebuilds the snapshot from a `BeaconState`, which is not part
 /// of the rule. Everything the rule does read is answered here, in place: the
 /// snapshot is a pair of per-validator vectors, so lending it beats copying it.
-impl core_rule::rule::Balances for BalanceSourceData {
+impl core_rule::Balances for BalanceSourceData {
     fn total_active_balance(&self) -> u64 {
         self.total_active_balance
     }
