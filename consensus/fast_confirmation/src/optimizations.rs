@@ -117,10 +117,13 @@ impl HonestFfgSupportCache {
 #[derive(Default)]
 pub struct IdentityU64Hasher(u64);
 impl core::hash::Hasher for IdentityU64Hasher {
+    #[inline(always)]
     fn finish(&self) -> u64 {
         self.0
     }
+    #[inline(always)]
     fn write(&mut self, _: &[u8]) {}
+    #[inline(always)]
     fn write_u64(&mut self, n: u64) {
         self.0 = n;
     }
@@ -155,6 +158,7 @@ impl RootKey for (Hash256, Epoch) {
 pub struct PrefixKey<K: RootKey>(K);
 
 impl<K: RootKey> core::hash::Hash for PrefixKey<K> {
+    #[inline(always)]
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         state.write_u64(self.0.prefix_hash());
     }
