@@ -102,10 +102,9 @@ impl<K: RootKey> RootMap<K> {
         if self.slots.is_empty() {
             return None;
         }
-        match &self.slots[Self::index_of(&self.slots, key)] {
-            Some((_, v)) => Some(*v),
-            None => None,
-        }
+        self.slots[Self::index_of(&self.slots, key)]
+            .as_ref()
+            .map(|(_, v)| *v)
     }
 
     /// Insert, replacing any existing value.
