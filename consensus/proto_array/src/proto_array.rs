@@ -1840,9 +1840,21 @@ impl ProtoArray {
     ///
     /// Returns the slot of `block_root` itself when it is an ancestor of `other_root`.
     pub fn common_ancestor_slot(&self, block_root: Hash256, other_root: Hash256) -> Option<Slot> {
-        self.iter_block_roots(&block_root)
-            .find(|(ancestor_root, _)| self.is_descendant(*ancestor_root, other_root))
-            .map(|(_root, slot)| slot)
+        // Walk both chains upwards, always advancing the one currently at the higher slot, until
+        // they meet. Slots strictly decrease along each chain, so this visits each node at most
+        // once rather than re-walking one chain per ancestor of the other.
+        let mut chain = self.iter_nodes(&block_root).peekable();
+        let mut other = self.iter_nodes(&other_root).peekable();
+        loop {
+            let (node, other_node) = (chain.peek()?, other.peek()?);
+            if node.root() == other_node.root() {
+                return Some(node.slot());
+            } else if node.slot() >= other_node.slot() {
+                chain.next();
+            } else {
+                other.next();
+            }
+        }
     }
 
     pub fn get_block(&self, root: Hash256) -> Option<&ProtoNode> {
