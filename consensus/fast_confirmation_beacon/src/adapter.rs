@@ -127,6 +127,11 @@ impl core_rule::Votes for VoteTrackers<'_> {
             current_slot: slot(v.current_slot()),
         })
     }
+
+    #[inline(always)]
+    fn current_root(&self, index: usize) -> Option<core_rule::Hash256> {
+        self.0.get(index).map(|v| root(v.current_root()))
+    }
 }
 
 /// `types::SlotAssignments`, answering the rule's one question of it.

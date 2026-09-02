@@ -762,9 +762,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
                     .is_in_range(val_idx, start_slot, end_slot)
                     .map_err(Error::SlotAssignmentsError)?
                 && !equivocating_indices.contains(&(val_idx as u64))
-                && votes
-                    .get(val_idx)
-                    .is_some_and(|vote| vote.current_root() == block_root)
+                && votes.current_root(val_idx) == Some(block_root)
             {
                 score = score.safe_add(balance)?;
             }

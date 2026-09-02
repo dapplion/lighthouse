@@ -234,6 +234,14 @@ pub trait Votes {
 
     fn get(&self, index: usize) -> Option<VoteTracker>;
 
+    /// Only the root. The loops that count support read nothing else, and a
+    /// host's vote record can keep the root and the slot on different cache
+    /// lines, so this is the read they make once per validator.
+    #[inline]
+    fn current_root(&self, index: usize) -> Option<Hash256> {
+        self.get(index).map(|vote| vote.current_root)
+    }
+
     /// Every vote, in index order. `get` is total on `0..len`, so nothing is skipped.
     fn iter(&self) -> impl Iterator<Item = VoteTracker> + '_ {
         (0..self.len()).map(|i| self.get(i).unwrap_or_default())

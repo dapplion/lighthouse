@@ -321,10 +321,9 @@ pub(crate) fn aggregate_vote_balances<V: Votes + ?Sized>(
         if equivocating_indices.contains(&(val_idx as u64)) {
             continue;
         }
-        let Some(vote) = votes.get(val_idx) else {
+        let Some(vote_root) = votes.current_root(val_idx) else {
             continue;
         };
-        let vote_root = vote.current_root();
         if vote_root.is_zero() {
             continue;
         }
