@@ -47,6 +47,10 @@ impl VoteTracker {
         self.current_root
     }
 
+    pub fn current_root_ref(&self) -> &Hash256 {
+        &self.current_root
+    }
+
     /// The slot of this validator's latest message.
     pub fn current_slot(&self) -> Slot {
         self.current_slot

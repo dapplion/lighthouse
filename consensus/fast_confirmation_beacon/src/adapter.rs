@@ -129,8 +129,8 @@ impl core_rule::Votes for VoteTrackers<'_> {
     }
 
     #[inline(always)]
-    fn current_root(&self, index: usize) -> Option<core_rule::Hash256> {
-        self.0.get(index).map(|v| root(v.current_root()))
+    fn root(&self, index: usize) -> Option<&[u8; 32]> {
+        self.0.get(index).map(|v| &v.current_root_ref().0)
     }
 }
 
