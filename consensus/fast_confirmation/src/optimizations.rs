@@ -7,7 +7,6 @@
 use crate::{BalanceSourceData, Error};
 use proto_array::core::{ProtoArray, VoteTracker};
 use safe_arith::SafeArith;
-use std::cell::OnceCell;
 use std::collections::{BTreeSet, HashMap};
 use types::{Checkpoint, Epoch, Hash256, Slot};
 
@@ -37,68 +36,6 @@ impl CheckpointAndBalance {
 
     pub fn balances(&self) -> &BalanceSourceData {
         &self.balances
-    }
-}
-
-/// Cached implementation of the spec's `get_attestation_score`.
-///
-/// The Python spec computes `get_attestation_score(store, node, balance_source)` independently
-/// for each candidate block. Lighthouse computes the same scores for a canonical chain segment in
-/// one pass and then serves individual `get_attestation_score` calls from this cache.
-pub(crate) struct AttestationScoreCache {
-    scores: HashMap<Hash256, u64>,
-}
-
-impl AttestationScoreCache {
-    pub(crate) fn for_chain(
-        proto_array: &ProtoArray,
-        chain: &[Hash256],
-        terminal_slot: Slot,
-        balance_source: &BalanceSourceData,
-        votes: &[VoteTracker],
-        equivocating_indices: &BTreeSet<u64>,
-    ) -> Result<Self, Error> {
-        Ok(Self {
-            scores: precompute_chain_attestation_scores(
-                proto_array,
-                chain,
-                terminal_slot,
-                balance_source,
-                votes,
-                equivocating_indices,
-            )?,
-        })
-    }
-
-    pub(crate) fn get_attestation_score(&self, block_root: Hash256) -> Option<u64> {
-        self.scores.get(&block_root).copied()
-    }
-}
-
-/// Memoizes one O(V) `compute_honest_ffg_support` sweep so both FFG predicates can share it within
-/// a single `get_latest_confirmed` call. The cache owns no FCR logic; callers provide the spec
-/// computation as a closure.
-pub(crate) struct HonestFfgSupportCache {
-    support: OnceCell<u64>,
-}
-
-impl HonestFfgSupportCache {
-    pub(crate) fn new() -> Self {
-        Self {
-            support: OnceCell::new(),
-        }
-    }
-
-    pub(crate) fn get_or_compute(
-        &self,
-        compute: impl FnOnce() -> Result<u64, Error>,
-    ) -> Result<u64, Error> {
-        if let Some(support) = self.support.get() {
-            return Ok(*support);
-        }
-        let support = compute()?;
-        let _ = self.support.set(support);
-        Ok(support)
     }
 }
 

@@ -1,20 +1,22 @@
-//! Differential test: Lighthouse's rule and the ported `fast_confirmation_core`
-//! must reach the same verdict on the same chain.
+//! Behaviour of `get_latest_confirmed` over a real `ProtoArray`, pinned.
 //!
-//! The unit tests inside `fast_confirmation` cover the arithmetic. This covers
-//! the state machine: a real `ProtoArray`, real vote trackers, and
-//! `get_latest_confirmed` run twice over the same inputs. It is the evidence
-//! that the port is faithful in behaviour and not merely in shape.
+//! Lighthouse now delegates the rule to `fast_confirmation_core`, so running
+//! both and comparing them would compare the code to itself. The expectations
+//! below were instead recorded from Lighthouse's own implementation *before*
+//! the delegation, over the same fixtures, and assert that routing through the
+//! core did not change a single verdict.
+//!
+//! Each case is `(head slot, current slot, confirmed-in slot) -> confirmed-out
+//! slot`. They were chosen to cover the branches that decide the outcome:
+//! steady state, the epoch boundary, a missed slot, and revert-to-finalized.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
 use ethereum_hashing::hash_fixed;
-use fast_confirmation::adapter::{Assignments, ProtoArrayStore, VoteTrackers};
 use fast_confirmation::{
     BalanceSourceData, BalanceSourceKey, CheckpointAndBalance, FastConfirmationRule,
 };
-use fast_confirmation_core as core_rule;
 use fixed_bytes::FixedBytesExtended;
 use proto_array::core::{ProtoArray, VoteTracker};
 use proto_array::{Block, ExecutionStatus, JustifiedBalances, ProtoArrayForkChoice};
@@ -40,18 +42,9 @@ struct Fixture {
     votes: Vec<VoteTracker>,
     balance_source: BalanceSourceData,
     lh: FastConfirmationRule,
-    core: core_rule::rule::FastConfirmationRule<Assignments>,
     finalized_checkpoint: Checkpoint,
     observed_justified_checkpoint: Checkpoint,
     genesis_checkpoint: Checkpoint,
-}
-
-fn core_balances(b: &BalanceSourceData) -> core_rule::rule::BalanceSourceData {
-    core_rule::rule::BalanceSourceData {
-        total_active_balance: b.total_active_balance,
-        effective_balances: b.effective_balances.clone(),
-        slashed: b.slashed.clone(),
-    }
 }
 
 /// Build one chain and two rules seeded to the same state.
@@ -206,22 +199,11 @@ fn fixture(gap_slot: Option<u64>) -> Fixture {
     .expect("lh fcr");
     lh.test_set_head_balance_source(balance_source.clone());
 
-    let core = core_rule::rule::FastConfirmationRule::new(
-        fast_confirmation::adapter::checkpoint(&finalized_checkpoint),
-        fast_confirmation::adapter::root(finalized_checkpoint.root),
-        25,
-        40,
-        Assignments(seed_assignments),
-        core_balances(&balance_source),
-        E::slots_per_epoch(),
-    );
-
     Fixture {
         proto_array: fc.core_proto_array().clone(),
         votes: fc.votes().to_vec(),
         balance_source,
         lh,
-        core,
         finalized_checkpoint,
         observed_justified_checkpoint,
         genesis_checkpoint,
@@ -243,106 +225,72 @@ impl Fixture {
         );
         self.lh.previous_epoch_observed_justified =
             CheckpointAndBalance::new(self.genesis_checkpoint, self.balance_source.clone());
-
-        let cb = core_balances(&self.balance_source);
-        self.core.previous_slot_head = fast_confirmation::adapter::root(head_root);
-        self.core.current_slot_head = fast_confirmation::adapter::root(head_root);
-        self.core.confirmed_root = fast_confirmation::adapter::root(confirmed_root);
-        self.core.current_epoch_observed_justified = core_rule::rule::CheckpointAndBalance::new(
-            fast_confirmation::adapter::checkpoint(&self.observed_justified_checkpoint),
-            cb.clone(),
-        );
-        self.core.previous_epoch_observed_justified = core_rule::rule::CheckpointAndBalance::new(
-            fast_confirmation::adapter::checkpoint(&self.genesis_checkpoint),
-            cb,
-        );
     }
 
-    /// Run both implementations and require the same answer.
-    fn assert_same(&self, head_slot: u64, current_slot: u64, label: &str) {
-        let head_root = block_root_at(head_slot);
-        let equivocating = BTreeSet::new();
+    /// Run the rule and require the recorded verdict.
+    fn assert_confirms(&self, head_slot: u64, current_slot: u64, expected_slot: u64, label: &str) {
+        let confirmed = self
+            .lh
+            .get_latest_confirmed::<E>(
+                block_root_at(head_slot),
+                &self.finalized_checkpoint,
+                &self.observed_justified_checkpoint,
+                Slot::new(current_slot),
+                &self.proto_array,
+                &self.votes,
+                &BTreeSet::new(),
+            )
+            .unwrap_or_else(|e| panic!("{label}: rule returned an error: {e:?}"));
 
-        let lh = self.lh.get_latest_confirmed::<E>(
-            head_root,
-            &self.finalized_checkpoint,
-            &self.observed_justified_checkpoint,
-            Slot::new(current_slot),
-            &self.proto_array,
-            &self.votes,
-            &equivocating,
+        assert_eq!(
+            confirmed,
+            block_root_at(expected_slot),
+            "{label}: expected the block at slot {expected_slot}"
         );
-
-        let store = ProtoArrayStore {
-            proto_array: &self.proto_array,
-        };
-        let core = self.core.get_latest_confirmed(
-            fast_confirmation::adapter::root(head_root),
-            &fast_confirmation::adapter::checkpoint(&self.finalized_checkpoint),
-            &fast_confirmation::adapter::checkpoint(&self.observed_justified_checkpoint),
-            core_rule::Slot::new(current_slot),
-            &store,
-            &VoteTrackers(&self.votes),
-            &equivocating,
-        );
-
-        match (lh, core) {
-            (Ok(l), Ok(c)) => assert_eq!(
-                l,
-                fast_confirmation::adapter::hash(c),
-                "{label}: confirmed root differs between implementations"
-            ),
-            (Err(_), Err(_)) => {
-                // Both refused. The error taxonomies differ by design; agreeing
-                // on "no confirmation" is the behaviour under test.
-            }
-            (l, c) => panic!(
-                "{label}: one implementation errored and the other did not: lh={l:?} core={c:?}"
-            ),
-        }
     }
 }
 
-/// The realistic spectrum the benchmark measures, asserted for agreement.
+/// Steady state and the epoch boundary. The confirmed root advances to the head
+/// or to the last block the support cleared.
 #[test]
-fn implementations_agree_across_chain_positions() {
+fn confirms_the_recorded_blocks_across_chain_positions() {
     let mut f = fixture(None);
-    for (name, head_slot, current_slot, confirmed_slot) in [
-        ("steady_mid_epoch", 69u64, 70u64, 66u64),
-        ("epoch_first_slot", 63, 64, 40),
-        ("epoch_catch_up", 65, 66, 40),
-        ("missed_epoch_start", 63, 68, 40),
+    for (name, head_slot, current_slot, confirmed_slot, expected) in [
+        ("steady_mid_epoch", 69u64, 70u64, 66u64, 69u64),
+        ("epoch_first_slot", 63, 64, 40, 63),
+        ("epoch_catch_up", 65, 66, 40, 65),
+        ("missed_epoch_start", 63, 68, 40, 63),
     ] {
         f.apply(head_slot, confirmed_slot);
-        f.assert_same(head_slot, current_slot, name);
+        f.assert_confirms(head_slot, current_slot, expected, name);
     }
 }
 
-/// A missed slot is where the empty-slot support discount fires, and where an
-/// off-by-one between the two ancestor walks would show up.
+/// A missed slot, where the empty-slot support discount applies and an
+/// off-by-one in the ancestor walk would show up.
 #[test]
-fn implementations_agree_across_a_missed_slot() {
+fn confirms_the_recorded_blocks_across_a_missed_slot() {
     let mut f = fixture(Some(60));
-    for (name, head_slot, current_slot, confirmed_slot) in [
-        ("after_gap", 61u64, 62u64, 56u64),
-        ("spanning_gap", 62, 63, 58),
-        ("gap_then_epoch", 63, 66, 40),
+    for (name, head_slot, current_slot, confirmed_slot, expected) in [
+        ("after_gap", 61u64, 62u64, 56u64, 61u64),
+        ("spanning_gap", 62, 63, 58, 62),
+        ("gap_then_epoch", 63, 66, 40, 63),
     ] {
         f.apply(head_slot, confirmed_slot);
-        f.assert_same(head_slot, current_slot, name);
+        f.assert_confirms(head_slot, current_slot, expected, name);
     }
 }
 
-/// The confirmed root lagging far behind forces the revert-to-finalized path,
-/// the branch most likely to diverge because it is the least exercised.
+/// A confirmed root left too far behind reverts to the finalized block. This is
+/// the least-exercised branch and the one most likely to drift.
 #[test]
-fn implementations_agree_on_revert_to_finalized() {
+fn reverts_to_finalized_when_the_confirmed_root_falls_behind() {
     let mut f = fixture(None);
-    for (name, head_slot, current_slot, confirmed_slot) in [
-        ("confirmed_two_epochs_back", 69u64, 70u64, 5u64),
-        ("confirmed_at_genesis", 69, 70, 0),
+    for (name, head_slot, current_slot, confirmed_slot, expected) in [
+        ("confirmed_two_epochs_back", 69u64, 70u64, 5u64, 0u64),
+        ("confirmed_at_genesis", 69, 70, 0, 0),
     ] {
         f.apply(head_slot, confirmed_slot);
-        f.assert_same(head_slot, current_slot, name);
+        f.assert_confirms(head_slot, current_slot, expected, name);
     }
 }

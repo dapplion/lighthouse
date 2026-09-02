@@ -12,7 +12,7 @@ use fast_confirmation_core as core_rule;
 use proto_array::core::{ProtoArray, VoteTracker};
 use types::{Checkpoint, Epoch, Hash256, Slot, SlotAssignments};
 
-use crate::Error;
+use crate::{BalanceSourceData, Error};
 
 pub fn root(h: Hash256) -> core_rule::Root {
     h.0
@@ -113,6 +113,24 @@ impl core_rule::store::ForkChoiceStore for ProtoArrayStore<'_> {
             .ok_or(core_rule::Error::UnrealizedJustificationNotFound(r))
     }
 
+    /// One map lookup, then an array index for the parent -- `proto_array`
+    /// stores its nodes contiguously and links them by index, so a walk should
+    /// not be hashing a root at every hop.
+    fn slot_and_parent(
+        &self,
+        r: core_rule::Root,
+    ) -> core_rule::Result<(core_rule::Slot, Option<core_rule::Root>)> {
+        let node = self
+            .proto_array
+            .get_block(hash(r))
+            .ok_or(core_rule::Error::NodeNotFound(r))?;
+        let parent = node
+            .parent()
+            .and_then(|idx| self.proto_array.nodes.get(idx))
+            .map(|p| root(p.root()));
+        Ok((slot(node.slot()), parent))
+    }
+
     fn execution_status(
         &self,
         r: core_rule::Root,
@@ -135,6 +153,7 @@ impl core_rule::store::ForkChoiceStore for ProtoArrayStore<'_> {
 }
 
 /// `types::SlotAssignments`, answering the rule's one question of it.
+#[derive(Debug)]
 pub struct Assignments(pub SlotAssignments);
 
 impl core_rule::rule::SlotAssignments for Assignments {
@@ -171,4 +190,36 @@ impl From<core_rule::Error> for Error {
 
 fn alloc_format(e: core_rule::Error) -> String {
     format!("{e:?}")
+}
+
+/// Lighthouse's balance snapshot, lent to the rule.
+///
+/// It carries a `BalanceSourceKey` the core does not model -- that key decides
+/// when Lighthouse rebuilds the snapshot from a `BeaconState`, which is not part
+/// of the rule. Everything the rule does read is answered here, in place: the
+/// snapshot is a pair of per-validator vectors, so lending it beats copying it.
+impl core_rule::rule::Balances for BalanceSourceData {
+    fn total_active_balance(&self) -> u64 {
+        self.total_active_balance
+    }
+
+    fn balance(&self, index: usize) -> u64 {
+        BalanceSourceData::balance(self, index)
+    }
+
+    fn is_slashed(&self, index: usize) -> bool {
+        self.slashed.get(index).copied().unwrap_or(false)
+    }
+
+    fn unslashed_and_active_indices(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
+        BalanceSourceData::unslashed_and_active_indices(self)
+    }
+
+    fn active_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.effective_balances
+            .iter()
+            .enumerate()
+            .filter(|(_, balance)| **balance > 0)
+            .map(|(i, _)| i)
+    }
 }

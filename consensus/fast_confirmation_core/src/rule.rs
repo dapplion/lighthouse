@@ -125,6 +125,38 @@ pub struct BalanceSourceData {
     pub slashed: Vec<bool>,
 }
 
+/// The balance snapshot the rule reads, as an interface.
+///
+/// Lighthouse carries an extra cache key on its own snapshot type and the guest
+/// carries none, so neither can be the other. Both answer these five questions,
+/// which is all the rule ever asks -- so the rule is written once against this
+/// and each host lends it the data it already holds.
+pub trait Balances {
+    fn total_active_balance(&self) -> u64;
+    fn balance(&self, index: usize) -> u64;
+    fn is_slashed(&self, index: usize) -> bool;
+    fn unslashed_and_active_indices(&self) -> impl Iterator<Item = (usize, u64)> + '_;
+    fn active_indices(&self) -> impl Iterator<Item = usize> + '_;
+}
+
+impl Balances for BalanceSourceData {
+    fn total_active_balance(&self) -> u64 {
+        self.total_active_balance
+    }
+    fn balance(&self, index: usize) -> u64 {
+        BalanceSourceData::balance(self, index)
+    }
+    fn is_slashed(&self, index: usize) -> bool {
+        BalanceSourceData::is_slashed(self, index)
+    }
+    fn unslashed_and_active_indices(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
+        BalanceSourceData::unslashed_and_active_indices(self)
+    }
+    fn active_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        BalanceSourceData::active_indices(self)
+    }
+}
+
 impl BalanceSourceData {
     pub fn balance(&self, index: usize) -> u64 {
         self.effective_balances.get(index).copied().unwrap_or(0)
@@ -233,11 +265,11 @@ pub struct ChainAttestationScores {
 }
 
 impl ChainAttestationScores {
-    pub fn for_chain<S: ForkChoiceStore, V: Votes + ?Sized>(
+    pub fn for_chain<S: ForkChoiceStore, V: Votes + ?Sized, B: Balances>(
         store: &S,
         chain: &[Root],
         terminal_slot: Slot,
-        balance_source: &BalanceSourceData,
+        balance_source: &B,
         votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Self> {
@@ -249,8 +281,7 @@ impl ChainAttestationScores {
 
         // Spec: `aggregate_vote_balances`. A vote for the zero root is no vote,
         // and an equivocator's is discounted -- the same two skips as upstream.
-        let mut balance_by_root: alloc::collections::BTreeMap<Root, u64> =
-            alloc::collections::BTreeMap::new();
+        let mut balance_by_root = crate::rootmap::RootMap::<Root>::new();
         for val_idx in 0..votes.len() {
             let Some(vote) = votes.get(val_idx) else {
                 continue;
@@ -265,35 +296,34 @@ impl ChainAttestationScores {
             if balance == 0 || balance_source.is_slashed(val_idx) {
                 continue;
             }
-            let entry = balance_by_root.entry(vote_root).or_insert(0);
-            *entry = entry.safe_add(balance)?;
+            balance_by_root.add(vote_root, balance)?;
         }
 
         let mut score_at_position = alloc::vec![0u64; chain.len()];
         for (vote_root, balance) in balance_by_root.iter() {
             // Project the vote onto the chain: walk towards the root until a
             // chain member is reached, or the walk drops past the terminal.
-            let mut root = *vote_root;
+            let mut root = vote_root;
             let pos = loop {
                 if let Some(p) = position.get(&root) {
                     break Some(*p);
                 }
-                let Ok(slot) = store.block_slot(root) else {
+                let Ok((slot, parent)) = store.slot_and_parent(root) else {
                     break None;
                 };
                 if slot <= terminal_slot {
                     break None;
                 }
-                match store.parent_root(root) {
-                    Ok(parent) => root = parent,
-                    Err(_) => break None,
+                match parent {
+                    Some(parent) => root = parent,
+                    None => break None,
                 }
             };
             let Some(pos) = pos else { continue };
             let score = score_at_position
                 .get_mut(pos)
                 .ok_or(Error::IndexOutOfBounds(pos))?;
-            *score = score.safe_add(*balance)?;
+            *score = score.safe_add(balance)?;
         }
 
         let mut scores = alloc::collections::BTreeMap::new();
@@ -360,6 +390,80 @@ pub struct FastConfirmationRule<A> {
     pub(crate) slots_per_epoch: u64,
 }
 
+/// What the rule did, beyond the root it returned.
+///
+/// The core cannot emit Lighthouse's metrics or logs -- it has no allocator to
+/// format with and no registry to write to -- but it is the only place that
+/// knows which branch fired. So it reports, and the host decides what to say.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Outcome {
+    /// Why the rule fell back to the finalized root, if it did.
+    pub reverted_to_finalized: Option<&'static str>,
+    /// The chain restarted from the current-epoch observed-justified checkpoint.
+    pub restarted_from_justified: bool,
+    /// The confirmed root moved forward.
+    pub advanced: bool,
+    /// `(support, safety_threshold)` of the block that blocked re-confirmation.
+    pub unconfirmed_support: Option<(u64, u64)>,
+}
+
+/// A checkpoint paired with a *borrowed* balance snapshot.
+///
+/// Mirrors [`CheckpointAndBalance`]'s accessors so the rule bodies read the
+/// same whether the state is owned or borrowed.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointAndBalanceRef<'a, B> {
+    checkpoint: Checkpoint,
+    balances: &'a B,
+}
+
+impl<'a, B> CheckpointAndBalanceRef<'a, B> {
+    pub fn new(checkpoint: Checkpoint, balances: &'a B) -> Self {
+        Self {
+            checkpoint,
+            balances,
+        }
+    }
+
+    pub fn checkpoint(&self) -> Checkpoint {
+        self.checkpoint
+    }
+
+    pub fn balances(&self) -> &'a B {
+        self.balances
+    }
+}
+
+/// The rule's state, borrowed rather than owned.
+///
+/// Every read-only part of the rule is implemented against this, so a host that
+/// already holds the state in its own types can evaluate the rule without
+/// copying it. The balance snapshots are per-validator vectors -- tens of
+/// megabytes at mainnet size -- so a per-evaluation copy is not affordable, and
+/// the roots are 32 bytes and simply copied.
+#[derive(Debug, Clone, Copy)]
+pub struct RuleView<'a, A, B> {
+    pub confirmed_root: Root,
+    pub previous_epoch_observed_justified: CheckpointAndBalanceRef<'a, B>,
+    pub current_epoch_observed_justified: CheckpointAndBalanceRef<'a, B>,
+    pub previous_slot_head: Root,
+    pub byzantine_threshold: u64,
+    pub proposer_score_boost: u64,
+    pub slot_assignments: &'a A,
+    pub head_balance_source: &'a B,
+    pub slots_per_epoch: u64,
+}
+
+impl<'a, A, B> RuleView<'a, A, B> {
+    pub(crate) fn get_previous_balance_source(&self) -> &'a B {
+        self.previous_epoch_observed_justified.balances()
+    }
+
+    pub(crate) fn get_current_balance_source(&self) -> &'a B {
+        self.current_epoch_observed_justified.balances()
+    }
+}
+
 impl<A: SlotAssignments> FastConfirmationRule<A> {
     pub const MAX_BYZANTINE_THRESHOLD: u64 = 25;
 
@@ -405,14 +509,6 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         self.last_update_slot
     }
 
-    pub(crate) fn get_previous_balance_source(&self) -> &BalanceSourceData {
-        self.previous_epoch_observed_justified.balances()
-    }
-
-    pub(crate) fn get_current_balance_source(&self) -> &BalanceSourceData {
-        self.current_epoch_observed_justified.balances()
-    }
-
     /// Spec: `on_fast_confirmation`.
     ///
     /// **Adapted, not transcribed.** Lighthouse takes `&BeaconState` here and
@@ -446,7 +542,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         )?;
 
         if !self.spec_test_mode {
-            self.confirmed_root = self.get_latest_confirmed(
+            self.confirmed_root = self.view().get_latest_confirmed(
                 head_root,
                 finalized_checkpoint,
                 unrealized_justified_checkpoint,
@@ -528,6 +624,8 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         Ok(())
     }
 
+    /// Spec: `get_latest_confirmed`. Evaluated against a borrowed view of this
+    /// state, which is where the rule actually lives.
     #[allow(clippy::too_many_arguments)]
     pub fn get_latest_confirmed<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
@@ -539,6 +637,95 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Root> {
+        self.view().get_latest_confirmed(
+            head_root,
+            finalized_checkpoint,
+            unrealized_justified_checkpoint,
+            current_slot,
+            store,
+            votes,
+            equivocating_indices,
+        )
+    }
+
+    /// Spec: `get_current_target_score`.
+    pub fn get_current_target_score<S: ForkChoiceStore, V: Votes + ?Sized>(
+        &self,
+        head_root: Root,
+        current_slot: Slot,
+        store: &S,
+        votes: &V,
+        equivocating_indices: &BTreeSet<u64>,
+    ) -> Result<u64> {
+        self.view().get_current_target_score(
+            head_root,
+            current_slot,
+            store,
+            votes,
+            equivocating_indices,
+        )
+    }
+
+    /// Borrow the state so the read-only rule can run against it.
+    pub fn view(&self) -> RuleView<'_, A, BalanceSourceData> {
+        RuleView {
+            confirmed_root: self.confirmed_root,
+            previous_epoch_observed_justified: CheckpointAndBalanceRef::new(
+                self.previous_epoch_observed_justified.checkpoint(),
+                self.previous_epoch_observed_justified.balances(),
+            ),
+            current_epoch_observed_justified: CheckpointAndBalanceRef::new(
+                self.current_epoch_observed_justified.checkpoint(),
+                self.current_epoch_observed_justified.balances(),
+            ),
+            previous_slot_head: self.previous_slot_head,
+            byzantine_threshold: self.byzantine_threshold,
+            proposer_score_boost: self.proposer_score_boost,
+            slot_assignments: &self.slot_assignments,
+            head_balance_source: &self.head_balance_source,
+            slots_per_epoch: self.slots_per_epoch,
+        }
+    }
+}
+
+impl<A: SlotAssignments, B: Balances> RuleView<'_, A, B> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_latest_confirmed<S: ForkChoiceStore, V: Votes + ?Sized>(
+        &self,
+        head_root: Root,
+        finalized_checkpoint: &Checkpoint,
+        unrealized_justified_checkpoint: &Checkpoint,
+        current_slot: Slot,
+        store: &S,
+        votes: &V,
+        equivocating_indices: &BTreeSet<u64>,
+    ) -> Result<Root> {
+        self.get_latest_confirmed_with_outcome(
+            head_root,
+            finalized_checkpoint,
+            unrealized_justified_checkpoint,
+            current_slot,
+            store,
+            votes,
+            equivocating_indices,
+        )
+        .map(|(root, _)| root)
+    }
+
+    /// [`Self::get_latest_confirmed`], also reporting which branch fired so the
+    /// host can record it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_latest_confirmed_with_outcome<S: ForkChoiceStore, V: Votes + ?Sized>(
+        &self,
+        head_root: Root,
+        finalized_checkpoint: &Checkpoint,
+        unrealized_justified_checkpoint: &Checkpoint,
+        current_slot: Slot,
+        store: &S,
+        votes: &V,
+        equivocating_indices: &BTreeSet<u64>,
+    ) -> Result<(Root, Outcome)> {
+        let mut outcome = Outcome::default();
         let current_epoch = current_slot.epoch(self.slots_per_epoch);
         let is_epoch_start = is_start_slot_at_epoch(current_slot, self.slots_per_epoch);
         let mut confirmed_root = self.confirmed_root;
@@ -573,6 +760,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
                 store,
                 votes,
                 equivocating_indices,
+                &mut outcome,
             )?
         {
             Some(chain_unsafe_reason)
@@ -581,7 +769,8 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         };
         // Lighthouse logs `reason` here; the core returns the root and lets the
         // host decide what to say about it.
-        if let Some(_reason) = should_revert_to_finalized_reason {
+        if let Some(reason) = should_revert_to_finalized_reason {
+            outcome.reverted_to_finalized = Some(reason);
             confirmed_root = finalized_checkpoint.root;
         }
 
@@ -607,6 +796,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
             && is_head_unrealized_justified_ok
             && is_confirmed_block_stale
         {
+            outcome.restarted_from_justified = true;
             confirmed_root = self.current_epoch_observed_justified.checkpoint().root;
         }
 
@@ -614,7 +804,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         if get_block_epoch(confirmed_root, store, self.slots_per_epoch)?.safe_add(1u64)?
             >= current_epoch
         {
-            confirmed_root = self.find_latest_confirmed_descendant(
+            let advanced = self.find_latest_confirmed_descendant(
                 confirmed_root,
                 head_root,
                 unrealized_justified_checkpoint,
@@ -623,9 +813,11 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
                 votes,
                 equivocating_indices,
             )?;
+            outcome.advanced = advanced != confirmed_root;
+            confirmed_root = advanced;
         }
 
-        Ok(confirmed_root)
+        Ok((confirmed_root, outcome))
     }
 
     /// Spec: find_latest_confirmed_descendant
@@ -803,6 +995,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     ///
     /// `Ok(None)` = the confirmed chain is safe (re-confirmable). `Ok(Some(reason))` = it
     /// isn't, with `reason` naming which check failed (surfaced as the revert metric label).
+    #[allow(clippy::too_many_arguments)]
     fn is_confirmed_chain_safe<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
         confirmed_root: Root,
@@ -810,6 +1003,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         store: &S,
         votes: &V,
         equivocating_indices: &BTreeSet<u64>,
+        outcome: &mut Outcome,
     ) -> Result<Option<&'static str>> {
         if get_checkpoint_for_block(
             confirmed_root,
@@ -885,7 +1079,11 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
                     // metric here. The core has nowhere to send them, so it
                     // returns the reason and the host reads the numbers off the
                     // `Confirmation` it already has.
-                    Unconfirmed::BelowThreshold { .. } => {
+                    Unconfirmed::BelowThreshold {
+                        support,
+                        safety_threshold,
+                    } => {
+                        outcome.unconfirmed_support = Some((support, safety_threshold));
                         return Ok(Some("unconfirmed_below_threshold"));
                     }
                     Unconfirmed::Optimistic => {
@@ -904,7 +1102,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// Spec: `get_block_support_between_slots`.
     fn get_block_support_between_slots<V: Votes + ?Sized>(
         &self,
-        balance_source: &BalanceSourceData,
+        balance_source: &B,
         block_root: Root,
         start_slot: Slot,
         end_slot: Slot,
@@ -939,9 +1137,9 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// Spec: `compute_proposer_score(balance_source)`.
     /// Uses `(committee_weight * proposer_score_boost) // 100` (multiply-first) to match
     /// the spec and avoid precision loss from divide-first ordering.
-    fn compute_proposer_score(&self, balance_source: &BalanceSourceData) -> Result<u64> {
+    fn compute_proposer_score(&self, balance_source: &B) -> Result<u64> {
         Ok(crate::compute_proposer_score(
-            balance_source.total_active_balance,
+            balance_source.total_active_balance(),
             self.slots_per_epoch,
             self.proposer_score_boost,
         )?)
@@ -950,7 +1148,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// Spec: `compute_empty_slot_support_discount`.
     fn compute_empty_slot_support_discount<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
-        balance_source: &BalanceSourceData,
+        balance_source: &B,
         block_root: Root,
         store: &S,
         votes: &V,
@@ -992,7 +1190,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// Spec: `get_support_discount`.
     fn get_support_discount<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
-        balance_source: &BalanceSourceData,
+        balance_source: &B,
         block_root: Root,
         store: &S,
         votes: &V,
@@ -1010,7 +1208,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// Spec: `compute_safety_threshold`.
     fn compute_safety_threshold<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
-        balance_source: &BalanceSourceData,
+        balance_source: &B,
         block_root: Root,
         current_slot: Slot,
         store: &S,
@@ -1020,7 +1218,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         let parent_root = parent_root(block_root, store)?;
         let parent_slot = get_block_slot(parent_root, store)?;
 
-        let total_active_balance = balance_source.total_active_balance;
+        let total_active_balance = balance_source.total_active_balance();
         let proposer_score = self.compute_proposer_score(balance_source)?;
         let maximum_support = crate::estimate_committee_weight_between_slots(
             total_active_balance,
@@ -1054,7 +1252,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// Spec: `get_adversarial_weight`.
     fn get_adversarial_weight<S: ForkChoiceStore>(
         &self,
-        balance_source: &BalanceSourceData,
+        balance_source: &B,
         block_root: Root,
         current_slot: Slot,
         store: &S,
@@ -1084,12 +1282,12 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// Spec: `compute_adversarial_weight`.
     fn compute_adversarial_weight(
         &self,
-        balance_source: &BalanceSourceData,
+        balance_source: &B,
         start_slot: Slot,
         end_slot: Slot,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<u64> {
-        let total_active_balance = balance_source.total_active_balance;
+        let total_active_balance = balance_source.total_active_balance();
         let maximum_weight = crate::estimate_committee_weight_between_slots(
             total_active_balance,
             (start_slot).as_u64(),
@@ -1117,7 +1315,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// with precomputed head assignments instead of materializing all committee participants.
     fn get_equivocation_score(
         &self,
-        balance_source: &BalanceSourceData,
+        balance_source: &B,
         start_slot: Slot,
         end_slot: Slot,
         equivocating_indices: &BTreeSet<u64>,
@@ -1162,7 +1360,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
             return Ok(true);
         }
 
-        let total_active_balance = self.head_balance_source.total_active_balance;
+        let total_active_balance = self.head_balance_source.total_active_balance();
         let honest_ffg = honest_ffg_support.get_or_compute(|| {
             self.compute_honest_ffg_support(
                 head_root,
@@ -1185,7 +1383,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         equivocating_indices: &BTreeSet<u64>,
         honest_ffg_support: &HonestFfgSupportCache,
     ) -> Result<bool> {
-        let total_active_balance = self.head_balance_source.total_active_balance;
+        let total_active_balance = self.head_balance_source.total_active_balance();
         let honest_ffg = honest_ffg_support.get_or_compute(|| {
             self.compute_honest_ffg_support(
                 head_root,
@@ -1217,8 +1415,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         // Aggregate balances by (vote root, vote epoch): most validators share a small set of
         // latest-message checkpoints, so each O(depth) checkpoint lookup runs once per distinct
         // key rather than once per validator.
-        let mut balance_by_vote_checkpoint =
-            alloc::collections::BTreeMap::<(Root, Epoch), u64>::new();
+        let mut balance_by_vote_checkpoint = crate::rootmap::RootMap::<(Root, Epoch)>::new();
 
         // Spec: sum the effective balance of validators that:
         // - Are active the current epoch
@@ -1239,22 +1436,17 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
                 && vote_epoch == target.epoch
                 && !equivocating_indices.contains(&(val_idx as u64))
             {
-                {
-                    let e = balance_by_vote_checkpoint
-                        .entry((vote_root, vote_epoch))
-                        .or_insert(0);
-                    *e = e.safe_add(balance)?;
-                }
+                balance_by_vote_checkpoint.add((vote_root, vote_epoch), balance)?;
             }
         }
 
         for ((vote_root, vote_epoch), balance) in balance_by_vote_checkpoint.iter() {
             // Spec: get_checkpoint_for_block(store, latest_messages[i].root,
             //        get_latest_message_epoch(latest_messages[i])).
-            if get_checkpoint_for_block(*vote_root, *vote_epoch, store, self.slots_per_epoch)
+            if get_checkpoint_for_block(vote_root, vote_epoch, store, self.slots_per_epoch)
                 == Some(target)
             {
-                score = score.safe_add(*balance)?;
+                score = score.safe_add(balance)?;
             }
         }
         Ok(score)
@@ -1271,7 +1463,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     ) -> Result<u64> {
         let current_epoch = current_slot.epoch(self.slots_per_epoch);
         let balance_source = &self.head_balance_source;
-        let total_active_balance = balance_source.total_active_balance;
+        let total_active_balance = balance_source.total_active_balance();
 
         let ffg_support_for_checkpoint = self.get_current_target_score(
             head_root,
@@ -1312,7 +1504,7 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     #[allow(clippy::too_many_arguments)]
     fn is_one_confirmed<S: ForkChoiceStore, V: Votes + ?Sized>(
         &self,
-        balance_source: &BalanceSourceData,
+        balance_source: &B,
         block_root: Root,
         attestation_scores: &impl AttestationScores,
         current_slot: Slot,

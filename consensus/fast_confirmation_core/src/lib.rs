@@ -31,6 +31,7 @@ extern crate alloc;
 pub struct ArithError;
 
 pub mod primitives;
+pub(crate) mod rootmap;
 pub mod rule;
 pub mod store;
 

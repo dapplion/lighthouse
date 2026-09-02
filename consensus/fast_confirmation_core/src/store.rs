@@ -29,6 +29,17 @@ pub trait ForkChoiceStore {
 
     /// Pre-merge blocks are `Irrelevant`; the spec's MUST is post-merge.
     fn execution_status(&self, root: Root) -> Result<ExecutionStatus>;
+
+    /// A node's slot and parent together, for the ancestor walks.
+    ///
+    /// Every hop of a walk needs both. Asking for them separately costs two
+    /// lookups where a store that holds its nodes in an array can serve both
+    /// from one, so a store with a cheaper path should override this. The
+    /// default keeps the two-lookup behaviour for stores that have nothing
+    /// faster. `None` for the parent means the walk has reached the tree root.
+    fn slot_and_parent(&self, root: Root) -> Result<(Slot, Option<Root>)> {
+        Ok((self.block_slot(root)?, self.parent_root(root).ok()))
+    }
 }
 
 /// Spec: `get_block_epoch`.
@@ -62,13 +73,13 @@ pub fn is_ancestor<S: ForkChoiceStore>(
     let ancestor_slot = store.block_slot(ancestor_root)?;
     let mut root = block_root;
     for _ in 0..MAX_WALK {
-        let slot = store.block_slot(root)?;
+        let (slot, parent) = store.slot_and_parent(root)?;
         if slot <= ancestor_slot {
             return Ok(root == ancestor_root);
         }
-        match store.parent_root(root) {
-            Ok(parent) => root = parent,
-            Err(_) => return Ok(false),
+        match parent {
+            Some(parent) => root = parent,
+            None => return Ok(false),
         }
     }
     Err(Error::WalkTooLong)
@@ -78,13 +89,11 @@ pub fn is_ancestor<S: ForkChoiceStore>(
 pub fn get_ancestor<S: ForkChoiceStore>(store: &S, block_root: Root, slot: Slot) -> Result<Root> {
     let mut root = block_root;
     for _ in 0..MAX_WALK {
-        let current = store.block_slot(root)?;
+        let (current, parent) = store.slot_and_parent(root)?;
         if current <= slot {
             return Ok(root);
         }
-        root = store
-            .parent_root(root)
-            .map_err(|_| Error::AncestorNotFound { block: block_root })?;
+        root = parent.ok_or(Error::AncestorNotFound { block: block_root })?;
     }
     Err(Error::WalkTooLong)
 }
@@ -107,14 +116,14 @@ pub fn get_ancestor_roots<S: ForkChoiceStore>(
             roots.reverse();
             return Ok(roots);
         }
-        let slot = store.block_slot(root)?;
+        let (slot, parent) = store.slot_and_parent(root)?;
         if slot <= terminal_slot {
             return Ok(alloc::vec::Vec::new());
         }
         roots.push(root);
-        match store.parent_root(root) {
-            Ok(parent) => root = parent,
-            Err(_) => return Ok(alloc::vec::Vec::new()),
+        match parent {
+            Some(parent) => root = parent,
+            None => return Ok(alloc::vec::Vec::new()),
         }
     }
     Err(Error::WalkTooLong)
