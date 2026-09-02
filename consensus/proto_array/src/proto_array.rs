@@ -1017,6 +1017,11 @@ impl ProtoArray {
 
         // Collect all *ancestors* which were declared invalid since they reside between the
         // `head_block_root` and the `latest_valid_ancestor_root`.
+        // The walk path in visit order (head first), and whether each visited node's payload is
+        // invalid. A node is "block invalid" when any payload below it on this path is invalid:
+        // that payload is part of the node's beacon state lineage, so its state can never be
+        // built on, whichever edge a descendant takes.
+        let mut walk_path: Vec<(usize, bool)> = Vec::new();
         let mut status = PayloadStatus::Full;
         loop {
             let node = self
@@ -1027,6 +1032,7 @@ impl ProtoArray {
             // An `EMPTY` edge is a gap in the execution ancestry of the branch, not the end of it.
             // This branch never ran the payload of this block, so the walk steps over it.
             if status != PayloadStatus::Full {
+                walk_path.push((index, false));
                 let Some(parent_index) = node.parent() else {
                     break;
                 };
@@ -1081,10 +1087,13 @@ impl ProtoArray {
                     ExecutionStatus::Optimistic(hash) => {
                         invalidated_indices.insert(index);
                         *node.execution_status_mut() = ExecutionStatus::Invalid(hash);
+                        walk_path.push((index, true));
                     }
                     // The block is already invalid, but keep going backwards to ensure all ancestors
                     // are updated.
-                    ExecutionStatus::Invalid(_) => (),
+                    ExecutionStatus::Invalid(_) => {
+                        walk_path.push((index, true));
+                    }
                     // This block is pre-merge, therefore it has no execution status. Nor do its
                     // ancestors.
                     ExecutionStatus::Irrelevant(_) => break,
@@ -1110,10 +1119,23 @@ impl ProtoArray {
          * *forwards* to invalidate all descendants of all blocks in `invalidated_indices`.
          */
 
+        // Every node visited above the deepest invalid payload has that payload in its beacon
+        // state lineage, whichever edge it took itself. Their blocks can never be built on.
+        let mut block_invalid: HashSet<usize> = HashSet::default();
+        if let Some(deepest_strike) = walk_path.iter().rposition(|(_, struck)| *struck) {
+            for (index, _) in walk_path.iter().take(deepest_strike) {
+                block_invalid.insert(*index);
+            }
+        }
+
         // Collect all *descendants* which have been declared invalid since they're the descendant
         // of a block with an invalid execution payload. Walk them through the `children` index
         // instead of scanning every node.
-        let mut queue: Vec<usize> = invalidated_indices.iter().copied().collect();
+        let mut queue: Vec<usize> = invalidated_indices
+            .iter()
+            .chain(block_invalid.iter())
+            .copied()
+            .collect();
         while let Some(parent_index) = queue.pop() {
             let child_indices = self
                 .children
@@ -1126,9 +1148,12 @@ impl ProtoArray {
                     .get_mut(index)
                     .ok_or(Error::InvalidNodeIndex(index))?;
 
-                // A Gloas descendant becomes invalid only when it built on the payload of the
-                // ancestor. A descendant that took the `EMPTY` edge stays viable.
-                if let ProtoNode::V29(gloas_node) = node
+                // A descendant of a block-invalid parent is dead whichever edge it took: the
+                // invalid payload is already in the parent's state. When only the parent's own
+                // payload is invalid, a descendant that took the `EMPTY` edge does not include
+                // it and stays viable.
+                if !block_invalid.contains(&parent_index)
+                    && let ProtoNode::V29(gloas_node) = node
                     && gloas_node.parent_payload_status != PayloadStatus::Full
                 {
                     continue;
@@ -1157,6 +1182,8 @@ impl ProtoArray {
                     }
                 }
 
+                // Every struck descendant carries the invalid payload in its state lineage.
+                block_invalid.insert(index);
                 if invalidated_indices.insert(index) {
                     queue.push(index);
                 }
