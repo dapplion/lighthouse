@@ -52,6 +52,12 @@ pub(crate) static FAST_CONFIRMATION_FALLBACKS: LazyLock<Result<IntCounter>> = La
         "Count of fallbacks of the confirmed root to the finalized block",
     )
 });
+pub static FCR_UNCONFIRMATION_DISTANCE: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "beacon_fcr_unconfirmation_distance",
+        "Slots between a block FCR had confirmed and the point the confirmation withdrew to",
+    )
+});
 pub(crate) static FCR_FALLBACK_REASONS: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
     try_create_int_counter_vec(
         "beacon_fcr_fallback_reasons_total",

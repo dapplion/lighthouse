@@ -999,28 +999,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     if confirmed_root != old_confirmed_root {
                         metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_CHANGES);
 
-                        // An unconfirmation: a reorg made a block we had confirmed non-canonical.
-                        // Compared across the whole run, because inside `get_latest_confirmed` the
-                        // confirmed root may fall back to the finalized block and be advanced
-                        // forward again, which confirms nothing new and takes nothing back. An
-                        // `old_confirmed_root` that fork choice has pruned is an ancestor of the
-                        // finalized block, the healthy case, and `is_descendant` is false for
-                        // unknown roots.
-                        if fork_choice_read_lock
-                            .get_block(&old_confirmed_root)
-                            .is_some()
-                            && !fork_choice_read_lock
-                                .is_descendant(old_confirmed_root, new_view.head_block_root)
-                        {
-                            warn!(
-                                unconfirmed = ?old_confirmed_root,
-                                head = ?new_view.head_block_root,
-                                confirmed = ?confirmed_root,
-                                slot = %current_slot,
-                                "FCR confirmed block was reorged out"
-                            );
-                            metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
-                        }
+                        Self::detect_unconfirmation(
+                            &fork_choice_read_lock,
+                            old_confirmed_root,
+                            new_view.head_block_root,
+                            confirmed_root,
+                            current_slot,
+                        );
                     }
 
                     // Emit a `fast_confirmation` event on every FCR run, regardless of
@@ -1404,6 +1389,78 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             old_confirmed_root,
             new_update_slot: fcr.last_update_slot() != old_update_slot,
         })
+    }
+
+    /// Report a block that FCR had confirmed and no longer confirms.
+    ///
+    /// Both signals must agree: the head is no longer a descendant of the previously confirmed
+    /// block, and neither is the new confirmed root. That is the standardised
+    /// `beacon_fast_confirmation_reorgs_total` event, "on chain reorg making confirmed block
+    /// non-canonical". A fallback that steps back along a chain the block is still on keeps the
+    /// block canonical and is counted as a fallback instead.
+    ///
+    /// The comparison spans the whole run, because inside `get_latest_confirmed` the confirmed
+    /// root may fall back to the finalized block and be advanced forward again, which confirms
+    /// nothing new and takes nothing back.
+    fn detect_unconfirmation(
+        fork_choice: &BeaconForkChoice<T>,
+        old_confirmed_root: Hash256,
+        head_root: Hash256,
+        confirmed_root: Hash256,
+        current_slot: Slot,
+    ) {
+        // An `old_confirmed_root` that fork choice has pruned is an ancestor of the finalized
+        // block, which is the healthy case, and `is_descendant` cannot tell that apart from a
+        // reorg.
+        let Some(old_confirmed_slot) = fork_choice
+            .get_block(&old_confirmed_root)
+            .map(|block| block.slot)
+        else {
+            return;
+        };
+
+        if fork_choice.is_descendant(old_confirmed_root, head_root)
+            || fork_choice.is_descendant(old_confirmed_root, confirmed_root)
+        {
+            return;
+        }
+
+        // Depth of the reorg: how far back the confirmed block sat from where its chain and the
+        // new head last agreed.
+        let reorg_distance = Self::common_ancestor_slot(fork_choice, old_confirmed_root, head_root)
+            .map_or(old_confirmed_slot, |ancestor_slot| {
+                old_confirmed_slot.saturating_sub(ancestor_slot)
+            });
+
+        metrics::set_gauge(
+            &fcr_metrics::FCR_UNCONFIRMATION_DISTANCE,
+            reorg_distance.as_u64() as i64,
+        );
+        metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
+        warn!(
+            unconfirmed = ?old_confirmed_root,
+            unconfirmed_slot = %old_confirmed_slot,
+            head = ?head_root,
+            confirmed = ?confirmed_root,
+            slot = %current_slot,
+            %reorg_distance,
+            "FCR confirmed block reorged out of the canonical chain"
+        );
+    }
+
+    /// Slot of the most recent common ancestor of `root` and `head_root`, or `None` when fork
+    /// choice no longer holds one.
+    fn common_ancestor_slot(
+        fork_choice: &BeaconForkChoice<T>,
+        root: Hash256,
+        head_root: Hash256,
+    ) -> Option<Slot> {
+        fork_choice
+            .proto_array()
+            .core_proto_array()
+            .iter_block_roots(&root)
+            .find(|(ancestor_root, _)| fork_choice.is_descendant(*ancestor_root, head_root))
+            .map(|(_, slot)| slot)
     }
 
     /// Build a `FastConfirmationRule` seeded from `finalized_checkpoint`, sourcing its balance
