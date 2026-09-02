@@ -2141,3 +2141,176 @@ impl<'a> Iterator for Iter<'a> {
         Some(node)
     }
 }
+
+#[cfg(test)]
+mod invalidation_tests {
+    use super::*;
+    use types::{AttestationShufflingId, Epoch, MainnetEthSpec};
+
+    fn shuffling_id() -> AttestationShufflingId {
+        AttestationShufflingId {
+            shuffling_epoch: Epoch::new(0),
+            shuffling_decision_block: Hash256::zero(),
+        }
+    }
+
+    /// A Gloas node at `index` with root `0x0i..`, bid hash `0x1i..`, and an `Optimistic` payload.
+    fn gloas_node(
+        index: usize,
+        parent: Option<usize>,
+        parent_payload_status: PayloadStatus,
+    ) -> ProtoNode {
+        ProtoNode::V29(ProtoNodeV29 {
+            slot: Slot::new(index as u64),
+            state_root: Hash256::zero(),
+            target_root: Hash256::zero(),
+            current_epoch_shuffling_id: shuffling_id(),
+            next_epoch_shuffling_id: shuffling_id(),
+            root: Hash256::repeat_byte(index as u8),
+            parent,
+            justified_checkpoint: Checkpoint::default(),
+            finalized_checkpoint: Checkpoint::default(),
+            weight: 0,
+            execution_status: ExecutionStatus::Optimistic(ExecutionBlockHash::repeat_byte(
+                0x10 + index as u8,
+            )),
+            unrealized_justified_checkpoint: None,
+            unrealized_finalized_checkpoint: None,
+            parent_payload_status,
+            empty_payload_weight: 0,
+            full_payload_weight: 0,
+            execution_payload_block_hash: ExecutionBlockHash::repeat_byte(0x10 + index as u8),
+            execution_payload_parent_hash: ExecutionBlockHash::zero(),
+            block_timeliness_attestation_threshold: true,
+            block_timeliness_ptc_threshold: true,
+            payload_timeliness_votes: BitVector::default(),
+            payload_data_availability_votes: BitVector::default(),
+            ptc_participation: BitVector::default(),
+            payload_received: true,
+            proposer_index: 0,
+            equivocating_attestation_score: 0,
+        })
+    }
+
+    fn v17_node(
+        index: usize,
+        parent: Option<usize>,
+        execution_status: ExecutionStatus,
+    ) -> ProtoNode {
+        ProtoNode::V17(ProtoNodeV17 {
+            slot: Slot::new(index as u64),
+            state_root: Hash256::zero(),
+            target_root: Hash256::zero(),
+            current_epoch_shuffling_id: shuffling_id(),
+            next_epoch_shuffling_id: shuffling_id(),
+            root: Hash256::repeat_byte(index as u8),
+            parent,
+            justified_checkpoint: Checkpoint::default(),
+            finalized_checkpoint: Checkpoint::default(),
+            weight: 0,
+            best_child: None,
+            best_descendant: None,
+            execution_status,
+            unrealized_justified_checkpoint: None,
+            unrealized_finalized_checkpoint: None,
+        })
+    }
+
+    fn array_of(nodes: Vec<ProtoNode>) -> ProtoArray {
+        let indices = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.root(), i))
+            .collect();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+        for (i, node) in nodes.iter().enumerate() {
+            if let Some(p) = node.parent() {
+                children[p].push(i);
+            }
+        }
+        ProtoArray {
+            prune_threshold: 256,
+            nodes,
+            indices,
+            children,
+        }
+    }
+
+    fn invalidate(array: &mut ProtoArray, head_index: usize, latest_valid_ancestor: u8) {
+        array
+            .propagate_execution_payload_invalidation::<MainnetEthSpec>(
+                &InvalidationOperation::InvalidateMany {
+                    head_block_root: Hash256::repeat_byte(head_index as u8),
+                    always_invalidate_head: true,
+                    latest_valid_ancestor: ExecutionBlockHash::repeat_byte(latest_valid_ancestor),
+                },
+                Checkpoint::default(),
+            )
+            .unwrap();
+    }
+
+    /// Chain 0 <-Full- 1 <-Full- 2 <-Empty- 3. The EL says payload 1 is invalid and payload 0 is
+    /// the latest valid one. Block 2 carries payload 1 in its state, so block 3 is dead even
+    /// though it took the `EMPTY` edge of block 2.
+    #[test]
+    fn empty_edge_descendant_of_block_on_invalid_ancestry_dies() {
+        let mut array = array_of(vec![
+            gloas_node(0, None, PayloadStatus::Full),
+            gloas_node(1, Some(0), PayloadStatus::Full),
+            gloas_node(2, Some(1), PayloadStatus::Full),
+            gloas_node(3, Some(2), PayloadStatus::Empty),
+        ]);
+        invalidate(&mut array, 2, 0x10);
+
+        assert!(array.nodes[1].execution_status().is_invalid());
+        assert!(array.nodes[2].execution_status().is_invalid());
+        assert!(
+            array.nodes[3].execution_status().is_invalid(),
+            "block 3 has payload 1 in its state lineage through block 2",
+        );
+        assert!(array.nodes[0].execution_status().is_strictly_optimistic());
+    }
+
+    /// Chain 0 <-Full- 1 <-Empty- 2. Only payload 1 is invalid. Block 2 does not include it, so
+    /// block 2 stays viable.
+    #[test]
+    fn empty_edge_descendant_of_the_deepest_invalid_payload_survives() {
+        let mut array = array_of(vec![
+            gloas_node(0, None, PayloadStatus::Full),
+            gloas_node(1, Some(0), PayloadStatus::Full),
+            gloas_node(2, Some(1), PayloadStatus::Empty),
+        ]);
+        invalidate(&mut array, 1, 0x10);
+
+        assert!(array.nodes[1].execution_status().is_invalid());
+        assert!(
+            array.nodes[2].execution_status().is_strictly_optimistic(),
+            "block 2 took the empty edge of the deepest invalid payload",
+        );
+    }
+
+    /// The first Gloas payload after the fork is invalid. The walk must strike it, stop at the
+    /// pre-Gloas parent whose hash the EL names as latest valid, and leave that parent alone.
+    #[test]
+    fn first_payload_after_the_gloas_fork_can_be_invalidated() {
+        let mut array = array_of(vec![
+            v17_node(
+                0,
+                None,
+                ExecutionStatus::Valid(ExecutionBlockHash::repeat_byte(0x10)),
+            ),
+            gloas_node(1, Some(0), PayloadStatus::Full),
+            gloas_node(2, Some(1), PayloadStatus::Full),
+        ]);
+        invalidate(&mut array, 2, 0x10);
+
+        assert!(array.nodes[2].execution_status().is_invalid());
+        assert!(array.nodes[1].execution_status().is_invalid());
+        assert!(
+            array.nodes[0]
+                .execution_status()
+                .is_valid_and_post_bellatrix(),
+            "the pre-Gloas latest valid ancestor keeps its status",
+        );
+    }
+}
