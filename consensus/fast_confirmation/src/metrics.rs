@@ -66,11 +66,19 @@ pub(crate) static FCR_FALLBACK_REASONS: LazyLock<Result<IntCounterVec>> = LazyLo
         &["reason"],
     )
 });
+pub static FCR_CONFIRMED_ROOT_REORGS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "beacon_fcr_confirmed_root_reorgs_total",
+        "Count of times the newly confirmed root was not a descendant of the block FCR had \
+         previously confirmed, i.e. FCR itself moved off a block it had confirmed",
+    )
+});
 pub static FAST_CONFIRMATION_REORGS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
     try_create_int_counter(
         "beacon_fast_confirmation_reorgs_total",
-        "Count of unconfirmations: a chain reorg made a previously confirmed block non-canonical. \
-         Should always be zero under the FCR safety assumptions",
+        "Count of unconfirmations: a chain reorg made a previously confirmed block non-canonical, \
+         i.e. the head is no longer a descendant of it. Should always be zero under the FCR \
+         safety assumptions",
     )
 });
 pub(crate) static FCR_FALLBACK_SUPPORT_RATIO: LazyLock<Result<Histogram>> = LazyLock::new(|| {

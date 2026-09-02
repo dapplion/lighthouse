@@ -997,26 +997,36 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     }
                     if confirmed_root != old_confirmed_root {
                         metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_CHANGES);
+                    }
 
-                        // An `old_confirmed_root` that fork choice has pruned is an ancestor of the finalized
-                        // block, which is the healthy case, and `is_descendant` cannot tell that apart from a
-                        // reorg.
-                        let head_root = new_view.head_block_root;
-                        if let Some(old_confirmed_block) =
-                            fork_choice_read_lock.get_block(&old_confirmed_root)
-                            && !fork_choice_read_lock.is_descendant(old_confirmed_root, head_root)
-                        {
-                            let old_confirmed_slot = old_confirmed_block.slot;
-                            // Whether FCR also moved off the old confirmed block, rather than the
-                            // head alone leaving it behind.
-                            let fcr_reorg = !fork_choice_read_lock
-                                .is_descendant(old_confirmed_root, confirmed_root);
-
-                            // Depth of the reorg: how far back the confirmed block sat from where its chain and the
-                            // new head last agreed.
+                    // Checked on every run, not only when the confirmed root moves: the head can
+                    // reorg off a block FCR still confirms.
+                    //
+                    // An `old_confirmed_root` that fork choice has pruned is an ancestor of the
+                    // finalized block, which is the healthy case, and `is_descendant` cannot tell
+                    // that apart from a reorg.
+                    let head_root = new_view.head_block_root;
+                    if let Some(old_confirmed_block) =
+                        fork_choice_read_lock.get_block(&old_confirmed_root)
+                    {
+                        let old_confirmed_slot = old_confirmed_block.slot;
+                        // The chain moved off the old confirmed block.
+                        let head_reorg =
+                            !fork_choice_read_lock.is_descendant(old_confirmed_root, head_root);
+                        // FCR moved off it, whether or not the chain did.
+                        let fcr_reorg = !fork_choice_read_lock
+                            .is_descendant(old_confirmed_root, confirmed_root);
+                        if head_reorg || fcr_reorg {
+                            // Depth of the reorg, measured against whichever chain left the block
+                            // behind: how far back it sat from where the two last agreed.
+                            let diverged_from = if head_reorg {
+                                head_root
+                            } else {
+                                confirmed_root
+                            };
                             let reorg_distance = fork_choice_read_lock
                                 .proto_array()
-                                .common_ancestor_slot(old_confirmed_root, head_root)
+                                .common_ancestor_slot(old_confirmed_root, diverged_from)
                                 .map(|ancestor_slot| {
                                     old_confirmed_slot.saturating_sub(ancestor_slot)
                                 });
@@ -1027,18 +1037,22 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                                     reorg_distance.as_u64() as i64,
                                 );
                             }
-                            if fcr_reorg {
+                            if head_reorg {
                                 metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
+                            }
+                            if fcr_reorg {
+                                metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_REORGS);
                             }
                             warn!(
                                 unconfirmed = ?old_confirmed_root,
                                 unconfirmed_slot = %old_confirmed_slot,
                                 head = ?head_root,
                                 confirmed = ?confirmed_root,
+                                head_reorg,
                                 fcr_reorg,
                                 slot = %current_slot,
                                 ?reorg_distance,
-                                "FCR confirmed block reorged out of the canonical chain"
+                                "FCR unconfirmed a previously confirmed block"
                             );
                         }
                     }
