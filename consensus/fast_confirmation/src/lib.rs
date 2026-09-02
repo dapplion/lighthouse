@@ -37,6 +37,7 @@
 //! The visible algorithm deliberately keeps the spec function names and control-flow shape;
 //! the caches are implementation details behind those helpers.
 
+mod adapter;
 mod balance_source;
 pub mod metrics;
 pub mod optimizations;
@@ -62,9 +63,15 @@ pub enum Error {
     UnableToObtainHeadState(String),
     UnableToObtainCheckpointState(String),
     MissingCheckpointState(Checkpoint),
-    AncestorNotFound { block: Hash256, slot: Slot },
+    AncestorNotFound {
+        block: Hash256,
+        slot: Slot,
+    },
     UnrealizedJustificationNotFound(Hash256),
-    CheckpointBlockNotFound { block: Hash256, epoch: types::Epoch },
+    CheckpointBlockNotFound {
+        block: Hash256,
+        epoch: types::Epoch,
+    },
     HeadCheckpointNotFound(Hash256),
     MissingPrecomputedScore(Hash256),
     BlockEpochNone(Hash256),
@@ -74,6 +81,8 @@ pub enum Error {
     IndexOutOfBounds(usize),
     SlotAssignmentsError(BeaconStateError),
     ArithError(ArithError),
+    /// An error the ported core raised that has no Lighthouse-side equivalent.
+    CoreRule(String),
 }
 
 impl From<ArithError> for Error {
@@ -1552,5 +1561,110 @@ mod tests {
                 head_block_root: head_root_c
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod core_parity {
+    //! The core is a port, so the question that matters is whether it still
+    //! computes what the original does. These drive both implementations from
+    //! the same inputs and compare, rather than asserting either against a
+    //! number someone wrote down.
+
+    use super::*;
+    use fast_confirmation_core as core_rule;
+    use types::MainnetEthSpec;
+
+    type E = MainnetEthSpec;
+    const SPE: u64 = 32;
+
+    /// The estimator across every shape of slot range that matters: inside one
+    /// epoch, spanning a boundary, covering a whole epoch, and empty.
+    #[test]
+    fn the_estimator_agrees_on_every_range_shape() {
+        let total = 42_651_485_000_000_000u64;
+        for start in 0u64..80 {
+            for len in 0u64..80 {
+                let end = start + len;
+                let theirs = estimate_committee_weight_between_slots::<E>(
+                    total,
+                    Slot::new(start),
+                    Slot::new(end),
+                );
+                let ours =
+                    core_rule::estimate_committee_weight_between_slots(total, start, end, SPE);
+                match (theirs, ours) {
+                    (Ok(a), Ok(b)) => assert_eq!(a, b, "range {start}..={end}"),
+                    (Err(_), Err(_)) => {}
+                    (a, b) => panic!("range {start}..={end}: {a:?} against {b:?}"),
+                }
+            }
+        }
+    }
+
+    /// And on an empty range, where the spec returns zero rather than erroring.
+    #[test]
+    fn an_inverted_range_weighs_nothing_on_both_sides() {
+        let total = 32_000_000_000u64;
+        assert_eq!(
+            estimate_committee_weight_between_slots::<E>(total, Slot::new(10), Slot::new(5))
+                .unwrap(),
+            core_rule::estimate_committee_weight_between_slots(total, 10, 5, SPE).unwrap(),
+        );
+    }
+
+    /// The threshold assembly, including the saturating branch a large discount
+    /// takes.
+    #[test]
+    fn the_threshold_agrees_including_its_saturating_branch() {
+        for &(support, proposer, adversarial, discount) in &[
+            (1_000_000u64, 500u64, 250u64, 0u64),
+            (100, 20, 10, 0),
+            (10, 0, 0, 1_000),
+            (0, 0, 0, 0),
+            (u64::MAX / 4, 1, 1, 1),
+        ] {
+            let numerator = support
+                .safe_add(proposer)
+                .and_then(|n| n.safe_add(adversarial.safe_mul(2)?));
+            let theirs = match numerator {
+                Ok(n) if discount < n => n.safe_sub(discount).and_then(|v| v.safe_div(2)).ok(),
+                Ok(_) => Some(0),
+                Err(_) => None,
+            };
+            let ours = core_rule::safety_threshold(support, proposer, adversarial, discount).ok();
+            assert_eq!(
+                theirs, ours,
+                "{support}/{proposer}/{adversarial}/{discount}"
+            );
+        }
+    }
+
+    /// The adjustment factor, which exists to round *up*: 999 must not become 0.
+    #[test]
+    fn the_adjustment_factor_agrees() {
+        for estimate in [0u64, 1, 999, 1000, 1001, 1500, 999_999] {
+            let ceil = estimate.safe_add(999).unwrap().safe_div(1000).unwrap();
+            let theirs = ceil.safe_mul(1005).unwrap();
+            let ours =
+                core_rule::adjust_committee_weight_estimate_to_ensure_safety(estimate).unwrap();
+            assert_eq!(theirs, ours, "estimate {estimate}");
+        }
+    }
+
+    /// The proposer score, multiply-first in both.
+    #[test]
+    fn the_proposer_score_agrees() {
+        for total in [32_000_000_000u64, 42_651_485_000_000_000, 1, 0] {
+            for boost in [40u64, 0, 100] {
+                let theirs = total
+                    .safe_div(SPE)
+                    .and_then(|w| w.safe_mul(boost))
+                    .and_then(|w| w.safe_div(100))
+                    .ok();
+                let ours = core_rule::compute_proposer_score(total, SPE, boost).ok();
+                assert_eq!(theirs, ours, "total {total} boost {boost}");
+            }
+        }
     }
 }

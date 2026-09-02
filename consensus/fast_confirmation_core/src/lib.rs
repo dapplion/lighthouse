@@ -24,16 +24,55 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-/// The only way any of this fails.
+extern crate alloc;
+
+/// Checked arithmetic overflowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArithError;
 
-type Result<T> = core::result::Result<T, ArithError>;
+pub mod primitives;
+pub mod rule;
+pub mod store;
+
+pub use primitives::{Checkpoint, Epoch, ExecutionStatus, Root, Slot, Vote, ZERO_ROOT};
+
+/// Why the rule could not reach an answer. Mirrors `fast_confirmation::Error`,
+/// less the variants that only a `ProtoArray` can raise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    NodeNotFound(Root),
+    ParentRootNotFound(Root),
+    AncestorNotFound {
+        block: Root,
+    },
+    UnrealizedJustificationNotFound(Root),
+    HeadCheckpointNotFound(Root),
+    CheckpointBlockNotFound {
+        block: Root,
+        epoch: Epoch,
+    },
+    MissingPrecomputedScore(Root),
+    MissingCheckpointState(Checkpoint),
+    SlotAssignmentsError,
+    IndexOutOfBounds(usize),
+    /// An ancestor walk ran past any plausible chain length, so the tree it was
+    /// given has a cycle.
+    WalkTooLong,
+    Arith(ArithError),
+}
+
+impl From<ArithError> for Error {
+    fn from(e: ArithError) -> Self {
+        Error::Arith(e)
+    }
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
 
 /// Checked arithmetic, named as `safe_arith::SafeArith` names it so both
 /// consumers read the same. That crate is not `no_std`, which is the only
 /// reason this exists.
-trait Arith: Sized {
+pub(crate) trait Arith: Sized {
     fn safe_add(self, other: Self) -> Result<Self>;
     fn safe_sub(self, other: Self) -> Result<Self>;
     fn safe_mul(self, other: Self) -> Result<Self>;
@@ -43,19 +82,19 @@ trait Arith: Sized {
 
 impl Arith for u64 {
     fn safe_add(self, other: Self) -> Result<Self> {
-        self.checked_add(other).ok_or(ArithError)
+        self.checked_add(other).ok_or(Error::Arith(ArithError))
     }
     fn safe_sub(self, other: Self) -> Result<Self> {
-        self.checked_sub(other).ok_or(ArithError)
+        self.checked_sub(other).ok_or(Error::Arith(ArithError))
     }
     fn safe_mul(self, other: Self) -> Result<Self> {
-        self.checked_mul(other).ok_or(ArithError)
+        self.checked_mul(other).ok_or(Error::Arith(ArithError))
     }
     fn safe_div(self, other: Self) -> Result<Self> {
-        self.checked_div(other).ok_or(ArithError)
+        self.checked_div(other).ok_or(Error::Arith(ArithError))
     }
     fn safe_rem(self, other: Self) -> Result<Self> {
-        self.checked_rem(other).ok_or(ArithError)
+        self.checked_rem(other).ok_or(Error::Arith(ArithError))
     }
 }
 
