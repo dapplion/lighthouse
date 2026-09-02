@@ -751,18 +751,20 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
         // - Are not slashed in `balance_source` tracked here as `slashed == false`
         // - Do not belong to the `store.equivocating_indices` set
         // - Their vote is for exactly `block_root`
+        // Committee assignment admits a small fraction of the set, so it is tested
+        // before the vote is read: `Votes::get` copies the vote out of the host's
+        // storage, and at mainnet size that copy is most of this loop.
         let mut score = 0u64;
         for (val_idx, balance) in balance_source.unslashed_and_active_indices() {
-            let Some(vote) = votes.get(val_idx) else {
-                continue;
-            };
             if balance > 0
                 && self
                     .slot_assignments
                     .is_in_range(val_idx, start_slot, end_slot)
                     .map_err(Error::SlotAssignmentsError)?
-                && vote.current_root() == block_root
                 && !equivocating_indices.contains(&(val_idx as u64))
+                && votes
+                    .get(val_idx)
+                    .is_some_and(|vote| vote.current_root() == block_root)
             {
                 score = score.safe_add(balance)?;
             }

@@ -329,13 +329,17 @@ pub(crate) fn aggregate_vote_balances<V: Votes + ?Sized>(
 ) -> Result<RootBalanceMap<Hash256>, Error> {
     let mut balance_by_vote_root = RootBalanceMap::<Hash256>::new();
 
-    for (val_idx, vote) in votes.iter().enumerate() {
-        let vote_root = vote.current_root();
-        if vote_root.is_zero() || equivocating_indices.contains(&(val_idx as u64)) {
+    // Walk the active set and read a vote only for a validator that can count:
+    // `Votes::get` copies the vote out of the host's storage.
+    for (val_idx, balance) in balance_source.unslashed_and_active_indices() {
+        if equivocating_indices.contains(&(val_idx as u64)) {
             continue;
         }
-        let balance = balance_source.unslashed_balance(val_idx);
-        if balance == 0 {
+        let Some(vote) = votes.get(val_idx) else {
+            continue;
+        };
+        let vote_root = vote.current_root();
+        if vote_root.is_zero() {
             continue;
         }
         balance_by_vote_root.add(vote_root, balance)?;
