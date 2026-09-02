@@ -75,6 +75,7 @@ use crate::pending_payload_cache::{
 use crate::pending_payload_envelopes::PendingPayloadEnvelopes;
 use crate::persisted_beacon_chain::PersistedBeaconChain;
 use crate::persisted_custody::persist_custody_context;
+use crate::persisted_fast_confirmation::{PersistedQueuedAttestations, QUEUED_ATTESTATIONS_DB_KEY};
 use crate::persisted_fork_choice::PersistedForkChoice;
 use crate::pre_finalization_cache::PreFinalizationBlockCache;
 use crate::proposer_preferences_verification::proposer_preference_cache::GossipVerifiedProposerPreferenceCache;
@@ -682,15 +683,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         let persisted_fork_choice =
             PersistedForkChoice::from_bytes(&persisted_fork_choice_bytes, store.get_config())?;
-        let fc_store =
-            BeaconForkChoiceStore::from_persisted(persisted_fork_choice.fork_choice_store, store)?;
+        let fc_store = BeaconForkChoiceStore::from_persisted(
+            persisted_fork_choice.fork_choice_store,
+            store.clone(),
+        )?;
 
-        Ok(Some(ForkChoice::from_persisted(
+        let mut fork_choice = ForkChoice::from_persisted(
             persisted_fork_choice.fork_choice,
             reset_payload_statuses,
             fc_store,
             spec,
-        )?))
+        )?;
+        // The attestations that were waiting for the next slot when fork choice was persisted.
+        if let Some(queued) =
+            store.get_item::<PersistedQueuedAttestations>(&QUEUED_ATTESTATIONS_DB_KEY)?
+        {
+            fork_choice.requeue_attestations(queued.attestations);
+        }
+        Ok(Some(fork_choice))
     }
 
     /// Persists `self.op_pool` to disk.
