@@ -1006,49 +1006,37 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     if let Some(old_confirmed_slot) = fork_choice_read_lock
                         .get_block(&old_confirmed_root)
                         .map(|block| block.slot)
+                        && !fork_choice_read_lock.is_descendant(old_confirmed_root, head_root)
                     {
-                        let head_reorg =
-                            !fork_choice_read_lock.is_descendant(old_confirmed_root, head_root);
+                        // The head descends from the confirmed root, so this only records whether
+                        // FCR had already moved off the block by the time the reorg reached it.
                         let fcr_reorg = !fork_choice_read_lock
                             .is_descendant(old_confirmed_root, confirmed_root);
-                        if head_reorg || fcr_reorg {
-                            // Measured against whichever chain left the block behind.
-                            let diverged_from = if head_reorg {
-                                head_root
-                            } else {
-                                confirmed_root
-                            };
-                            let reorg_distance = fork_choice_read_lock
-                                .proto_array()
-                                .common_ancestor_slot(old_confirmed_root, diverged_from)
-                                .map(|ancestor_slot| {
-                                    old_confirmed_slot.saturating_sub(ancestor_slot)
-                                });
+                        let reorg_distance = fork_choice_read_lock
+                            .proto_array()
+                            .common_ancestor_slot(old_confirmed_root, head_root)
+                            .map(|ancestor_slot| old_confirmed_slot.saturating_sub(ancestor_slot));
 
-                            if let Some(reorg_distance) = reorg_distance {
-                                metrics::set_gauge(
-                                    &fcr_metrics::FCR_UNCONFIRMATION_DISTANCE,
-                                    reorg_distance.as_u64() as i64,
-                                );
-                            }
-                            if head_reorg {
-                                metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
-                            }
-                            if fcr_reorg {
-                                metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_REORGS);
-                            }
-                            warn!(
-                                unconfirmed = ?old_confirmed_root,
-                                unconfirmed_slot = %old_confirmed_slot,
-                                head = ?head_root,
-                                confirmed = ?confirmed_root,
-                                head_reorg,
-                                fcr_reorg,
-                                slot = %current_slot,
-                                ?reorg_distance,
-                                "FCR unconfirmed a previously confirmed block"
+                        if let Some(reorg_distance) = reorg_distance {
+                            metrics::set_gauge(
+                                &fcr_metrics::FCR_UNCONFIRMATION_DISTANCE,
+                                reorg_distance.as_u64() as i64,
                             );
                         }
+                        metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_REORGS);
+                        if fcr_reorg {
+                            metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_REORGS);
+                        }
+                        warn!(
+                            unconfirmed = ?old_confirmed_root,
+                            unconfirmed_slot = %old_confirmed_slot,
+                            head = ?head_root,
+                            confirmed = ?confirmed_root,
+                            fcr_reorg,
+                            slot = %current_slot,
+                            ?reorg_distance,
+                            "FCR confirmed block was reorged out"
+                        );
                     }
 
                     // Emit a `fast_confirmation` event on every FCR run, regardless of
