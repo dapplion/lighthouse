@@ -1110,26 +1110,22 @@ impl ProtoArray {
          * *forwards* to invalidate all descendants of all blocks in `invalidated_indices`.
          */
 
-        let starting_block_root = latest_valid_ancestor_root
-            .filter(|_| latest_valid_ancestor_is_descendant)
-            .unwrap_or(head_block_root);
-        let latest_valid_ancestor_index = *self
-            .indices
-            .get(&starting_block_root)
-            .ok_or(Error::NodeUnknown(starting_block_root))?;
-        let first_potential_descendant = latest_valid_ancestor_index + 1;
+        // Collect all *descendants* which have been declared invalid since they're the descendant
+        // of a block with an invalid execution payload. Walk them through the `children` index
+        // instead of scanning every node.
+        let mut queue: Vec<usize> = invalidated_indices.iter().copied().collect();
+        while let Some(parent_index) = queue.pop() {
+            let child_indices = self
+                .children
+                .get(parent_index)
+                .ok_or(Error::InvalidNodeIndex(parent_index))?
+                .clone();
+            for index in child_indices {
+                let node = self
+                    .nodes
+                    .get_mut(index)
+                    .ok_or(Error::InvalidNodeIndex(index))?;
 
-        // Collect all *descendants* which have been declared invalid since they're the descendant of a block
-        // with an invalid execution payload.
-        for index in first_potential_descendant..self.nodes.len() {
-            let node = self
-                .nodes
-                .get_mut(index)
-                .ok_or(Error::InvalidNodeIndex(index))?;
-
-            if let Some(parent_index) = node.parent()
-                && invalidated_indices.contains(&parent_index)
-            {
                 // A Gloas descendant becomes invalid only when it built on the payload of the
                 // ancestor. A descendant that took the `EMPTY` edge stays viable.
                 if let ProtoNode::V29(gloas_node) = node
@@ -1161,7 +1157,9 @@ impl ProtoArray {
                     }
                 }
 
-                invalidated_indices.insert(index);
+                if invalidated_indices.insert(index) {
+                    queue.push(index);
+                }
             }
         }
 
