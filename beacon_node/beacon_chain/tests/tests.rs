@@ -3,6 +3,7 @@
 use beacon_chain::{
     BeaconChain, ChainConfig, NotifyExecutionLayer, StateSkipConfig, WhenSlotSkipped,
     attestation_verification::Error as AttnError,
+    chain_config::FastConfirmationMode,
     custody_context::NodeCustodyType,
     test_utils::{
         AttestationStrategy, BeaconChainHarness, BlockStrategy, EphemeralHarnessType,
@@ -1253,4 +1254,57 @@ async fn test_compute_weak_subjectivity_period() {
     let calculated_ws_period = head_state.compute_weak_subjectivity_period(&spec).unwrap();
 
     assert_eq!(calculated_ws_period, expected_ws_period_post_electra);
+}
+
+/// Rebuilding slot assignments requires the head state pulled up to the current epoch. That runs
+/// under the fork choice read lock, so a head state from an earlier epoch must be skipped rather
+/// than advanced in place (sigp/lighthouse#9595).
+#[tokio::test]
+async fn slot_assignments_skip_rebuild_for_stale_head_state() {
+    let harness = get_harness_with_config(
+        VALIDATOR_COUNT,
+        ChainConfig {
+            fast_confirmation: FastConfirmationMode::Enabled,
+            ..Default::default()
+        },
+    );
+
+    harness
+        .extend_chain(
+            E::slots_per_epoch() as usize * 2,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+    harness.chain.recompute_head_at_current_slot().await;
+
+    let head_epoch = harness.chain.head_snapshot().beacon_state.current_epoch();
+    assert_eq!(
+        harness
+            .chain
+            .canonical_head
+            .slot_assignments
+            .lock()
+            .key()
+            .shuffling_epoch,
+        head_epoch,
+        "assignments should be rebuilt while the head is current"
+    );
+
+    // Jump the clock forward without importing blocks, leaving the head state two epochs stale.
+    let stale_slot = harness.chain.slot().unwrap() + E::slots_per_epoch() * 2;
+    harness.set_current_slot(stale_slot);
+    harness.chain.recompute_head_at_current_slot().await;
+
+    assert_eq!(
+        harness
+            .chain
+            .canonical_head
+            .slot_assignments
+            .lock()
+            .key()
+            .shuffling_epoch,
+        head_epoch,
+        "a stale head state must not trigger a rebuild"
+    );
 }
