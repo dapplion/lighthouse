@@ -131,6 +131,7 @@ impl core::hash::Hasher for IdentityU64Hasher {
 
 /// First 8 bytes of a block root as a `u64` (roots are uniformly distributed, so this is a good
 /// hash). The stored full key disambiguates the (2⁻⁶⁴) prefix collision.
+#[inline(always)]
 fn root_prefix(root: &Hash256) -> u64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&root.as_slice()[..8]);
@@ -143,12 +144,14 @@ pub trait RootKey: Copy + Eq {
 }
 
 impl RootKey for Hash256 {
+    #[inline(always)]
     fn prefix_hash(&self) -> u64 {
         root_prefix(self)
     }
 }
 
 impl RootKey for (Hash256, Epoch) {
+    #[inline(always)]
     fn prefix_hash(&self) -> u64 {
         root_prefix(&self.0) ^ self.1.as_u64()
     }
