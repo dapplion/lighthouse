@@ -984,7 +984,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         .saturating_sub(confirmed_slot.as_u64());
                     metrics::set_gauge(&fcr_metrics::FCR_CONFIRMATION_DELAY_SLOTS, delay as i64);
                     metrics::set_gauge(
-                        &fcr_metrics::FCR_CONFIRMED_ROOT_SLOT,
+                        &fcr_metrics::FAST_CONFIRMATION_SLOT,
                         confirmed_slot.as_u64() as i64,
                     );
                     // Sample the settled-delay histogram only on the first recompute that advanced

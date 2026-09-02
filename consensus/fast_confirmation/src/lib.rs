@@ -48,7 +48,7 @@ use optimizations::{AttestationScoreCache, HonestFfgSupportCache};
 use proto_array::core::{ProtoArray, ProtoNode, VoteTracker};
 use safe_arith::{ArithError, SafeArith};
 use std::collections::BTreeSet;
-use tracing::{debug, debug_span};
+use tracing::{debug, debug_span, warn};
 use types::{
     BeaconState, BeaconStateError, Checkpoint, Epoch, EthSpec, Hash256, Slot, SlotAssignments,
 };
@@ -85,11 +85,11 @@ impl From<ArithError> for Error {
 /// Rich outcome of `is_one_confirmed` to track metrics in case of `BelowThreshold`..
 enum Confirmation {
     Confirmed,
-    NotConfirmed(Unconfirmed),
+    NotConfirmed(NotConfirmedReason),
 }
 
 /// Why a block failed `is_one_confirmed`.
-enum Unconfirmed {
+enum NotConfirmedReason {
     /// The block's execution status is optimistic or invalid.
     Optimistic,
     /// Attestation support did not exceed the safety threshold.
@@ -106,6 +106,10 @@ impl Confirmation {
 }
 
 const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
+
+/// `beacon_fast_confirmation_fallbacks_total` reason for the one fallback that is an
+/// unconfirmation: the confirmed block is no longer an ancestor of the head.
+const REORG_FALLBACK_REASON: &str = "not_ancestor";
 
 /// The Fast Confirmation Rule state
 #[derive(Debug)]
@@ -384,8 +388,8 @@ impl FastConfirmationRule {
 
         let confirmed_block_epoch_result = get_block_epoch::<E>(confirmed_root, proto_array);
 
-        // Revert to finalized block if either of the following is true:
-        let should_revert_to_finalized_reason = if confirmed_block_epoch_result
+        // Fall back to the finalized block if either of the following is true:
+        let should_fall_back_reason = if confirmed_block_epoch_result
             .as_ref()
             .map_or(true, |block_epoch| {
                 block_epoch.saturating_add(1u64) < current_epoch
@@ -401,7 +405,7 @@ impl FastConfirmationRule {
             }
         } else if !is_ancestor(head_root, confirmed_root, proto_array)? {
             // 2) the latest confirmed block does not belong to the canonical chain,
-            Some("not_ancestor")
+            Some(REORG_FALLBACK_REASON)
         } else if is_epoch_start
             && let Some(chain_unsafe_reason) = self.is_confirmed_chain_safe::<E>(
                 // 3) the confirmed chain starting from the current epoch observed justified
@@ -417,16 +421,30 @@ impl FastConfirmationRule {
         } else {
             None
         };
-        if let Some(reason) = should_revert_to_finalized_reason {
+        if let Some(reason) = should_fall_back_reason {
+            if reason == REORG_FALLBACK_REASON {
+                // An unconfirmation: a block previously reported as confirmed is no longer
+                // canonical. Under the FCR assumptions (synchrony and less than
+                // `byzantine_threshold` adversarial stake) this must never happen, so it is
+                // logged loudly and counted apart from the other fallbacks, which are recoveries
+                // from staleness rather than broken confirmations.
+                warn!(
+                    unconfirmed = %confirmed_root,
+                    head = %head_root,
+                    slot = %current_slot,
+                    "FCR confirmed block was reorged out"
+                );
+                metrics::inc_counter(&metrics::FAST_CONFIRMATION_REORGS);
+            }
             debug!(
                 prev_confirmed = %confirmed_root,
                 finalized = %finalized_checkpoint.root,
                 slot = %current_slot,
                 reason = reason,
-                "FCR reverted to finalized"
+                "FCR fell back to finalized"
             );
             confirmed_root = finalized_checkpoint.root;
-            metrics::inc_counter_vec(&metrics::FCR_REVERT_TO_FINALIZED, &[reason]);
+            metrics::inc_counter_vec(&metrics::FAST_CONFIRMATION_FALLBACKS, &[reason]);
         }
 
         // Restart the confirmation chain if each of the following conditions are true:
@@ -458,7 +476,7 @@ impl FastConfirmationRule {
                 "FCR restarted from observed justified"
             );
             confirmed_root = self.current_epoch_observed_justified.checkpoint().root;
-            metrics::inc_counter(&metrics::FCR_RESTART_FROM_JUSTIFIED);
+            metrics::inc_counter(&metrics::FAST_CONFIRMATION_RESTARTS);
         }
 
         // Attempt to further advance the latest confirmed block
@@ -655,7 +673,7 @@ impl FastConfirmationRule {
     /// precomputes scores once and uses `is_one_confirmed_with_score`.
     ///
     /// `Ok(None)` = the confirmed chain is safe (re-confirmable). `Ok(Some(reason))` = it
-    /// isn't, with `reason` naming which check failed (surfaced as the revert metric label).
+    /// isn't, with `reason` naming which check failed (surfaced as the fallback metric label).
     fn is_confirmed_chain_safe<E: EthSpec>(
         &self,
         confirmed_root: Hash256,
@@ -714,7 +732,7 @@ impl FastConfirmationRule {
         )?;
 
         for root in &chain_roots {
-            if let Confirmation::NotConfirmed(unconfirmed) = self.is_one_confirmed::<E>(
+            if let Confirmation::NotConfirmed(reason) = self.is_one_confirmed::<E>(
                 self.get_previous_balance_source(),
                 *root,
                 &attestation_scores,
@@ -723,22 +741,22 @@ impl FastConfirmationRule {
                 votes,
                 equivocating_indices,
             )? {
-                // `root` is not confirmed; surface why for the revert metric.
-                match unconfirmed {
-                    Unconfirmed::BelowThreshold {
+                // `root` is not confirmed; surface why for the fallback metric.
+                match reason {
+                    NotConfirmedReason::BelowThreshold {
                         support,
                         safety_threshold,
                     } => {
                         if safety_threshold > 0 {
                             metrics::observe(
-                                &metrics::FCR_UNCONFIRMED_SUPPORT_RATIO,
+                                &metrics::FCR_FALLBACK_SUPPORT_RATIO,
                                 support as f64 / safety_threshold as f64,
                             );
                         }
-                        return Ok(Some("unconfirmed_below_threshold"));
+                        return Ok(Some("below_safety_threshold"));
                     }
-                    Unconfirmed::Optimistic => {
-                        return Ok(Some("unconfirmed_optimistic"));
+                    NotConfirmedReason::Optimistic => {
+                        return Ok(Some("optimistic_or_invalid"));
                     }
                 }
             }
@@ -1169,7 +1187,7 @@ impl FastConfirmationRule {
     ) -> Result<Confirmation, Error> {
         // Spec MUST: not confirmed if the block's execution status is not VALID.
         if is_optimistic_or_invalid(block_root, proto_array)? {
-            return Ok(Confirmation::NotConfirmed(Unconfirmed::Optimistic));
+            return Ok(Confirmation::NotConfirmed(NotConfirmedReason::Optimistic));
         }
         let support = get_attestation_score(block_root, attestation_scores)?;
         let safety_threshold = self.compute_safety_threshold::<E>(
@@ -1183,10 +1201,12 @@ impl FastConfirmationRule {
         if support > safety_threshold {
             Ok(Confirmation::Confirmed)
         } else {
-            Ok(Confirmation::NotConfirmed(Unconfirmed::BelowThreshold {
-                support,
-                safety_threshold,
-            }))
+            Ok(Confirmation::NotConfirmed(
+                NotConfirmedReason::BelowThreshold {
+                    support,
+                    safety_threshold,
+                },
+            ))
         }
     }
 }
