@@ -5,3 +5,4 @@ edition = { workspace = true }
 description = "The fast confirmation rule: no store, no allocator-bound host types, no std."
 
 [dependencies]
+hashbrown = { workspace = true }

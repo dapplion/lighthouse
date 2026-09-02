@@ -9,8 +9,8 @@ use crate::store::ForkChoiceStore;
 use crate::{BalanceSourceData, Error};
 use alloc::collections::BTreeSet;
 use alloc::vec;
-use alloc::vec::Vec;
 use core::cell::OnceCell;
+use hashbrown::HashMap;
 
 /// An observed-justified checkpoint paired with the balance snapshot anchored to it.
 ///
@@ -25,6 +25,7 @@ pub struct CheckpointAndBalance {
 }
 
 impl CheckpointAndBalance {
+    #[inline]
     pub fn new(checkpoint: Checkpoint, balances: BalanceSourceData) -> Self {
         Self {
             checkpoint,
@@ -32,10 +33,12 @@ impl CheckpointAndBalance {
         }
     }
 
+    #[inline]
     pub fn checkpoint(&self) -> Checkpoint {
         self.checkpoint
     }
 
+    #[inline]
     pub fn balances(&self) -> &BalanceSourceData {
         &self.balances
     }
@@ -71,6 +74,7 @@ impl AttestationScoreCache {
         })
     }
 
+    #[inline]
     pub(crate) fn get_attestation_score(&self, block_root: Hash256) -> Option<u64> {
         self.scores.get(&block_root)
     }
@@ -84,12 +88,14 @@ pub(crate) struct HonestFfgSupportCache {
 }
 
 impl HonestFfgSupportCache {
+    #[inline]
     pub(crate) fn new() -> Self {
         Self {
             support: OnceCell::new(),
         }
     }
 
+    #[inline]
     pub(crate) fn get_or_compute(
         &self,
         compute: impl FnOnce() -> Result<u64, Error>,
@@ -100,6 +106,23 @@ impl HonestFfgSupportCache {
         let support = compute()?;
         let _ = self.support.set(support);
         Ok(support)
+    }
+}
+
+/// Identity hasher for `u64` keys derived from block-root byte prefixes.
+///
+/// The aggregation and projection maps below already store/compare the full key, so the prefix only
+/// chooses a bucket. Avoiding SipHash over 32-byte roots matters in the same per-validator loops that
+/// dominate the 1M-validator FCR benchmarks.
+#[derive(Default)]
+pub struct IdentityU64Hasher(u64);
+impl core::hash::Hasher for IdentityU64Hasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, _: &[u8]) {}
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n;
     }
 }
 
@@ -128,18 +151,23 @@ impl RootKey for (Hash256, Epoch) {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct PrefixKey<K: RootKey>(K);
+
+impl<K: RootKey> core::hash::Hash for PrefixKey<K> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.0.prefix_hash());
+    }
+}
+
 /// Aggregates validator balances by vote key before running expensive per-key work.
 ///
 /// This intentionally changes the shape of the spec's per-validator loops, but not the result:
 /// summing balances before projection/checkpoint lookup is equivalent to summing matching
 /// validators after lookup, and avoids repeating the same ancestor walk for every validator with
 /// the same latest message.
-///
-/// Open addressing with linear probing, because `no_std` has no `HashMap` and
-/// a `BTreeMap` costs a 32-byte comparison per level, once per validator.
 pub struct RootBalanceMap<K: RootKey> {
-    slots: Vec<Option<(K, u64)>>,
-    len: usize,
+    map: HashMap<PrefixKey<K>, u64, core::hash::BuildHasherDefault<IdentityU64Hasher>>,
 }
 
 impl<K: RootKey> Default for RootBalanceMap<K> {
@@ -151,75 +179,28 @@ impl<K: RootKey> Default for RootBalanceMap<K> {
 impl<K: RootKey> RootBalanceMap<K> {
     pub fn new() -> Self {
         Self {
-            slots: Vec::new(),
-            len: 0,
+            map: HashMap::default(),
         }
-    }
-
-    fn index_of(slots: &[Option<(K, u64)>], key: &K) -> usize {
-        let mask = slots.len() - 1;
-        let mut i = (key.prefix_hash() as usize) & mask;
-        loop {
-            match &slots[i] {
-                None => return i,
-                Some((k, _)) if k == key => return i,
-                _ => i = (i + 1) & mask,
-            }
-        }
-    }
-
-    /// Keep the load under 0.7 so probe runs stay short.
-    fn reserve_one(&mut self) {
-        if !self.slots.is_empty() && (self.len + 1) * 10 < self.slots.len() * 7 {
-            return;
-        }
-        let new_len = if self.slots.is_empty() {
-            64
-        } else {
-            self.slots.len() * 2
-        };
-        let mut slots: Vec<Option<(K, u64)>> = Vec::new();
-        slots.resize_with(new_len, || None);
-        for entry in self.slots.iter().flatten() {
-            let i = Self::index_of(&slots, &entry.0);
-            slots[i] = Some(*entry);
-        }
-        self.slots = slots;
     }
 
     pub fn add(&mut self, key: K, balance: u64) -> Result<(), Error> {
-        self.reserve_one();
-        let i = Self::index_of(&self.slots, &key);
-        match &mut self.slots[i] {
-            Some((_, v)) => v.safe_add_assign(balance)?,
-            slot @ None => {
-                *slot = Some((key, balance));
-                self.len += 1;
-            }
-        }
+        self.map
+            .entry(PrefixKey(key))
+            .or_insert(0)
+            .safe_add_assign(balance)?;
         Ok(())
     }
 
     pub fn insert(&mut self, key: K, value: u64) {
-        self.reserve_one();
-        let i = Self::index_of(&self.slots, &key);
-        if self.slots[i].is_none() {
-            self.len += 1;
-        }
-        self.slots[i] = Some((key, value));
+        self.map.insert(PrefixKey(key), value);
     }
 
     pub fn get(&self, key: &K) -> Option<u64> {
-        if self.slots.is_empty() {
-            return None;
-        }
-        self.slots[Self::index_of(&self.slots, key)]
-            .as_ref()
-            .map(|(_, v)| *v)
+        self.map.get(&PrefixKey(*key)).copied()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (K, u64)> + '_ {
-        self.slots.iter().flatten().copied()
+        self.map.iter().map(|(key, &balance)| (key.0, balance))
     }
 }
 
@@ -262,6 +243,7 @@ impl<'a> ChainProjector<'a> {
 
     /// The deepest canonical position `vote_root` descends from, or `None` if it covers no block
     /// on the segment.
+    #[inline]
     fn project(&self, vote_root: Hash256) -> Option<usize> {
         let mut root = vote_root;
         loop {

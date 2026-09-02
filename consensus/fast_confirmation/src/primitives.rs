@@ -14,6 +14,7 @@ pub trait SafeArith<Rhs = Self>: Sized {
     fn safe_div(self, other: Rhs) -> Result<Self, ArithError>;
     fn safe_rem(self, other: Rhs) -> Result<Self, ArithError>;
 
+    #[inline]
     fn safe_add_assign(&mut self, other: Rhs) -> Result<(), ArithError>
     where
         Self: Copy,
@@ -24,18 +25,23 @@ pub trait SafeArith<Rhs = Self>: Sized {
 }
 
 impl SafeArith for u64 {
+    #[inline]
     fn safe_add(self, other: Self) -> Result<Self, ArithError> {
         self.checked_add(other).ok_or(ArithError)
     }
+    #[inline]
     fn safe_sub(self, other: Self) -> Result<Self, ArithError> {
         self.checked_sub(other).ok_or(ArithError)
     }
+    #[inline]
     fn safe_mul(self, other: Self) -> Result<Self, ArithError> {
         self.checked_mul(other).ok_or(ArithError)
     }
+    #[inline]
     fn safe_div(self, other: Self) -> Result<Self, ArithError> {
         self.checked_div(other).ok_or(ArithError)
     }
+    #[inline]
     fn safe_rem(self, other: Self) -> Result<Self, ArithError> {
         self.checked_rem(other).ok_or(ArithError)
     }
@@ -50,16 +56,19 @@ impl Hash256 {
         Self([0; 32])
     }
 
+    #[inline]
     pub fn is_zero(&self) -> bool {
         self.0 == [0; 32]
     }
 
+    #[inline]
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
 }
 
 impl From<[u8; 32]> for Hash256 {
+    #[inline]
     fn from(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
@@ -93,33 +102,41 @@ macro_rules! scalar {
             pub const fn as_u64(&self) -> u64 {
                 self.0
             }
+            #[inline]
             pub fn saturating_add(self, other: u64) -> Self {
                 Self(self.0.saturating_add(other))
             }
+            #[inline]
             pub fn saturating_sub(self, other: u64) -> Self {
                 Self(self.0.saturating_sub(other))
             }
         }
 
         impl SafeArith<u64> for $name {
+            #[inline]
             fn safe_add(self, other: u64) -> Result<Self, ArithError> {
                 self.0.safe_add(other).map(Self)
             }
+            #[inline]
             fn safe_sub(self, other: u64) -> Result<Self, ArithError> {
                 self.0.safe_sub(other).map(Self)
             }
+            #[inline]
             fn safe_mul(self, other: u64) -> Result<Self, ArithError> {
                 self.0.safe_mul(other).map(Self)
             }
+            #[inline]
             fn safe_div(self, other: u64) -> Result<Self, ArithError> {
                 self.0.safe_div(other).map(Self)
             }
+            #[inline]
             fn safe_rem(self, other: u64) -> Result<Self, ArithError> {
                 self.0.safe_rem(other).map(Self)
             }
         }
 
         impl From<u64> for $name {
+            #[inline]
             fn from(v: u64) -> Self {
                 Self(v)
             }
@@ -137,12 +154,14 @@ scalar!(Slot);
 scalar!(Epoch);
 
 impl Slot {
+    #[inline]
     pub fn epoch(self, slots_per_epoch: u64) -> Epoch {
         Epoch(self.0 / slots_per_epoch)
     }
 }
 
 impl Epoch {
+    #[inline]
     pub fn start_slot(self, slots_per_epoch: u64) -> Slot {
         Slot(self.0.saturating_mul(slots_per_epoch))
     }
@@ -163,6 +182,7 @@ pub trait EthSpec {
 pub struct SlotsPerEpoch<const N: u64>;
 
 impl<const N: u64> EthSpec for SlotsPerEpoch<N> {
+    #[inline]
     fn slots_per_epoch() -> u64 {
         N
     }
@@ -191,9 +211,11 @@ pub struct VoteTracker {
 }
 
 impl VoteTracker {
+    #[inline]
     pub fn current_root(&self) -> Hash256 {
         self.current_root
     }
+    #[inline]
     pub fn current_slot(&self) -> Slot {
         self.current_slot
     }

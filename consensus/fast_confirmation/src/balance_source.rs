@@ -17,10 +17,12 @@ pub struct BalanceSourceData {
 }
 
 impl BalanceSourceData {
+    #[inline]
     pub fn balance(&self, val_idx: usize) -> u64 {
         self.effective_balances.get(val_idx).copied().unwrap_or(0)
     }
 
+    #[inline]
     pub fn unslashed_and_active_indices(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
         self.effective_balances
             .iter()
@@ -34,6 +36,7 @@ impl BalanceSourceData {
 
     /// Return balance only if the validator is not slashed.
     /// Spec: `get_block_support_between_slots` excludes slashed validators.
+    #[inline]
     pub fn unslashed_balance(&self, val_idx: usize) -> u64 {
         if self.slashed.get(val_idx).copied().unwrap_or(false) {
             0
