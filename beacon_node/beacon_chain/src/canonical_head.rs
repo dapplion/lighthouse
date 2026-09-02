@@ -999,26 +999,20 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         metrics::inc_counter(&fcr_metrics::FCR_CONFIRMED_ROOT_CHANGES);
                     }
 
-                    // Checked on every run, not only when the confirmed root moves: the head can
-                    // reorg off a block FCR still confirms.
-                    //
-                    // An `old_confirmed_root` that fork choice has pruned is an ancestor of the
-                    // finalized block, which is the healthy case, and `is_descendant` cannot tell
-                    // that apart from a reorg.
+                    // Runs every time, not only when the confirmed root moves: the head can reorg
+                    // off a block FCR still confirms. A pruned `old_confirmed_root` is an ancestor
+                    // of finality, which `is_descendant` cannot tell apart from a reorg.
                     let head_root = new_view.head_block_root;
-                    if let Some(old_confirmed_block) =
-                        fork_choice_read_lock.get_block(&old_confirmed_root)
+                    if let Some(old_confirmed_slot) = fork_choice_read_lock
+                        .get_block(&old_confirmed_root)
+                        .map(|block| block.slot)
                     {
-                        let old_confirmed_slot = old_confirmed_block.slot;
-                        // The chain moved off the old confirmed block.
                         let head_reorg =
                             !fork_choice_read_lock.is_descendant(old_confirmed_root, head_root);
-                        // FCR moved off it, whether or not the chain did.
                         let fcr_reorg = !fork_choice_read_lock
                             .is_descendant(old_confirmed_root, confirmed_root);
                         if head_reorg || fcr_reorg {
-                            // Depth of the reorg, measured against whichever chain left the block
-                            // behind: how far back it sat from where the two last agreed.
+                            // Measured against whichever chain left the block behind.
                             let diverged_from = if head_reorg {
                                 head_root
                             } else {
