@@ -261,7 +261,7 @@ impl HonestFfgSupportCache {
 /// nearest chain position at or below it, then the positions are suffix-summed,
 /// so a block's score is every vote for it or any descendant of it.
 pub struct ChainAttestationScores {
-    scores: alloc::collections::BTreeMap<Root, u64>,
+    scores: crate::rootmap::RootMap<Root>,
 }
 
 impl ChainAttestationScores {
@@ -274,26 +274,26 @@ impl ChainAttestationScores {
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Self> {
         // Position of each chain member, oldest first.
-        let mut position = alloc::collections::BTreeMap::new();
+        let mut position = crate::rootmap::RootMap::<Root>::new();
         for (i, root) in chain.iter().enumerate() {
-            position.insert(*root, i);
+            position.insert(*root, i as u64);
         }
 
         // Spec: `aggregate_vote_balances`. A vote for the zero root is no vote,
         // and an equivocator's is discounted -- the same two skips as upstream.
         let mut balance_by_root = crate::rootmap::RootMap::<Root>::new();
-        for val_idx in 0..votes.len() {
+        // Walking the active set rather than the vote list fuses the balance
+        // and slashed lookups into one step and skips reading a vote that
+        // could not have counted.
+        for (val_idx, balance) in balance_source.unslashed_and_active_indices() {
+            if equivocating_indices.contains(&(val_idx as u64)) {
+                continue;
+            }
             let Some(vote) = votes.get(val_idx) else {
                 continue;
             };
             let vote_root = vote.current_root();
-            if vote_root == crate::primitives::ZERO_ROOT
-                || equivocating_indices.contains(&(val_idx as u64))
-            {
-                continue;
-            }
-            let balance = balance_source.balance(val_idx);
-            if balance == 0 || balance_source.is_slashed(val_idx) {
+            if vote_root == crate::primitives::ZERO_ROOT {
                 continue;
             }
             balance_by_root.add(vote_root, balance)?;
@@ -306,7 +306,7 @@ impl ChainAttestationScores {
             let mut root = vote_root;
             let pos = loop {
                 if let Some(p) = position.get(&root) {
-                    break Some(*p);
+                    break Some(p as usize);
                 }
                 let Ok((slot, parent)) = store.slot_and_parent(root) else {
                     break None;
@@ -326,7 +326,7 @@ impl ChainAttestationScores {
             *score = score.safe_add(balance)?;
         }
 
-        let mut scores = alloc::collections::BTreeMap::new();
+        let mut scores = crate::rootmap::RootMap::<Root>::new();
         let mut running = 0u64;
         for i in (0..chain.len()).rev() {
             running = running.safe_add(score_at_position[i])?;
@@ -338,7 +338,7 @@ impl ChainAttestationScores {
 
 impl AttestationScores for ChainAttestationScores {
     fn get_attestation_score(&self, block_root: Root) -> Option<u64> {
-        self.scores.get(&block_root).copied()
+        self.scores.get(&block_root)
     }
 }
 
@@ -1115,19 +1115,27 @@ impl<A: SlotAssignments, B: Balances> RuleView<'_, A, B> {
         // - Are not slashed in `balance_source` tracked here as `slashed == false`
         // - Do not belong to the `store.equivocating_indices` set
         // - Their vote is for exactly `block_root`
+        //
+        // The conditions are pure predicates, so the order they are tested in
+        // does not change the sum -- but it does change the cost. Committee
+        // assignment is the selective one: a range of a slot or two out of an
+        // epoch admits a small fraction of the set, so it is tested first and
+        // the vote is only read for validators that survive it.
         let mut score = 0u64;
         for (val_idx, balance) in balance_source.unslashed_and_active_indices() {
-            let Some(vote) = votes.get(val_idx) else {
-                continue;
-            };
-            if balance > 0
-                && self
+            if balance == 0
+                || !self
                     .slot_assignments
                     .is_in_range(val_idx, start_slot, end_slot)
                     .map_err(|_| Error::SlotAssignmentsError)?
-                && vote.current_root() == block_root
-                && !equivocating_indices.contains(&(val_idx as u64))
+                || equivocating_indices.contains(&(val_idx as u64))
             {
+                continue;
+            }
+            let Some(vote) = votes.get(val_idx) else {
+                continue;
+            };
+            if vote.current_root() == block_root {
                 score = score.safe_add(balance)?;
             }
         }

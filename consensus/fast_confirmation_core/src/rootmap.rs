@@ -98,6 +98,28 @@ impl<K: RootKey> RootMap<K> {
         Ok(())
     }
 
+    pub(crate) fn get(&self, key: &K) -> Option<u64> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        match &self.slots[Self::index_of(&self.slots, key)] {
+            Some((_, v)) => Some(*v),
+            None => None,
+        }
+    }
+
+    /// Insert, replacing any existing value.
+    pub(crate) fn insert(&mut self, key: K, value: u64) {
+        if self.slots.is_empty() || (self.len + 1) * 10 >= self.slots.len() * 7 {
+            self.grow();
+        }
+        let i = Self::index_of(&self.slots, &key);
+        if self.slots[i].is_none() {
+            self.len = self.len.saturating_add(1);
+        }
+        self.slots[i] = Some((key, value));
+    }
+
     pub(crate) fn iter(&self) -> impl Iterator<Item = (K, u64)> + '_ {
         self.slots.iter().flatten().copied()
     }
