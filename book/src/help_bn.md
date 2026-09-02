@@ -548,6 +548,16 @@ Flags:
           permissions will be inherited from the parent folder.
       --metrics
           Enable the Prometheus metrics HTTP server. Disabled by default.
+      --minimal
+          Minimises the resource usage (bandwidth and disk) of this node,
+          intended for nodes running only a small number of validators. Disables
+          backfill sync, so historical blocks and custody columns before the
+          checkpoint are never downloaded. Disables the long-lived (backbone)
+          attestation subnet subscriptions, so no attestation subnets are
+          subscribed to or advertised unless required by a validator duty.
+          Disables the subscription to the beacon_aggregate_and_proof topic, so
+          aggregate attestations are not received from gossip, although our own
+          aggregates are still published.
       --private
           Prevents sending various client identification information.
       --proposer-only

@@ -1179,6 +1179,10 @@ pub fn set_network_config(
         config.subscribe_all_subnets = true;
     }
 
+    if parse_flag(cli_args, "minimal") {
+        config.minimal = true;
+    }
+
     if parse_flag(cli_args, "import-all-attestations") {
         config.import_all_attestations = true;
     }

@@ -119,6 +119,21 @@ pub fn cli_app() -> Command {
                 .display_order(0)
         )
         .arg(
+            Arg::new("minimal")
+                .long("minimal")
+                .action(ArgAction::SetTrue)
+                .help_heading(FLAG_HEADER)
+                .help("Minimises the resource usage (bandwidth and disk) of this node, intended \
+                       for nodes running only a small number of validators. Disables backfill \
+                       sync, so historical blocks and custody columns before the checkpoint are \
+                       never downloaded. Disables the long-lived (backbone) attestation subnet \
+                       subscriptions, so no attestation subnets are subscribed to or advertised \
+                       unless required by a validator duty. Disables the subscription to the \
+                       beacon_aggregate_and_proof topic, so aggregate attestations are not \
+                       received from gossip, although our own aggregates are still published.")
+                .display_order(0)
+        )
+        .arg(
             Arg::new("import-all-attestations")
                 .long("import-all-attestations")
                 .help("Import and aggregate all attestations, regardless of validator subscriptions. \

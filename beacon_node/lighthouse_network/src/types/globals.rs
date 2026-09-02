@@ -233,6 +233,9 @@ impl<E: EthSpec> NetworkGlobals<E> {
             enable_light_client_server: self.config.enable_light_client_server,
             enable_execution_proof: self.config.enable_execution_proof,
             subscribe_all_subnets: self.config.subscribe_all_subnets,
+            // In minimal mode we rely on attestations included in blocks rather than on
+            // aggregates from gossip. We can still publish our own aggregates.
+            subscribe_aggregate_and_proof: !self.config.minimal,
             sampling_subnets: self.sampling_subnets.read().clone(),
         }
     }

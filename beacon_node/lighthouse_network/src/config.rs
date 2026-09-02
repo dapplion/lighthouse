@@ -97,6 +97,11 @@ pub struct Config {
     /// Subscribe to all subnets for the duration of the runtime.
     pub subscribe_all_subnets: bool,
 
+    /// Minimise the resource usage of this node. Disables backfill sync, the long-lived
+    /// ("backbone") attestation subnet subscriptions and the subscription to the
+    /// `beacon_aggregate_and_proof` topic.
+    pub minimal: bool,
+
     /// Import/aggregate all attestations received on subscribed subnets for the duration of the
     /// runtime.
     pub import_all_attestations: bool,
@@ -362,6 +367,7 @@ impl Default for Config {
             network_load: 3,
             private: false,
             subscribe_all_subnets: false,
+            minimal: false,
             import_all_attestations: false,
             shutdown_after_sync: false,
             topics: Vec::new(),

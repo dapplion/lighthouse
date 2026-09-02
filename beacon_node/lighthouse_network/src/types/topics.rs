@@ -41,6 +41,9 @@ pub struct TopicConfig {
     pub enable_light_client_server: bool,
     pub enable_execution_proof: bool,
     pub subscribe_all_subnets: bool,
+    /// Whether to subscribe to the `beacon_aggregate_and_proof` topic. Note that we can still
+    /// publish to the topic while unsubscribed.
+    pub subscribe_aggregate_and_proof: bool,
     pub sampling_subnets: HashSet<DataColumnSubnetId>,
 }
 
@@ -52,11 +55,14 @@ pub fn core_topics_to_subscribe<E: EthSpec>(
 ) -> Vec<GossipKind> {
     let mut topics = vec![
         GossipKind::BeaconBlock,
-        GossipKind::BeaconAggregateAndProof,
         GossipKind::VoluntaryExit,
         GossipKind::ProposerSlashing,
         GossipKind::AttesterSlashing,
     ];
+
+    if opts.subscribe_aggregate_and_proof {
+        topics.push(GossipKind::BeaconAggregateAndProof);
+    }
 
     if opts.subscribe_all_subnets {
         for i in 0..spec.attestation_subnet_count {
@@ -138,6 +144,7 @@ pub fn all_topics_at_fork<E: EthSpec>(fork: ForkName, spec: &ChainSpec) -> Vec<G
         enable_light_client_server: true,
         enable_execution_proof: true,
         subscribe_all_subnets: true,
+        subscribe_aggregate_and_proof: true,
         sampling_subnets,
     };
     core_topics_to_subscribe::<E>(fork, &opts, spec)
@@ -552,6 +559,7 @@ mod tests {
             enable_light_client_server: false,
             enable_execution_proof: false,
             subscribe_all_subnets: false,
+            subscribe_aggregate_and_proof: true,
             sampling_subnets: sampling_subnets.clone(),
         }
     }
