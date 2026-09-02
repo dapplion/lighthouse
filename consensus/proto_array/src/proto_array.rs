@@ -814,19 +814,35 @@ impl ProtoArray {
         let v29 = node
             .as_v29_mut()
             .map_err(|_| Error::InvalidNodeVariant { block_root })?;
-        v29.payload_received = true;
-        // The envelope reveals the payload, so the node takes the status from the execution layer.
-        v29.execution_status = execution_status;
+        match v29.execution_status {
+            // The invalidation sweep condemned this payload before its envelope arrived. The
+            // verdict is implied by its invalid ancestry, so a late envelope must not undo it.
+            ExecutionStatus::Invalid(_) => return Ok(()),
+            // A duplicate envelope must not downgrade a validated payload.
+            ExecutionStatus::Valid(_) => return Ok(()),
+            _ => (),
+        }
         let parent = v29.parent;
         let parent_status = v29.parent_payload_status;
 
-        // A valid payload also validates every payload that its branch executed, so promote the
-        // ancestry.
+        // A valid payload also validates every payload that its branch executed. Walk the
+        // ancestry first: if it holds an invalid payload, the error must leave this node
+        // unwritten rather than valid on top of an invalid ancestor.
         if execution_status.is_valid_and_post_bellatrix()
             && let Some(parent_index) = parent
         {
             self.propagate_execution_payload_validation_from(parent_index, parent_status)?;
         }
+
+        let v29 = self
+            .nodes
+            .get_mut(index)
+            .ok_or(Error::InvalidNodeIndex(index))?
+            .as_v29_mut()
+            .map_err(|_| Error::InvalidNodeVariant { block_root })?;
+        v29.payload_received = true;
+        // The envelope reveals the payload, so the node takes the status from the execution layer.
+        v29.execution_status = execution_status;
 
         Ok(())
     }
