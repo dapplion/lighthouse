@@ -1,6 +1,9 @@
-//! Validator-balance snapshot used by the Fast Confirmation Rule.
+//! Validator-balance snapshot used by the Fast Confirmation Rule, built from a
+//! `BeaconState`.
 
 use crate::Error;
+use crate::adapter;
+use fast_confirmation::BalanceSourceData;
 use safe_arith::SafeArith;
 use types::{BeaconState, Epoch, EthSpec, Hash256};
 
@@ -43,78 +46,31 @@ impl BalanceSourceKey {
     }
 }
 
-/// Snapshot of a validator set's effective balances for one epoch.
+/// Create a balance source for `state` at its current epoch.
 ///
-/// The [`BalanceSourceKey`] fixes this snapshot — two chains sharing it have the same view — and
-/// is used as the cache key.
-#[derive(Clone, Debug)]
-pub struct BalanceSourceData {
-    pub key: BalanceSourceKey,
-    pub total_active_balance: u64,
-    /// Effective balance per validator index. 0 for inactive.
-    pub effective_balances: Vec<u64>,
-    /// Used to filter support votes
-    /// (spec: `get_block_support_between_slots` excludes slashed validators).
-    pub slashed: Vec<bool>,
-}
+/// The state must be pulled up to the desired epoch prior to calling this function.
+pub(crate) fn build<E: EthSpec>(state: &BeaconState<E>) -> BalanceSourceData {
+    let current_epoch = state.current_epoch();
+    let validators = state.validators();
+    let mut effective_balances = Vec::with_capacity(validators.len());
+    let mut slashed = Vec::with_capacity(validators.len());
+    let mut total_active_balance = 0u64;
 
-impl BalanceSourceData {
-    /// Create a balance source for `state` at its current epoch.
-    ///
-    /// The state must be pulled up to the desired epoch prior to calling this function.
-    pub(crate) fn new<E: EthSpec>(
-        state: &BeaconState<E>,
-        block_root: Hash256,
-    ) -> Result<Self, Error> {
-        let current_epoch = state.current_epoch();
-        let key = BalanceSourceKey::compute(state, block_root)?;
-        let validators = state.validators();
-        let mut effective_balances = Vec::with_capacity(validators.len());
-        let mut slashed = Vec::with_capacity(validators.len());
-        let mut total_active_balance = 0u64;
-
-        for validator in validators.iter() {
-            slashed.push(validator.slashed);
-            if validator.is_active_at(current_epoch) {
-                effective_balances.push(validator.effective_balance);
-                total_active_balance =
-                    total_active_balance.saturating_add(validator.effective_balance);
-            } else {
-                effective_balances.push(0);
-            }
-        }
-
-        Ok(Self {
-            key,
-            total_active_balance,
-            effective_balances,
-            slashed,
-        })
-    }
-
-    pub(crate) fn balance(&self, val_idx: usize) -> u64 {
-        self.effective_balances.get(val_idx).copied().unwrap_or(0)
-    }
-
-    pub(crate) fn unslashed_and_active_indices(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
-        self.effective_balances
-            .iter()
-            .copied()
-            .enumerate()
-            .filter_map(|(i, balance)| {
-                (balance > 0 && !self.slashed.get(i).copied().unwrap_or(false))
-                    .then_some((i, balance))
-            })
-    }
-
-    /// Return balance only if the validator is not slashed.
-    /// Spec: `get_block_support_between_slots` excludes slashed validators.
-    pub(crate) fn unslashed_balance(&self, val_idx: usize) -> u64 {
-        if self.slashed.get(val_idx).copied().unwrap_or(false) {
-            0
+    for validator in validators.iter() {
+        slashed.push(validator.slashed);
+        if validator.is_active_at(current_epoch) {
+            effective_balances.push(validator.effective_balance);
+            total_active_balance = total_active_balance.saturating_add(validator.effective_balance);
         } else {
-            self.balance(val_idx)
+            effective_balances.push(0);
         }
+    }
+
+    BalanceSourceData {
+        epoch: adapter::epoch(current_epoch),
+        total_active_balance,
+        effective_balances,
+        slashed,
     }
 }
 

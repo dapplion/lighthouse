@@ -1329,7 +1329,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         slot_assignments: &SlotAssignments,
     ) -> Result<FcrOutcome, FastConfirmationError> {
         let _fcr_timer = metrics::start_timer(&fcr_metrics::FCR_TIMES);
-        let old_confirmed_root = fcr.confirmed_root;
+        let old_confirmed_root = fcr.confirmed_root();
 
         let finalized_cp = fork_choice.finalized_checkpoint();
         let unrealized_justified_cp = fork_choice.unrealized_justified_checkpoint();
@@ -1360,8 +1360,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         )?;
 
         let confirmed_node = fork_choice
-            .get_block(&fcr.confirmed_root)
-            .ok_or(FastConfirmationError::NodeNotFound(fcr.confirmed_root))?;
+            .get_block(&fcr.confirmed_root())
+            .ok_or(FastConfirmationError::NodeNotFound(fcr.confirmed_root()))?;
 
         // Resolve the confirmed block's execution payload hash for the EL `safe_block_hash`.
         // This MUST be the parent block hash for Gloas, per the spec.
@@ -1370,14 +1370,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .block_hash()
             .or(confirmed_node.execution_payload_parent_hash)
             .ok_or(FastConfirmationError::NodeHasNoBlockHash(
-                fcr.confirmed_root,
+                fcr.confirmed_root(),
             ))?;
 
         Ok(FcrOutcome {
-            confirmed_root: fcr.confirmed_root,
+            confirmed_root: fcr.confirmed_root(),
             confirmed_slot: confirmed_node.slot,
             confirmed_block_hash,
-            new_confirmed_root: fcr.confirmed_root != old_confirmed_root,
+            new_confirmed_root: fcr.confirmed_root() != old_confirmed_root,
             new_update_slot: fcr.last_update_slot() != old_update_slot,
         })
     }

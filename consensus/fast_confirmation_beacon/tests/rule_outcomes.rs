@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use ethereum_hashing::hash_fixed;
 use fast_confirmation_beacon::{
-    BalanceSourceData, BalanceSourceKey, CheckpointAndBalance, FastConfirmationRule,
+    BalanceSourceData, CheckpointAndBalance, FastConfirmationRule, adapter,
 };
 use fixed_bytes::FixedBytesExtended;
 use proto_array::core::{ProtoArray, VoteTracker};
@@ -155,10 +155,7 @@ fn fixture(gap_slot: Option<u64>) -> Fixture {
     .expect("find head");
 
     let balance_source = BalanceSourceData {
-        key: BalanceSourceKey::NoSlashings {
-            epoch_boundary_root: observed_justified_checkpoint.root,
-            epoch: Slot::new(CHAIN_TIP_SLOT).epoch(E::slots_per_epoch()),
-        },
+        epoch: adapter::epoch(Slot::new(CHAIN_TIP_SLOT).epoch(E::slots_per_epoch())),
         total_active_balance: BALANCE.saturating_mul(NUM_VALIDATORS as u64),
         effective_balances: vec![BALANCE; NUM_VALIDATORS],
         slashed: vec![false; NUM_VALIDATORS],
@@ -216,15 +213,17 @@ impl Fixture {
         let head_root = block_root_at(head_slot);
         let confirmed_root = block_root_at(confirmed_slot);
 
-        self.lh.previous_slot_head = head_root;
-        self.lh.current_slot_head = head_root;
-        self.lh.confirmed_root = confirmed_root;
-        self.lh.current_epoch_observed_justified = CheckpointAndBalance::new(
-            self.observed_justified_checkpoint,
+        self.lh.inner.previous_slot_head = adapter::root(head_root);
+        self.lh.inner.current_slot_head = adapter::root(head_root);
+        self.lh.inner.confirmed_root = adapter::root(confirmed_root);
+        self.lh.inner.current_epoch_observed_justified = CheckpointAndBalance::new(
+            adapter::checkpoint(&self.observed_justified_checkpoint),
             self.balance_source.clone(),
         );
-        self.lh.previous_epoch_observed_justified =
-            CheckpointAndBalance::new(self.genesis_checkpoint, self.balance_source.clone());
+        self.lh.inner.previous_epoch_observed_justified = CheckpointAndBalance::new(
+            adapter::checkpoint(&self.genesis_checkpoint),
+            self.balance_source.clone(),
+        );
     }
 
     /// Run the rule and require the recorded verdict.

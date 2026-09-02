@@ -1381,7 +1381,7 @@ impl<E: EthSpec> Tester<E> {
 
         if let Some(ref fcr_mutex) = self.harness.chain.canonical_head.fast_confirmation {
             let mut fcr = fcr_mutex.lock();
-            fcr.confirmed_root = fcr
+            let confirmed_root = fcr
                 .get_latest_confirmed::<E>(
                     head_root,
                     &finalized_cp,
@@ -1394,10 +1394,11 @@ impl<E: EthSpec> Tester<E> {
                 .map_err(|e| {
                     Error::InternalError(format!("FCR get_latest_confirmed failed: {e:?}"))
                 })?;
+            fcr.set_confirmed_root(confirmed_root);
         }
         drop(fork_choice_lock);
 
-        let actual = self.get_fcr_field("confirmed_root", |fcr| fcr.confirmed_root)?;
+        let actual = self.get_fcr_field("confirmed_root", |fcr| fcr.confirmed_root())?;
         check_equal("confirmed_root", actual, expected)
     }
 
@@ -1406,7 +1407,7 @@ impl<E: EthSpec> Tester<E> {
         expected: ExecutionBlockHash,
     ) -> Result<(), Error> {
         let confirmed_root =
-            self.get_fcr_field("safe_execution_block_hash", |fcr| fcr.confirmed_root)?;
+            self.get_fcr_field("safe_execution_block_hash", |fcr| fcr.confirmed_root())?;
         let fork_choice = self.harness.chain.canonical_head.fork_choice_read_lock();
         let block = fork_choice.get_block(&confirmed_root).ok_or_else(|| {
             Error::InternalError(format!(
@@ -1426,7 +1427,7 @@ impl<E: EthSpec> Tester<E> {
         expected: Checkpoint,
     ) -> Result<(), Error> {
         let actual = self.get_fcr_field("previous_epoch_observed_justified_checkpoint", |fcr| {
-            fcr.previous_epoch_observed_justified.checkpoint()
+            fcr.previous_epoch_observed_justified_checkpoint()
         })?;
         check_equal(
             "previous_epoch_observed_justified_checkpoint",
@@ -1440,7 +1441,7 @@ impl<E: EthSpec> Tester<E> {
         expected: Checkpoint,
     ) -> Result<(), Error> {
         let actual = self.get_fcr_field("current_epoch_observed_justified_checkpoint", |fcr| {
-            fcr.current_epoch_observed_justified.checkpoint()
+            fcr.current_epoch_observed_justified_checkpoint()
         })?;
         check_equal(
             "current_epoch_observed_justified_checkpoint",
@@ -1455,7 +1456,7 @@ impl<E: EthSpec> Tester<E> {
     ) -> Result<(), Error> {
         let actual = self
             .get_fcr_field("previous_epoch_greatest_unrealized_checkpoint", |fcr| {
-                fcr.previous_epoch_greatest_unrealized_checkpoint
+                fcr.previous_epoch_greatest_unrealized_checkpoint()
             })?;
         check_equal(
             "previous_epoch_greatest_unrealized_checkpoint",
@@ -1465,12 +1466,12 @@ impl<E: EthSpec> Tester<E> {
     }
 
     pub fn check_previous_slot_head(&self, expected: Hash256) -> Result<(), Error> {
-        let actual = self.get_fcr_field("previous_slot_head", |fcr| fcr.previous_slot_head)?;
+        let actual = self.get_fcr_field("previous_slot_head", |fcr| fcr.previous_slot_head())?;
         check_equal("previous_slot_head", actual, expected)
     }
 
     pub fn check_current_slot_head(&self, expected: Hash256) -> Result<(), Error> {
-        let actual = self.get_fcr_field("current_slot_head", |fcr| fcr.current_slot_head)?;
+        let actual = self.get_fcr_field("current_slot_head", |fcr| fcr.current_slot_head())?;
         check_equal("current_slot_head", actual, expected)
     }
     pub fn process_payload_attestation_message(

@@ -1,50 +1,133 @@
-//! The types the rule is written against, with the same surface the Lighthouse
-//! originals expose.
-//!
-//! `types` and `proto_array` are not `no_std` and drag in most of the client, so
-//! the rule cannot use them directly. Rather than rewrite it against `u64`, this
-//! provides `Slot`, `Epoch`, `Root` and `Checkpoint` with the same methods --
-//! `epoch()`, `as_u64()`, `start_slot()`, `safe_add()` -- so the ported bodies
-//! read as the originals do and diff against them cleanly. That is the whole
-//! design goal: a reviewer should be able to put the two side by side.
+//! The handful of `types` the rule reads, without `types`.
 
-use crate::{ArithError, Result};
+use core::fmt;
 
-/// A block root. `types::Hash256` in Lighthouse.
-pub type Root = [u8; 32];
+/// Checked arithmetic overflowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArithError;
 
-/// The zero root, which the rule uses for "no block".
-pub const ZERO_ROOT: Root = [0u8; 32];
+/// `safe_arith::SafeArith`, for the types the rule does arithmetic on.
+pub trait SafeArith<Rhs = Self>: Sized {
+    fn safe_add(self, other: Rhs) -> Result<Self, ArithError>;
+    fn safe_sub(self, other: Rhs) -> Result<Self, ArithError>;
+    fn safe_mul(self, other: Rhs) -> Result<Self, ArithError>;
+    fn safe_div(self, other: Rhs) -> Result<Self, ArithError>;
+    fn safe_rem(self, other: Rhs) -> Result<Self, ArithError>;
+
+    fn safe_add_assign(&mut self, other: Rhs) -> Result<(), ArithError>
+    where
+        Self: Copy,
+    {
+        *self = self.safe_add(other)?;
+        Ok(())
+    }
+}
+
+impl SafeArith for u64 {
+    fn safe_add(self, other: Self) -> Result<Self, ArithError> {
+        self.checked_add(other).ok_or(ArithError)
+    }
+    fn safe_sub(self, other: Self) -> Result<Self, ArithError> {
+        self.checked_sub(other).ok_or(ArithError)
+    }
+    fn safe_mul(self, other: Self) -> Result<Self, ArithError> {
+        self.checked_mul(other).ok_or(ArithError)
+    }
+    fn safe_div(self, other: Self) -> Result<Self, ArithError> {
+        self.checked_div(other).ok_or(ArithError)
+    }
+    fn safe_rem(self, other: Self) -> Result<Self, ArithError> {
+        self.checked_rem(other).ok_or(ArithError)
+    }
+}
+
+/// A block root.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Hash256(pub [u8; 32]);
+
+impl Hash256 {
+    pub const fn zero() -> Self {
+        Self([0; 32])
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.0 == [0; 32]
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<[u8; 32]> for Hash256 {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl fmt::Debug for Hash256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x")?;
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Hash256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
 
 macro_rules! scalar {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
-        pub struct $name(pub u64);
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Debug)]
+        pub struct $name(u64);
 
         impl $name {
             pub const fn new(v: u64) -> Self {
                 Self(v)
             }
-            pub const fn as_u64(self) -> u64 {
+            pub const fn as_u64(&self) -> u64 {
                 self.0
             }
-            pub fn safe_add(self, other: impl Into<u64>) -> Result<Self> {
-                Ok(Self(self.0.checked_add(other.into()).ok_or(ArithError)?))
+            pub fn saturating_add(self, other: u64) -> Self {
+                Self(self.0.saturating_add(other))
             }
-            pub fn safe_sub(self, other: impl Into<u64>) -> Result<Self> {
-                Ok(Self(self.0.checked_sub(other.into()).ok_or(ArithError)?))
-            }
-            pub fn saturating_add(self, other: impl Into<u64>) -> Self {
-                Self(self.0.saturating_add(other.into()))
-            }
-            pub fn saturating_sub(self, other: impl Into<u64>) -> Self {
-                Self(self.0.saturating_sub(other.into()))
+            pub fn saturating_sub(self, other: u64) -> Self {
+                Self(self.0.saturating_sub(other))
             }
         }
 
-        impl From<$name> for u64 {
-            fn from(v: $name) -> u64 {
-                v.0
+        impl SafeArith<u64> for $name {
+            fn safe_add(self, other: u64) -> Result<Self, ArithError> {
+                self.0.safe_add(other).map(Self)
+            }
+            fn safe_sub(self, other: u64) -> Result<Self, ArithError> {
+                self.0.safe_sub(other).map(Self)
+            }
+            fn safe_mul(self, other: u64) -> Result<Self, ArithError> {
+                self.0.safe_mul(other).map(Self)
+            }
+            fn safe_div(self, other: u64) -> Result<Self, ArithError> {
+                self.0.safe_div(other).map(Self)
+            }
+            fn safe_rem(self, other: u64) -> Result<Self, ArithError> {
+                self.0.safe_rem(other).map(Self)
+            }
+        }
+
+        impl From<u64> for $name {
+            fn from(v: u64) -> Self {
+                Self(v)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
             }
         }
     };
@@ -54,52 +137,61 @@ scalar!(Slot);
 scalar!(Epoch);
 
 impl Slot {
-    /// Spec: `compute_epoch_at_slot`.
     pub fn epoch(self, slots_per_epoch: u64) -> Epoch {
         Epoch(self.0 / slots_per_epoch)
     }
 }
 
 impl Epoch {
-    /// Spec: `compute_start_slot_at_epoch`.
     pub fn start_slot(self, slots_per_epoch: u64) -> Slot {
         Slot(self.0.saturating_mul(slots_per_epoch))
     }
 }
 
-/// `types::Checkpoint`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
 pub struct Checkpoint {
     pub epoch: Epoch,
-    pub root: Root,
+    pub root: Hash256,
 }
 
-/// Whether a block's execution payload is usable. The rule only ever asks
-/// whether it is optimistic or invalid, so that is all this carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutionStatus {
-    Valid,
-    OptimisticOrInvalid,
-    /// Pre-merge. Treated as not optimistic, as the spec's MUST is post-merge.
-    Irrelevant,
+/// The one thing the rule reads off the chain spec.
+pub trait EthSpec {
+    fn slots_per_epoch() -> u64;
 }
 
-impl ExecutionStatus {
-    pub fn is_optimistic_or_invalid(self) -> bool {
-        matches!(self, ExecutionStatus::OptimisticOrInvalid)
+/// A spec known at compile time, for a caller with no `types` to hand.
+pub struct SlotsPerEpoch<const N: u64>;
+
+impl<const N: u64> EthSpec for SlotsPerEpoch<N> {
+    fn slots_per_epoch() -> u64 {
+        N
     }
 }
 
-/// One validator's latest vote. `proto_array::VoteTracker`, at the two fields
+/// Failure to answer a committee membership question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotAssignmentsError;
+
+/// `types::SlotAssignments`, at the one question the rule asks of it.
+pub trait SlotAssignments {
+    fn is_in_range(
+        &self,
+        validator_index: usize,
+        start_slot: Slot,
+        end_slot: Slot,
+    ) -> Result<bool, SlotAssignmentsError>;
+}
+
+/// One validator's latest vote: `proto_array::VoteTracker`, at the two fields
 /// the rule reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Vote {
-    pub current_root: Root,
+pub struct VoteTracker {
+    pub current_root: Hash256,
     pub current_slot: Slot,
 }
 
-impl Vote {
-    pub fn current_root(&self) -> Root {
+impl VoteTracker {
+    pub fn current_root(&self) -> Hash256 {
         self.current_root
     }
     pub fn current_slot(&self) -> Slot {
@@ -107,12 +199,10 @@ impl Vote {
     }
 }
 
-/// Read-only access to the latest vote of each validator, by validator index.
+/// The latest vote of each validator, by index, read in place.
 ///
-/// The rule reads votes but never owns them. Lighthouse keeps them as
-/// `proto_array::VoteTracker` and the guest keeps them packed; both answer this
-/// without copying the set, which at mainnet size would be tens of megabytes
-/// per evaluation.
+/// Lighthouse keeps votes as `proto_array::VoteTracker` and would otherwise
+/// copy the whole set -- tens of megabytes at mainnet size -- on every call.
 pub trait Votes {
     fn len(&self) -> usize;
 
@@ -120,15 +210,20 @@ pub trait Votes {
         self.len() == 0
     }
 
-    fn get(&self, index: usize) -> Option<Vote>;
+    fn get(&self, index: usize) -> Option<VoteTracker>;
+
+    /// Every vote, in index order. `get` is total on `0..len`, so nothing is skipped.
+    fn iter(&self) -> impl Iterator<Item = VoteTracker> + '_ {
+        (0..self.len()).map(|i| self.get(i).unwrap_or_default())
+    }
 }
 
-impl Votes for [Vote] {
+impl Votes for [VoteTracker] {
     fn len(&self) -> usize {
-        <[Vote]>::len(self)
+        <[VoteTracker]>::len(self)
     }
 
-    fn get(&self, index: usize) -> Option<Vote> {
-        <[Vote]>::get(self, index).copied()
+    fn get(&self, index: usize) -> Option<VoteTracker> {
+        <[VoteTracker]>::get(self, index).copied()
     }
 }
