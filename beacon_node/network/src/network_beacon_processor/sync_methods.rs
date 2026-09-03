@@ -38,6 +38,9 @@ pub enum ChainSegmentProcessId {
     RangeBatchId(ChainId, Epoch),
     /// Processing ID for a backfill syncing batch.
     BackSyncBatchId(Epoch),
+    /// Processing ID for a tree sync batch, identified by the roots it covers. A chain can
+    /// split while its blocks process, so a result routes by root, not by chain.
+    TreeSync(Vec<Hash256>),
 }
 
 /// Returned when a chain segment import fails.
@@ -477,13 +480,16 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         process_id: ChainSegmentProcessId,
         downloaded_blocks: Vec<RangeSyncBlock<T::EthSpec>>,
     ) {
-        let ChainSegmentProcessId::RangeBatchId(chain_id, epoch) = process_id else {
-            // This is a request from range sync, this should _never_ happen
-            crit!(
-                error = "process_chain_segment called on a variant other than RangeBatchId",
-                "Please notify the devs"
-            );
-            return;
+        let (chain_id, epoch) = match &process_id {
+            ChainSegmentProcessId::RangeBatchId(chain_id, epoch) => (*chain_id, *epoch),
+            ChainSegmentProcessId::TreeSync(_) => (0, Epoch::new(0)),
+            ChainSegmentProcessId::BackSyncBatchId(_) => {
+                crit!(
+                    error = "process_chain_segment called on a variant other than RangeBatchId",
+                    "Please notify the devs"
+                );
+                return;
+            }
         };
 
         let start_slot = downloaded_blocks.first().map(|b| b.slot().as_u64());

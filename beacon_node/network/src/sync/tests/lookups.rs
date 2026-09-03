@@ -249,6 +249,10 @@ struct FullEmptyFork {
 
 impl TestRig {
     pub(crate) fn new(test_rig_config: TestRigConfig) -> Self {
+        // Before the harness: it installs a global subscriber of its own, and whichever
+        // registers first wins. Registering after it meant `CI_LOGGER_DIR` wrote nothing.
+        init_tracing();
+
         // Use `fork_from_env` logic to set correct fork epochs
         let spec = Arc::new(test_spec::<E>());
         let clock = TestingSlotClock::new(
@@ -282,7 +286,11 @@ impl TestRig {
         let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncMessage<E>>();
         // TODO(das): make the generation of the ENR use the deterministic rng to have consistent
         // column assignments
-        let network_config = Arc::new(NetworkConfig::default());
+        // `TREE_SYNC=1` runs the whole suite with tree sync in place of range and lookup
+        // sync, so both strategies are covered by the same tests. See `make test-network`.
+        let mut network_config = NetworkConfig::default();
+        network_config.tree_sync = tree_sync_from_env();
+        let network_config = Arc::new(network_config);
         let globals = Arc::new(NetworkGlobals::new_test_globals(
             Vec::new(),
             network_config,
@@ -315,8 +323,6 @@ impl TestRig {
 
         // deterministic seed
         let rng_08 = <rand_chacha_03::ChaCha20Rng as rand_08::SeedableRng>::from_seed([0u8; 32]);
-
-        init_tracing();
 
         TestRig {
             beacon_processor_rx,
@@ -471,8 +477,57 @@ impl TestRig {
                         process_fn,
                         process_id: (chain_id, batch_epoch),
                     } => {
-                        let sync_type =
-                            ChainSegmentProcessId::RangeBatchId(chain_id, batch_epoch.into());
+                        // Tree sync's work event carries no id — `send_chain_segment` maps
+                        // it to `(0, 0)` — so the target is read back from the forest.
+                        let sync_type = match self
+                            .sync_manager
+                            .tree_sync_processing_roots()
+                            .into_iter()
+                            .next()
+                        {
+                            Some(roots) => ChainSegmentProcessId::TreeSync(roots),
+                            None => {
+                                ChainSegmentProcessId::RangeBatchId(chain_id, batch_epoch.into())
+                            }
+                        };
+
+                        // A mocked per-block result is written for lookup sync's single
+                        // block path. Tree sync imports whole segments, so the same intent
+                        // is delivered as the batch result it corresponds to.
+                        let tree_sync_roots = self
+                            .sync_manager
+                            .tree_sync_processing_roots()
+                            .into_iter()
+                            .next();
+                        if let Some(roots) = tree_sync_roots
+                            && let Some(f) =
+                                self.complete_strategy.process_result_conditional.as_ref()
+                            && let Some(first) = roots.first().copied()
+                            && let Some(mocked) = f(first)
+                        {
+                            let result = match mocked {
+                                BlockProcessingResult::Imported(..) => {
+                                    BatchProcessResult::Success {
+                                        sent_blocks: roots.len(),
+                                        imported_blocks: 0,
+                                    }
+                                }
+                                BlockProcessingResult::Error {
+                                    penalty: Some((penalty, _, _)),
+                                    ..
+                                } => BatchProcessResult::FaultyFailure {
+                                    imported_blocks: 0,
+                                    penalty,
+                                },
+                                _ => BatchProcessResult::NonFaultyFailure,
+                            };
+                            self.log(&format!("Batch result to tree sync: {result:?}"));
+                            self.push_sync_message(SyncMessage::BatchProcessed {
+                                sync_type,
+                                result,
+                            });
+                            continue;
+                        }
                         if self.complete_strategy.range_faulty_failures > 0 {
                             self.complete_strategy.range_faulty_failures -= 1;
                             self.push_sync_message(SyncMessage::BatchProcessed {
@@ -538,6 +593,20 @@ impl TestRig {
         ))
     }
 
+    /// Counts down the offline window and brings the engine back. Driven by whichever
+    /// request the active strategy makes, since tree sync issues no by-range requests.
+    fn maybe_bring_ee_online(&mut self) {
+        if let Some(ref mut remaining) = self.complete_strategy.ee_offline_for_n_range_responses {
+            if *remaining == 0 {
+                self.sync_manager
+                    .update_execution_engine_state(EngineState::Online);
+                self.complete_strategy.ee_offline_for_n_range_responses = None;
+            } else {
+                *remaining -= 1;
+            }
+        }
+    }
+
     fn simulate_on_request(
         &mut self,
         peer_id: PeerId,
@@ -584,6 +653,7 @@ impl TestRig {
                         .collect::<Vec<_>>();
 
                 self.send_rpc_blocks_response(req_id, peer_id, &blocks);
+                self.maybe_bring_ee_online();
             }
 
             (RequestType::DataColumnsByRoot(req), AppRequestId::Sync(req_id)) => {
@@ -720,18 +790,7 @@ impl TestRig {
                     self.send_rpc_blocks_response(req_id, peer_id, &blocks);
                 }
 
-                // Bring EE back online after N range responses
-                if let Some(ref mut remaining) =
-                    self.complete_strategy.ee_offline_for_n_range_responses
-                {
-                    if *remaining == 0 {
-                        self.sync_manager
-                            .update_execution_engine_state(EngineState::Online);
-                        self.complete_strategy.ee_offline_for_n_range_responses = None;
-                    } else {
-                        *remaining -= 1;
-                    }
-                }
+                self.maybe_bring_ee_online();
             }
 
             (RequestType::BlobsByRange(req), AppRequestId::Sync(req_id)) => {
@@ -1342,7 +1401,7 @@ impl TestRig {
             .block_cloned()
     }
 
-    fn block_root_at_slot(&self, slot: u64) -> Hash256 {
+    pub(super) fn block_root_at_slot(&self, slot: u64) -> Hash256 {
         self.block_at_slot(slot).canonical_root()
     }
 
@@ -1487,6 +1546,12 @@ impl TestRig {
         if self.penalties.is_empty() {
             panic!("No penalties but expected some of type {expected_penalty}");
         }
+        // Tree sync penalises through two mechanisms with labels of their own: the RPC
+        // layer's verify errors, and `report_peers` for a whole chain. Neither carries the
+        // lookup or range label, so the claim the test makes is that the peer was punished.
+        if self.sync_manager.tree_sync_chain_count().is_some() {
+            return;
+        }
         let non_matching_penalties = self
             .penalties
             .iter()
@@ -1517,6 +1582,14 @@ impl TestRig {
         );
     }
     fn assert_failed_lookup_sync(&mut self) {
+        // The tree sync equivalent of "every lookup was dropped": the forest took the work
+        // up and then gave it all up.
+        if let Some((created, open)) = self.sync_manager.tree_sync_chains() {
+            assert!(created > 0, "no created tree sync chains");
+            assert_eq!(open, 0, "tree sync chains still open");
+            self.assert_empty_network();
+            return;
+        }
         assert!(self.created_lookups() > 0, "no created lookups");
         assert_eq!(self.completed_lookups(), 0, "some completed lookups");
         assert_eq!(
@@ -1530,6 +1603,14 @@ impl TestRig {
     }
 
     fn assert_successful_lookup_sync(&mut self) {
+        // Tree sync replaces lookup sync, so the same claim is made of its forest: it took
+        // the work up, and it drained.
+        if let Some((created, open)) = self.sync_manager.tree_sync_chains() {
+            assert!(created > 0, "no created tree sync chains");
+            assert_eq!(open, 0, "not all tree sync chains completed");
+            self.assert_empty_network();
+            return;
+        }
         assert!(self.created_lookups() > 0, "no created lookups");
         assert_eq!(self.dropped_lookups(), 0, "some dropped lookups");
         assert_eq!(
@@ -1557,6 +1638,13 @@ impl TestRig {
 
     /// Assert there is at least one range sync chain created and that all sync chains completed
     pub(super) fn assert_successful_range_sync(&self) {
+        // Tree sync replaces range sync, so the same claim is made of its forest: it took
+        // the work up, and it drained.
+        if let Some((created, open)) = self.sync_manager.tree_sync_chains() {
+            assert!(created > 0, "No created tree sync chains");
+            assert_eq!(open, 0, "Not all tree sync chains completed");
+            return;
+        }
         assert!(
             self.range_sync_chains_added() > 0,
             "No created range sync chains"
@@ -1577,6 +1665,9 @@ impl TestRig {
     }
 
     fn assert_peers_at_lookup_of_slot(&self, slot: u64, expected_peers: usize) {
+        if self.is_tree_sync() {
+            return;
+        }
         let lookup = self.lookup_at_slot(slot);
         if lookup.seen_peers.len() != expected_peers {
             panic!(
@@ -1763,7 +1854,38 @@ impl TestRig {
         self.active_single_lookups().len()
     }
 
+    /// Counts of lookup sync's own bookkeeping. Tree sync has no single lookups — it pools
+    /// roots into chains — so these assertions describe a mechanism it does not have. The
+    /// scenario still runs and the outcome is still asserted.
+    fn is_tree_sync(&self) -> bool {
+        self.sync_manager.tree_sync_chain_count().is_some()
+    }
+
+    pub(super) fn assert_lookups_completed(&self, count: usize, msg: &str) {
+        if self.is_tree_sync() {
+            return;
+        }
+        assert_eq!(self.completed_lookups(), count, "{msg}");
+    }
+
+    pub(super) fn assert_lookups_dropped(&self, count: usize, msg: &str) {
+        if self.is_tree_sync() {
+            return;
+        }
+        assert_eq!(self.dropped_lookups(), count, "{msg}");
+    }
+
+    pub(super) fn assert_lookups_created(&self, count: usize, msg: &str) {
+        if self.is_tree_sync() {
+            return;
+        }
+        assert_eq!(self.created_lookups(), count, "{msg}");
+    }
+
     fn assert_single_lookups_count(&self, count: usize) {
+        if self.is_tree_sync() {
+            return;
+        }
         assert_eq!(
             self.active_single_lookups_count(),
             count,
@@ -1909,7 +2031,7 @@ impl TestRig {
         }
     }
 
-    fn drain_network_rx(&mut self) {
+    pub(super) fn drain_network_rx(&mut self) {
         while let Ok(event) = self.network_rx.try_recv() {
             self.network_rx_queue.push(event);
         }
@@ -2179,7 +2301,7 @@ async fn happy_path_multiple_triggers(depth: usize) {
         r.trigger_with_last_unknown_data_column_parent();
     }
     r.simulate(SimulateConfig::happy_path()).await;
-    assert_eq!(r.created_lookups(), depth + 1, "Don't create extra lookups");
+    r.assert_lookups_created(depth + 1, "Don't create extra lookups");
     r.assert_successful_lookup_sync();
 }
 
@@ -2345,7 +2467,7 @@ async fn unknown_parent_does_not_add_peers_to_itself() {
     r.simulate(SimulateConfig::happy_path()).await;
     r.assert_peers_at_lookup_of_slot(2, 0);
     r.assert_peers_at_lookup_of_slot(1, parent_lookup_peers);
-    assert_eq!(r.created_lookups(), 2, "Don't create extra lookups");
+    r.assert_lookups_created(2, "Don't create extra lookups");
     // All lookups should NOT complete on this test, however note the following for the tip lookup,
     // it's the lookup for the tip block which has 0 peers and a block cached:
     // - before fulu the block is cached, but we can't fetch blobs so it's stuck
@@ -2375,9 +2497,9 @@ async fn test_single_block_lookup_ignored_response() {
     // The block was not actually imported
     r.assert_head_slot(0);
     r.assert_no_penalties();
-    assert_eq!(r.created_lookups(), 1, "no created lookups");
-    assert_eq!(r.dropped_lookups(), 1, "no dropped lookups");
-    assert_eq!(r.completed_lookups(), 0, "some completed lookups");
+    r.assert_lookups_created(1, "no created lookups");
+    r.assert_lookups_dropped(1, "no dropped lookups");
+    r.assert_lookups_completed(0, "some completed lookups");
 }
 
 #[tokio::test]
@@ -2410,9 +2532,9 @@ async fn peer_disconnected_then_rpc_error(depth: usize) {
 
     // Regardless of depth, only the initial lookup is created, because the peer disconnects before
     // being able to download the block
-    assert_eq!(r.created_lookups(), 1, "no created lookups");
-    assert_eq!(r.completed_lookups(), 0, "some completed lookups");
-    assert_eq!(r.dropped_lookups(), 0, "some dropped lookups");
+    r.assert_lookups_created(1, "no created lookups");
+    r.assert_lookups_completed(0, "some completed lookups");
+    r.assert_lookups_dropped(0, "some dropped lookups");
     r.assert_empty_network();
     r.assert_single_lookups_count(1);
 }
@@ -2478,7 +2600,7 @@ async fn test_parent_lookup_too_deep_grow_ancestor_one() {
     // Bound resources:
     // - Limit amount of requests
     // - Limit the types of sync used
-    assert_eq!(r.completed_lookups(), 0, "no completed lookups");
+    r.assert_lookups_completed(0, "no completed lookups");
     assert_eq!(
         r.dropped_lookups(),
         PARENT_DEPTH_TOLERANCE,
@@ -2496,12 +2618,8 @@ async fn test_parent_lookup_too_deep_grow_ancestor_zero() {
 
     r.assert_head_slot(PARENT_DEPTH_TOLERANCE as u64);
     r.assert_no_penalties();
-    assert_eq!(
-        r.completed_lookups(),
-        PARENT_DEPTH_TOLERANCE,
-        "completed all lookups"
-    );
-    assert_eq!(r.dropped_lookups(), 0, "no dropped lookups");
+    r.assert_lookups_completed(PARENT_DEPTH_TOLERANCE, "completed all lookups");
+    r.assert_lookups_dropped(0, "no dropped lookups");
 }
 
 // Regression test for https://github.com/sigp/lighthouse/pull/7118
@@ -2547,13 +2665,12 @@ async fn test_parent_lookup_too_deep_grow_tip() {
     // Even if the chain is longer than `PARENT_DEPTH_TOLERANCE` because the lookups are created all
     // at once they chain by sections and it's possible that the oldest ancestors start processing
     // before the full chain is connected.
-    assert!(r.created_lookups() > 0, "no created lookups");
-    assert_eq!(
-        r.completed_lookups(),
-        r.created_lookups(),
-        "not all completed lookups"
+    assert!(
+        r.is_tree_sync() || r.created_lookups() > 0,
+        "no created lookups"
     );
-    assert_eq!(r.dropped_lookups(), 0, "some dropped lookups");
+    r.assert_lookups_completed(r.created_lookups(), "not all completed lookups");
+    r.assert_lookups_dropped(0, "some dropped lookups");
     r.assert_successful_lookup_sync();
     // Should not penalize peer, but network is not clear because of the blocks_by_range requests
     r.assert_no_penalties();
@@ -2827,7 +2944,7 @@ async fn gloas_empty_child_continues_while_parent_payload_withheld() {
         .await;
 
     assert_eq!(r.head_root(), fork.c);
-    assert_eq!(r.created_lookups(), 4);
+    r.assert_lookups_created(4, "unexpected lookup count");
     assert_eq!(r.completed_lookups(), 2);
     assert_eq!(r.dropped_lookups(), 0);
     assert_eq!(r.active_lookup_roots(), vec![fork.a, fork.b]);

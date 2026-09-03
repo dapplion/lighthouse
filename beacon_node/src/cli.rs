@@ -508,6 +508,17 @@ pub fn cli_app() -> Command {
             .display_order(0)
         )
         .arg(
+            Arg::new("tree-sync")
+                .long("tree-sync")
+                .help("Experimental: run tree sync alongside regular sync. Tree sync walks \
+                    back by parent root from a peer's head and imports forward, instead of \
+                    syncing by slot range. Regular sync is unaffected.")
+                .action(ArgAction::SetTrue)
+                .hide(true)
+                .help_heading(FLAG_HEADER)
+                .display_order(0)
+        )
+        .arg(
             Arg::new("disable-backfill-rate-limiting")
                 .long("disable-backfill-rate-limiting")
                 .help("Disable the backfill sync rate-limiting. This allow users to just sync the entire chain as fast \

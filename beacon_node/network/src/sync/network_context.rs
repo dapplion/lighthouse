@@ -2,9 +2,8 @@
 //! channel and stores a global RPC ID to perform requests.
 
 use self::custody::{ActiveCustodyRequest, Error as CustodyRequestError};
-pub use self::requests::{
-    BlocksByRootSingleRequest, DataColumnsByRootRequestParams, PayloadEnvelopesByRootSingleRequest,
-};
+pub(crate) use self::download::{DownloadError, DownloadRequest};
+pub use self::requests::{BlockRootsRequest, DataColumnsByRootRequestParams, PayloadRootsRequest};
 use super::SyncMessage;
 use super::block_sidecar_coupling::RangeBlockComponentsRequest;
 use super::manager::BlockProcessType;
@@ -24,26 +23,30 @@ use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineStat
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, DataColumnsByRangeRequest, PayloadEnvelopesByRangeRequest,
+    BlobsByRangeRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
+    PayloadEnvelopesByRangeRequest,
 };
 use lighthouse_network::rpc::{
-    BlocksByRangeRequest, GoodbyeReason, MAX_CONCURRENT_REQUESTS, RPCError, RequestType,
+    BlocksByRangeRequest, GoodbyeReason, MAX_CONCURRENT_REQUESTS, Protocol, RPCError, RequestType,
 };
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
-    AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
+    AppRequestId, BeaconBlocksByRootRequestId, BeaconBlocksByRootRequester, BlobsByRangeRequestId,
+    BlocksByRangeRequestId, ComponentsByRangeRequestId, ComponentsByRootRequestId,
     CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyId, CustodyRequester,
     DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
+    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId,
+    PayloadEnvelopesByRootRequestId, PayloadEnvelopesByRootRequester, SingleLookupReqId,
     SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
 pub use requests::LookupVerifyError;
 use requests::{
-    ActiveRequestItems, ActiveRequests, BlobsByRangeRequestItems, BlocksByRangeRequestItems,
-    BlocksByRootRequestItems, DataColumnsByRangeRequestItems, DataColumnsByRootRequestItems,
-    PayloadEnvelopesByRangeRequestItems, PayloadEnvelopesByRootRequestItems,
+    ActiveRequestItems, ActiveRequests, BlobsByRangeRequestItems, BlocksByHeadRequestItems,
+    BlocksByRangeRequestItems, BlocksByRootRequestItems, DataColumnsByRangeRequestItems,
+    DataColumnsByRootRequestItems, PayloadEnvelopesByRangeRequestItems,
+    PayloadEnvelopesByRootRequestItems,
 };
 #[cfg(test)]
 use slot_clock::SlotClock;
@@ -59,7 +62,13 @@ use types::{
     ForkContext, Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
 };
 
+pub mod components_by_root;
+pub use self::components_by_root::ComponentsByRootResponse;
+use self::components_by_root::{
+    BlockSummary, ComponentsByRootRequest, ComponentsByRootRequestResult, ComponentsByRootResult,
+};
 pub mod custody;
+mod download;
 mod requests;
 
 macro_rules! new_range_request_span {
@@ -223,10 +232,15 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
 
     /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
     blocks_by_root_requests:
-        ActiveRequests<SingleLookupReqId, BlocksByRootRequestItems<T::EthSpec>>,
+        ActiveRequests<BeaconBlocksByRootRequestId, BlocksByRootRequestItems<T::EthSpec>>,
+    /// A mapping of active BlocksByHead requests, used by block lookups to walk a block's ancestors.
+    blocks_by_head_requests:
+        ActiveRequests<SingleLookupReqId, BlocksByHeadRequestItems<T::EthSpec>>,
     /// A mapping of active PayloadEnvelopesByRoot requests
-    payload_envelopes_by_root_requests:
-        ActiveRequests<SingleLookupReqId, PayloadEnvelopesByRootRequestItems<T::EthSpec>>,
+    payload_envelopes_by_root_requests: ActiveRequests<
+        PayloadEnvelopesByRootRequestId,
+        PayloadEnvelopesByRootRequestItems<T::EthSpec>,
+    >,
     /// A mapping of active DataColumnsByRoot requests
     data_columns_by_root_requests:
         ActiveRequests<DataColumnsByRootRequestId, DataColumnsByRootRequestItems<T::EthSpec>>,
@@ -250,6 +264,9 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// BlocksByRange requests paired with other ByRange requests for data components
     components_by_range_requests:
         FnvHashMap<ComponentsByRangeRequestId, RangeBlockComponentsRequest<T::EthSpec>>,
+
+    /// Blocks by root requests paired with custody by root and envelopes for tree sync
+    components_by_root_requests: HashMap<ComponentsByRootRequestId, ComponentsByRootRequest<T>>,
 
     /// A batch of data columns by range request for custody sync
     custody_backfill_data_column_batch_requests:
@@ -328,6 +345,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             execution_engine_state: EngineState::Online, // always assume `Online` at the start
             request_id: 1,
             blocks_by_root_requests: ActiveRequests::new("blocks_by_root"),
+            blocks_by_head_requests: ActiveRequests::new("blocks_by_head"),
             payload_envelopes_by_root_requests: ActiveRequests::new("payload_envelopes_by_root"),
             data_columns_by_root_requests: ActiveRequests::new("data_columns_by_root"),
             blocks_by_range_requests: ActiveRequests::new("blocks_by_range"),
@@ -336,6 +354,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             payload_envelopes_by_range_requests: ActiveRequests::new("payload_envelopes_by_range"),
             custody_by_root_requests: <_>::default(),
             components_by_range_requests: FnvHashMap::default(),
+            components_by_root_requests: <_>::default(),
             custody_backfill_data_column_batch_requests: FnvHashMap::default(),
             network_beacon_processor,
             chain,
@@ -361,6 +380,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             network_send: _,
             request_id: _,
             blocks_by_root_requests,
+            blocks_by_head_requests,
             payload_envelopes_by_root_requests,
             data_columns_by_root_requests,
             blocks_by_range_requests,
@@ -371,6 +391,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             custody_by_root_requests: _,
             // components_by_range_requests is a meta request of various _by_range requests
             components_by_range_requests: _,
+            // components_by_root_requests is a meta request of various _by_root requests
+            components_by_root_requests: _,
             custody_backfill_data_column_batch_requests: _,
             execution_engine_state: _,
             network_beacon_processor: _,
@@ -382,6 +404,10 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .active_requests_of_peer(peer_id)
             .into_iter()
             .map(|id| SyncRequestId::SingleBlock { id: *id });
+        let blocks_by_head_ids = blocks_by_head_requests
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|id| SyncRequestId::BlocksByHead(*id));
         let payload_envelopes_by_root_ids = payload_envelopes_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
@@ -407,6 +433,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .into_iter()
             .map(|req_id| SyncRequestId::PayloadEnvelopesByRange(*req_id));
         blocks_by_root_ids
+            .chain(blocks_by_head_ids)
             .chain(payload_envelopes_by_root_ids)
             .chain(data_column_by_root_ids)
             .chain(blocks_by_range_ids)
@@ -421,8 +448,37 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .custody_peers_for_column(column_index, block_slot)
     }
 
+    pub fn block_is_known_to_fork_choice(&self, root: &Hash256) -> bool {
+        self.chain.block_is_known_to_fork_choice(root)
+    }
+
+    /// The finalized checkpoint root and the slot its epoch starts at.
+    pub fn finalized(&self) -> (Hash256, Slot) {
+        let checkpoint = self
+            .chain
+            .canonical_head
+            .cached_head()
+            .finalized_checkpoint();
+        (
+            checkpoint.root,
+            checkpoint
+                .epoch
+                .start_slot(<T::EthSpec as EthSpec>::slots_per_epoch()),
+        )
+    }
+
     pub fn network_globals(&self) -> &NetworkGlobals<T::EthSpec> {
         &self.network_beacon_processor.network_globals
+    }
+
+    /// Returns true if the peer advertised support for the `beacon_blocks_by_head` protocol.
+    pub fn peer_supports_blocks_by_head(&self, peer_id: &PeerId) -> bool {
+        self.network_globals()
+            .peers
+            .read()
+            .peer_info(peer_id)
+            .map(|info| info.supports_protocol(Protocol::BlocksByHead))
+            .unwrap_or(false)
     }
 
     /// Returns the Client type of the peer if known
@@ -714,33 +770,6 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peers_to_deprioritize: &HashSet<PeerId>,
         block_root: Hash256,
     ) -> Result<LookupRequestResult<Arc<SignedBeaconBlock<T::EthSpec>>>, RpcRequestSendError> {
-        let blocks_by_root_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
-        let Some(peer_id) = lookup_peers
-            .read()
-            .iter()
-            .map(|peer| {
-                (
-                    // De-prioritize peers that have already failed this request
-                    peers_to_deprioritize.contains(peer),
-                    // Strictly de-prioritize peers already at the per-protocol concurrency limit
-                    blocks_by_root_per_peer.at_concurrency_limit(peer),
-                    // Random factor to break ties, otherwise the PeerID breaks ties
-                    rand::random::<u32>(),
-                    peer,
-                )
-            })
-            .min()
-            .map(|(_, _, _, peer)| *peer)
-        else {
-            // Allow lookup to not have any peers and do nothing. This is an optimization to not
-            // lose progress of lookups created from a block with unknown parent before we receive
-            // attestations for said block.
-            // Lookup sync event safety: If a lookup requires peers to make progress, and does
-            // not receive any new peers for some time it will be dropped. If it receives a new
-            // peer it must attempt to make progress.
-            return Ok(LookupRequestResult::Pending("no peers"));
-        };
-
         match self.chain.get_block_process_status(&block_root) {
             // Unknown block, continue request to download
             BlockProcessStatus::Unknown => {}
@@ -768,14 +797,66 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             req_id: self.next_id(),
         };
 
-        let request = BlocksByRootSingleRequest(block_root);
+        if self
+            .send_blocks_by_root_request(
+                BlockRootsRequest::new(block_root),
+                BeaconBlocksByRootRequester::Lookup(id),
+                &lookup_peers,
+                peers_to_deprioritize,
+                true,
+            )?
+            .is_none()
+        {
+            // Allow lookup to not have any peers and do nothing. This is an optimization to not
+            // lose progress of lookups created from a block with unknown parent before we receive
+            // attestations for said block.
+            // Lookup sync event safety: If a lookup requires peers to make progress, and does
+            // not receive any new peers for some time it will be dropped. If it receives a new
+            // peer it must attempt to make progress.
+            return Ok(LookupRequestResult::Pending("no peers"));
+        }
 
-        // Lookup sync event safety: If network_send.send() returns Ok(_) we are guaranteed that
-        // eventually at least one this 3 events will be received:
-        // - StreamTermination(request_id): handled by `Self::on_single_block_response`
-        // - RPCError(request_id): handled by `Self::on_single_block_response`
-        // - Disconnect(peer_id) handled by `Self::peer_disconnected``which converts it to a
-        // ` RPCError(request_id)`event handled by the above method
+        Ok(LookupRequestResult::RequestSent(id.req_id))
+    }
+
+    pub fn send_blocks_by_root_request(
+        &mut self,
+        request: BlockRootsRequest,
+        requester: BeaconBlocksByRootRequester,
+        peers: &Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+        expect_max_responses: bool,
+    ) -> Result<Option<BeaconBlocksByRootRequestId>, RpcRequestSendError> {
+        let blocks_by_root_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
+        let Some(peer_id) = peers
+            .read()
+            .iter()
+            .map(|peer| {
+                (
+                    // De-prioritize peers that have already failed this request
+                    peers_to_deprioritize.contains(peer),
+                    // Strictly de-prioritize peers already at the per-protocol concurrency limit
+                    blocks_by_root_per_peer.at_concurrency_limit(peer),
+                    // Random factor to break ties, otherwise the PeerID breaks ties
+                    rand::random::<u32>(),
+                    peer,
+                )
+            })
+            .min()
+            .map(|(_, _, _, peer)| *peer)
+        else {
+            return Ok(None);
+        };
+
+        let items = BlocksByRootRequestItems::new(&request);
+        let first_root = request.0.first().copied();
+        let root_count = request.0.len();
+
+        let id = BeaconBlocksByRootRequestId {
+            id: self.next_id(),
+            requester,
+        };
+
         let network_request = RequestType::BlocksByRoot(
             request
                 .into_request(&self.fork_context)
@@ -791,7 +872,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         debug!(
             method = "BlocksByRoot",
-            ?block_root,
+            ?first_root,
+            root_count,
             peer = %peer_id,
             %id,
             "Sync RPC request sent"
@@ -800,21 +882,117 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let request_span = debug_span!(
             parent: Span::current(),
             "lh_outgoing_block_by_root_request",
-            %block_root,
+            ?first_root,
+            root_count,
         );
-        self.blocks_by_root_requests.insert(
+        self.blocks_by_root_requests
+            .insert(id, peer_id, expect_max_responses, items, request_span);
+
+        Ok(Some(id))
+    }
+
+    /// Sends a `beacon_blocks_by_head` request to `peer_id`, fetching `request.beacon_root` and a
+    /// run of its ancestors in a single request.
+    pub fn send_blocks_by_head(
+        &mut self,
+        peer_id: PeerId,
+        lookup_id: SingleLookupId,
+        request: BlocksByHeadRequest,
+    ) -> Result<Id, RpcRequestSendError> {
+        let id = SingleLookupReqId {
+            lookup_id,
+            req_id: self.next_id(),
+        };
+        self.network_send
+            .send(NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::BlocksByHead(request.clone()),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByHead(id)),
+            })
+            .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        debug!(
+            method = "BlocksByHead",
+            block_root = ?request.beacon_root,
+            peer = %peer_id,
+            %id,
+            "Sync RPC request sent"
+        );
+
+        let request_span = debug_span!(
+            parent: Span::current(),
+            "lh_outgoing_block_by_head_request",
+            block_root = %request.beacon_root,
+        );
+        self.blocks_by_head_requests.insert(
             id,
             peer_id,
-            // true = enforce max_requests as returned for blocks_by_root. We always request a single
-            // block and the peer must have it.
-            true,
-            BlocksByRootRequestItems::new(request),
+            // false = the peer may return fewer blocks than requested (e.g. reached genesis or
+            // finalization), so the request completes on stream termination.
+            false,
+            BlocksByHeadRequestItems::new(request.beacon_root, request.count as usize),
             request_span,
         );
 
-        Ok(LookupRequestResult::RequestSent(id.req_id))
+        Ok(id.req_id)
     }
 
+    /// Starts a coupled download of `roots` — the blocks, and the custody columns for those
+    /// of them that carry data — and returns the id naming it, which is also the key it is
+    /// held under.
+    pub fn components_by_root_request(
+        &mut self,
+        chain_id: Id,
+        blocks: &[BlockSummary],
+        peers: Arc<RwLock<HashSet<PeerId>>>,
+    ) -> Result<ComponentsByRootRequestId, RpcRequestSendError> {
+        let req_id = ComponentsByRootRequestId {
+            id: self.next_id(),
+            chain_id,
+        };
+        let mut request = ComponentsByRootRequest::new(req_id, blocks, peers)?;
+        match request.continue_requests(self) {
+            Ok(_) => {
+                self.components_by_root_requests.insert(req_id, request);
+                Ok(req_id)
+            }
+            Err(e) => Err(RpcRequestSendError::InternalError(format!("{e:?}"))),
+        }
+    }
+    pub(crate) fn on_components_by_root_response(
+        &mut self,
+        req_id: ComponentsByRootRequestId,
+        response: ComponentsByRootResponse<T::EthSpec>,
+        peer_id: Option<PeerId>,
+    ) -> Option<ComponentsByRootResult<T::EthSpec>> {
+        let mut request = self.components_by_root_requests.remove(&req_id)?;
+        let result = request.on_response(response, peer_id, self);
+        self.handle_components_by_root_result(req_id, request, result)
+    }
+
+    fn handle_components_by_root_result(
+        &mut self,
+        req_id: ComponentsByRootRequestId,
+        request: ComponentsByRootRequest<T>,
+        result: ComponentsByRootRequestResult<T::EthSpec>,
+    ) -> Option<ComponentsByRootResult<T::EthSpec>> {
+        let result = result.transpose();
+
+        match result.as_ref() {
+            Some(Ok(blocks)) => {
+                debug!(%req_id, count = blocks.len(), "Components by root request success, removing")
+            }
+            Some(Err(e)) => {
+                debug!(%req_id, error = ?e, "Components by root request failure, removing")
+            }
+            None => {
+                self.components_by_root_requests.insert(req_id, request);
+            }
+        }
+        result
+    }
+
+    /// Forgets a coupled download, when the chain that wanted it is dropped.
     /// Request a payload envelope for a block root via PayloadEnvelopesByRoot RPC.
     pub fn payload_lookup_request(
         &mut self,
@@ -863,11 +1041,136 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             req_id: self.next_id(),
         };
 
-        let request = PayloadEnvelopesByRootSingleRequest { block_root };
+        self.send_payload_envelopes_by_root_request(
+            PayloadRootsRequest::new(block_root),
+            PayloadEnvelopesByRootRequester::Lookup(id),
+            peer_id,
+            true,
+        )?;
+
+        Ok(LookupRequestResult::RequestSent(id.req_id))
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn payloads_by_root_request(
+        &mut self,
+        req_id: ComponentsByRootRequestId,
+        roots: &[Hash256],
+        peers: &Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Result<
+        LookupRequestResult<
+            Vec<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>,
+            PayloadEnvelopesByRootRequestId,
+        >,
+        RpcRequestSendError,
+    > {
+        if roots.is_empty() {
+            return Ok(LookupRequestResult::NoRequestNeeded("no payloads", vec![]));
+        }
+
+        let Some(peer_id) = self.select_payloads_by_root_peer(peers, peers_to_deprioritize) else {
+            return Ok(LookupRequestResult::Pending("no peers"));
+        };
+
+        let id = PayloadEnvelopesByRootRequestId {
+            id: self.next_id(),
+            requester: PayloadEnvelopesByRootRequester::ComponentsByRoot(req_id),
+        };
+        let request = PayloadRootsRequest(roots.to_vec());
+        let items = PayloadEnvelopesByRootRequestItems::new(&request);
+        let network_request = RequestType::PayloadEnvelopesByRoot(
+            request
+                .into_request(&self.fork_context)
+                .map_err(RpcRequestSendError::InternalError)?,
+        );
+        self.network_send
+            .send(NetworkMessage::SendRequest {
+                peer_id,
+                request: network_request,
+                app_request_id: AppRequestId::Sync(SyncRequestId::SinglePayloadEnvelope { id }),
+            })
+            .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        let request_span = debug_span!(
+            parent: Span::current(),
+            "lh_outgoing_payload_envelopes_by_root_request",
+        );
+        self.payload_envelopes_by_root_requests
+            .insert(id, peer_id, true, items, request_span);
+        Ok(LookupRequestResult::RequestSent(id))
+    }
+
+    pub fn custody_by_root_request(
+        &mut self,
+        req_id: ComponentsByRootRequestId,
+        roots: &[Hash256],
+        epoch: Epoch,
+        peers: &Arc<RwLock<HashSet<PeerId>>>,
+    ) -> Result<
+        LookupRequestResult<DataColumnSidecarList<T::EthSpec>, ComponentsByRootRequestId>,
+        RpcRequestSendError,
+    > {
+        if roots.is_empty() {
+            return Ok(LookupRequestResult::NoRequestNeeded("no columns", vec![]));
+        }
+        // `ignore_cache`: the cache lookup keys off the first root only, so for a batch it
+        // would skip indexes held for that block but missing for the rest, leaving the set
+        // short of the custody columns coupling requires.
+        match self.custody_lookup_request(
+            CustodyRequester::ComponentsByRoot(req_id),
+            roots,
+            epoch,
+            true,
+            peers.clone(),
+        )? {
+            LookupRequestResult::RequestSent(_) => Ok(LookupRequestResult::RequestSent(req_id)),
+            LookupRequestResult::NoRequestNeeded(reason, columns) => {
+                Ok(LookupRequestResult::NoRequestNeeded(reason, columns))
+            }
+            LookupRequestResult::Pending(reason) => Ok(LookupRequestResult::Pending(reason)),
+        }
+    }
+
+    fn select_payloads_by_root_peer(
+        &self,
+        peers: &Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Option<PeerId> {
+        let per_peer = ActiveRequestsPerPeer::new(&self.payload_envelopes_by_root_requests);
+        peers
+            .read()
+            .iter()
+            .map(|peer| {
+                (
+                    peers_to_deprioritize.contains(peer),
+                    per_peer.at_concurrency_limit(peer),
+                    rand::random::<u32>(),
+                    peer,
+                )
+            })
+            .min()
+            .map(|(_, _, _, peer)| *peer)
+    }
+
+    pub fn send_payload_envelopes_by_root_request(
+        &mut self,
+        request: PayloadRootsRequest,
+        requester: PayloadEnvelopesByRootRequester,
+        peer_id: PeerId,
+        expect_max_responses: bool,
+    ) -> Result<PayloadEnvelopesByRootRequestId, RpcRequestSendError> {
+        let items = PayloadEnvelopesByRootRequestItems::new(&request);
+        let first_root = request.0.first().copied();
+        let root_count = request.0.len();
+
+        let id = PayloadEnvelopesByRootRequestId {
+            id: self.next_id(),
+            requester,
+        };
 
         let network_request = RequestType::PayloadEnvelopesByRoot(
             request
-                .clone()
                 .into_request(&self.fork_context)
                 .map_err(RpcRequestSendError::InternalError)?,
         );
@@ -881,7 +1184,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
         debug!(
             method = "PayloadEnvelopesByRoot",
-            ?block_root,
+            ?first_root,
+            root_count,
             peer = %peer_id,
             %id,
             "Sync RPC request sent"
@@ -890,15 +1194,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.payload_envelopes_by_root_requests.insert(
             id,
             peer_id,
-            // true = enforce that the peer returns a response. We only request a single envelope
-            // and the peer must have it.
-            true,
-            PayloadEnvelopesByRootRequestItems::new(request),
+            expect_max_responses,
+            items,
             Span::none(),
         );
 
-        Ok(LookupRequestResult::RequestSent(id.req_id))
+        Ok(id)
     }
+
     /// Request to send a `data_columns_by_root` request to the network. The request may cover the
     /// custody columns of one or more block roots.
     pub fn data_column_lookup_request(
@@ -1014,6 +1317,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let caller_req_id = match &requester {
             CustodyRequester::SingleLookup(id) => id.req_id,
             CustodyRequester::RangeSync(id) => id.id,
+            CustodyRequester::ComponentsByRoot(id) => id.id,
         };
 
         let mut request = ActiveCustodyRequest::new(
@@ -1343,46 +1647,49 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     // Request handlers
 
-    pub(crate) fn on_single_block_response(
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn on_blocks_by_root_response(
+        &mut self,
+        id: BeaconBlocksByRootRequestId,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>> {
+        let resp = self.blocks_by_root_requests.on_response(id, rpc_event);
+        self.on_rpc_response_result(resp, peer_id)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn on_blocks_by_head_response(
         &mut self,
         id: SingleLookupReqId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
-    ) -> Option<RpcResponseResult<Arc<SignedBeaconBlock<T::EthSpec>>>> {
-        let resp = self.blocks_by_root_requests.on_response(id, rpc_event);
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>> {
+        // The response has the requested `beacon_root` first followed by its ancestors in
+        // descending slot order, and must contain at least the requested block.
+        let resp = self.blocks_by_head_requests.on_response(id, rpc_event);
         let resp = resp.map(|res| {
-            res.and_then(|mut blocks| {
-                // Enforce that exactly one chunk = one block is returned. ReqResp behavior limits the
-                // response count to at most 1.
-                match blocks.pop() {
-                    Some(block) => Ok(block),
-                    // Should never happen, `blocks_by_root_requests` enforces that we receive at least
-                    // 1 chunk.
-                    None => Err(LookupVerifyError::NotEnoughResponsesReturned { actual: 0 }.into()),
+            res.and_then(|blocks| {
+                if blocks.is_empty() {
+                    Err(LookupVerifyError::NotEnoughResponsesReturned { actual: 0 }.into())
+                } else {
+                    Ok(blocks)
                 }
             })
         });
         self.on_rpc_response_result(resp, peer_id)
     }
 
-    pub(crate) fn on_single_payload_envelope_response(
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn on_payload_envelopes_by_root_response(
         &mut self,
-        id: SingleLookupReqId,
+        id: PayloadEnvelopesByRootRequestId,
         peer_id: PeerId,
         rpc_event: RpcEvent<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>,
-    ) -> Option<RpcResponseResult<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>> {
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>>> {
         let resp = self
             .payload_envelopes_by_root_requests
             .on_response(id, rpc_event);
-        let resp = resp.map(|res| {
-            res.and_then(|mut envelopes| {
-                match envelopes.pop() {
-                    Some(envelope) => Ok(envelope),
-                    // Should never happen, we enforce at least 1 chunk.
-                    None => Err(LookupVerifyError::NotEnoughResponsesReturned { actual: 0 }.into()),
-                }
-            })
-        });
         self.on_rpc_response_result(resp, peer_id)
     }
 
@@ -1454,7 +1761,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peer_id: PeerId,
     ) -> Option<RpcResponseResult<R>> {
         if let Some(Err(RpcResponseError::VerifyError(e))) = &resp {
-            self.report_peer(peer_id, PeerAction::LowToleranceError, e.into());
+            // A peer may legally omit a block it does not have — it may have checkpoint
+            // synced and not backfilled — so we still require the full set but do not
+            // treat a short response as we treat a response that breaks the protocol.
+            let action = match e {
+                LookupVerifyError::NotEnoughResponsesReturned { .. } => {
+                    PeerAction::HighToleranceError
+                }
+                _ => PeerAction::LowToleranceError,
+            };
+            self.report_peer(peer_id, action, e.into());
         }
         resp
     }
@@ -1719,6 +2035,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     pub(crate) fn register_metrics(&self) {
         for (id, count) in [
             ("blocks_by_root", self.blocks_by_root_requests.len()),
+            ("blocks_by_head", self.blocks_by_head_requests.len()),
             (
                 "data_columns_by_root",
                 self.data_columns_by_root_requests.len(),

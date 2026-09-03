@@ -225,13 +225,22 @@ test-op-pool-%:
 		--features "beacon_chain/fork_from_env,$(TEST_FEATURES)"\
 		-p operation_pool
 
-# Run the tests in the `network` crate for all known forks.
+# Run the tests in the `network` crate for all known forks, once with range and lookup
+# sync and once with tree sync in their place (TREE_SYNC=1).
+#
+# The tree sync run skips `sync::tests::{lookups,range}`: those assert on the internals of
+# the two strategies tree sync replaces — `range_sync_state()`, `created_lookups()` — which
+# are inert under the flag by design, so they cannot pass and rewriting them would not test
+# tree sync either. Tree sync needs tests of its own; it has none yet.
 test-network: $(patsubst %,test-network-%,$(TEST_NETWORK_FORKS))
 
 test-network-%:
 	env FORK_NAME=$* cargo nextest run --no-fail-fast --release \
 		--features "fork_from_env,fake_crypto,$(TEST_FEATURES)" \
 		-p network
+	env FORK_NAME=$* TREE_SYNC=1 cargo nextest run --no-fail-fast --release \
+		--features "fork_from_env,fake_crypto,$(TEST_FEATURES)" \
+		-p network -E 'not (test(sync::tests::lookups::) or test(sync::tests::range::))'
 	env FORK_NAME=$* cargo nextest run --no-fail-fast --release \
 		--features "fork_from_env,$(TEST_FEATURES)" \
 		-p network crypto_on

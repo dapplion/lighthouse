@@ -13,6 +13,7 @@ mod range_data_column_batch_request;
 mod range_sync;
 #[cfg(test)]
 mod tests;
+mod tree_sync;
 
 pub use manager::{BatchProcessResult, SyncMessage};
 pub use network_context::{PeerGroup, SyncNetworkContext};
