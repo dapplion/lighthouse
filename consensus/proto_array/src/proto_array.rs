@@ -1030,8 +1030,13 @@ impl ProtoArray {
                 .ok_or(Error::InvalidNodeIndex(index))?;
 
             // An `EMPTY` edge is a gap in the execution ancestry of the branch, not the end of it.
-            // This branch never ran the payload of this block, so the walk steps over it.
-            if status != PayloadStatus::Full {
+            // This branch never ran the payload of this block, so the walk steps over it. An
+            // unrevealed payload is stepped over for the same reason: nothing here was executed,
+            // and the payloads the branch did execute sit above it. Without the step-over, an
+            // invalidation anchored on an unrevealed head records nothing at all.
+            if status != PayloadStatus::Full
+                || matches!(node.execution_status(), ExecutionStatus::NotYetRevealed(_))
+            {
                 walk_path.push((index, false));
                 let Some(parent_index) = node.parent() else {
                     break;
@@ -1062,8 +1067,7 @@ impl ProtoArray {
                     }
                 }
                 ExecutionStatus::Irrelevant(_) => break,
-                // The envelope for this payload has not arrived here yet. There is no verdict
-                // to update, and nothing above it changes either.
+                // Stepped over before the match; unreachable.
                 ExecutionStatus::NotYetRevealed(_) => break,
             }
 
