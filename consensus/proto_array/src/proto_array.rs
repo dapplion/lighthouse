@@ -826,7 +826,12 @@ impl ProtoArray {
         match v29.execution_status {
             // The invalidation sweep condemned this payload before its envelope arrived. The
             // verdict is implied by its invalid ancestry, so a late envelope must not undo it.
-            ExecutionStatus::Invalid(_) => return Ok(()),
+            // The envelope did arrive though: without `payload_received`, sync would fetch and
+            // import it again forever.
+            ExecutionStatus::Invalid(_) => {
+                v29.payload_received = true;
+                return Ok(());
+            }
             // A duplicate envelope must not downgrade a validated payload.
             ExecutionStatus::Valid(_) => return Ok(()),
             _ => (),
