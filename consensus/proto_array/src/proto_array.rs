@@ -672,9 +672,13 @@ impl ProtoArray {
 
             // An invalid Gloas payload condemns only the `FULL` node of the parent. A block that
             // builds on the `EMPTY` node does not include that payload and is accepted.
+            //
+            // A pre-Gloas parent carries its payload inside the block, so every child includes
+            // it, whatever `parent_payload_status` the fork boundary convention stored.
             let builds_on_invalid_payload = parent.execution_status().is_invalid()
-                && node.parent_payload_status().unwrap_or(PayloadStatus::Full)
-                    == PayloadStatus::Full;
+                && (parent.as_v17().is_ok()
+                    || node.parent_payload_status().unwrap_or(PayloadStatus::Full)
+                        == PayloadStatus::Full);
             if builds_on_invalid_payload {
                 return Err(Error::ParentExecutionStatusIsInvalid {
                     block_root: block.root,
@@ -1141,6 +1145,12 @@ impl ProtoArray {
             .copied()
             .collect();
         while let Some(parent_index) = queue.pop() {
+            let parent_is_v17 = self
+                .nodes
+                .get(parent_index)
+                .ok_or(Error::InvalidNodeIndex(parent_index))?
+                .as_v17()
+                .is_ok();
             let child_indices = self
                 .children
                 .get(parent_index)
@@ -1156,7 +1166,11 @@ impl ProtoArray {
                 // invalid payload is already in the parent's state. When only the parent's own
                 // payload is invalid, a descendant that took the `EMPTY` edge does not include
                 // it and stays viable.
+                //
+                // A pre-Gloas parent carries its payload inside the block, so its children have
+                // no escape, whatever the fork boundary convention stored for the edge.
                 if !block_invalid.contains(&parent_index)
+                    && !parent_is_v17
                     && let ProtoNode::V29(gloas_node) = node
                     && gloas_node.parent_payload_status != PayloadStatus::Full
                 {
@@ -2290,6 +2304,28 @@ mod invalidation_tests {
         assert!(
             array.nodes[2].execution_status().is_strictly_optimistic(),
             "block 2 took the empty edge of the deepest invalid payload",
+        );
+    }
+
+    /// A pre-Gloas parent with an invalid payload condemns its Gloas child, even though the fork
+    /// boundary convention stores an `Empty` edge for it: the parent's payload rides inside the
+    /// parent block, so the child's state includes it.
+    #[test]
+    fn gloas_child_of_invalid_pre_gloas_parent_dies() {
+        let mut array = array_of(vec![
+            v17_node(
+                0,
+                None,
+                ExecutionStatus::Optimistic(ExecutionBlockHash::repeat_byte(0x10)),
+            ),
+            gloas_node(1, Some(0), PayloadStatus::Empty),
+        ]);
+        invalidate(&mut array, 0, 0xff);
+
+        assert!(array.nodes[0].execution_status().is_invalid());
+        assert!(
+            array.nodes[1].execution_status().is_invalid(),
+            "the parent's payload is inside the parent block, so the child has no empty escape",
         );
     }
 
