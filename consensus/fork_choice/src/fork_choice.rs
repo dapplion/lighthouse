@@ -1688,7 +1688,18 @@ where
     /// Returns an `ExecutionStatus` if the block is known **and** a descendant of the finalized root.
     pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
-            self.proto_array.get_block_execution_status(block_root)
+            match self.proto_array.get_block_execution_status(block_root) {
+                // The block's own payload has not arrived, so the chain that ends at this block
+                // runs on an ancestor's payload. Callers gate attestation production and report
+                // `execution_optimistic` on this method, and both must reflect the payload the
+                // chain executed, not the one it has never seen.
+                Some(ExecutionStatus::NotYetRevealed(_)) => self
+                    .proto_array
+                    .get_node_execution_status(block_root, PayloadStatus::Empty)
+                    .ok()
+                    .flatten(),
+                other => other,
+            }
         } else {
             None
         }
