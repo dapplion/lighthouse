@@ -222,6 +222,42 @@ impl<A: SlotAssignments> FastConfirmationRule<A> {
     /// Enable spec test mode: `on_fast_confirmation` still tracks variables but
     /// does not update `confirmed_root`. Call `get_latest_confirmed` explicitly
     /// when the test needs the confirmation result.
+    /// Rebuild a rule from its persisted fields, for a host that runs one
+    /// slot at a time from a checkpointed store.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        confirmed_root: Hash256,
+        previous_epoch_observed_justified: CheckpointAndBalance,
+        current_epoch_observed_justified: CheckpointAndBalance,
+        previous_epoch_greatest_unrealized_checkpoint: Checkpoint,
+        previous_slot_head: Hash256,
+        current_slot_head: Hash256,
+        byzantine_threshold: u64,
+        proposer_score_boost: u64,
+        slot_assignments: A,
+        head_balance_source: BalanceSourceData,
+        last_update_slot: Option<Slot>,
+    ) -> Self {
+        Self {
+            confirmed_root,
+            previous_epoch_observed_justified,
+            current_epoch_observed_justified,
+            previous_epoch_greatest_unrealized_checkpoint,
+            previous_slot_head,
+            current_slot_head,
+            byzantine_threshold: byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD),
+            proposer_score_boost,
+            slot_assignments,
+            head_balance_source,
+            last_update_slot,
+            spec_test_mode: false,
+        }
+    }
+
+    pub fn proposer_score_boost(&self) -> u64 {
+        self.proposer_score_boost
+    }
+
     pub fn set_spec_test_mode(&mut self, enabled: bool) {
         self.spec_test_mode = enabled;
     }
