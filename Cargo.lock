@@ -1313,7 +1313,7 @@ dependencies = [
  "ethereum_ssz",
  "ethereum_ssz_derive",
  "execution_layer",
- "fast_confirmation",
+ "fast_confirmation_beacon",
  "fixed_bytes",
  "fork_choice",
  "futures",
@@ -2977,7 +2977,7 @@ dependencies = [
  "ethereum_ssz",
  "ethereum_ssz_derive",
  "execution_layer",
- "fast_confirmation",
+ "fast_confirmation_beacon",
  "fork_choice",
  "fs2",
  "hex",
@@ -3568,8 +3568,16 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 name = "fast_confirmation"
 version = "0.1.0"
 dependencies = [
+ "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "fast_confirmation_beacon"
+version = "0.1.0"
+dependencies = [
  "criterion",
  "ethereum_hashing",
+ "fast_confirmation",
  "fixed_bytes",
  "metrics",
  "proto_array",

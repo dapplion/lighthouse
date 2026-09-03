@@ -4,12 +4,13 @@
 //! per-block `get_attestation_score`) via a faster algorithm. They are deliberately kept out of
 //! `lib.rs` so that module reads as the spec algorithm.
 
+use crate::primitives::{Checkpoint, Epoch, Hash256, SafeArith, Slot, Votes};
+use crate::store::ForkChoiceStore;
 use crate::{BalanceSourceData, Error};
-use proto_array::core::{ProtoArray, VoteTracker};
-use safe_arith::SafeArith;
-use std::cell::OnceCell;
-use std::collections::{BTreeSet, HashMap};
-use types::{Checkpoint, Epoch, Hash256, Slot};
+use alloc::collections::BTreeSet;
+use alloc::vec;
+use core::cell::OnceCell;
+use hashbrown::HashMap;
 
 /// An observed-justified checkpoint paired with the balance snapshot anchored to it.
 ///
@@ -24,6 +25,7 @@ pub struct CheckpointAndBalance {
 }
 
 impl CheckpointAndBalance {
+    #[inline]
     pub fn new(checkpoint: Checkpoint, balances: BalanceSourceData) -> Self {
         Self {
             checkpoint,
@@ -31,10 +33,12 @@ impl CheckpointAndBalance {
         }
     }
 
+    #[inline]
     pub fn checkpoint(&self) -> Checkpoint {
         self.checkpoint
     }
 
+    #[inline]
     pub fn balances(&self) -> &BalanceSourceData {
         &self.balances
     }
@@ -46,16 +50,16 @@ impl CheckpointAndBalance {
 /// for each candidate block. Lighthouse computes the same scores for a canonical chain segment in
 /// one pass and then serves individual `get_attestation_score` calls from this cache.
 pub(crate) struct AttestationScoreCache {
-    scores: HashMap<Hash256, u64>,
+    scores: RootBalanceMap<Hash256>,
 }
 
 impl AttestationScoreCache {
-    pub(crate) fn for_chain(
-        proto_array: &ProtoArray,
+    pub(crate) fn for_chain<V: Votes + ?Sized>(
+        proto_array: &dyn ForkChoiceStore,
         chain: &[Hash256],
         terminal_slot: Slot,
         balance_source: &BalanceSourceData,
-        votes: &[VoteTracker],
+        votes: &V,
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Self, Error> {
         Ok(Self {
@@ -70,8 +74,9 @@ impl AttestationScoreCache {
         })
     }
 
+    #[inline]
     pub(crate) fn get_attestation_score(&self, block_root: Hash256) -> Option<u64> {
-        self.scores.get(&block_root).copied()
+        self.scores.get(&block_root)
     }
 }
 
@@ -83,12 +88,14 @@ pub(crate) struct HonestFfgSupportCache {
 }
 
 impl HonestFfgSupportCache {
+    #[inline]
     pub(crate) fn new() -> Self {
         Self {
             support: OnceCell::new(),
         }
     }
 
+    #[inline]
     pub(crate) fn get_or_compute(
         &self,
         compute: impl FnOnce() -> Result<u64, Error>,
@@ -108,12 +115,15 @@ impl HonestFfgSupportCache {
 /// chooses a bucket. Avoiding SipHash over 32-byte roots matters in the same per-validator loops that
 /// dominate the 1M-validator FCR benchmarks.
 #[derive(Default)]
-struct IdentityU64Hasher(u64);
-impl std::hash::Hasher for IdentityU64Hasher {
+pub struct IdentityU64Hasher(u64);
+impl core::hash::Hasher for IdentityU64Hasher {
+    #[inline(always)]
     fn finish(&self) -> u64 {
         self.0
     }
+    #[inline(always)]
     fn write(&mut self, _: &[u8]) {}
+    #[inline(always)]
     fn write_u64(&mut self, n: u64) {
         self.0 = n;
     }
@@ -121,36 +131,38 @@ impl std::hash::Hasher for IdentityU64Hasher {
 
 /// First 8 bytes of a block root as a `u64` (roots are uniformly distributed, so this is a good
 /// hash). The stored full key disambiguates the (2⁻⁶⁴) prefix collision.
+#[inline(always)]
 fn root_prefix(root: &Hash256) -> u64 {
-    u64::from_le_bytes(
-        root.as_slice()[..8]
-            .try_into()
-            .expect("Hash256 is 32 bytes"),
-    )
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&root.as_slice()[..8]);
+    u64::from_le_bytes(bytes)
 }
 
 /// A key that can be hashed cheaply from the block root it contains.
-pub(crate) trait RootKey: Copy + Eq {
+pub trait RootKey: Copy + Eq {
     fn prefix_hash(&self) -> u64;
 }
 
 impl RootKey for Hash256 {
+    #[inline(always)]
     fn prefix_hash(&self) -> u64 {
         root_prefix(self)
     }
 }
 
 impl RootKey for (Hash256, Epoch) {
+    #[inline(always)]
     fn prefix_hash(&self) -> u64 {
         root_prefix(&self.0) ^ self.1.as_u64()
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-struct PrefixKey<K: RootKey>(K);
+pub struct PrefixKey<K: RootKey>(K);
 
-impl<K: RootKey> std::hash::Hash for PrefixKey<K> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl<K: RootKey> core::hash::Hash for PrefixKey<K> {
+    #[inline(always)]
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         state.write_u64(self.0.prefix_hash());
     }
 }
@@ -161,18 +173,24 @@ impl<K: RootKey> std::hash::Hash for PrefixKey<K> {
 /// summing balances before projection/checkpoint lookup is equivalent to summing matching
 /// validators after lookup, and avoids repeating the same ancestor walk for every validator with
 /// the same latest message.
-pub(crate) struct RootBalanceMap<K: RootKey> {
-    map: HashMap<PrefixKey<K>, u64, std::hash::BuildHasherDefault<IdentityU64Hasher>>,
+pub struct RootBalanceMap<K: RootKey> {
+    map: HashMap<PrefixKey<K>, u64, core::hash::BuildHasherDefault<IdentityU64Hasher>>,
+}
+
+impl<K: RootKey> Default for RootBalanceMap<K> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<K: RootKey> RootBalanceMap<K> {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             map: HashMap::default(),
         }
     }
 
-    pub(crate) fn add(&mut self, key: K, balance: u64) -> Result<(), Error> {
+    pub fn add(&mut self, key: K, balance: u64) -> Result<(), Error> {
         self.map
             .entry(PrefixKey(key))
             .or_insert(0)
@@ -180,7 +198,15 @@ impl<K: RootKey> RootBalanceMap<K> {
         Ok(())
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (K, u64)> + '_ {
+    pub fn insert(&mut self, key: K, value: u64) {
+        self.map.insert(PrefixKey(key), value);
+    }
+
+    pub fn get(&self, key: &K) -> Option<u64> {
+        self.map.get(&PrefixKey(*key)).copied()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (K, u64)> + '_ {
         self.map.iter().map(|(key, &balance)| (key.0, balance))
     }
 }
@@ -203,41 +229,39 @@ impl<K: RootKey> RootBalanceMap<K> {
 ///   project(Z) -> None  Z is below the terminal T; covers nothing on the segment
 /// ```
 struct ChainProjector<'a> {
-    proto_array: &'a ProtoArray,
-    /// node index → position on the canonical chain segment.
-    index_to_position: HashMap<usize, usize>,
+    proto_array: &'a dyn ForkChoiceStore,
+    /// block root → position on the canonical chain segment.
+    root_to_position: RootBalanceMap<Hash256>,
     terminal_slot: Slot,
 }
 
 impl<'a> ChainProjector<'a> {
-    fn new(proto_array: &'a ProtoArray, chain: &[Hash256], terminal_slot: Slot) -> Self {
-        let mut index_to_position = HashMap::with_capacity(chain.len());
+    fn new(proto_array: &'a dyn ForkChoiceStore, chain: &[Hash256], terminal_slot: Slot) -> Self {
+        let mut root_to_position = RootBalanceMap::new();
         for (pos, root) in chain.iter().enumerate() {
-            if let Some(&idx) = proto_array.indices.get(root) {
-                index_to_position.insert(idx, pos);
-            }
+            root_to_position.insert(*root, pos as u64);
         }
         Self {
             proto_array,
-            index_to_position,
+            root_to_position,
             terminal_slot,
         }
     }
 
     /// The deepest canonical position `vote_root` descends from, or `None` if it covers no block
     /// on the segment.
+    #[inline]
     fn project(&self, vote_root: Hash256) -> Option<usize> {
-        let &start_idx = self.proto_array.indices.get(&vote_root)?;
-        let mut idx = start_idx;
+        let mut root = vote_root;
         loop {
-            if let Some(&pos) = self.index_to_position.get(&idx) {
-                return Some(pos);
+            if let Some(pos) = self.root_to_position.get(&root) {
+                return Some(pos as usize);
             }
-            let node = self.proto_array.nodes.get(idx)?;
-            if node.slot() <= self.terminal_slot {
+            let (slot, parent) = self.proto_array.slot_and_parent(root)?;
+            if slot <= self.terminal_slot {
                 break;
             }
-            idx = node.parent()?;
+            root = parent?;
         }
         None
     }
@@ -249,14 +273,14 @@ impl<'a> ChainProjector<'a> {
 ///
 /// One pass in place of B separate O(V × depth) `get_attestation_score` calls. Pure optimization —
 /// not a spec function.
-pub fn precompute_chain_attestation_scores(
-    proto_array: &ProtoArray,
+pub fn precompute_chain_attestation_scores<V: Votes + ?Sized>(
+    proto_array: &dyn ForkChoiceStore,
     chain: &[Hash256],
     terminal_slot: Slot,
     balance_source: &BalanceSourceData,
-    votes: &[VoteTracker],
+    votes: &V,
     equivocating_indices: &BTreeSet<u64>,
-) -> Result<HashMap<Hash256, u64>, Error> {
+) -> Result<RootBalanceMap<Hash256>, Error> {
     let vote_balances = aggregate_vote_balances(balance_source, votes, equivocating_indices)?;
 
     // Charge each vote root's balance to the deepest chain block it covers, then suffix-sum so every
@@ -276,7 +300,7 @@ pub fn precompute_chain_attestation_scores(
     }
 
     // Suffix sum: a vote covering position j also covers all ancestors at positions 0..j.
-    let mut scores = HashMap::with_capacity(chain_len);
+    let mut scores = RootBalanceMap::new();
     let mut running = 0u64;
     for i in (0..chain_len).rev() {
         running = running.safe_add(score_at_position[i])?;
@@ -287,23 +311,22 @@ pub fn precompute_chain_attestation_scores(
 
 /// Sum unslashed balances by LMD vote root (skipping zero and equivocating votes), so the ancestor
 /// projection runs once per distinct root rather than once per validator.
-pub(crate) fn aggregate_vote_balances(
+pub(crate) fn aggregate_vote_balances<V: Votes + ?Sized>(
     balance_source: &BalanceSourceData,
-    votes: &[VoteTracker],
+    votes: &V,
     equivocating_indices: &BTreeSet<u64>,
 ) -> Result<RootBalanceMap<Hash256>, Error> {
     let mut balance_by_vote_root = RootBalanceMap::<Hash256>::new();
 
-    for (val_idx, vote) in votes.iter().enumerate() {
-        let vote_root = vote.current_root();
-        if vote_root.is_zero() || equivocating_indices.contains(&(val_idx as u64)) {
+    for (val_idx, vote_root) in votes.roots().enumerate() {
+        if *vote_root == [0; 32] || equivocating_indices.contains(&(val_idx as u64)) {
             continue;
         }
         let balance = balance_source.unslashed_balance(val_idx);
         if balance == 0 {
             continue;
         }
-        balance_by_vote_root.add(vote_root, balance)?;
+        balance_by_vote_root.add(Hash256(*vote_root), balance)?;
     }
 
     Ok(balance_by_vote_root)

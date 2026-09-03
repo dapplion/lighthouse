@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ethereum_hashing::hash_fixed;
-use fast_confirmation::{
-    BalanceSourceData, BalanceSourceKey, CheckpointAndBalance, FastConfirmationRule,
+use fast_confirmation_beacon::{
+    BalanceSourceData, CheckpointAndBalance, FastConfirmationRule, adapter,
 };
 use fixed_bytes::FixedBytesExtended;
 use proto_array::core::{ProtoArray, VoteTracker};
@@ -112,15 +112,17 @@ impl BenchData {
     /// measurements.
     fn apply_scenario(&mut self, scenario: &Scenario) {
         let head_root = block_root_at(scenario.head_slot);
-        self.fcr.previous_slot_head = head_root;
-        self.fcr.current_slot_head = head_root;
-        self.fcr.confirmed_root = block_root_at(scenario.confirmed_slot);
-        self.fcr.current_epoch_observed_justified = CheckpointAndBalance::new(
-            self.observed_justified_checkpoint,
+        self.fcr.inner.previous_slot_head = adapter::root(head_root);
+        self.fcr.inner.current_slot_head = adapter::root(head_root);
+        self.fcr.inner.confirmed_root = adapter::root(block_root_at(scenario.confirmed_slot));
+        self.fcr.inner.current_epoch_observed_justified = CheckpointAndBalance::new(
+            adapter::checkpoint(&self.observed_justified_checkpoint),
             self.balance_source.clone(),
         );
-        self.fcr.previous_epoch_observed_justified =
-            CheckpointAndBalance::new(self.genesis_checkpoint, self.balance_source.clone());
+        self.fcr.inner.previous_epoch_observed_justified = CheckpointAndBalance::new(
+            adapter::checkpoint(&self.genesis_checkpoint),
+            self.balance_source.clone(),
+        );
     }
 }
 
@@ -245,10 +247,7 @@ fn build_chain_inner(
 
     let total_active_balance = BALANCE.saturating_mul(num_validators as u64);
     let balance_source = BalanceSourceData {
-        key: BalanceSourceKey::NoSlashings {
-            epoch_boundary_root: observed_justified_checkpoint.root,
-            epoch: Slot::new(CHAIN_TIP_SLOT).epoch(E::slots_per_epoch()),
-        },
+        epoch: adapter::epoch(Slot::new(CHAIN_TIP_SLOT).epoch(E::slots_per_epoch())),
         total_active_balance,
         effective_balances: vec![BALANCE; num_validators],
         slashed: vec![false; num_validators],
@@ -363,14 +362,21 @@ fn bench_precompute_chain_scores(c: &mut Criterion) {
             group.sample_size(10);
         }
 
+        let chain: Vec<_> = data.block_roots[1..]
+            .iter()
+            .map(|root| adapter::root(*root))
+            .collect();
+        let store = adapter::ProtoArrayStore {
+            proto_array: &data.proto_array,
+        };
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 fast_confirmation::optimizations::precompute_chain_attestation_scores(
-                    &data.proto_array,
-                    &data.block_roots[1..],
-                    terminal_slot,
+                    &store,
+                    &chain,
+                    adapter::slot(terminal_slot),
                     &data.balance_source,
-                    &data.votes,
+                    &adapter::VoteTrackers(&data.votes),
                     &data.equivocating_indices,
                 )
             })

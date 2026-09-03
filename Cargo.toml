@@ -50,6 +50,7 @@ members = [
     "common/warp_utils",
     "common/workspace_members",
     "consensus/fast_confirmation",
+    "consensus/fast_confirmation_beacon",
     "consensus/fixed_bytes",
     "consensus/fork_choice",
     "consensus/int_to_bytes",
@@ -152,6 +153,7 @@ ethereum_ssz = { version = "0.10.0", features = ["context_deserialize"] }
 ethereum_ssz_derive = "0.10.0"
 execution_layer = { path = "beacon_node/execution_layer" }
 fast_confirmation = { path = "consensus/fast_confirmation" }
+fast_confirmation_beacon = { path = "consensus/fast_confirmation_beacon" }
 filesystem = { path = "common/filesystem" }
 fixed_bytes = { path = "consensus/fixed_bytes" }
 fnv = "1"
@@ -160,6 +162,7 @@ fs2 = "0.4"
 futures = "0.3"
 genesis = { path = "beacon_node/genesis" }
 graffiti_file = { path = "validator_client/graffiti_file" }
+hashbrown = { version = "0.16", default-features = false, features = ["inline-more"] }
 hashlink = "0.11"
 health_metrics = { path = "common/health_metrics" }
 hex = "0.4"
