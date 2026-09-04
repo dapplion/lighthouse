@@ -373,10 +373,7 @@ pub fn spawn_notifier<T: BeaconChainTypes>(
                         metrics::set_gauge(&metrics::IS_OPTIMISTIC_SYNC, 0);
                         format!("{} (verified)", hash)
                     }
-                    // An unrevealed payload in the head's executed ancestry is unverified, the
-                    // same as an optimistic one.
-                    Ok(ExecutionStatus::Optimistic(hash))
-                    | Ok(ExecutionStatus::NotYetRevealed(hash)) => {
+                    Ok(ExecutionStatus::Optimistic(hash)) => {
                         metrics::set_gauge(&metrics::IS_OPTIMISTIC_SYNC, 1);
                         warn!(
                             info = "chain not fully verified, \
@@ -385,6 +382,13 @@ pub fn spawn_notifier<T: BeaconChainTypes>(
                             "Head is optimistic"
                         );
                         format!("{} (unverified)", hash)
+                    }
+                    Ok(ExecutionStatus::NotYetRevealed(hash)) => {
+                        debug!(
+                            bid_block_hash = ?hash,
+                            "Head execution payload is not yet revealed"
+                        );
+                        format!("{} (unrevealed)", hash)
                     }
                     Ok(ExecutionStatus::Invalid(hash)) => {
                         crit!(
