@@ -242,6 +242,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         drop(proposer_head_timer);
         let re_org_parent_block = proposer_head.parent_node.root();
 
+        let (state_root, state) = self
+            .store
+            .get_advanced_hot_state_from_cache(re_org_parent_block, slot)
+            .or_else(|| {
+                warn!(reason = "no state in cache", "Not attempting re-org");
+                None
+            })?;
+
         // The head uniquely determines the parent payload status for the re-org block, whichever
         // variant (full or empty) it builds on must have more weight, or else we would have already
         // re-orged away from this block naturally, and it would not be the head, by definition.
@@ -251,15 +259,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // separate payload to apply, which `EMPTY` conveys.
             PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
         };
-
-        let (state_root, state) = self
-            .store
-            .get_advanced_hot_state_from_cache(re_org_parent_block, slot)
-            .or_else(|| {
-                warn!(reason = "no state in cache", "Not attempting re-org");
-                None
-            })?;
-
         let parent_envelope = if parent_payload_status == PayloadStatus::Full {
             let envelope = self
                 .store
