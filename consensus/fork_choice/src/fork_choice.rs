@@ -3,8 +3,8 @@ use crate::{ForkChoiceStore, InvalidationOperation};
 use fixed_bytes::FixedBytesExtended;
 use logging::crit;
 use proto_array::{
-    Block as ProtoBlock, ExecutionStatus, JustifiedBalances, LatestMessage, PayloadStatus,
-    ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice, ReOrgThreshold,
+    Block as ProtoBlock, ExecutionStatus, FcBlockHash, JustifiedBalances, LatestMessage,
+    PayloadStatus, ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice, ReOrgThreshold,
 };
 use ssz_derive::{Decode, Encode};
 use state_processing::{
@@ -25,6 +25,7 @@ use types::{
 
 #[derive(Debug)]
 pub enum Error<T> {
+    Unexpected(String),
     InvalidAttestation(InvalidAttestation),
     InvalidPayloadAttestation(InvalidPayloadAttestation),
     InvalidAttesterSlashing(AttesterSlashingValidationError),
@@ -430,14 +431,14 @@ where
                 // Gloas: execution status is irrelevant post-Gloas; payload validation
                 // is decoupled from beacon blocks.
                 (
-                    ExecutionStatus::irrelevant(),
+                    ExecutionStatus::pre_merge(),
                     Some(signed_bid.message.parent_block_hash),
                     Some(signed_bid.message.block_hash),
                 )
             } else if let Ok(execution_payload) = anchor_block.message().execution_payload() {
                 // Pre-Gloas forks: do not set payload hashes, they are only used post-Gloas.
                 if execution_payload.is_default_with_empty_roots() {
-                    (ExecutionStatus::irrelevant(), None, None)
+                    (ExecutionStatus::pre_merge(), None, None)
                 } else {
                     // Assume that this payload is valid, since the anchor should be a
                     // trusted block and state.
@@ -449,7 +450,7 @@ where
                 }
             } else {
                 // Pre-merge: no execution payload at all.
-                (ExecutionStatus::irrelevant(), None, None)
+                (ExecutionStatus::pre_merge(), None, None)
             };
 
         // If the current slot is not provided, use the value that was last provided to the store.
@@ -602,23 +603,53 @@ where
         // For justified/finalized hashes we always use the bid's parent_block_hash, since the
         // payload from the justified/finalized block is not itself justified/finalized due to
         // being applied immediately prior to the next block.
-        let head_hash = self.get_block(&head_root).and_then(|b| {
-            match head_payload_status {
-                PayloadStatus::Full => b.execution_payload_block_hash,
-                PayloadStatus::Pending | PayloadStatus::Empty => b.execution_payload_parent_hash,
+        let head_hash = match self.get_block(&head_root) {
+            None => None,
+            Some(b) => {
+                if spec.fork_name_at_slot::<E>(b.slot).gloas_enabled() {
+                    let side_hash = match head_payload_status {
+                        PayloadStatus::Full => b.execution_payload_block_hash,
+                        PayloadStatus::Pending | PayloadStatus::Empty => {
+                            b.execution_payload_parent_hash
+                        }
+                    };
+                    Some(side_hash.ok_or_else(|| {
+                        Error::Unexpected(format!(
+                            "gloas head node without payload hashes: {head_root:?}"
+                        ))
+                    })?)
+                } else {
+                    match b.execution_status.block_hash() {
+                        FcBlockHash::PostMerge(hash) => Some(hash),
+                        FcBlockHash::PreMerge => None,
+                    }
+                }
             }
-            .or_else(|| b.execution_status.block_hash())
-        });
+        };
         let justified_root = self.justified_checkpoint().root;
         let finalized_root = self.finalized_checkpoint().root;
-        let justified_hash = self.get_block(&justified_root).and_then(|b| {
-            b.execution_payload_parent_hash
-                .or_else(|| b.execution_status.block_hash())
-        });
-        let finalized_hash = self.get_block(&finalized_root).and_then(|b| {
-            b.execution_payload_parent_hash
-                .or_else(|| b.execution_status.block_hash())
-        });
+        let checkpoint_hash = |root: Hash256, b: &ProtoBlock| -> Result<_, Error<T::Error>> {
+            if spec.fork_name_at_slot::<E>(b.slot).gloas_enabled() {
+                Ok(Some(b.execution_payload_parent_hash.ok_or_else(|| {
+                    Error::Unexpected(format!(
+                        "gloas checkpoint node without a parent payload hash: {root:?}"
+                    ))
+                })?))
+            } else {
+                match b.execution_status.block_hash() {
+                    FcBlockHash::PostMerge(hash) => Ok(Some(hash)),
+                    FcBlockHash::PreMerge => Ok(None),
+                }
+            }
+        };
+        let justified_hash = match self.get_block(&justified_root) {
+            Some(b) => checkpoint_hash(justified_root, &b)?,
+            None => None,
+        };
+        let finalized_hash = match self.get_block(&finalized_root) {
+            Some(b) => checkpoint_hash(finalized_root, &b)?,
+            None => None,
+        };
         self.forkchoice_update_parameters = ForkchoiceUpdateParameters {
             head_root,
             head_hash,
@@ -1040,7 +1071,7 @@ where
             if block_hash == ExecutionBlockHash::zero() {
                 // The block is post-merge-fork, but pre-terminal-PoW block. We don't need to verify
                 // the payload.
-                ExecutionStatus::irrelevant()
+                ExecutionStatus::pre_merge()
             } else {
                 match payload_verification_status {
                     PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
@@ -1060,7 +1091,7 @@ where
             }
         } else {
             // There is no payload to verify.
-            ExecutionStatus::irrelevant()
+            ExecutionStatus::pre_merge()
         };
 
         let (execution_payload_parent_hash, execution_payload_block_hash) =
@@ -1688,7 +1719,18 @@ where
     /// Returns an `ExecutionStatus` if the block is known **and** a descendant of the finalized root.
     pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
-            self.proto_array.get_block_execution_status(block_root)
+            match self.proto_array.get_block_execution_status(block_root) {
+                // The block's own payload has not arrived, so the chain that ends at this block
+                // runs on an ancestor's payload. Callers gate attestation production and report
+                // `execution_optimistic` on this method, and both must reflect the payload the
+                // chain executed, not the one it has never seen.
+                Some(ExecutionStatus::NotYetRevealed(_)) => self
+                    .proto_array
+                    .get_node_execution_status(block_root, PayloadStatus::Empty)
+                    .ok()
+                    .flatten(),
+                other => other,
+            }
         } else {
             None
         }
@@ -1699,12 +1741,13 @@ where
         &self,
         block_root: &Hash256,
         payload_status: PayloadStatus,
-    ) -> Option<ExecutionStatus> {
+    ) -> Result<Option<ExecutionStatus>, Error<T::Error>> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
             self.proto_array
                 .get_node_execution_status(block_root, payload_status)
+                .map_err(Error::ProtoArrayError)
         } else {
-            None
+            Ok(None)
         }
     }
 

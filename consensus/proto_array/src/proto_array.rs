@@ -1,4 +1,4 @@
-use crate::proto_array_fork_choice::IndexedForkChoiceNode;
+use crate::proto_array_fork_choice::{FcBlockHash, IndexedForkChoiceNode};
 use crate::{
     Block, ExecutionStatus, JustifiedBalances, LatestMessage, PayloadStatus, error::Error,
 };
@@ -114,12 +114,13 @@ pub struct ProtoNode {
     #[superstruct(only(V17), partial_getter(copy))]
     #[ssz(with = "four_byte_option_usize")]
     pub best_descendant: Option<usize>,
-    /// Validity of the payload that this block reveals, and its execution block hash. The status
-    /// is `Irrelevant` until a Gloas envelope reveals the payload.
+    /// Validity of the payload that this block commits to, and its execution block hash. The
+    /// status is `NotYetRevealed` until a Gloas envelope reveals the payload.
     ///
-    /// This is the status of one payload, not of the block. A head on `(root, EMPTY)` ran the
-    /// payload of an ancestor. Use `ProtoArrayForkChoice::get_node_execution_status` when the
-    /// node is not known.
+    /// This is the status of the payload, not of the block. The `(root, EMPTY)` fork choice node
+    /// does not include this payload, so its validity is that of an ancestor's payload. Use
+    /// `ProtoArrayForkChoice::get_node_execution_status` to read the status of either fork
+    /// choice node of this block.
     #[superstruct(getter(copy))]
     pub execution_status: ExecutionStatus,
     #[superstruct(getter(copy))]
@@ -177,19 +178,33 @@ pub struct ProtoNode {
     pub equivocating_attestation_score: u64,
 }
 
+/// The `parent_payload_status` of a node whose fork is not statically known.
+///
+/// A pre-Gloas node has no edge of its own. There is no correct general substitute, so every
+/// consumer must match `PreGloas` and decide for its own question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadStatusCrossFork {
+    Gloas(PayloadStatus),
+    PreGloas,
+}
+
 impl ProtoNode {
     pub fn is_gloas(&self) -> bool {
         self.as_v29().is_ok()
     }
 
-    /// Generic version of spec's `parent_payload_status` that works for pre-Gloas nodes by
-    /// considering their parents Empty.
-    pub fn get_parent_payload_status(&self) -> PayloadStatus {
-        self.parent_payload_status().unwrap_or(PayloadStatus::Empty)
+    /// The payload status of the edge to the parent, fork-aware: pre-Gloas nodes have no edge
+    /// of their own, and the two questions callers ask resolve it differently. The caller picks
+    /// the reading through `PayloadStatusCrossFork`.
+    pub fn get_parent_payload_status(&self) -> PayloadStatusCrossFork {
+        match self.parent_payload_status() {
+            Ok(status) => PayloadStatusCrossFork::Gloas(status),
+            Err(_) => PayloadStatusCrossFork::PreGloas,
+        }
     }
 
     pub fn is_parent_node_full(&self) -> bool {
-        self.get_parent_payload_status() == PayloadStatus::Full
+        self.get_parent_payload_status() == PayloadStatusCrossFork::Gloas(PayloadStatus::Full)
     }
 
     pub fn attestation_score(&self, payload_status: PayloadStatus) -> u64 {
@@ -641,8 +656,7 @@ impl ProtoArray {
                 full_payload_weight: 0,
                 execution_payload_block_hash,
                 execution_payload_parent_hash,
-                // The payload is revealed later, in an envelope.
-                execution_status: ExecutionStatus::Irrelevant(false),
+                execution_status: ExecutionStatus::NotYetRevealed(execution_payload_block_hash),
                 payload_timeliness_votes: BitVector::default(),
                 payload_data_availability_votes: BitVector::default(),
                 ptc_participation: BitVector::default(),
@@ -660,17 +674,26 @@ impl ProtoArray {
         };
 
         // If the parent has an invalid execution status, return an error before adding the
-        // block to `self`. This applies only when the parent is a V17 node with execution tracking.
+        // block to `self`.
         if let Some(parent_index) = node.parent() {
             let parent = self
                 .nodes
                 .get(parent_index)
                 .ok_or(Error::InvalidNodeIndex(parent_index))?;
 
-            // Execution status tracking only exists on V17 (pre-Gloas) nodes.
-            if let Ok(v17) = parent.as_v17()
-                && v17.execution_status.is_invalid()
-            {
+            // The child builds on one fork choice node of the parent. If that node's status is
+            // invalid, the child commits to an invalid chain and is rejected. Building on the
+            // `EMPTY` node of a parent whose own payload is invalid stays allowed.
+            let parent_node_status = self.get_node_execution_status(
+                parent.root(),
+                match node.get_parent_payload_status() {
+                    PayloadStatusCrossFork::Gloas(status) => status,
+                    // A pre-Gloas parent carries its payload inside the block: the child
+                    // builds on it.
+                    PayloadStatusCrossFork::PreGloas => PayloadStatus::Full,
+                },
+            )?;
+            if parent_node_status.is_invalid() {
                 return Err(Error::ParentExecutionStatusIsInvalid {
                     block_root: block.root,
                     parent_root: parent.root(),
@@ -694,8 +717,10 @@ impl ProtoArray {
         if let Some(parent_index) = node.parent()
             && matches!(block.execution_status, ExecutionStatus::Valid(_))
         {
-            let parent_status = node.parent_payload_status().unwrap_or(PayloadStatus::Full);
-            self.propagate_execution_payload_validation_from(parent_index, parent_status)?;
+            self.propagate_execution_payload_validation_from(
+                parent_index,
+                node.get_parent_payload_status(),
+            )?;
         }
 
         Ok(())
@@ -814,21 +839,73 @@ impl ProtoArray {
         let v29 = node
             .as_v29_mut()
             .map_err(|_| Error::InvalidNodeVariant { block_root })?;
-        v29.payload_received = true;
-        // The envelope reveals the payload, so the node takes the status from the execution layer.
-        v29.execution_status = execution_status;
+        match v29.execution_status {
+            // The invalidation sweep condemned this payload before its envelope arrived. The
+            // verdict is implied by its invalid ancestry, so a late envelope must not undo it.
+            // The envelope did arrive though: without `payload_received`, sync would fetch and
+            // import it again forever.
+            ExecutionStatus::Invalid(_) => {
+                v29.payload_received = true;
+                return Ok(());
+            }
+            // A duplicate envelope must not downgrade a validated payload.
+            ExecutionStatus::Valid(_) => return Ok(()),
+            _ => (),
+        }
         let parent = v29.parent;
         let parent_status = v29.parent_payload_status;
 
-        // A valid payload also validates every payload that its branch executed, so promote the
-        // ancestry.
+        // A valid payload also validates every payload that its branch executed. Walk the
+        // ancestry first: if it holds an invalid payload, the error must leave this node
+        // unwritten rather than valid on top of an invalid ancestor.
         if execution_status.is_valid_and_post_bellatrix()
             && let Some(parent_index) = parent
         {
-            self.propagate_execution_payload_validation_from(parent_index, parent_status)?;
+            self.propagate_execution_payload_validation_from(
+                parent_index,
+                PayloadStatusCrossFork::Gloas(parent_status),
+            )?;
         }
 
+        let v29 = self
+            .nodes
+            .get_mut(index)
+            .ok_or(Error::InvalidNodeIndex(index))?
+            .as_v29_mut()
+            .map_err(|_| Error::InvalidNodeVariant { block_root })?;
+        v29.payload_received = true;
+        // The envelope reveals the payload, so the node takes the status from the execution layer.
+        v29.execution_status = execution_status;
+
         Ok(())
+    }
+
+    /// Execution status of the `(block_root, payload_status)` fork choice node.
+    ///
+    /// `FULL` is the status of the block's own payload. `EMPTY` and `PENDING` run no payload of
+    /// this block, so they answer with the inherited status. Pre-Gloas both collapse to the
+    /// block's own status.
+    pub fn get_node_execution_status(
+        &self,
+        block_root: Hash256,
+        payload_status: PayloadStatus,
+    ) -> Result<ExecutionStatus, Error> {
+        match payload_status {
+            PayloadStatus::Full => {
+                let index = *self
+                    .indices
+                    .get(&block_root)
+                    .ok_or(Error::NodeUnknown(block_root))?;
+                let node = self
+                    .nodes
+                    .get(index)
+                    .ok_or(Error::InvalidNodeIndex(index))?;
+                Ok(node.execution_status())
+            }
+            PayloadStatus::Empty | PayloadStatus::Pending => {
+                self.empty_node_execution_status(block_root)
+            }
+        }
     }
 
     /// Execution validity of `(block_root, EMPTY)`. This node runs no payload of its own. It
@@ -857,7 +934,7 @@ impl ProtoArray {
             // Reached an ancestor whose payload this branch executed.
             if gloas_node.parent_payload_status == PayloadStatus::Full {
                 let Some(parent_index) = gloas_node.parent else {
-                    return Ok(ExecutionStatus::irrelevant());
+                    return Ok(ExecutionStatus::pre_merge());
                 };
                 let parent = self
                     .nodes
@@ -868,7 +945,7 @@ impl ProtoArray {
 
             match gloas_node.parent {
                 Some(parent_index) => index = parent_index,
-                None => return Ok(ExecutionStatus::irrelevant()),
+                None => return Ok(ExecutionStatus::pre_merge()),
             }
         }
     }
@@ -887,7 +964,8 @@ impl ProtoArray {
             .indices
             .get(&block_root)
             .ok_or(Error::NodeUnknown(block_root))?;
-        self.propagate_execution_payload_validation_from(index, PayloadStatus::Full)
+        // Pre-Gloas only entry: the verified node carries its payload inside itself.
+        self.propagate_execution_payload_validation_from(index, PayloadStatusCrossFork::PreGloas)
     }
 
     /// Promotes `start_index` and every payload that its branch executed to `Valid`.
@@ -902,7 +980,7 @@ impl ProtoArray {
     fn propagate_execution_payload_validation_from(
         &mut self,
         start_index: usize,
-        start_status: PayloadStatus,
+        start_status: PayloadStatusCrossFork,
     ) -> Result<(), Error> {
         let mut index = start_index;
         let mut status = start_status;
@@ -912,29 +990,47 @@ impl ProtoArray {
                 .get_mut(index)
                 .ok_or(Error::InvalidNodeIndex(index))?;
 
-            // Only a `FULL` node has a payload of its own in the execution ancestry of this branch.
-            if status == PayloadStatus::Full {
-                match node.execution_status() {
-                    // We have reached a node that we already know is valid. No need to iterate further
-                    // since we assume an ancestors have already been set to valid.
-                    ExecutionStatus::Valid(_) => return Ok(()),
-                    // We have reached an irrelevant node, this node is prior to a terminal execution
-                    // block. There's no need to iterate further, it's impossible for this block to have
-                    // any relevant ancestors.
-                    ExecutionStatus::Irrelevant(_) => return Ok(()),
-                    // The block has an unknown status, set it to valid since any ancestor of a valid
-                    // payload can be considered valid.
-                    ExecutionStatus::Optimistic(payload_block_hash) => {
-                        *node.execution_status_mut() = ExecutionStatus::Valid(payload_block_hash);
+            // Only a `FULL` node has a payload of its own in the execution ancestry of this
+            // branch. A pre-Gloas block carries its payload inside itself, so it is executed.
+            match status {
+                PayloadStatusCrossFork::Gloas(PayloadStatus::Full)
+                | PayloadStatusCrossFork::PreGloas => {
+                    match node.execution_status() {
+                        // We have reached a node that we already know is valid. No need to iterate further
+                        // since we assume an ancestors have already been set to valid.
+                        ExecutionStatus::Valid(_) => return Ok(()),
+                        // We have reached an irrelevant node, this node is prior to a terminal execution
+                        // block. There's no need to iterate further, it's impossible for this block to have
+                        // any relevant ancestors.
+                        ExecutionStatus::PreMerge(_) => return Ok(()),
+                        // The block has an unknown status, set it to valid since any ancestor of a valid
+                        // payload can be considered valid.
+                        ExecutionStatus::Optimistic(payload_block_hash) => {
+                            *node.execution_status_mut() =
+                                ExecutionStatus::Valid(payload_block_hash);
+                        }
+                        // An ancestor of the valid payload was invalid. This is a serious error which
+                        // indicates a consensus failure in the execution node. This is unrecoverable.
+                        ExecutionStatus::Invalid(ancestor_payload_block_hash) => {
+                            return Err(Error::InvalidAncestorOfValidPayload {
+                                ancestor_block_root: node.root(),
+                                ancestor_payload_block_hash,
+                            });
+                        }
+                        // The chain committed to this payload but its envelope has not arrived here
+                        // yet (envelopes can arrive out of order during sync). Stop: it is promoted
+                        // when its own envelope is validated.
+                        ExecutionStatus::NotYetRevealed(_) => return Ok(()),
                     }
-                    // An ancestor of the valid payload was invalid. This is a serious error which
-                    // indicates a consensus failure in the execution node. This is unrecoverable.
-                    ExecutionStatus::Invalid(ancestor_payload_block_hash) => {
-                        return Err(Error::InvalidAncestorOfValidPayload {
-                            ancestor_block_root: node.root(),
-                            ancestor_payload_block_hash,
-                        });
-                    }
+                }
+                // Skip, noop
+                PayloadStatusCrossFork::Gloas(PayloadStatus::Empty) => {}
+                // `Pending` is a head-walk virtual state, never a stored edge.
+                PayloadStatusCrossFork::Gloas(PayloadStatus::Pending) => {
+                    return Err(Error::Unexpected(format!(
+                        "pending edge in promotion walk at {:?}",
+                        node.root()
+                    )));
                 }
             }
 
@@ -942,9 +1038,8 @@ impl ProtoArray {
                 // We have reached the root block, iteration complete.
                 return Ok(());
             };
-            // Which of the two nodes of the parent this block extends. Pre-Gloas the chain
-            // is all `FULL`.
-            status = node.parent_payload_status().unwrap_or(PayloadStatus::Full);
+            // Which of the two nodes of the parent this block extends.
+            status = node.get_parent_payload_status();
             index = parent_index;
         }
     }
@@ -992,6 +1087,11 @@ impl ProtoArray {
 
         // Collect all *ancestors* which were declared invalid since they reside between the
         // `head_block_root` and the `latest_valid_ancestor_root`.
+        // The walk path in visit order (head first), and whether each visited node's payload is
+        // invalid. A node is "block invalid" when any payload below it on this path is invalid:
+        // that payload is part of the node's beacon state lineage, so its state can never be
+        // built on, whichever edge a descendant takes.
+        let mut walk_path: Vec<(usize, bool)> = Vec::new();
         let mut status = PayloadStatus::Full;
         loop {
             let node = self
@@ -1000,12 +1100,34 @@ impl ProtoArray {
                 .ok_or(Error::InvalidNodeIndex(index))?;
 
             // An `EMPTY` edge is a gap in the execution ancestry of the branch, not the end of it.
-            // This branch never ran the payload of this block, so the walk steps over it.
-            if status != PayloadStatus::Full {
+            // This branch never ran the payload of this block, so the walk steps over it. An
+            // unrevealed payload is stepped over for the same reason: nothing here was executed,
+            // and the payloads the branch did execute sit above it. Without the step-over, an
+            // invalidation anchored on an unrevealed head records nothing at all.
+            let steps_over = match node.execution_status() {
+                ExecutionStatus::NotYetRevealed(_) => true,
+                ExecutionStatus::Valid(_)
+                | ExecutionStatus::Invalid(_)
+                | ExecutionStatus::Optimistic(_)
+                | ExecutionStatus::PreMerge(_) => status != PayloadStatus::Full,
+            };
+            if steps_over {
+                // A block that commits to the latest valid payload is the walk's boundary even
+                // though its envelope has not arrived: the hash pins the content.
+                if let ExecutionStatus::NotYetRevealed(bid_hash) = node.execution_status()
+                    && op.latest_valid_ancestor() == Some(bid_hash)
+                {
+                    break;
+                }
+                walk_path.push((index, false));
                 let Some(parent_index) = node.parent() else {
                     break;
                 };
-                status = node.parent_payload_status().unwrap_or(PayloadStatus::Full);
+                status = match node.get_parent_payload_status() {
+                    PayloadStatusCrossFork::Gloas(status) => status,
+                    // A pre-Gloas parent carries its payload inside the block, so it is executed.
+                    PayloadStatusCrossFork::PreGloas => PayloadStatus::Full,
+                };
                 index = parent_index;
                 continue;
             }
@@ -1030,7 +1152,9 @@ impl ProtoArray {
                         break;
                     }
                 }
-                ExecutionStatus::Irrelevant(_) => break,
+                ExecutionStatus::PreMerge(_) => break,
+                // Stepped over before the match; unreachable.
+                ExecutionStatus::NotYetRevealed(_) => break,
             }
 
             // Only invalidate the head block if either:
@@ -1053,18 +1177,26 @@ impl ProtoArray {
                     ExecutionStatus::Optimistic(hash) => {
                         invalidated_indices.insert(index);
                         *node.execution_status_mut() = ExecutionStatus::Invalid(hash);
+                        walk_path.push((index, true));
                     }
                     // The block is already invalid, but keep going backwards to ensure all ancestors
                     // are updated.
-                    ExecutionStatus::Invalid(_) => (),
+                    ExecutionStatus::Invalid(_) => {
+                        walk_path.push((index, true));
+                    }
                     // This block is pre-merge, therefore it has no execution status. Nor do its
                     // ancestors.
-                    ExecutionStatus::Irrelevant(_) => break,
+                    ExecutionStatus::PreMerge(_) => break,
+                    ExecutionStatus::NotYetRevealed(_) => break,
                 }
             }
 
             if let Some(parent_index) = node.parent() {
-                status = node.parent_payload_status().unwrap_or(PayloadStatus::Full);
+                status = match node.get_parent_payload_status() {
+                    PayloadStatusCrossFork::Gloas(status) => status,
+                    // A pre-Gloas parent carries its payload inside the block, so it is executed.
+                    PayloadStatusCrossFork::PreGloas => PayloadStatus::Full,
+                };
                 index = parent_index
             } else {
                 // The root of the block tree has been reached (aka the finalized block), without
@@ -1081,29 +1213,51 @@ impl ProtoArray {
          * *forwards* to invalidate all descendants of all blocks in `invalidated_indices`.
          */
 
-        let starting_block_root = latest_valid_ancestor_root
-            .filter(|_| latest_valid_ancestor_is_descendant)
-            .unwrap_or(head_block_root);
-        let latest_valid_ancestor_index = *self
-            .indices
-            .get(&starting_block_root)
-            .ok_or(Error::NodeUnknown(starting_block_root))?;
-        let first_potential_descendant = latest_valid_ancestor_index + 1;
+        // Every node visited above the deepest invalid payload has that payload in its beacon
+        // state lineage, whichever edge it took itself. Their blocks can never be built on.
+        let mut block_invalid: HashSet<usize> = HashSet::default();
+        if let Some(deepest_strike) = walk_path.iter().rposition(|(_, struck)| *struck) {
+            for (index, _) in walk_path.iter().take(deepest_strike) {
+                block_invalid.insert(*index);
+            }
+        }
 
-        // Collect all *descendants* which have been declared invalid since they're the descendant of a block
-        // with an invalid execution payload.
-        for index in first_potential_descendant..self.nodes.len() {
-            let node = self
+        // Collect all *descendants* which have been declared invalid since they're the descendant
+        // of a block with an invalid execution payload. Walk them through the `children` index
+        // instead of scanning every node.
+        let mut queue: Vec<usize> = invalidated_indices
+            .iter()
+            .chain(block_invalid.iter())
+            .copied()
+            .collect();
+        while let Some(parent_index) = queue.pop() {
+            let parent_is_v17 = self
                 .nodes
-                .get_mut(index)
-                .ok_or(Error::InvalidNodeIndex(index))?;
+                .get(parent_index)
+                .ok_or(Error::InvalidNodeIndex(parent_index))?
+                .as_v17()
+                .is_ok();
+            let child_indices = self
+                .children
+                .get(parent_index)
+                .ok_or(Error::InvalidNodeIndex(parent_index))?
+                .clone();
+            for index in child_indices {
+                let node = self
+                    .nodes
+                    .get_mut(index)
+                    .ok_or(Error::InvalidNodeIndex(index))?;
 
-            if let Some(parent_index) = node.parent()
-                && invalidated_indices.contains(&parent_index)
-            {
-                // A Gloas descendant becomes invalid only when it built on the payload of the
-                // ancestor. A descendant that took the `EMPTY` edge stays viable.
-                if let ProtoNode::V29(gloas_node) = node
+                // A descendant of a block-invalid parent is dead whichever edge it took: the
+                // invalid payload is already in the parent's state. When only the parent's own
+                // payload is invalid, a descendant that took the `EMPTY` edge does not include
+                // it and stays viable.
+                //
+                // A pre-Gloas parent carries its payload inside the block, so its children have
+                // no escape, whatever the fork boundary convention stored for the edge.
+                if !block_invalid.contains(&parent_index)
+                    && !parent_is_v17
+                    && let ProtoNode::V29(gloas_node) = node
                     && gloas_node.parent_payload_status != PayloadStatus::Full
                 {
                     continue;
@@ -1119,25 +1273,24 @@ impl ProtoArray {
                     ExecutionStatus::Optimistic(hash) | ExecutionStatus::Invalid(hash) => {
                         *node.execution_status_mut() = ExecutionStatus::Invalid(hash);
                     }
-                    ExecutionStatus::Irrelevant(_) => {
-                        // In Gloas this means only that the payload is not revealed yet. The block did
-                        // commit to the invalid ancestry. Pre-Gloas this state is a contradiction.
-                        match node {
-                            ProtoNode::V29(gloas_node) => {
-                                gloas_node.execution_status = ExecutionStatus::Invalid(
-                                    gloas_node.execution_payload_block_hash,
-                                );
-                            }
-                            ProtoNode::V17(_) => {
-                                return Err(Error::IrrelevantDescendant {
-                                    block_root: node.root(),
-                                });
-                            }
-                        }
+                    // The block committed to the invalid ancestry even though its payload never
+                    // arrived. A descendant of an invalid payload is invalid.
+                    ExecutionStatus::NotYetRevealed(hash) => {
+                        *node.execution_status_mut() = ExecutionStatus::Invalid(hash);
+                    }
+                    // A pre-merge descendant of an executed block is a contradiction.
+                    ExecutionStatus::PreMerge(_) => {
+                        return Err(Error::IrrelevantDescendant {
+                            block_root: node.root(),
+                        });
                     }
                 }
 
-                invalidated_indices.insert(index);
+                // Every struck descendant carries the invalid payload in its state lineage.
+                block_invalid.insert(index);
+                if invalidated_indices.insert(index) {
+                    queue.push(index);
+                }
             }
         }
 
@@ -1580,7 +1733,11 @@ impl ProtoArray {
                 return Ok(IndexedForkChoiceNode {
                     root: current.root(),
                     proto_node_index: current_index,
-                    payload_status: child.get_parent_payload_status(),
+                    payload_status: match child.get_parent_payload_status() {
+                        PayloadStatusCrossFork::Gloas(status) => status,
+                        // A pre-Gloas parent has a single virtual node, conventionally `EMPTY`.
+                        PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
+                    },
                 });
             }
 
@@ -1621,16 +1778,22 @@ impl ProtoArray {
                         .ok_or(Error::InvalidNodeIndex(i))
                         .map(|child| {
                             // Spec: node.payload_status == get_parent_payload_status(store, blocks[root])
-                            (child.get_parent_payload_status() == node.payload_status).then(|| {
-                                (
-                                    IndexedForkChoiceNode {
-                                        root: child.root(),
-                                        proto_node_index: i,
-                                        payload_status: PayloadStatus::Pending,
-                                    },
-                                    child.clone(),
-                                )
-                            })
+                            (match child.get_parent_payload_status() {
+                                PayloadStatusCrossFork::Gloas(status) => status,
+                                // A pre-Gloas parent has a single virtual node,
+                                // conventionally `EMPTY`.
+                                PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
+                            } == node.payload_status)
+                                .then(|| {
+                                    (
+                                        IndexedForkChoiceNode {
+                                            root: child.root(),
+                                            proto_node_index: i,
+                                            payload_status: PayloadStatus::Pending,
+                                        },
+                                        child.clone(),
+                                    )
+                                })
                         })
                         .transpose()
                 })
@@ -1652,7 +1815,7 @@ impl ProtoArray {
         } else if fc_node.payload_status == PayloadStatus::Empty {
             Ok(1)
         } else if self.should_extend_payload::<E>(
-            fc_node,
+            fc_node.root,
             proto_node,
             current_slot,
             proposer_boost_root,
@@ -1704,23 +1867,21 @@ impl ProtoArray {
 
     pub fn should_extend_payload<E: EthSpec>(
         &self,
-        fc_node: &IndexedForkChoiceNode,
+        block_root: Hash256,
         proto_node: &ProtoNode,
         current_slot: Slot,
         proposer_boost_root: Hash256,
     ) -> Result<bool, Error> {
         if proto_node.slot().saturating_add(1u64) != current_slot {
             return Err(Error::ShouldExtendPayloadInvalidSlot {
-                block_root: fc_node.root,
+                block_root,
                 block_slot: proto_node.slot(),
                 current_slot,
             });
         }
 
         let Ok(node) = proto_node.as_v29() else {
-            return Err(Error::InvalidNodeVariant {
-                block_root: fc_node.root,
-            });
+            return Err(Error::InvalidNodeVariant { block_root });
         };
 
         // Spec equivalent to `if not is_payload_verified(store, root): return False`
@@ -1754,7 +1915,7 @@ impl ProtoArray {
 
         Ok((proto_node.payload_timeliness::<E>(true)?
             && proto_node.payload_data_availability::<E>(true)?)
-            || proposer_boost_parent_root != fc_node.root
+            || proposer_boost_parent_root != block_root
             || proposer_boost_node.is_parent_node_full())
     }
 
@@ -2005,10 +2166,9 @@ impl ProtoArray {
         self.nodes
             .iter()
             .rev()
-            .find(|node| {
-                node.execution_status()
-                    .block_hash()
-                    .is_some_and(|node_block_hash| node_block_hash == *block_hash)
+            .find(|node| match node.execution_status().block_hash() {
+                FcBlockHash::PostMerge(node_block_hash) => node_block_hash == *block_hash,
+                FcBlockHash::PreMerge => false,
             })
             .map(|node| node.root())
     }
@@ -2090,5 +2250,200 @@ impl<'a> Iterator for Iter<'a> {
         let node = self.proto_array.nodes.get(next_node_index)?;
         self.next_node_index = node.parent();
         Some(node)
+    }
+}
+
+#[cfg(test)]
+mod invalidation_tests {
+    use super::*;
+    use types::{AttestationShufflingId, Epoch, MainnetEthSpec};
+
+    fn shuffling_id() -> AttestationShufflingId {
+        AttestationShufflingId {
+            shuffling_epoch: Epoch::new(0),
+            shuffling_decision_block: Hash256::zero(),
+        }
+    }
+
+    /// A Gloas node at `index` with root `0x0i..`, bid hash `0x1i..`, and an `Optimistic` payload.
+    fn gloas_node(
+        index: usize,
+        parent: Option<usize>,
+        parent_payload_status: PayloadStatus,
+    ) -> ProtoNode {
+        ProtoNode::V29(ProtoNodeV29 {
+            slot: Slot::new(index as u64),
+            state_root: Hash256::zero(),
+            target_root: Hash256::zero(),
+            current_epoch_shuffling_id: shuffling_id(),
+            next_epoch_shuffling_id: shuffling_id(),
+            root: Hash256::repeat_byte(index as u8),
+            parent,
+            justified_checkpoint: Checkpoint::default(),
+            finalized_checkpoint: Checkpoint::default(),
+            weight: 0,
+            execution_status: ExecutionStatus::Optimistic(ExecutionBlockHash::repeat_byte(
+                0x10 + index as u8,
+            )),
+            unrealized_justified_checkpoint: None,
+            unrealized_finalized_checkpoint: None,
+            parent_payload_status,
+            empty_payload_weight: 0,
+            full_payload_weight: 0,
+            execution_payload_block_hash: ExecutionBlockHash::repeat_byte(0x10 + index as u8),
+            execution_payload_parent_hash: ExecutionBlockHash::zero(),
+            block_timeliness_attestation_threshold: true,
+            block_timeliness_ptc_threshold: true,
+            payload_timeliness_votes: BitVector::default(),
+            payload_data_availability_votes: BitVector::default(),
+            ptc_participation: BitVector::default(),
+            payload_received: true,
+            proposer_index: 0,
+            equivocating_attestation_score: 0,
+        })
+    }
+
+    fn v17_node(
+        index: usize,
+        parent: Option<usize>,
+        execution_status: ExecutionStatus,
+    ) -> ProtoNode {
+        ProtoNode::V17(ProtoNodeV17 {
+            slot: Slot::new(index as u64),
+            state_root: Hash256::zero(),
+            target_root: Hash256::zero(),
+            current_epoch_shuffling_id: shuffling_id(),
+            next_epoch_shuffling_id: shuffling_id(),
+            root: Hash256::repeat_byte(index as u8),
+            parent,
+            justified_checkpoint: Checkpoint::default(),
+            finalized_checkpoint: Checkpoint::default(),
+            weight: 0,
+            best_child: None,
+            best_descendant: None,
+            execution_status,
+            unrealized_justified_checkpoint: None,
+            unrealized_finalized_checkpoint: None,
+        })
+    }
+
+    fn array_of(nodes: Vec<ProtoNode>) -> ProtoArray {
+        let indices = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.root(), i))
+            .collect();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+        for (i, node) in nodes.iter().enumerate() {
+            if let Some(p) = node.parent() {
+                children[p].push(i);
+            }
+        }
+        ProtoArray {
+            prune_threshold: 256,
+            nodes,
+            indices,
+            children,
+        }
+    }
+
+    fn invalidate(array: &mut ProtoArray, head_index: usize, latest_valid_ancestor: u8) {
+        array
+            .propagate_execution_payload_invalidation::<MainnetEthSpec>(
+                &InvalidationOperation::InvalidateMany {
+                    head_block_root: Hash256::repeat_byte(head_index as u8),
+                    always_invalidate_head: true,
+                    latest_valid_ancestor: ExecutionBlockHash::repeat_byte(latest_valid_ancestor),
+                },
+                Checkpoint::default(),
+            )
+            .unwrap();
+    }
+
+    /// Chain 0 <-Full- 1 <-Full- 2 <-Empty- 3. The EL says payload 1 is invalid and payload 0 is
+    /// the latest valid one. Block 2 carries payload 1 in its state, so block 3 is dead even
+    /// though it took the `EMPTY` edge of block 2.
+    #[test]
+    fn empty_edge_descendant_of_block_on_invalid_ancestry_dies() {
+        let mut array = array_of(vec![
+            gloas_node(0, None, PayloadStatus::Full),
+            gloas_node(1, Some(0), PayloadStatus::Full),
+            gloas_node(2, Some(1), PayloadStatus::Full),
+            gloas_node(3, Some(2), PayloadStatus::Empty),
+        ]);
+        invalidate(&mut array, 2, 0x10);
+
+        assert!(array.nodes[1].execution_status().is_invalid());
+        assert!(array.nodes[2].execution_status().is_invalid());
+        assert!(
+            array.nodes[3].execution_status().is_invalid(),
+            "block 3 has payload 1 in its state lineage through block 2",
+        );
+        assert!(array.nodes[0].execution_status().is_strictly_optimistic());
+    }
+
+    /// Chain 0 <-Full- 1 <-Empty- 2. Only payload 1 is invalid. Block 2 does not include it, so
+    /// block 2 stays viable.
+    #[test]
+    fn empty_edge_descendant_of_the_deepest_invalid_payload_survives() {
+        let mut array = array_of(vec![
+            gloas_node(0, None, PayloadStatus::Full),
+            gloas_node(1, Some(0), PayloadStatus::Full),
+            gloas_node(2, Some(1), PayloadStatus::Empty),
+        ]);
+        invalidate(&mut array, 1, 0x10);
+
+        assert!(array.nodes[1].execution_status().is_invalid());
+        assert!(
+            array.nodes[2].execution_status().is_strictly_optimistic(),
+            "block 2 took the empty edge of the deepest invalid payload",
+        );
+    }
+
+    /// A pre-Gloas parent with an invalid payload condemns its Gloas child, even though the fork
+    /// boundary convention stores an `Empty` edge for it: the parent's payload rides inside the
+    /// parent block, so the child's state includes it.
+    #[test]
+    fn gloas_child_of_invalid_pre_gloas_parent_dies() {
+        let mut array = array_of(vec![
+            v17_node(
+                0,
+                None,
+                ExecutionStatus::Optimistic(ExecutionBlockHash::repeat_byte(0x10)),
+            ),
+            gloas_node(1, Some(0), PayloadStatus::Empty),
+        ]);
+        invalidate(&mut array, 0, 0xff);
+
+        assert!(array.nodes[0].execution_status().is_invalid());
+        assert!(
+            array.nodes[1].execution_status().is_invalid(),
+            "the parent's payload is inside the parent block, so the child has no empty escape",
+        );
+    }
+
+    /// The first Gloas payload after the fork is invalid. The walk must strike it, stop at the
+    /// pre-Gloas parent whose hash the EL names as latest valid, and leave that parent alone.
+    #[test]
+    fn first_payload_after_the_gloas_fork_can_be_invalidated() {
+        let mut array = array_of(vec![
+            v17_node(
+                0,
+                None,
+                ExecutionStatus::Valid(ExecutionBlockHash::repeat_byte(0x10)),
+            ),
+            gloas_node(1, Some(0), PayloadStatus::Full),
+            gloas_node(2, Some(1), PayloadStatus::Full),
+        ]);
+        invalidate(&mut array, 2, 0x10);
+
+        assert!(array.nodes[2].execution_status().is_invalid());
+        assert!(array.nodes[1].execution_status().is_invalid());
+        assert!(
+            array.nodes[0]
+                .execution_status()
+                .is_valid_and_post_bellatrix(),
+            "the pre-Gloas latest valid ancestor keeps its status",
+        );
     }
 }

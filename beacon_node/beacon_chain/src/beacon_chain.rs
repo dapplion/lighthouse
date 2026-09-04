@@ -114,7 +114,7 @@ use operation_pool::{
 };
 use parking_lot::{Mutex, RwLock};
 use proof_engine::ProofEngine;
-use proto_array::{DoNotReOrg, ProposerHeadError, ReOrgThreshold};
+use proto_array::{DoNotReOrg, FcBlockHash, ProposerHeadError, ReOrgThreshold};
 use rand::RngCore;
 use safe_arith::SafeArith;
 use serde_utils::quoted_u64::Quoted;
@@ -1893,7 +1893,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // pre-finalization.
             None => Err(Error::CannotAttestToFinalizedBlock { beacon_block_root }),
             // The attestation references a fully valid `beacon_block_root`.
-            Some(execution_status) if execution_status.is_valid_or_irrelevant() => Ok(attestation),
+            Some(execution_status) if execution_status.is_valid_or_pre_merge() => Ok(attestation),
             // The attestation references a block that has not been verified by an EL (i.e. it
             // is optimistic or invalid). Don't return the block, return an error instead.
             Some(execution_status) => Err(Error::HeadBlockNotFullyVerified {
@@ -1934,7 +1934,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // pre-finalization.
             None => Err(Error::SyncContributionDataReferencesFinalizedBlock { beacon_block_root }),
             // The contribution references a fully valid `beacon_block_root`.
-            Some(execution_status) if execution_status.is_valid_or_irrelevant() => Ok(contribution),
+            Some(execution_status) if execution_status.is_valid_or_pre_merge() => Ok(contribution),
             // The contribution references a block that has not been verified by an EL (i.e. it
             // is optimistic or invalid). Don't return the block, return an error instead.
             Some(execution_status) => Err(Error::HeadBlockNotFullyVerified {
@@ -2096,7 +2096,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .fork_choice_read_lock()
             .get_block_execution_status(&beacon_block_root)
         {
-            Some(execution_status) if execution_status.is_valid_or_irrelevant() => (),
+            Some(execution_status) if execution_status.is_valid_or_pre_merge() => (),
             Some(execution_status) => {
                 return Err(Error::HeadBlockNotFullyVerified {
                     beacon_block_root,
@@ -4440,9 +4440,15 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     // Ask about the node that the head is on. The status of the block can let an
                     // empty head claim a validity that its branch never established.
                     if let Some(proto_block) = fork_choice.get_block(&block_root) {
-                        let new_head_is_optimistic = fork_choice
+                        let new_head_is_optimistic = match fork_choice
                             .get_node_execution_status(&block_root, head_payload_status)
-                            .is_some_and(|status| status.is_optimistic_or_invalid());
+                        {
+                            Ok(Some(status)) => status.is_optimistic_or_invalid(),
+                            // Node or status not found, unreachable but treat as error
+                            Ok(None) => true,
+                            // Error traversing FC, mark as optimistic as defensive
+                            Err(_) => true,
+                        };
 
                         if let Err(e) = self.early_attester_cache.add_head_block(
                             block_root,
@@ -5506,15 +5512,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(Box::new(DoNotReOrg::NotProposing.into()));
         }
 
-        // This only works pre-Gloas, so a Gloas node reports no head hash here.
-        let parent_head_hash = info
-            .parent_node
-            .as_v17()
-            .ok()
-            .and_then(|node| node.execution_status.block_hash());
+        // The Gloas early-return above means the head, and therefore its parent, are pre-Gloas.
+        let parent_head_hash = match info.parent_node.execution_status().block_hash() {
+            FcBlockHash::PostMerge(hash) => hash,
+            // We never build blocks on top of pre-merge parents.
+            FcBlockHash::PreMerge => {
+                return Err(Box::new(ProposerHeadError::Error(Error::Unexpected(
+                    format!("pre-merge re-org parent: {:?}", info.parent_node.root()),
+                ))));
+            }
+        };
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: info.parent_node.root(),
-            head_hash: parent_head_hash,
+            head_hash: Some(parent_head_hash),
             justified_hash: canonical_forkchoice_params.justified_hash,
             finalized_hash: canonical_forkchoice_params.finalized_hash,
         };
@@ -6509,7 +6519,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // Return an error here to try and prevent progression by upstream functions.
             return Err(Error::JustifiedPayloadInvalid {
                 justified_root: justified_block.root,
-                execution_block_hash: justified_block.execution_status.block_hash(),
+                execution_block_hash: match justified_block.execution_status.block_hash() {
+                    FcBlockHash::PostMerge(hash) => Some(hash),
+                    FcBlockHash::PreMerge => None,
+                },
             });
         }
 

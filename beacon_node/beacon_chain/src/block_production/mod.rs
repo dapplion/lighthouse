@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use fork_choice::PayloadStatus;
-use proto_array::{ProposerHeadError, ReOrgThreshold};
+use proto_array::{PayloadStatusCrossFork, ProposerHeadError, ReOrgThreshold};
 use slot_clock::SlotClock;
 use tracing::{debug, error, info, instrument, warn};
 use types::{BeaconState, Epoch, EthSpec, Hash256, SignedExecutionPayloadEnvelope, Slot};
@@ -242,11 +242,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         drop(proposer_head_timer);
         let re_org_parent_block = proposer_head.parent_node.root();
 
-        // The head uniquely determines the parent payload status for the re-org block, whichever
-        // variant (full or empty) it builds on must have more weight, or else we would have already
-        // re-orged away from this block naturally, and it would not be the head, by definition.
-        let parent_payload_status = proposer_head.head_node.get_parent_payload_status();
-
         let (state_root, state) = self
             .store
             .get_advanced_hot_state_from_cache(re_org_parent_block, slot)
@@ -255,6 +250,15 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 None
             })?;
 
+        // The head uniquely determines the parent payload status for the re-org block, whichever
+        // variant (full or empty) it builds on must have more weight, or else we would have already
+        // re-orged away from this block naturally, and it would not be the head, by definition.
+        let parent_payload_status = match proposer_head.head_node.get_parent_payload_status() {
+            PayloadStatusCrossFork::Gloas(status) => status,
+            // Gloas re-org logic never runs with a pre-Gloas head; a pre-Gloas parent has no
+            // separate payload to apply, which `EMPTY` conveys.
+            PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
+        };
         let parent_envelope = if parent_payload_status == PayloadStatus::Full {
             let envelope = self
                 .store

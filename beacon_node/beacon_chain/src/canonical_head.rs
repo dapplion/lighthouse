@@ -57,6 +57,7 @@ use fork_choice::{
     ProtoBlock, ResetPayloadStatuses,
 };
 use itertools::process_results;
+use proto_array::FcBlockHash;
 
 use logging::crit;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
@@ -601,6 +602,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let head_block_root = head.head_block_root();
         self.fork_choice_read_lock()
             .get_node_execution_status(&head_block_root, head.head_payload_status())
+            .map_err(Error::ForkChoiceError)?
             .ok_or(Error::HeadMissingFromForkChoice(head_block_root))
     }
 
@@ -617,6 +619,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let execution_status = self
             .fork_choice_read_lock()
             .get_node_execution_status(&head_block_root, head.head_payload_status())
+            .map_err(Error::ForkChoiceError)?
             .ok_or(Error::HeadMissingFromForkChoice(head_block_root))?;
         Ok((head, execution_status))
     }
@@ -1351,14 +1354,33 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .ok_or(FastConfirmationError::NodeNotFound(fcr.confirmed_root))?;
 
         // Resolve the confirmed block's execution payload hash for the EL `safe_block_hash`.
-        // This MUST be the parent block hash for Gloas, per the spec.
-        let confirmed_block_hash = confirmed_node
-            .execution_status
-            .block_hash()
-            .or(confirmed_node.execution_payload_parent_hash)
-            .ok_or(FastConfirmationError::NodeHasNoBlockHash(
-                fcr.confirmed_root,
-            ))?;
+        // This MUST be the parent block hash for Gloas, per the spec: the payload the confirmed
+        // block commits to is applied only with the confirmation of the next block.
+        let confirmed_is_gloas = store
+            .spec
+            .fork_name_at_slot::<T::EthSpec>(confirmed_node.slot)
+            .gloas_enabled();
+        let confirmed_block_hash = if confirmed_is_gloas {
+            confirmed_node
+                .execution_payload_parent_hash
+                .ok_or_else(|| {
+                    FastConfirmationError::Unexpected(format!(
+                        "gloas confirmed node has no parent payload hash: {:?}",
+                        fcr.confirmed_root
+                    ))
+                })?
+        } else {
+            match confirmed_node.execution_status.block_hash() {
+                // Pre-Gloas: the confirmed block's own executed payload.
+                FcBlockHash::PostMerge(hash) => hash,
+                // A pre-merge confirmed block has no payload hash to report.
+                FcBlockHash::PreMerge => {
+                    return Err(FastConfirmationError::NodeHasNoBlockHash(
+                        fcr.confirmed_root,
+                    ));
+                }
+            }
+        };
 
         Ok(FcrOutcome {
             confirmed_root: fcr.confirmed_root,
