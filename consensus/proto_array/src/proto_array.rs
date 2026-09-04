@@ -178,22 +178,33 @@ pub struct ProtoNode {
     pub equivocating_attestation_score: u64,
 }
 
+/// The `parent_payload_status` of a node whose fork is not statically known.
+///
+/// A pre-Gloas node has no edge of its own. There is no correct general substitute, so every
+/// consumer must match `PreGloas` and decide for its own question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadStatusCrossFork {
+    Gloas(PayloadStatus),
+    PreGloas,
+}
+
 impl ProtoNode {
     pub fn is_gloas(&self) -> bool {
         self.as_v29().is_ok()
     }
 
-    /// Generic version of spec's `parent_payload_status` that works for pre-Gloas nodes by
-    /// considering their parents Empty.
-    ///
-    /// The pre-Gloas defaults differ by question: child matching uses `Empty` (one virtual
-    /// node), the execution status walks use `Full` (the block carries its own payload).
-    pub fn get_parent_payload_status(&self) -> PayloadStatus {
-        self.parent_payload_status().unwrap_or(PayloadStatus::Empty)
+    /// The payload status of the edge to the parent, fork-aware: pre-Gloas nodes have no edge
+    /// of their own, and the two questions callers ask resolve it differently. The caller picks
+    /// the reading through `PayloadStatusCrossFork`.
+    pub fn get_parent_payload_status(&self) -> PayloadStatusCrossFork {
+        match self.parent_payload_status() {
+            Ok(status) => PayloadStatusCrossFork::Gloas(status),
+            Err(_) => PayloadStatusCrossFork::PreGloas,
+        }
     }
 
     pub fn is_parent_node_full(&self) -> bool {
-        self.get_parent_payload_status() == PayloadStatus::Full
+        self.get_parent_payload_status() == PayloadStatusCrossFork::Gloas(PayloadStatus::Full)
     }
 
     pub fn attestation_score(&self, payload_status: PayloadStatus) -> u64 {
@@ -675,7 +686,12 @@ impl ProtoArray {
             // `EMPTY` node of a parent whose own payload is invalid stays allowed.
             let parent_node_status = self.get_node_execution_status(
                 parent.root(),
-                node.parent_payload_status().unwrap_or(PayloadStatus::Full),
+                match node.get_parent_payload_status() {
+                    PayloadStatusCrossFork::Gloas(status) => status,
+                    // A pre-Gloas parent carries its payload inside the block: the child
+                    // builds on it.
+                    PayloadStatusCrossFork::PreGloas => PayloadStatus::Full,
+                },
             )?;
             if parent_node_status.is_invalid() {
                 return Err(Error::ParentExecutionStatusIsInvalid {
@@ -701,7 +717,11 @@ impl ProtoArray {
         if let Some(parent_index) = node.parent()
             && matches!(block.execution_status, ExecutionStatus::Valid(_))
         {
-            let parent_status = node.parent_payload_status().unwrap_or(PayloadStatus::Full);
+            let parent_status = match node.get_parent_payload_status() {
+                PayloadStatusCrossFork::Gloas(status) => status,
+                // A pre-Gloas parent carries its payload inside the block, so it is executed.
+                PayloadStatusCrossFork::PreGloas => PayloadStatus::Full,
+            };
             self.propagate_execution_payload_validation_from(parent_index, parent_status)?;
         }
 
@@ -1004,7 +1024,11 @@ impl ProtoArray {
             };
             // Which of the two nodes of the parent this block extends. Pre-Gloas the chain
             // is all `FULL`.
-            status = node.parent_payload_status().unwrap_or(PayloadStatus::Full);
+            status = match node.get_parent_payload_status() {
+                PayloadStatusCrossFork::Gloas(status) => status,
+                // A pre-Gloas parent carries its payload inside the block, so it is executed.
+                PayloadStatusCrossFork::PreGloas => PayloadStatus::Full,
+            };
             index = parent_index;
         }
     }
@@ -1076,7 +1100,11 @@ impl ProtoArray {
                 let Some(parent_index) = node.parent() else {
                     break;
                 };
-                status = node.parent_payload_status().unwrap_or(PayloadStatus::Full);
+                status = match node.get_parent_payload_status() {
+                    PayloadStatusCrossFork::Gloas(status) => status,
+                    // A pre-Gloas parent carries its payload inside the block, so it is executed.
+                    PayloadStatusCrossFork::PreGloas => PayloadStatus::Full,
+                };
                 index = parent_index;
                 continue;
             }
@@ -1141,7 +1169,11 @@ impl ProtoArray {
             }
 
             if let Some(parent_index) = node.parent() {
-                status = node.parent_payload_status().unwrap_or(PayloadStatus::Full);
+                status = match node.get_parent_payload_status() {
+                    PayloadStatusCrossFork::Gloas(status) => status,
+                    // A pre-Gloas parent carries its payload inside the block, so it is executed.
+                    PayloadStatusCrossFork::PreGloas => PayloadStatus::Full,
+                };
                 index = parent_index
             } else {
                 // The root of the block tree has been reached (aka the finalized block), without
@@ -1678,7 +1710,11 @@ impl ProtoArray {
                 return Ok(IndexedForkChoiceNode {
                     root: current.root(),
                     proto_node_index: current_index,
-                    payload_status: child.get_parent_payload_status(),
+                    payload_status: match child.get_parent_payload_status() {
+                        PayloadStatusCrossFork::Gloas(status) => status,
+                        // A pre-Gloas parent has a single virtual node, conventionally `EMPTY`.
+                        PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
+                    },
                 });
             }
 
@@ -1719,16 +1755,22 @@ impl ProtoArray {
                         .ok_or(Error::InvalidNodeIndex(i))
                         .map(|child| {
                             // Spec: node.payload_status == get_parent_payload_status(store, blocks[root])
-                            (child.get_parent_payload_status() == node.payload_status).then(|| {
-                                (
-                                    IndexedForkChoiceNode {
-                                        root: child.root(),
-                                        proto_node_index: i,
-                                        payload_status: PayloadStatus::Pending,
-                                    },
-                                    child.clone(),
-                                )
-                            })
+                            (match child.get_parent_payload_status() {
+                                PayloadStatusCrossFork::Gloas(status) => status,
+                                // A pre-Gloas parent has a single virtual node,
+                                // conventionally `EMPTY`.
+                                PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
+                            } == node.payload_status)
+                                .then(|| {
+                                    (
+                                        IndexedForkChoiceNode {
+                                            root: child.root(),
+                                            proto_node_index: i,
+                                            payload_status: PayloadStatus::Pending,
+                                        },
+                                        child.clone(),
+                                    )
+                                })
                         })
                         .transpose()
                 })
