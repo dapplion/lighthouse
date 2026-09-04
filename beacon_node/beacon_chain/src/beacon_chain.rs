@@ -4440,13 +4440,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     // Ask about the node that the head is on. The status of the block can let an
                     // empty head claim a validity that its branch never established.
                     if let Some(proto_block) = fork_choice.get_block(&block_root) {
-                        // A read error counts as optimistic: better to skip the cache than to
-                        // serve a head no EL vouched for.
                         let new_head_is_optimistic = match fork_choice
                             .get_node_execution_status(&block_root, head_payload_status)
                         {
                             Ok(Some(status)) => status.is_optimistic_or_invalid(),
-                            Ok(None) => false,
+                            // Node or status not found, unreachable but treat as error
+                            Ok(None) => true,
+                            // Error traversing FC, mark as optimistic as defensive
                             Err(_) => true,
                         };
 
