@@ -51,6 +51,8 @@ pub enum Error {
         parent_root: Hash256,
     },
     Arith(ArithError),
+    /// A state that the caller believed unreachable. The string says where and why.
+    Unexpected(String),
     InvalidNodeVariant {
         block_root: Hash256,
     },
