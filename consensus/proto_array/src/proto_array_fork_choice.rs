@@ -92,6 +92,14 @@ pub struct LatestMessage {
     pub payload_present: bool,
 }
 
+/// The execution block hash a fork choice node's status carries. The hash names the payload's
+/// content whether or not this node's envelope has arrived; only pre-merge blocks have none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FcBlockHash {
+    PreMerge,
+    PostMerge(ExecutionBlockHash),
+}
+
 /// Represents the verification status of an execution payload.
 #[derive(Clone, Copy, Debug, PartialEq, Encode, Decode, Serialize, Deserialize)]
 #[ssz(enum_behaviour = "union")]
@@ -154,15 +162,14 @@ impl ExecutionStatus {
         ExecutionStatus::PreMerge(false)
     }
 
-    pub fn block_hash(&self) -> Option<ExecutionBlockHash> {
+    /// The bid's committed block hash (Gloas) or the block's own payload hash (pre-Gloas).
+    pub fn block_hash(&self) -> FcBlockHash {
         match self {
             ExecutionStatus::Valid(hash)
             | ExecutionStatus::Invalid(hash)
-            | ExecutionStatus::Optimistic(hash) => Some(*hash),
-            // TODO(gloas): the committed block hash of a `NotYetRevealed` payload is known, but
-            // callers of this method treat `Some` as "a payload an EL was told about" (e.g. the
-            // `latest_valid_ancestor` lookup). Revisit whether any caller wants the bid hash.
-            ExecutionStatus::PreMerge(_) | ExecutionStatus::NotYetRevealed(_) => None,
+            | ExecutionStatus::Optimistic(hash)
+            | ExecutionStatus::NotYetRevealed(hash) => FcBlockHash::PostMerge(*hash),
+            ExecutionStatus::PreMerge(_) => FcBlockHash::PreMerge,
         }
     }
 

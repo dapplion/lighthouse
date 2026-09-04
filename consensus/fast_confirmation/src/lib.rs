@@ -58,6 +58,7 @@ use types::{
 pub enum Error {
     NodeNotFound(Hash256),
     NodeHasNoBlockHash(Hash256),
+    Unexpected(String),
     ParentRootNotFound(Hash256),
     UnableToObtainHeadState(String),
     UnableToObtainCheckpointState(String),

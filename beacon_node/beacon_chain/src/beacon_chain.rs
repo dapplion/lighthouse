@@ -5512,15 +5512,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(Box::new(DoNotReOrg::NotProposing.into()));
         }
 
-        // This only works pre-Gloas, so a Gloas node reports no head hash here.
-        let parent_head_hash = info
-            .parent_node
-            .as_v17()
-            .ok()
-            .and_then(|node| node.execution_status.block_hash());
+        // The Gloas early-return above means the head, and therefore its parent, are pre-Gloas.
+        let parent_head_hash = match info.parent_node.execution_status().block_hash() {
+            FcBlockHash::PostMerge(hash) => hash,
+            // We never build blocks on top of pre-merge parents.
+            FcBlockHash::PreMerge => {
+                return Err(Box::new(ProposerHeadError::Error(Error::Unexpected(
+                    format!("pre-merge re-org parent: {:?}", info.parent_node.root()),
+                ))));
+            }
+        };
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: info.parent_node.root(),
-            head_hash: parent_head_hash,
+            head_hash: Some(parent_head_hash),
             justified_hash: canonical_forkchoice_params.justified_hash,
             finalized_hash: canonical_forkchoice_params.finalized_hash,
         };
@@ -6515,7 +6519,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // Return an error here to try and prevent progression by upstream functions.
             return Err(Error::JustifiedPayloadInvalid {
                 justified_root: justified_block.root,
-                execution_block_hash: justified_block.execution_status.block_hash(),
+                execution_block_hash: match justified_block.execution_status.block_hash() {
+                    FcBlockHash::PostMerge(hash) => Some(hash),
+                    FcBlockHash::PreMerge => None,
+                },
             });
         }
 

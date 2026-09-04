@@ -1,4 +1,4 @@
-use crate::proto_array_fork_choice::IndexedForkChoiceNode;
+use crate::proto_array_fork_choice::{FcBlockHash, IndexedForkChoiceNode};
 use crate::{
     Block, ExecutionStatus, JustifiedBalances, LatestMessage, PayloadStatus, error::Error,
 };
@@ -1104,9 +1104,21 @@ impl ProtoArray {
             // unrevealed payload is stepped over for the same reason: nothing here was executed,
             // and the payloads the branch did execute sit above it. Without the step-over, an
             // invalidation anchored on an unrevealed head records nothing at all.
-            if status != PayloadStatus::Full
-                || matches!(node.execution_status(), ExecutionStatus::NotYetRevealed(_))
-            {
+            let steps_over = match node.execution_status() {
+                ExecutionStatus::NotYetRevealed(_) => true,
+                ExecutionStatus::Valid(_)
+                | ExecutionStatus::Invalid(_)
+                | ExecutionStatus::Optimistic(_)
+                | ExecutionStatus::PreMerge(_) => status != PayloadStatus::Full,
+            };
+            if steps_over {
+                // A block that commits to the latest valid payload is the walk's boundary even
+                // though its envelope has not arrived: the hash pins the content.
+                if let ExecutionStatus::NotYetRevealed(bid_hash) = node.execution_status()
+                    && op.latest_valid_ancestor() == Some(bid_hash)
+                {
+                    break;
+                }
                 walk_path.push((index, false));
                 let Some(parent_index) = node.parent() else {
                     break;
@@ -2154,10 +2166,9 @@ impl ProtoArray {
         self.nodes
             .iter()
             .rev()
-            .find(|node| {
-                node.execution_status()
-                    .block_hash()
-                    .is_some_and(|node_block_hash| node_block_hash == *block_hash)
+            .find(|node| match node.execution_status().block_hash() {
+                FcBlockHash::PostMerge(node_block_hash) => node_block_hash == *block_hash,
+                FcBlockHash::PreMerge => false,
             })
             .map(|node| node.root())
     }

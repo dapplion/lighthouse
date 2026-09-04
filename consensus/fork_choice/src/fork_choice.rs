@@ -3,8 +3,8 @@ use crate::{ForkChoiceStore, InvalidationOperation};
 use fixed_bytes::FixedBytesExtended;
 use logging::crit;
 use proto_array::{
-    Block as ProtoBlock, ExecutionStatus, JustifiedBalances, LatestMessage, PayloadStatus,
-    ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice, ReOrgThreshold,
+    Block as ProtoBlock, ExecutionStatus, FcBlockHash, JustifiedBalances, LatestMessage,
+    PayloadStatus, ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice, ReOrgThreshold,
 };
 use ssz_derive::{Decode, Encode};
 use state_processing::{
@@ -25,6 +25,7 @@ use types::{
 
 #[derive(Debug)]
 pub enum Error<T> {
+    Unexpected(String),
     InvalidAttestation(InvalidAttestation),
     InvalidPayloadAttestation(InvalidPayloadAttestation),
     InvalidAttesterSlashing(AttesterSlashingValidationError),
@@ -602,23 +603,53 @@ where
         // For justified/finalized hashes we always use the bid's parent_block_hash, since the
         // payload from the justified/finalized block is not itself justified/finalized due to
         // being applied immediately prior to the next block.
-        let head_hash = self.get_block(&head_root).and_then(|b| {
-            match head_payload_status {
-                PayloadStatus::Full => b.execution_payload_block_hash,
-                PayloadStatus::Pending | PayloadStatus::Empty => b.execution_payload_parent_hash,
+        let head_hash = match self.get_block(&head_root) {
+            None => None,
+            Some(b) => {
+                if spec.fork_name_at_slot::<E>(b.slot).gloas_enabled() {
+                    let side_hash = match head_payload_status {
+                        PayloadStatus::Full => b.execution_payload_block_hash,
+                        PayloadStatus::Pending | PayloadStatus::Empty => {
+                            b.execution_payload_parent_hash
+                        }
+                    };
+                    Some(side_hash.ok_or_else(|| {
+                        Error::Unexpected(format!(
+                            "gloas head node without payload hashes: {head_root:?}"
+                        ))
+                    })?)
+                } else {
+                    match b.execution_status.block_hash() {
+                        FcBlockHash::PostMerge(hash) => Some(hash),
+                        FcBlockHash::PreMerge => None,
+                    }
+                }
             }
-            .or_else(|| b.execution_status.block_hash())
-        });
+        };
         let justified_root = self.justified_checkpoint().root;
         let finalized_root = self.finalized_checkpoint().root;
-        let justified_hash = self.get_block(&justified_root).and_then(|b| {
-            b.execution_payload_parent_hash
-                .or_else(|| b.execution_status.block_hash())
-        });
-        let finalized_hash = self.get_block(&finalized_root).and_then(|b| {
-            b.execution_payload_parent_hash
-                .or_else(|| b.execution_status.block_hash())
-        });
+        let checkpoint_hash = |root: Hash256, b: &ProtoBlock| -> Result<_, Error<T::Error>> {
+            if spec.fork_name_at_slot::<E>(b.slot).gloas_enabled() {
+                Ok(Some(b.execution_payload_parent_hash.ok_or_else(|| {
+                    Error::Unexpected(format!(
+                        "gloas checkpoint node without a parent payload hash: {root:?}"
+                    ))
+                })?))
+            } else {
+                match b.execution_status.block_hash() {
+                    FcBlockHash::PostMerge(hash) => Ok(Some(hash)),
+                    FcBlockHash::PreMerge => Ok(None),
+                }
+            }
+        };
+        let justified_hash = match self.get_block(&justified_root) {
+            Some(b) => checkpoint_hash(justified_root, &b)?,
+            None => None,
+        };
+        let finalized_hash = match self.get_block(&finalized_root) {
+            Some(b) => checkpoint_hash(finalized_root, &b)?,
+            None => None,
+        };
         self.forkchoice_update_parameters = ForkchoiceUpdateParameters {
             head_root,
             head_hash,
