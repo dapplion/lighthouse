@@ -670,16 +670,14 @@ impl ProtoArray {
                 .get(parent_index)
                 .ok_or(Error::InvalidNodeIndex(parent_index))?;
 
-            // An invalid Gloas payload condemns only the `FULL` node of the parent. A block that
-            // builds on the `EMPTY` node does not include that payload and is accepted.
-            //
-            // A pre-Gloas parent carries its payload inside the block, so every child includes
-            // it, whatever `parent_payload_status` the fork boundary convention stored.
-            let builds_on_invalid_payload = parent.execution_status().is_invalid()
-                && (parent.as_v17().is_ok()
-                    || node.parent_payload_status().unwrap_or(PayloadStatus::Full)
-                        == PayloadStatus::Full);
-            if builds_on_invalid_payload {
+            // The child builds on one fork choice node of the parent. If that node's status is
+            // invalid, the child commits to an invalid chain and is rejected. Building on the
+            // `EMPTY` node of a parent whose own payload is invalid stays allowed.
+            let parent_node_status = self.get_node_execution_status(
+                parent.root(),
+                node.parent_payload_status().unwrap_or(PayloadStatus::Full),
+            )?;
+            if parent_node_status.is_invalid() {
                 return Err(Error::ParentExecutionStatusIsInvalid {
                     block_root: block.root,
                     parent_root: parent.root(),
@@ -859,6 +857,34 @@ impl ProtoArray {
         v29.execution_status = execution_status;
 
         Ok(())
+    }
+
+    /// Execution status of the `(block_root, payload_status)` fork choice node.
+    ///
+    /// `FULL` is the status of the block's own payload. `EMPTY` and `PENDING` run no payload of
+    /// this block, so they answer with the inherited status. Pre-Gloas both collapse to the
+    /// block's own status.
+    pub fn get_node_execution_status(
+        &self,
+        block_root: Hash256,
+        payload_status: PayloadStatus,
+    ) -> Result<ExecutionStatus, Error> {
+        match payload_status {
+            PayloadStatus::Full => {
+                let index = *self
+                    .indices
+                    .get(&block_root)
+                    .ok_or(Error::NodeUnknown(block_root))?;
+                let node = self
+                    .nodes
+                    .get(index)
+                    .ok_or(Error::InvalidNodeIndex(index))?;
+                Ok(node.execution_status())
+            }
+            PayloadStatus::Empty | PayloadStatus::Pending => {
+                self.empty_node_execution_status(block_root)
+            }
+        }
     }
 
     /// Execution validity of `(block_root, EMPTY)`. This node runs no payload of its own. It

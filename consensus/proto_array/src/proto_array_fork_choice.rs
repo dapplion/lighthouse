@@ -1081,12 +1081,13 @@ impl ProtoArrayForkChoice {
         block_root: &Hash256,
         payload_status: PayloadStatus,
     ) -> Result<Option<ExecutionStatus>, Error> {
-        match payload_status {
-            PayloadStatus::Full => Ok(self.get_block_execution_status(block_root)),
-            PayloadStatus::Empty | PayloadStatus::Pending => self
-                .proto_array
-                .empty_node_execution_status(*block_root)
-                .map(Some),
+        match self
+            .proto_array
+            .get_node_execution_status(*block_root, payload_status)
+        {
+            Ok(status) => Ok(Some(status)),
+            Err(Error::NodeUnknown(_)) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
