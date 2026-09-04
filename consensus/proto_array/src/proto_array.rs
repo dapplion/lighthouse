@@ -1792,7 +1792,7 @@ impl ProtoArray {
         } else if fc_node.payload_status == PayloadStatus::Empty {
             Ok(1)
         } else if self.should_extend_payload::<E>(
-            fc_node,
+            fc_node.root,
             proto_node,
             current_slot,
             proposer_boost_root,
@@ -1844,23 +1844,21 @@ impl ProtoArray {
 
     pub fn should_extend_payload<E: EthSpec>(
         &self,
-        fc_node: &IndexedForkChoiceNode,
+        block_root: Hash256,
         proto_node: &ProtoNode,
         current_slot: Slot,
         proposer_boost_root: Hash256,
     ) -> Result<bool, Error> {
         if proto_node.slot().saturating_add(1u64) != current_slot {
             return Err(Error::ShouldExtendPayloadInvalidSlot {
-                block_root: fc_node.root,
+                block_root,
                 block_slot: proto_node.slot(),
                 current_slot,
             });
         }
 
         let Ok(node) = proto_node.as_v29() else {
-            return Err(Error::InvalidNodeVariant {
-                block_root: fc_node.root,
-            });
+            return Err(Error::InvalidNodeVariant { block_root });
         };
 
         // Spec equivalent to `if not is_payload_verified(store, root): return False`
@@ -1894,7 +1892,7 @@ impl ProtoArray {
 
         Ok((proto_node.payload_timeliness::<E>(true)?
             && proto_node.payload_data_availability::<E>(true)?)
-            || proposer_boost_parent_root != fc_node.root
+            || proposer_boost_parent_root != block_root
             || proposer_boost_node.is_parent_node_full())
     }
 

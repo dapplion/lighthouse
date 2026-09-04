@@ -2,8 +2,7 @@ use crate::{
     JustifiedBalances,
     error::Error,
     proto_array::{
-        InvalidationOperation, Iter, NodeDelta, PayloadStatusCrossFork, ProtoArray, ProtoNode,
-        calculate_committee_fraction,
+        InvalidationOperation, Iter, NodeDelta, ProtoArray, ProtoNode, calculate_committee_fraction,
     },
     ssz_container::SszContainer,
 };
@@ -1053,17 +1052,13 @@ impl ProtoArrayForkChoice {
             .nodes
             .get(*block_index)
             .ok_or_else(|| format!("Missing node at index: {block_index}"))?;
-        let fc_node = IndexedForkChoiceNode {
-            root: proto_node.root(),
-            proto_node_index: *block_index,
-            payload_status: match proto_node.get_parent_payload_status() {
-                PayloadStatusCrossFork::Gloas(status) => status,
-                // A pre-Gloas parent has a single virtual node, conventionally `EMPTY`.
-                PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
-            },
-        };
         self.proto_array
-            .should_extend_payload::<E>(&fc_node, proto_node, current_slot, proposer_boost_root)
+            .should_extend_payload::<E>(
+                proto_node.root(),
+                proto_node,
+                current_slot,
+                proposer_boost_root,
+            )
             .map_err(|e| format!("{e:?}"))
     }
 
