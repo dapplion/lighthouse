@@ -109,9 +109,9 @@ pub enum ExecutionStatus {
     ///
     /// This `bool` only exists to satisfy our SSZ implementation which requires all variants
     /// to have a value. It can be set to anything.
-    Irrelevant(bool),
+    PreMerge(bool),
     /// The Gloas envelope carrying this block's committed payload has not arrived yet, so no EL
-    /// has been asked about it. Unlike `Irrelevant`, the payload exists and is unverified.
+    /// has been asked about it. Unlike `PreMerge`, the payload exists and is unverified.
     ///
     /// The `ExecutionBlockHash` is the bid's committed block hash.
     NotYetRevealed(ExecutionBlockHash),
@@ -147,11 +147,11 @@ impl IndexedForkChoiceNode {
 
 impl ExecutionStatus {
     pub fn is_execution_enabled(&self) -> bool {
-        !matches!(self, ExecutionStatus::Irrelevant(_))
+        !matches!(self, ExecutionStatus::PreMerge(_))
     }
 
-    pub fn irrelevant() -> Self {
-        ExecutionStatus::Irrelevant(false)
+    pub fn pre_merge() -> Self {
+        ExecutionStatus::PreMerge(false)
     }
 
     pub fn block_hash(&self) -> Option<ExecutionBlockHash> {
@@ -162,7 +162,7 @@ impl ExecutionStatus {
             // TODO(gloas): the committed block hash of a `NotYetRevealed` payload is known, but
             // callers of this method treat `Some` as "a payload an EL was told about" (e.g. the
             // `latest_valid_ancestor` lookup). Revisit whether any caller wants the bid hash.
-            ExecutionStatus::Irrelevant(_) | ExecutionStatus::NotYetRevealed(_) => None,
+            ExecutionStatus::PreMerge(_) | ExecutionStatus::NotYetRevealed(_) => None,
         }
     }
 
@@ -172,10 +172,10 @@ impl ExecutionStatus {
     /// - Does not have execution enabled.
     ///
     /// Whenever this function returns `true`, the block is *fully valid*.
-    pub fn is_valid_or_irrelevant(&self) -> bool {
+    pub fn is_valid_or_pre_merge(&self) -> bool {
         matches!(
             self,
-            ExecutionStatus::Valid(_) | ExecutionStatus::Irrelevant(_)
+            ExecutionStatus::Valid(_) | ExecutionStatus::PreMerge(_)
         )
     }
 
@@ -223,8 +223,8 @@ impl ExecutionStatus {
     /// Returns `true` if the block:
     ///
     /// - Does not have execution enabled (before or after Bellatrix fork)
-    pub fn is_irrelevant(&self) -> bool {
-        matches!(self, ExecutionStatus::Irrelevant(_))
+    pub fn is_pre_merge(&self) -> bool {
+        matches!(self, ExecutionStatus::PreMerge(_))
     }
 }
 
@@ -234,7 +234,7 @@ impl fmt::Display for ExecutionStatus {
             ExecutionStatus::Valid(_) => write!(f, "valid"),
             ExecutionStatus::Invalid(_) => write!(f, "invalid"),
             ExecutionStatus::Optimistic(_) => write!(f, "optimistic"),
-            ExecutionStatus::Irrelevant(_) => write!(f, "irrelevant"),
+            ExecutionStatus::PreMerge(_) => write!(f, "pre_merge"),
             ExecutionStatus::NotYetRevealed(_) => write!(f, "not_yet_revealed"),
         }
     }
@@ -920,7 +920,7 @@ impl ProtoArrayForkChoice {
                     *node.execution_status_mut() = ExecutionStatus::Optimistic(block_hash);
                 }
                 // An irrelevant node cannot become optimistic, this is a no-op.
-                ExecutionStatus::Irrelevant(_) => (),
+                ExecutionStatus::PreMerge(_) => (),
                 // No EL has seen this payload, so there is no verdict to reset.
                 ExecutionStatus::NotYetRevealed(_) => (),
             }
@@ -1407,7 +1407,7 @@ mod test_compute_deltas {
         let unknown = Hash256::from_low_u64_be(4);
         let junk_shuffling_id =
             AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
-        let execution_status = ExecutionStatus::irrelevant();
+        let execution_status = ExecutionStatus::pre_merge();
 
         let genesis_checkpoint = Checkpoint {
             epoch: genesis_epoch,
@@ -1568,7 +1568,7 @@ mod test_compute_deltas {
         let junk_state_root = Hash256::zero();
         let junk_shuffling_id =
             AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
-        let execution_status = ExecutionStatus::irrelevant();
+        let execution_status = ExecutionStatus::pre_merge();
 
         let genesis_checkpoint = Checkpoint {
             epoch: Epoch::new(0),

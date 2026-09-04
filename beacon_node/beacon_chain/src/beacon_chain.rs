@@ -1893,7 +1893,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // pre-finalization.
             None => Err(Error::CannotAttestToFinalizedBlock { beacon_block_root }),
             // The attestation references a fully valid `beacon_block_root`.
-            Some(execution_status) if execution_status.is_valid_or_irrelevant() => Ok(attestation),
+            Some(execution_status) if execution_status.is_valid_or_pre_merge() => Ok(attestation),
             // The attestation references a block that has not been verified by an EL (i.e. it
             // is optimistic or invalid). Don't return the block, return an error instead.
             Some(execution_status) => Err(Error::HeadBlockNotFullyVerified {
@@ -1934,7 +1934,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // pre-finalization.
             None => Err(Error::SyncContributionDataReferencesFinalizedBlock { beacon_block_root }),
             // The contribution references a fully valid `beacon_block_root`.
-            Some(execution_status) if execution_status.is_valid_or_irrelevant() => Ok(contribution),
+            Some(execution_status) if execution_status.is_valid_or_pre_merge() => Ok(contribution),
             // The contribution references a block that has not been verified by an EL (i.e. it
             // is optimistic or invalid). Don't return the block, return an error instead.
             Some(execution_status) => Err(Error::HeadBlockNotFullyVerified {
@@ -2096,7 +2096,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .fork_choice_read_lock()
             .get_block_execution_status(&beacon_block_root)
         {
-            Some(execution_status) if execution_status.is_valid_or_irrelevant() => (),
+            Some(execution_status) if execution_status.is_valid_or_pre_merge() => (),
             Some(execution_status) => {
                 return Err(Error::HeadBlockNotFullyVerified {
                     beacon_block_root,

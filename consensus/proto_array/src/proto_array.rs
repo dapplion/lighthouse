@@ -934,7 +934,7 @@ impl ProtoArray {
             // Reached an ancestor whose payload this branch executed.
             if gloas_node.parent_payload_status == PayloadStatus::Full {
                 let Some(parent_index) = gloas_node.parent else {
-                    return Ok(ExecutionStatus::irrelevant());
+                    return Ok(ExecutionStatus::pre_merge());
                 };
                 let parent = self
                     .nodes
@@ -945,7 +945,7 @@ impl ProtoArray {
 
             match gloas_node.parent {
                 Some(parent_index) => index = parent_index,
-                None => return Ok(ExecutionStatus::irrelevant()),
+                None => return Ok(ExecutionStatus::pre_merge()),
             }
         }
     }
@@ -1002,7 +1002,7 @@ impl ProtoArray {
                         // We have reached an irrelevant node, this node is prior to a terminal execution
                         // block. There's no need to iterate further, it's impossible for this block to have
                         // any relevant ancestors.
-                        ExecutionStatus::Irrelevant(_) => return Ok(()),
+                        ExecutionStatus::PreMerge(_) => return Ok(()),
                         // The block has an unknown status, set it to valid since any ancestor of a valid
                         // payload can be considered valid.
                         ExecutionStatus::Optimistic(payload_block_hash) => {
@@ -1140,7 +1140,7 @@ impl ProtoArray {
                         break;
                     }
                 }
-                ExecutionStatus::Irrelevant(_) => break,
+                ExecutionStatus::PreMerge(_) => break,
                 // Stepped over before the match; unreachable.
                 ExecutionStatus::NotYetRevealed(_) => break,
             }
@@ -1174,7 +1174,7 @@ impl ProtoArray {
                     }
                     // This block is pre-merge, therefore it has no execution status. Nor do its
                     // ancestors.
-                    ExecutionStatus::Irrelevant(_) => break,
+                    ExecutionStatus::PreMerge(_) => break,
                     ExecutionStatus::NotYetRevealed(_) => break,
                 }
             }
@@ -1267,7 +1267,7 @@ impl ProtoArray {
                         *node.execution_status_mut() = ExecutionStatus::Invalid(hash);
                     }
                     // A pre-merge descendant of an executed block is a contradiction.
-                    ExecutionStatus::Irrelevant(_) => {
+                    ExecutionStatus::PreMerge(_) => {
                         return Err(Error::IrrelevantDescendant {
                             block_root: node.root(),
                         });

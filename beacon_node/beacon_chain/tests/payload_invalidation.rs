@@ -345,7 +345,7 @@ impl InvalidPayloadRig {
                     if is_gloas {
                         // In Gloas the block is still valid. Only its payload was rejected, so
                         // the block stays in fork choice on its `EMPTY` node. The payload is
-                        // `Irrelevant` when the envelope never reached fork choice. It is
+                        // `PreMerge` when the envelope never reached fork choice. It is
                         // `Invalid` when invalidation ran. It is never valid.
                         assert!(
                             !block_in_forkchoice
@@ -379,7 +379,7 @@ impl InvalidPayloadRig {
 
     /// Pre-Gloas the block contains the payload and there is no envelope to import. In Gloas the
     /// execution layer sees the payload only when the envelope arrives. A block on its own
-    /// leaves the node `Irrelevant`.
+    /// leaves the node `PreMerge`.
     async fn import_envelope(
         &self,
         block: &Arc<SignedBeaconBlock<E>>,
@@ -688,7 +688,7 @@ async fn latest_valid_hash_will_not_validate() {
                 ));
             } else {
                 // Pre-Gloas the genesis block is simply pre-merge.
-                assert!(execution_status.is_irrelevant());
+                assert!(execution_status.is_pre_merge());
             }
         } else if slot == 1 {
             assert!(execution_status.is_valid_and_post_bellatrix())
@@ -831,7 +831,7 @@ async fn invalidates_all_descendants() {
         let execution_status = rig.execution_status(root);
         if slot == 0 {
             // Genesis block is pre-bellatrix.
-            assert!(execution_status.is_irrelevant());
+            assert!(execution_status.is_pre_merge());
         } else if slot == 1 {
             // First slot was imported as valid.
             assert!(execution_status.is_valid_and_post_bellatrix());
@@ -933,7 +933,7 @@ async fn switches_heads() {
         let execution_status = rig.execution_status(root);
         if slot == 0 {
             // Genesis block is pre-bellatrix.
-            assert!(execution_status.is_irrelevant());
+            assert!(execution_status.is_pre_merge());
         } else if slot == 1 {
             // First slot was imported as valid.
             assert!(execution_status.is_valid_and_post_bellatrix());
@@ -1130,7 +1130,7 @@ async fn payload_preparation() {
 
 #[tokio::test]
 async fn invalid_parent() {
-    // Pre-Gloas only. In Gloas a rejected payload leaves the parent `Irrelevant`, not
+    // Pre-Gloas only. In Gloas a rejected payload leaves the parent `PreMerge`, not
     // `Invalid`, and a child can build on the `EMPTY` node of the parent.
     if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;

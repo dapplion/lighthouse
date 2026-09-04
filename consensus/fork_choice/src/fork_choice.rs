@@ -430,14 +430,14 @@ where
                 // Gloas: execution status is irrelevant post-Gloas; payload validation
                 // is decoupled from beacon blocks.
                 (
-                    ExecutionStatus::irrelevant(),
+                    ExecutionStatus::pre_merge(),
                     Some(signed_bid.message.parent_block_hash),
                     Some(signed_bid.message.block_hash),
                 )
             } else if let Ok(execution_payload) = anchor_block.message().execution_payload() {
                 // Pre-Gloas forks: do not set payload hashes, they are only used post-Gloas.
                 if execution_payload.is_default_with_empty_roots() {
-                    (ExecutionStatus::irrelevant(), None, None)
+                    (ExecutionStatus::pre_merge(), None, None)
                 } else {
                     // Assume that this payload is valid, since the anchor should be a
                     // trusted block and state.
@@ -449,7 +449,7 @@ where
                 }
             } else {
                 // Pre-merge: no execution payload at all.
-                (ExecutionStatus::irrelevant(), None, None)
+                (ExecutionStatus::pre_merge(), None, None)
             };
 
         // If the current slot is not provided, use the value that was last provided to the store.
@@ -1040,7 +1040,7 @@ where
             if block_hash == ExecutionBlockHash::zero() {
                 // The block is post-merge-fork, but pre-terminal-PoW block. We don't need to verify
                 // the payload.
-                ExecutionStatus::irrelevant()
+                ExecutionStatus::pre_merge()
             } else {
                 match payload_verification_status {
                     PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
@@ -1060,7 +1060,7 @@ where
             }
         } else {
             // There is no payload to verify.
-            ExecutionStatus::irrelevant()
+            ExecutionStatus::pre_merge()
         };
 
         let (execution_payload_parent_hash, execution_payload_block_hash) =
