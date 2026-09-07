@@ -307,6 +307,13 @@ impl Rig {
             self.high_water,
             self.log.join("\n")
         );
+        // Once caught up the node has at most the control's votes, so it can never be ahead.
+        let control_head = self.control.chain.canonical_head.cached_head().head_slot();
+        assert!(
+            head < control_head || mine <= control,
+            "over-confirmation ({phase}): node at {mine}, control at {control}\n{}",
+            self.log.join("\n")
+        );
         self.high_water = self.high_water.max(mine);
     }
 }
@@ -320,6 +327,8 @@ struct Scenario {
     down: u64,
     /// Whether the control keeps proposing while the node is down.
     chain_continues: bool,
+    /// Attesters while the node is down.
+    attesters_down: usize,
     graceful: bool,
     /// Attesters for the first epoch after the node is back.
     attesters_after: usize,
@@ -333,6 +342,7 @@ impl Default for Scenario {
             stall_before: 0,
             down: 0,
             chain_continues: true,
+            attesters_down: VALIDATOR_COUNT,
             graceful: true,
             attesters_after: VALIDATOR_COUNT,
             restarts: 1,
@@ -355,6 +365,10 @@ impl Scenario {
     }
     fn chain_stalled(mut self) -> Self {
         self.chain_continues = false;
+        self
+    }
+    fn attesters_down(mut self, n: usize) -> Self {
+        self.attesters_down = n;
         self
     }
     fn crash(mut self) -> Self {
@@ -383,8 +397,9 @@ impl Scenario {
         }
         for _ in 0..self.restarts {
             rig.stop(self.graceful);
+            let down = validators(self.attesters_down);
             for _ in 0..self.down {
-                rig.step(&all, self.chain_continues).await;
+                rig.step(&down, self.chain_continues).await;
             }
             rig.boot().await;
         }
@@ -437,6 +452,18 @@ async fn downtime_across_an_epoch_boundary() {
 #[tokio::test]
 async fn downtime_of_more_than_an_epoch() {
     Scenario::default().down(12).run().await;
+}
+
+/// The control re-confirms at the boundary and reverts; the node slept through that boundary and
+/// must run the same check when it comes back rather than keep a root the votes no longer carry.
+#[tokio::test]
+async fn downtime_across_an_epoch_boundary_while_participation_drops() {
+    Scenario::default()
+        .at(2)
+        .down(8)
+        .attesters_down(0)
+        .run()
+        .await;
 }
 
 #[tokio::test]

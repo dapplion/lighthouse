@@ -13,9 +13,10 @@
 //! 1. `RwLock<BeaconForkChoice>`: Contains `proto_array` fork choice.
 //! 2. `RwLock<CachedHead>`: Contains a cached block/state from the last run of `proto_array`.
 //! 3. `Mutex<()>`: Is used to prevent concurrent execution of `BeaconChain::recompute_head`.
-//! 4. `Option<Mutex<FastConfirmationRule>>`: FCR state (None when disabled), only locked inside
-//!    `recompute_head_at_slot_internal` while the fork choice read lock (1) is held and
-//!    `recompute_head_lock` (3) serializes access.
+//! 4. `Option<Mutex<FastConfirmationRule>>`: FCR state (None when disabled). Locked inside
+//!    `recompute_head_at_slot_internal` while the fork choice read lock (1) is held, and briefly
+//!    by `persist_fork_choice` and `restore_from_store`, in both cases after any fork choice lock
+//!    has been released. Never lock the fork choice after this mutex.
 //!
 //! This module has to take great efforts to avoid causing a deadlock with these three methods. Any
 //! developers working in this module should tread carefully and seek a detailed review.
@@ -452,11 +453,7 @@ pub struct CanonicalHead<T: BeaconChainTypes> {
     ///
     /// This lock **should not be made public**, it should only be used inside this module.
     recompute_head_lock: Mutex<()>,
-    /// Fast Confirmation Rule state. `None` = FCR disabled.
-    ///
-    /// Updated inside `recompute_head_at_slot_internal` after `get_head` completes, while
-    /// the fork-choice read lock is still held. The Mutex is only locked briefly during
-    /// FCR computation, which is already serialized by `recompute_head_lock`.
+    /// Fast Confirmation Rule state. `None` = FCR disabled. See the lock ordering above.
     pub fast_confirmation: Option<Mutex<FastConfirmationRule>>,
     /// Per-validator committee slot assignments across the last 3 epochs.
     pub slot_assignments: Mutex<SlotAssignments>,
@@ -1340,6 +1337,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let votes = fork_choice.proto_array().votes();
         let equivocating_indices = fork_choice.fc_store().equivocating_indices();
 
+        // A restart that slept across an epoch boundary first performs the rotation it missed.
+        if let Some(checkpoint) = fcr.missed_boundary_checkpoint::<T::EthSpec>(
+            current_slot,
+            fork_choice.justified_checkpoint(),
+            unrealized_justified_cp,
+        ) {
+            let rotates_now = !current_slot
+                .as_u64()
+                .is_multiple_of(T::EthSpec::slots_per_epoch())
+                && checkpoint != fcr.current_epoch_observed_justified.checkpoint();
+            let state = rotates_now
+                .then(|| {
+                    Self::load_fcr_checkpoint_state(store, builder_onboarding_cache, checkpoint)
+                })
+                .transpose()?;
+            fcr.catch_up_missed_boundary::<T::EthSpec>(current_slot, checkpoint, state.as_ref())?;
+        }
+
         // Load the checkpoint state if it will be required.
         let checkpoint_state = fcr
             .checkpoint_state_needed::<T::EthSpec>(current_slot)
@@ -1385,7 +1400,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         })
     }
 
-    /// Restore the persisted FCR state, or seed from the justified checkpoint.
+    /// Restore the persisted FCR state, or seed from the justified checkpoint. The seed is read
+    /// before the first tick, so it only helps a restart that stays within the same epoch.
     fn load_fast_confirmation_rule(
         fork_choice: &BeaconForkChoice<T>,
         snapshot: &BeaconSnapshot<T::EthSpec>,
@@ -1414,8 +1430,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     }
 
     /// `None` unless the persisted confirmed root is still in fork choice and `VALID` (a payload
-    /// status reset at boot makes every block optimistic). Other references may have been pruned by
-    /// finality advancing on the first tick; they are clamped to finalized.
+    /// status reset at boot makes every block optimistic). Fork choice only serves descendants of
+    /// the finalized checkpoint; any other reference behind it — the previous observed-justified
+    /// checkpoint can be, after justification lag — is clamped to the finalized checkpoint.
     fn restore_fast_confirmation_rule(
         fork_choice: &BeaconForkChoice<T>,
         snapshot: &BeaconSnapshot<T::EthSpec>,
@@ -1425,7 +1442,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     ) -> Result<Option<FastConfirmationRule>, FastConfirmationError> {
         let Some(persisted) = store
             .get_item::<PersistedFastConfirmation>(&FAST_CONFIRMATION_DB_KEY)
-            .map_err(|e| FastConfirmationError::UnableToObtainCheckpointState(format!("{e:?}")))?
+            .map_err(|e| FastConfirmationError::UnableToObtainPersistedState(format!("{e:?}")))?
         else {
             return Ok(None);
         };
