@@ -1,18 +1,16 @@
 //! State that lets the Fast Confirmation Rule carry on across a restart instead of starting over.
 //!
-//! Nothing here changes the database schema: both items live under their own keys in
-//! `DBColumn::ForkChoice`, are written in the same batch as fork choice, and a database without
-//! them (an older version, a fresh sync) simply boots the way it always did.
+//! This does not change the database schema: the item lives under its own key in
+//! `DBColumn::ForkChoice`, is written in the same batch as fork choice, and a database without it
+//! (an older version, a fresh sync) simply boots the way it always did.
 
 use fast_confirmation::FastConfirmationRule;
-use fork_choice::QueuedAttestation;
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
 use store::{DBColumn, Error as StoreError, StoreItem};
 use types::{Checkpoint, Hash256, Slot};
 
 pub const FAST_CONFIRMATION_DB_KEY: Hash256 = Hash256::with_last_byte(1);
-pub const QUEUED_ATTESTATIONS_DB_KEY: Hash256 = Hash256::with_last_byte(2);
 
 /// Marks `last_update_slot` as unset: the rule had not run yet when it was persisted.
 const NO_UPDATE_SLOT: u64 = u64::MAX;
@@ -56,32 +54,6 @@ impl PersistedFastConfirmation {
 }
 
 impl StoreItem for PersistedFastConfirmation {
-    fn db_column() -> DBColumn {
-        DBColumn::ForkChoice
-    }
-
-    fn as_store_bytes(&self) -> Vec<u8> {
-        self.as_ssz_bytes()
-    }
-
-    fn from_store_bytes(bytes: &[u8]) -> Result<Self, StoreError> {
-        Self::from_ssz_bytes(bytes).map_err(Into::into)
-    }
-}
-
-/// Attestations fork choice was holding for the next slot when it was persisted.
-///
-/// `PersistedForkChoice` stopped carrying these in V29. Without them a node that shuts down in
-/// slot N comes back without any of slot N's votes until block N+1 delivers them, and the Fast
-/// Confirmation Rule, which re-confirms the recent chain at every epoch boundary, can fall a
-/// committee short of the safety threshold and drop its confirmed root for no reason a node that
-/// stayed up would have.
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
-pub struct PersistedQueuedAttestations {
-    pub attestations: Vec<QueuedAttestation>,
-}
-
-impl StoreItem for PersistedQueuedAttestations {
     fn db_column() -> DBColumn {
         DBColumn::ForkChoice
     }

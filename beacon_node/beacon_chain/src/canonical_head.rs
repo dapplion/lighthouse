@@ -35,10 +35,7 @@
 //! stack.
 
 use crate::chain_config::FastConfirmationMode;
-use crate::persisted_fast_confirmation::{
-    FAST_CONFIRMATION_DB_KEY, PersistedFastConfirmation, PersistedQueuedAttestations,
-    QUEUED_ATTESTATIONS_DB_KEY,
-};
+use crate::persisted_fast_confirmation::{FAST_CONFIRMATION_DB_KEY, PersistedFastConfirmation};
 use crate::persisted_fork_choice::PersistedForkChoice;
 use crate::shuffling_cache::BlockShufflingIds;
 use crate::state_advance_timer::MAX_ADVANCE_DISTANCE;
@@ -1825,24 +1822,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Persist fork choice to disk, writing immediately.
     pub fn persist_fork_choice(&self) -> Result<(), Error> {
         let _fork_choice_timer = metrics::start_timer(&metrics::PERSIST_FORK_CHOICE);
-        let mut batch = vec![
-            self.persist_fork_choice_in_batch()?,
-            self.persist_queued_attestations_in_batch(),
-        ];
+        let mut batch = vec![self.persist_fork_choice_in_batch()?];
         batch.extend(self.persist_fast_confirmation_in_batch());
         self.store.hot_db.do_atomically(batch)?;
         Ok(())
-    }
-
-    /// The attestations fork choice is holding for the next slot. They are not part of
-    /// `PersistedForkChoice`, and losing them across a restart costs the Fast Confirmation Rule a
-    /// committee's worth of support for the slot the node shut down in.
-    fn persist_queued_attestations_in_batch(&self) -> KeyValueStoreOp {
-        let attestations = self
-            .canonical_head
-            .fork_choice_read_lock()
-            .queued_attestations_flat();
-        PersistedQueuedAttestations { attestations }.as_kv_store_op(QUEUED_ATTESTATIONS_DB_KEY)
     }
 
     /// The Fast Confirmation Rule's tracking variables, when FCR is enabled.
