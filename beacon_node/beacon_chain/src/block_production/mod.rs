@@ -19,7 +19,7 @@ pub use gloas::PayloadEnvelopeContents;
 pub(crate) struct BlockProductionState<E: EthSpec> {
     pub state: BeaconState<E>,
     pub state_root: Option<Hash256>,
-    pub parent_payload_status: PayloadStatus,
+    pub parent_payload_status: PayloadStatusCrossFork,
     pub parent_envelope: Option<Arc<SignedExecutionPayloadEnvelope<E>>>,
 }
 
@@ -27,7 +27,7 @@ pub(crate) struct BlockProductionState<E: EthSpec> {
 struct ReOrgInputs<E: EthSpec> {
     state: BeaconState<E>,
     state_root: Hash256,
-    parent_payload_status: PayloadStatus,
+    parent_payload_status: PayloadStatusCrossFork,
     parent_envelope: Option<Arc<SignedExecutionPayloadEnvelope<E>>>,
 }
 
@@ -52,11 +52,22 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // clone the `Arc` so we can pass it to block production without a DB load.
         let (head_slot, head_block_root, head_state_root, head_payload_status, head_envelope) = {
             let head = self.canonical_head.cached_head();
+            // The side of the head only means something for a Gloas head; a pre-Gloas head has a
+            // single node and the walk's status for it carries no information.
+            let head_payload_status = if self
+                .spec
+                .fork_name_at_slot::<T::EthSpec>(head.head_slot())
+                .gloas_enabled()
+            {
+                PayloadStatusCrossFork::Gloas(head.head_payload_status())
+            } else {
+                PayloadStatusCrossFork::PreGloas
+            };
             (
                 head.head_slot(),
                 head.head_block_root(),
                 head.head_state_root(),
-                head.head_payload_status(),
+                head_payload_status,
                 head.snapshot.execution_envelope.clone(),
             )
         };
@@ -253,30 +264,26 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // The head uniquely determines the parent payload status for the re-org block, whichever
         // variant (full or empty) it builds on must have more weight, or else we would have already
         // re-orged away from this block naturally, and it would not be the head, by definition.
-        let parent_payload_status = match proposer_head.head_node.get_parent_payload_status() {
-            PayloadStatusCrossFork::Gloas(status) => status,
-            // Gloas re-org logic never runs with a pre-Gloas head; a pre-Gloas parent has no
-            // separate payload to apply, which `EMPTY` conveys.
-            PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
-        };
-        let parent_envelope = if parent_payload_status == PayloadStatus::Full {
-            let envelope = self
-                .store
-                .get_payload_envelope(&re_org_parent_block)
-                .ok()
-                .flatten()
-                .map(Arc::new)
-                .or_else(|| {
-                    warn!(
-                        reason = "missing execution payload envelope",
-                        "Not attempting re-org"
-                    );
-                    None
-                })?;
-            Some(envelope)
-        } else {
-            None
-        };
+        let parent_payload_status = proposer_head.head_node.get_parent_payload_status();
+        let parent_envelope =
+            if parent_payload_status == PayloadStatusCrossFork::Gloas(PayloadStatus::Full) {
+                let envelope = self
+                    .store
+                    .get_payload_envelope(&re_org_parent_block)
+                    .ok()
+                    .flatten()
+                    .map(Arc::new)
+                    .or_else(|| {
+                        warn!(
+                            reason = "missing execution payload envelope",
+                            "Not attempting re-org"
+                        );
+                        None
+                    })?;
+                Some(envelope)
+            } else {
+                None
+            };
 
         info!(
             weak_head = ?canonical_head,

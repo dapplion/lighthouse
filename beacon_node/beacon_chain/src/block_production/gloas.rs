@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use proto_array::PayloadStatus;
+use proto_array::PayloadStatusCrossFork;
 
 use bls::{PublicKeyBytes, Signature};
 use execution_layer::{
@@ -150,6 +151,18 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             parent_payload_status,
             parent_envelope,
         } = block_production_state;
+
+        // Gloas block production is fork-dispatched, so a pre-Gloas head cannot reach it.
+        let parent_payload_status = match parent_payload_status {
+            PayloadStatusCrossFork::Gloas(status) => status,
+            PayloadStatusCrossFork::PreGloas => {
+                return Err(BlockProductionError::BeaconChain(Box::new(
+                    BeaconChainError::Unexpected(
+                        "pre-gloas head in gloas block production".to_string(),
+                    ),
+                )));
+            }
+        };
 
         // Part 2/2 (async, with some blocking components)
         //
