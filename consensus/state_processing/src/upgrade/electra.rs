@@ -27,7 +27,7 @@ pub fn upgrade_to_electra<E: EthSpec>(
 
     // The total active balance cache must be built before the consolidation churn limit
     // is calculated.
-    pre_state.build_total_active_balance_cache(spec)?;
+    pre_state.build_active_totals_cache(spec)?;
     let earliest_consolidation_epoch = spec.compute_activation_exit_epoch(epoch)?;
 
     let mut post = upgrade_state_to_electra(
@@ -161,7 +161,7 @@ pub fn upgrade_state_to_electra<E: EthSpec>(
         pending_partial_withdrawals: Default::default(),
         pending_consolidations: Default::default(),
         // Caches
-        total_active_balance: pre.total_active_balance,
+        active_totals: pre.active_totals,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),
         committee_caches: mem::take(&mut pre.committee_caches),
         pubkey_cache: mem::take(&mut pre.pubkey_cache),

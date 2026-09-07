@@ -478,8 +478,12 @@ pub fn process_epoch_single_pass<E: EthSpec>(
     // Finally, finish updating effective balance caches. We need this to happen *after* processing
     // of pending consolidations, which recomputes some effective balances.
     if conf.effective_balance_updates {
-        let next_epoch_total_active_balance = next_epoch_cache.get_total_active_balance();
-        state.set_total_active_balance(next_epoch, next_epoch_total_active_balance, spec);
+        state.set_active_totals(
+            next_epoch,
+            next_epoch_cache.get_active_validator_count(),
+            next_epoch_cache.get_total_active_balance(),
+            spec,
+        );
         let next_epoch_activation_queue =
             activation_queues.map_or_else(ActivationQueue::default, |(_, queue)| queue);
         *state.epoch_cache_mut() =

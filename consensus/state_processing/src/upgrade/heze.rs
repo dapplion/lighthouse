@@ -90,7 +90,7 @@ pub fn upgrade_state_to_heze<E: EthSpec>(
         payload_expected_withdrawals: mem::take(&mut pre.payload_expected_withdrawals),
         ptc_window: pre.ptc_window.clone(),
         // Caches
-        total_active_balance: pre.total_active_balance,
+        active_totals: pre.active_totals,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),
         committee_caches: mem::take(&mut pre.committee_caches),
         pubkey_cache: mem::take(&mut pre.pubkey_cache),

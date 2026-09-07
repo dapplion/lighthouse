@@ -30,7 +30,7 @@ pub fn process_epoch<E: EthSpec>(
     state.build_committee_cache(RelativeEpoch::Previous, spec)?;
     state.build_committee_cache(RelativeEpoch::Current, spec)?;
     state.build_committee_cache(RelativeEpoch::Next, spec)?;
-    state.build_total_active_balance_cache(spec)?;
+    state.build_active_totals_cache(spec)?;
     initialize_epoch_cache(state, spec)?;
     initialize_progressive_balances_cache::<E>(state, spec)?;
 

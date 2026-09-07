@@ -451,7 +451,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 metrics::start_timer(&metrics::BLOCK_PRODUCTION_ATTESTATION_TIMES);
 
             // Epoch cache and total balance cache are required for op pool packing.
-            state.build_total_active_balance_cache(&self.spec)?;
+            state.build_active_totals_cache(&self.spec)?;
             initialize_epoch_cache(&mut state, &self.spec)?;
 
             // [New in Gloas:EIP7732] Since payload processing is deferred to the next block, the

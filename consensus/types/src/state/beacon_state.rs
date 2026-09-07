@@ -803,7 +803,8 @@ where
     #[tree_hash(skip_hashing)]
     #[cfg_attr(feature = "arbitrary", arbitrary(default))]
     #[metastruct(exclude)]
-    pub total_active_balance: Option<(Epoch, u64)>,
+    /// `(epoch, active_validator_count, total_active_balance)`, valid only for `epoch`.
+    pub active_totals: Option<(Epoch, u64, u64)>,
     #[serde(skip_serializing, skip_deserializing)]
     #[ssz(skip_serializing, skip_deserializing)]
     #[tree_hash(skip_hashing)]
@@ -1021,7 +1022,7 @@ impl<E: EthSpec> BeaconState<E> {
             finalized_checkpoint: Checkpoint::default(),
 
             // Caching (not in spec)
-            total_active_balance: None,
+            active_totals: None,
             progressive_balances_cache: <_>::default(),
             committee_caches: [
                 default_committee_cache.clone(),
@@ -2539,20 +2540,18 @@ impl<E: EthSpec> BeaconState<E> {
 
     /// Return the churn limit for the current epoch (number of validators who can leave per epoch).
     ///
-    /// Uses the current epoch committee cache, and will error if it isn't initialized.
+    /// Uses the active totals cache, and will error if it isn't initialized.
     pub fn get_validator_churn_limit(&self, spec: &ChainSpec) -> Result<u64, BeaconStateError> {
         Ok(std::cmp::max(
             spec.min_per_epoch_churn_limit,
-            (self
-                .committee_cache(RelativeEpoch::Current)?
-                .active_validator_count() as u64)
+            self.get_active_validator_count()?
                 .safe_div(spec.churn_limit_quotient)?,
         ))
     }
 
     /// Return the activation churn limit for the current epoch (number of validators who can enter per epoch).
     ///
-    /// Uses the current epoch committee cache, and will error if it isn't initialized.
+    /// Uses the active totals cache, and will error if it isn't initialized.
     pub fn get_activation_churn_limit(&self, spec: &ChainSpec) -> Result<u64, BeaconStateError> {
         Ok(match self {
             BeaconState::Base(_)
@@ -2609,29 +2608,30 @@ impl<E: EthSpec> BeaconState<E> {
     ///
     /// This method should rarely be invoked because single-pass epoch processing keeps the total
     /// active balance cache up to date.
-    pub fn compute_total_active_balance_slow(
+    pub fn compute_active_totals_slow(
         &self,
         spec: &ChainSpec,
-    ) -> Result<u64, BeaconStateError> {
+    ) -> Result<(u64, u64), BeaconStateError> {
         let current_epoch = self.current_epoch();
 
+        let mut active_validator_count: u64 = 0;
         let mut total_active_balance = 0;
 
         for validator in self.validators() {
             if validator.is_active_at(current_epoch) {
+                active_validator_count.safe_add_assign(1)?;
                 total_active_balance.safe_add_assign(validator.effective_balance)?;
             }
         }
-        Ok(std::cmp::max(
-            total_active_balance,
-            spec.effective_balance_increment,
+        Ok((
+            active_validator_count,
+            std::cmp::max(total_active_balance, spec.effective_balance_increment),
         ))
     }
 
     /// Implementation of `get_total_active_balance`, matching the spec.
     ///
-    /// Requires the total active balance cache to be initialised, which is initialised whenever
-    /// the current committee cache is.
+    /// Requires the active totals cache to be initialised.
     ///
     /// Returns minimum `EFFECTIVE_BALANCE_INCREMENT`, to avoid div by 0.
     pub fn get_total_active_balance(&self) -> Result<u64, BeaconStateError> {
@@ -2640,12 +2640,23 @@ impl<E: EthSpec> BeaconState<E> {
 
     /// Get the cached total active balance while checking that it is for the correct `epoch`.
     pub fn get_total_active_balance_at_epoch(&self, epoch: Epoch) -> Result<u64, BeaconStateError> {
-        let (initialized_epoch, balance) = self
-            .total_active_balance()
+        Ok(self.get_active_totals_at_epoch(epoch)?.1)
+    }
+
+    /// Get the cached active validator count for the current epoch.
+    pub fn get_active_validator_count(&self) -> Result<u64, BeaconStateError> {
+        Ok(self.get_active_totals_at_epoch(self.current_epoch())?.0)
+    }
+
+    /// Get the cached `(active_validator_count, total_active_balance)` while checking that they are
+    /// for the correct `epoch`.
+    fn get_active_totals_at_epoch(&self, epoch: Epoch) -> Result<(u64, u64), BeaconStateError> {
+        let (initialized_epoch, count, balance) = self
+            .active_totals()
             .ok_or(BeaconStateError::TotalActiveBalanceCacheUninitialized)?;
 
         if initialized_epoch == epoch {
-            Ok(balance)
+            Ok((count, balance))
         } else {
             Err(BeaconStateError::TotalActiveBalanceCacheInconsistent {
                 initialized_epoch,
@@ -2660,39 +2671,36 @@ impl<E: EthSpec> BeaconState<E> {
     /// single-pass epoch processing (or `process_rewards_and_penalties` for phase0).
     ///
     /// This function will ensure the balance is never set to 0, thus conforming to the spec.
-    pub fn set_total_active_balance(&mut self, epoch: Epoch, balance: u64, spec: &ChainSpec) {
+    pub fn set_active_totals(&mut self, epoch: Epoch, count: u64, balance: u64, spec: &ChainSpec) {
         let safe_balance = std::cmp::max(balance, spec.effective_balance_increment);
-        *self.total_active_balance_mut() = Some((epoch, safe_balance));
+        *self.active_totals_mut() = Some((epoch, count, safe_balance));
     }
 
     /// Build the total active balance cache for the current epoch if it is not already built.
     #[instrument(skip_all, level = "debug")]
-    pub fn build_total_active_balance_cache(
-        &mut self,
-        spec: &ChainSpec,
-    ) -> Result<(), BeaconStateError> {
+    pub fn build_active_totals_cache(&mut self, spec: &ChainSpec) -> Result<(), BeaconStateError> {
         if self
             .get_total_active_balance_at_epoch(self.current_epoch())
             .is_err()
         {
-            self.force_build_total_active_balance_cache(spec)?;
+            self.force_build_active_totals_cache(spec)?;
         }
         Ok(())
     }
 
     /// Build the total active balance cache, even if it is already built.
-    pub fn force_build_total_active_balance_cache(
+    pub fn force_build_active_totals_cache(
         &mut self,
         spec: &ChainSpec,
     ) -> Result<(), BeaconStateError> {
-        let total_active_balance = self.compute_total_active_balance_slow(spec)?;
-        *self.total_active_balance_mut() = Some((self.current_epoch(), total_active_balance));
+        let (count, balance) = self.compute_active_totals_slow(spec)?;
+        *self.active_totals_mut() = Some((self.current_epoch(), count, balance));
         Ok(())
     }
 
     /// Set the cached total active balance to `None`, representing no known value.
-    pub fn drop_total_active_balance_cache(&mut self) {
-        *self.total_active_balance_mut() = None;
+    pub fn drop_active_totals_cache(&mut self) {
+        *self.active_totals_mut() = None;
     }
 
     /// Get a mutable view of the epoch participation flags for `epoch`.
@@ -2758,7 +2766,7 @@ impl<E: EthSpec> BeaconState<E> {
 
     /// Drop all caches on the state.
     pub fn drop_all_caches(&mut self) -> Result<(), BeaconStateError> {
-        self.drop_total_active_balance_cache();
+        self.drop_active_totals_cache();
         self.drop_committee_cache(RelativeEpoch::Previous)?;
         self.drop_committee_cache(RelativeEpoch::Current)?;
         self.drop_committee_cache(RelativeEpoch::Next)?;
@@ -2795,9 +2803,6 @@ impl<E: EthSpec> BeaconState<E> {
             self.force_build_committee_cache(relative_epoch, spec)?;
         }
 
-        if self.total_active_balance().is_none() && relative_epoch == RelativeEpoch::Current {
-            self.build_total_active_balance_cache(spec)?;
-        }
         Ok(())
     }
 
@@ -3507,7 +3512,7 @@ impl<E: EthSpec> BeaconState<E> {
                 // Ensure total active balance cache remains built whenever current committee
                 // cache is built.
                 if epoch == self.current_epoch() {
-                    self.build_total_active_balance_cache(spec)?;
+                    self.build_active_totals_cache(spec)?;
                 }
             }
         }

@@ -104,7 +104,7 @@ pub fn upgrade_to_altair<E: EthSpec>(
         current_sync_committee: temp_sync_committee.clone(), // not read
         next_sync_committee: temp_sync_committee,            // not read
         // Caches
-        total_active_balance: pre.total_active_balance,
+        active_totals: pre.active_totals,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),
         committee_caches: mem::take(&mut pre.committee_caches),
         pubkey_cache: mem::take(&mut pre.pubkey_cache),

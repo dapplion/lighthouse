@@ -64,7 +64,7 @@ pub fn upgrade_to_capella<E: EthSpec>(
         next_withdrawal_validator_index: 0,
         historical_summaries: List::default(),
         // Caches
-        total_active_balance: pre.total_active_balance,
+        active_totals: pre.active_totals,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),
         committee_caches: mem::take(&mut pre.committee_caches),
         pubkey_cache: mem::take(&mut pre.pubkey_cache),
