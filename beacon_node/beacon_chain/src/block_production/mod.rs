@@ -11,7 +11,6 @@ use crate::{
     fork_choice_signal::ForkChoiceWaitResult, metrics,
 };
 
-mod bid_selection;
 mod gloas;
 
 pub use gloas::PayloadEnvelopeContents;

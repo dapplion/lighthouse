@@ -40,10 +40,7 @@ pub struct DirectBid<E: EthSpec> {
 #[derive(Clone)]
 pub struct BidRequestContext {
     pub slot: Slot,
-    /// The latest executed ancestor's payload hash (the parent's payload when building on FULL,
-    /// otherwise the payload the parent built on). Sent as the builder API's `parent_hash` path
-    /// parameter, and the hash a returned bid must name as its `parent_block_hash`.
-    pub executed_ancestor_hash: ExecutionBlockHash,
+    pub parent_hash: ExecutionBlockHash,
     pub parent_root: Hash256,
     pub proposer_pubkey: PublicKeyBytes,
     /// The active consensus version at `slot`, sent as the required `Eth-Consensus-Version`
@@ -151,7 +148,7 @@ impl Builders {
                 .get_execution_payload_bid::<E>(
                     url,
                     ctx.slot,
-                    ctx.executed_ancestor_hash,
+                    ctx.parent_hash,
                     ctx.parent_root,
                     &ctx.proposer_pubkey,
                     &entry.auth,
@@ -308,7 +305,7 @@ mod tests {
     fn context() -> BidRequestContext {
         BidRequestContext {
             slot: Slot::new(1),
-            executed_ancestor_hash: ExecutionBlockHash::zero(),
+            parent_hash: ExecutionBlockHash::zero(),
             parent_root: Hash256::ZERO,
             proposer_pubkey: PublicKeyBytes::empty(),
             fork_name: ForkName::Gloas,

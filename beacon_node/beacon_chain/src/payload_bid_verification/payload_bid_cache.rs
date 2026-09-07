@@ -1,8 +1,6 @@
 use crate::payload_bid_verification::gossip_verified_bid::GossipVerifiedPayloadBid;
-use educe::Educe;
 use parking_lot::RwLock;
 use std::{
-    collections::hash_map,
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
@@ -27,115 +25,84 @@ impl BidParent {
     }
 }
 
-/// The highest-value bid seen per `(slot, BidParent)`.
-///
-/// Keyed first by `Slot` (in a `BTreeMap` so that stale slots can be pruned cheaply via
-/// `split_off`), then by the [`BidParent`] the bid builds on.
 type HighestBidMap<E> = BTreeMap<Slot, HashMap<BidParent, GossipVerifiedPayloadBid<E>>>;
 
-/// The mutable state guarded by the cache's lock.
-#[derive(Educe)]
-#[educe(Default(bound = "E: EthSpec"))]
-pub struct GossipBidCacheInner<E: EthSpec> {
-    /// The current best bid for each `(slot, BidParent)`.
-    highest_bid: HighestBidMap<E>,
-    /// The `(BidParent, BuilderIndex)` pairs for which we have already accepted a gossip-verified
-    /// bid, per slot.
-    ///
-    /// Used to enforce one bid per builder per parent per slot: a builder may bid once for each
-    /// parent view compatible with the head.
-    seen_builder_bids: BTreeMap<Slot, HashSet<(BidParent, BuilderIndex)>>,
+pub struct GossipVerifiedPayloadBidCache<E: EthSpec> {
+    highest_bid: RwLock<HighestBidMap<E>>,
+    seen_builder_bids: RwLock<BTreeMap<Slot, HashSet<(BidParent, BuilderIndex)>>>,
 }
 
-/// A cache of gossip-verified payload bids.
-///
-/// Tracks, per slot, the highest-value bid observed for each parent a bid may build on and the
-/// set of `(parent, builder)` pairs that have already bid, so that duplicate and lower-value
-/// gossip bids can be rejected. Stale entries are removed via [`prune`](Self::prune) as the chain
-/// advances.
-#[derive(Educe)]
-#[educe(Default(bound = "E: EthSpec"))]
-pub struct GossipVerifiedPayloadBidCache<E: EthSpec> {
-    inner: RwLock<GossipBidCacheInner<E>>,
+impl<E: EthSpec> Default for GossipVerifiedPayloadBidCache<E> {
+    fn default() -> Self {
+        Self {
+            highest_bid: RwLock::new(BTreeMap::new()),
+            seen_builder_bids: RwLock::new(BTreeMap::new()),
+        }
+    }
 }
 
 impl<E: EthSpec> GossipVerifiedPayloadBidCache<E> {
-    /// Create a new, empty cache.
-    pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(GossipBidCacheInner::default()),
-        }
-    }
-
-    /// Get the highest-value cached bid for `(slot, bid_parent)`, if one exists.
+    /// Get the cached bid for `(slot, bid_parent)`.
     pub fn get_highest_bid(
         &self,
         slot: Slot,
         bid_parent: BidParent,
     ) -> Option<Arc<SignedExecutionPayloadBid<E>>> {
-        self.inner
+        self.highest_bid
             .read()
-            .highest_bid
             .get(&slot)
             .and_then(|map| map.get(&bid_parent).map(|b| b.signed_bid.clone()))
     }
 
-    /// Record a gossip-verified `bid` in the cache.
-    ///
-    /// This always marks the bid's `(parent, builder)` pair as seen for the bid's slot (see
-    /// [`seen_builder_bid_for_parent`](Self::seen_builder_bid_for_parent)). Additionally, if the
-    /// bid has a strictly higher value than the currently cached bid for its `(slot, BidParent)`
-    /// (or no bid is cached yet), it replaces the cached bid.
-    ///
-    /// Returns `true` if the bid became the new highest bid for its parent, or `false` if an
-    /// existing cached bid had an equal or greater value and was therefore retained.
-    pub fn observe_bid(&self, bid: GossipVerifiedPayloadBid<E>) -> bool {
-        let slot = bid.signed_bid.message.slot;
+    /// Insert a bid for `(slot, bid_parent)` only if its value is higher than the
+    /// currently cached bid for that key.
+    pub fn insert_highest_bid(&self, bid: GossipVerifiedPayloadBid<E>) {
         let key = BidParent::from_bid(&bid.signed_bid.message);
-        let mut inner = self.inner.write();
-        inner
-            .seen_builder_bids
-            .entry(slot)
-            .or_default()
-            .insert((key, bid.signed_bid.message.builder_index));
+        let mut highest_bid = self.highest_bid.write();
+        let slot_map = highest_bid.entry(bid.signed_bid.message.slot).or_default();
 
-        match inner.highest_bid.entry(slot).or_default().entry(key) {
-            hash_map::Entry::Vacant(entry) => {
-                entry.insert(bid);
-                true
-            }
-            hash_map::Entry::Occupied(mut entry) => {
-                if entry.get().signed_bid.message.value >= bid.signed_bid.message.value {
-                    return false;
-                }
-                entry.insert(bid);
-                true
-            }
+        if let Some(existing) = slot_map.get(&key)
+            && existing.signed_bid.message.value >= bid.signed_bid.message.value
+        {
+            return;
         }
+        slot_map.insert(key, bid);
     }
 
-    /// Returns `true` if a gossip-verified bid from `builder_index` has already been seen for
-    /// `(slot, bid_parent)`.
+    /// A gossip verified bid for `BuilderIndex` already exists for `(slot, bid_parent)`.
     pub fn seen_builder_bid_for_parent(
         &self,
         slot: &Slot,
         bid_parent: BidParent,
         builder_index: BuilderIndex,
     ) -> bool {
-        self.inner
+        self.seen_builder_bids
             .read()
-            .seen_builder_bids
             .get(slot)
             .is_some_and(|seen_builders| seen_builders.contains(&(bid_parent, builder_index)))
     }
 
-    /// Removes all cached bids and seen-builder records for slots older than `current_slot`.
-    ///
-    /// Entries for `current_slot` and later are retained.
+    /// Insert a builder into the seen cache.
+    pub fn insert_seen_builder_bid(&self, bid: &GossipVerifiedPayloadBid<E>) {
+        let mut seen_builder_bids = self.seen_builder_bids.write();
+        seen_builder_bids
+            .entry(bid.signed_bid.message.slot)
+            .or_default()
+            .insert((
+                BidParent::from_bid(&bid.signed_bid.message),
+                bid.signed_bid.message.builder_index,
+            ));
+    }
+
+    /// Prune anything before `current_slot`
     pub fn prune(&self, current_slot: Slot) {
-        let mut inner = self.inner.write();
-        inner.highest_bid = inner.highest_bid.split_off(&current_slot);
-        inner.seen_builder_bids = inner.seen_builder_bids.split_off(&current_slot);
+        self.highest_bid
+            .write()
+            .retain(|&slot, _| slot >= current_slot);
+
+        self.seen_builder_bids
+            .write()
+            .retain(|&slot, _| slot >= current_slot);
     }
 }
 
@@ -196,7 +163,7 @@ mod tests {
             parent_a.parent_block_root,
             100,
         );
-        cache.observe_bid(verified);
+        cache.insert_seen_builder_bid(&verified);
 
         // Seen only for the exact (slot, parent tuple, builder) combination.
         assert!(cache.seen_builder_bid_for_parent(&slot, parent_a, 0));
@@ -222,8 +189,8 @@ mod tests {
             parent_block_root: root_b,
         };
 
-        assert!(cache.observe_bid(make_gossip_verified(slot, 0, hash_a, root_a, 100)));
-        assert!(cache.observe_bid(make_gossip_verified(slot, 1, hash_b, root_b, 50)));
+        cache.insert_highest_bid(make_gossip_verified(slot, 0, hash_a, root_a, 100));
+        cache.insert_highest_bid(make_gossip_verified(slot, 1, hash_b, root_b, 50));
 
         // Each parent tuple keeps its own highest bid.
         assert_eq!(
@@ -237,7 +204,7 @@ mod tests {
 
         // A lower bid does not replace the cached bid for its tuple, and does
         // not touch the other tuple.
-        assert!(!cache.observe_bid(make_gossip_verified(slot, 2, hash_a, root_a, 60)));
+        cache.insert_highest_bid(make_gossip_verified(slot, 2, hash_a, root_a, 60));
         assert_eq!(
             cache.get_highest_bid(slot, parent_a).unwrap().message.value,
             100
@@ -248,7 +215,7 @@ mod tests {
         );
 
         // A higher bid replaces the cached bid for its tuple.
-        assert!(cache.observe_bid(make_gossip_verified(slot, 3, hash_b, root_b, 70)));
+        cache.insert_highest_bid(make_gossip_verified(slot, 3, hash_b, root_b, 70));
         let highest_b = cache.get_highest_bid(slot, parent_b).unwrap();
         assert_eq!(highest_b.message.value, 70);
         assert_eq!(highest_b.message.builder_index, 3);
@@ -266,7 +233,8 @@ mod tests {
 
         for slot in [1, 2, 3, 7, 8, 9, 10] {
             let verified = make_gossip_verified(Slot::new(slot), slot, hash, root, slot * 100);
-            cache.observe_bid(verified);
+            cache.insert_seen_builder_bid(&verified);
+            cache.insert_highest_bid(verified);
         }
 
         cache.prune(Slot::new(8));
