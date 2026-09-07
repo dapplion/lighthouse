@@ -23,19 +23,20 @@ use crate::{
     deposit::Deposit,
     execution::{
         AbstractExecPayload, BlindedPayload, BlindedPayloadBellatrix, BlindedPayloadCapella,
-        BlindedPayloadDeneb, BlindedPayloadElectra, BlindedPayloadFulu, Eth1Data, ExecutionPayload,
-        ExecutionPayloadBellatrix, ExecutionPayloadCapella, ExecutionPayloadDeneb,
-        ExecutionPayloadElectra, ExecutionPayloadFulu, ExecutionPayloadGloas,
-        ExecutionRequestsElectra, ExecutionRequestsGloas, FullPayload, FullPayloadBellatrix,
-        FullPayloadCapella, FullPayloadDeneb, FullPayloadElectra, FullPayloadFulu,
-        SignedBlsToExecutionChange,
+        BlindedPayloadDeneb, BlindedPayloadElectra, BlindedPayloadFulu,
+        EXECUTION_PAYLOAD_BID_ACTIVE_FIELDS, Eth1Data, ExecutionPayload, ExecutionPayloadBellatrix,
+        ExecutionPayloadCapella, ExecutionPayloadDeneb, ExecutionPayloadElectra,
+        ExecutionPayloadFulu, ExecutionPayloadGloas, ExecutionRequestsElectra,
+        ExecutionRequestsGloas, FullPayload, FullPayloadBellatrix, FullPayloadCapella,
+        FullPayloadDeneb, FullPayloadElectra, FullPayloadFulu, SignedBlsToExecutionChange,
     },
     exit::SignedVoluntaryExit,
     fork::{ForkName, map_fork_name},
     kzg_ext::KzgCommitments,
     light_client::consts::{
-        EXECUTION_BLOCK_HASH_INDEX_GLOAS, EXECUTION_PAYLOAD_INDEX, EXECUTION_PAYLOAD_PROOF_LEN,
-        PARENT_BLOCK_HASH_FIELD_INDEX, SIGNED_EXECUTION_PAYLOAD_BID_FIELD_INDEX,
+        EXECUTION_BLOCK_HASH_INDEX_GLOAS, EXECUTION_PAYLOAD_BID_PARENT_BLOCK_HASH_FIELD_INDEX,
+        EXECUTION_PAYLOAD_INDEX, EXECUTION_PAYLOAD_PROOF_LEN,
+        SIGNED_EXECUTION_PAYLOAD_BID_FIELD_INDEX,
     },
     slashing::{
         AttesterSlashingBase, AttesterSlashingElectra, AttesterSlashingGloas, AttesterSlashingRef,
@@ -57,6 +58,12 @@ pub const BLOB_KZG_COMMITMENTS_INDEX: usize = 11;
 
 /// The body of a `BeaconChain` block, containing operations.
 ///
+/// The `active_fields` of the progressive-container `BeaconBlockBody` variants (EIP-7688).
+///
+/// Must mirror the `active_fields(..)` lists on the `tree_hash` attributes below, which Gloas and
+/// Heze currently share; `gloas_body_progressive_container_root` checks that it does.
+pub const BEACON_BLOCK_BODY_ACTIVE_FIELDS: [bool; 13] = [true; 13];
+
 /// This *superstruct* abstracts over the hard-fork.
 #[superstruct(
     variants(Base, Altair, Bellatrix, Capella, Deneb, Electra, Fulu, Gloas, Heze),
@@ -378,25 +385,26 @@ impl<'a, E: EthSpec, Payload: AbstractExecPayload<E>> BeaconBlockBodyRef<'a, E, 
     }
 
     /// Produces the proof of inclusion for the execution block hash, for Gloas and later.
+    ///
+    /// [Modified in Gloas:EIP7732] the block commits to a payload bid rather than to a payload, so
+    /// the hash the light client can prove is the bid's `parent_block_hash`. The proof walks up
+    /// `ExecutionPayloadBid` (progressive), then `SignedExecutionPayloadBid` (a plain two-field
+    /// container), then the `BeaconBlockBody` (progressive).
     fn gloas_execution_block_hash_proof(&self) -> Result<Vec<Hash256>, BeaconStateError> {
         let signed_bid = self.signed_execution_payload_bid()?;
 
-        let bid_roots = signed_bid.message.field_roots();
-        let bid_active_fields = merkle_proof::active_fields_all_active(bid_roots.len())?;
         let mut proof = merkle_proof::progressive_container_proof(
-            &bid_roots,
-            PARENT_BLOCK_HASH_FIELD_INDEX,
-            bid_active_fields,
+            &signed_bid.message.field_roots(),
+            &EXECUTION_PAYLOAD_BID_ACTIVE_FIELDS,
+            EXECUTION_PAYLOAD_BID_PARENT_BLOCK_HASH_FIELD_INDEX,
         )?;
 
         proof.push(signed_bid.signature.tree_hash_root());
 
-        let body_roots = self.body_merkle_leaves();
-        let body_active_fields = merkle_proof::active_fields_all_active(body_roots.len())?;
         proof.extend(merkle_proof::progressive_container_proof(
-            &body_roots,
+            &self.body_merkle_leaves(),
+            &BEACON_BLOCK_BODY_ACTIVE_FIELDS,
             SIGNED_EXECUTION_PAYLOAD_BID_FIELD_INDEX,
-            body_active_fields,
         )?);
 
         Ok(proof)
@@ -1659,6 +1667,14 @@ mod tests {
             let expected = tree_hash::mix_in_active_fields(&container_root, active_fields);
 
             assert_eq!(body.tree_hash_root(), expected);
+
+            // The `active_fields` used when generating Merkle proofs must describe the same
+            // container as the `tree_hash` attribute.
+            assert_eq!(field_roots.len(), BEACON_BLOCK_BODY_ACTIVE_FIELDS.len());
+            assert_eq!(
+                merkle_proof::pack_active_fields(&BEACON_BLOCK_BODY_ACTIVE_FIELDS).unwrap(),
+                Hash256::from(active_fields)
+            );
         }
     }
 }

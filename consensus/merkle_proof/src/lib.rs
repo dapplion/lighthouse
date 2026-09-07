@@ -400,6 +400,9 @@ pub fn merkle_root_from_branch(leaf: H256, branch: &[H256], depth: usize, index:
 /// Return the first field index, the number of chunks and the binary depth of the progressive
 /// subtree at `level`, which holds `4^level` chunks starting at field `(4^level - 1) / 3`
 /// (EIP-7916).
+///
+/// A level deeper than `MAX_TREE_DEPTH` is reported as `ArithError`, since such a tree is not
+/// representable here.
 fn progressive_level(level: usize) -> Result<(usize, usize, usize), MerkleTreeError> {
     let depth = level.safe_mul(2)?;
     if depth > MAX_TREE_DEPTH {
@@ -465,54 +468,86 @@ pub fn progressive_container_gindex(field_index: usize) -> Result<usize, MerkleT
     Ok(subtree_gindex.safe_mul(size)?.safe_add(offset)?)
 }
 
-/// Compute the packed `active_fields` chunk for a container in which every field is active,
-/// which is true of every Gloas progressive container.
-pub fn active_fields_all_active(num_fields: usize) -> Result<H256, MerkleTreeError> {
+/// Pack an `active_fields` bitvector into the single chunk it is merkleized as (EIP-7688).
+pub fn pack_active_fields(active_fields: &[bool]) -> Result<H256, MerkleTreeError> {
     let mut bytes = [0u8; 32];
-    for field in 0..num_fields {
-        let byte = bytes
-            .get_mut(field.safe_div(8)?)
-            .ok_or(MerkleTreeError::Invalid)?;
-        *byte |= 1u8.safe_shl(field.safe_rem(8)? as u32)?;
+    if active_fields.len() > bytes.len().safe_mul(8)? {
+        return Err(MerkleTreeError::Invalid);
+    }
+    for (field, active) in active_fields.iter().enumerate() {
+        if *active {
+            let byte = bytes
+                .get_mut(field.safe_div(8)?)
+                .ok_or(MerkleTreeError::Invalid)?;
+            *byte |= 1u8.safe_shl(field.safe_rem(8)? as u32)?;
+        }
     }
     Ok(H256::from(bytes))
 }
 
+/// Expand the roots of a container's active fields into one leaf per `active_fields` entry,
+/// placing a zero leaf at each inactive entry so that generalized indices stay stable (EIP-7688).
+///
+/// Errors if `active_field_roots` does not hold exactly one root per active entry.
+fn progressive_container_leaves(
+    active_field_roots: &[H256],
+    active_fields: &[bool],
+) -> Result<Vec<H256>, MerkleTreeError> {
+    let mut roots = active_field_roots.iter();
+    let leaves = active_fields
+        .iter()
+        .map(|active| match *active {
+            true => roots.next().copied().ok_or(MerkleTreeError::Invalid),
+            false => Ok(H256::zero()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Every supplied root must have been claimed by an active entry.
+    match roots.next() {
+        Some(_) => Err(MerkleTreeError::Invalid),
+        None => Ok(leaves),
+    }
+}
+
 /// Generate a Merkle proof for the field at `field_index` of a progressive container (EIP-7688).
 ///
-/// `field_roots` must contain the `tree_hash_root` of every field in declaration order. The
-/// proof is in bottom-up order, ending with the `active_fields` chunk.
+/// `active_field_roots` must contain the `tree_hash_root` of every *active* field in declaration
+/// order, and `active_fields` the container's activity bitvector. `field_index` counts entries in
+/// `active_fields`, matching [`progressive_container_gindex`]. The proof is in bottom-up order,
+/// ending with the `active_fields` chunk.
 pub fn progressive_container_proof(
-    field_roots: &[H256],
+    active_field_roots: &[H256],
+    active_fields: &[bool],
     field_index: usize,
-    active_fields: H256,
 ) -> Result<Vec<H256>, MerkleTreeError> {
+    let field_roots = progressive_container_leaves(active_field_roots, active_fields)?;
     if field_index >= field_roots.len() {
         return Err(MerkleTreeError::Invalid);
     }
     let (level, offset, _) = progressive_field_location(field_index)?;
-    let (leaves, depth) = progressive_level_leaves(field_roots, level)?;
+    let (leaves, depth) = progressive_level_leaves(&field_roots, level)?;
 
     let (_, mut proof) = MerkleTree::create(leaves, depth).generate_proof(offset, depth)?;
 
-    proof.push(progressive_root_from(field_roots, level.safe_add(1)?)?);
+    proof.push(progressive_root_from(&field_roots, level.safe_add(1)?)?);
     for shallower in (0..level).rev() {
-        proof.push(progressive_level_root(field_roots, shallower)?);
+        proof.push(progressive_level_root(&field_roots, shallower)?);
     }
-    proof.push(active_fields);
+    proof.push(pack_active_fields(active_fields)?);
 
     Ok(proof)
 }
 
-/// Compute the root of a progressive container from its field roots.
+/// Compute the root of a progressive container from the roots of its active fields.
 pub fn progressive_container_root(
-    field_roots: &[H256],
-    active_fields: H256,
+    active_field_roots: &[H256],
+    active_fields: &[bool],
 ) -> Result<H256, MerkleTreeError> {
-    let progressive_root = progressive_root_from(field_roots, 0)?;
+    let field_roots = progressive_container_leaves(active_field_roots, active_fields)?;
+    let progressive_root = progressive_root_from(&field_roots, 0)?;
     Ok(H256::from(hash32_concat(
         progressive_root.as_slice(),
-        active_fields.as_slice(),
+        pack_active_fields(active_fields)?.as_slice(),
     )))
 }
 
@@ -582,11 +617,52 @@ mod progressive_tests {
             let mut expected = [0u8; 32];
             expected[..prefix.len()].copy_from_slice(prefix);
             assert_eq!(
-                active_fields_all_active(num_fields).unwrap(),
+                pack_active_fields(&vec![true; num_fields]).unwrap(),
                 H256::from(expected),
                 "{num_fields} fields"
             );
         }
+    }
+
+    /// An inactive field contributes a cleared bit and a zero leaf, leaving the generalized
+    /// indices of the fields around it unchanged.
+    #[test]
+    fn inactive_fields_zero_their_leaf() {
+        let active_fields = [true, false, true];
+        let roots = field_roots(2);
+
+        assert_eq!(pack_active_fields(&active_fields).unwrap(), {
+            let mut expected = [0u8; 32];
+            expected[0] = 0b101;
+            H256::from(expected)
+        });
+
+        // The inactive entry contributes a zero leaf, so the progressive part below the
+        // `active_fields` mix-in matches an all-active container whose middle root is zero.
+        let padded = [roots[0], H256::zero(), roots[1]];
+        assert_eq!(
+            progressive_container_leaves(&roots, &active_fields).unwrap(),
+            padded
+        );
+
+        // Entry 2 keeps the gindex it would have had were entry 1 active.
+        let root = progressive_container_root(&roots, &active_fields).unwrap();
+        let branch = progressive_container_proof(&roots, &active_fields, 2).unwrap();
+        let gindex = progressive_container_gindex(2).unwrap();
+        let depth = branch.len();
+        assert!(verify_merkle_proof(
+            roots[1],
+            &branch,
+            depth,
+            gindex - (1 << depth),
+            root
+        ));
+
+        // Supplying a root for the inactive entry is an error, not a silently different root.
+        assert_eq!(
+            progressive_container_root(&padded, &active_fields),
+            Err(MerkleTreeError::Invalid)
+        );
     }
 
     /// Check that every proof verifies against the container root, for container sizes spanning
@@ -595,12 +671,12 @@ mod progressive_tests {
     fn proofs_rebuild_the_root() {
         for num_fields in 1..=85 {
             let roots = field_roots(num_fields);
-            let active_fields = active_fields_all_active(num_fields).unwrap();
-            let root = progressive_container_root(&roots, active_fields).unwrap();
+            let active_fields = vec![true; num_fields];
+            let root = progressive_container_root(&roots, &active_fields).unwrap();
 
             for field_index in 0..num_fields {
                 let branch =
-                    progressive_container_proof(&roots, field_index, active_fields).unwrap();
+                    progressive_container_proof(&roots, &active_fields, field_index).unwrap();
                 let gindex = progressive_container_gindex(field_index).unwrap();
                 let depth = branch.len();
 
@@ -626,26 +702,26 @@ mod progressive_tests {
     #[test]
     fn rejects_out_of_range_field() {
         let roots = field_roots(4);
-        let active_fields = active_fields_all_active(4).unwrap();
         assert_eq!(
-            progressive_container_proof(&roots, 4, active_fields),
+            progressive_container_proof(&roots, &[true; 4], 4),
             Err(MerkleTreeError::Invalid)
         );
     }
 
     proptest::proptest! {
         /// Check that proofs verify for arbitrary leaves and container sizes into level 4, and
-        /// fail once a branch node is corrupted.
+        /// fail once a branch node is corrupted. `active_fields` occupies a single chunk, so a
+        /// progressive container holds at most 256 fields.
         #[test]
         fn proptest_progressive_create_and_verify(
-            (int_leaves, active) in (proptest::collection::vec(any::<u64>(), 0..=350), any::<u64>())
+            int_leaves in proptest::collection::vec(any::<u64>(), 0..=256)
         ) {
             let roots: Vec<_> = int_leaves.into_iter().map(H256::from_low_u64_be).collect();
-            let active_fields = H256::from_low_u64_be(active);
-            let root = progressive_container_root(&roots, active_fields).unwrap();
+            let active_fields = vec![true; roots.len()];
+            let root = progressive_container_root(&roots, &active_fields).unwrap();
 
             let proofs_ok = (0..roots.len()).all(|i| {
-                let branch = progressive_container_proof(&roots, i, active_fields).unwrap();
+                let branch = progressive_container_proof(&roots, &active_fields, i).unwrap();
                 let gindex = progressive_container_gindex(i).unwrap();
                 let depth = branch.len();
                 let index = gindex - (1 << depth);

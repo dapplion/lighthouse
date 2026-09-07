@@ -296,6 +296,9 @@ impl From<BeaconStateHash> for Hash256 {
 /// we add internal mutability to `milhouse::{List, Vector}`. See:
 ///
 /// https://github.com/sigp/milhouse/issues/43
+///
+/// The `active_fields` of the progressive-container variants (EIP-7688) are declared separately in
+/// `BEACON_STATE_ACTIVE_FIELDS`, which must mirror the `active_fields(..)` lists below.
 #[superstruct(
     variants(Base, Altair, Bellatrix, Capella, Deneb, Electra, Fulu, Gloas, Heze),
     variant_attributes(
@@ -3745,6 +3748,13 @@ impl<E: EthSpec> ForkVersionDecode for BeaconState<E> {
     }
 }
 
+/// The `active_fields` of the progressive-container `BeaconState` variants (EIP-7688).
+///
+/// Must mirror the `active_fields(..)` lists on the `tree_hash` attributes of `BeaconStateGloas`
+/// and `BeaconStateHeze`, which currently share one list; `active_fields_match_num_fields` checks
+/// that the lengths agree.
+pub const BEACON_STATE_ACTIVE_FIELDS: [bool; 46] = [true; 46];
+
 impl<E: EthSpec> BeaconState<E> {
     /// The number of fields of the `BeaconState` rounded up to the nearest power of two.
     ///
@@ -3854,16 +3864,14 @@ impl<E: EthSpec> BeaconState<E> {
     }
 
     pub fn compute_finalized_root_proof(&self) -> Result<Vec<Hash256>, BeaconStateError> {
-        // Finalized root is the right child of `finalized_checkpoint`, divide by two to get
-        // the generalized index of `state.finalized_checkpoint`.
+        // Finalized root is the right child of `finalized_checkpoint`, whose field offset in
+        // `BeaconState` is 20 in every fork.
         //
-        // Convert gindex to index by subtracting 2**depth (gindex = 2**depth + index).
-        //
-        // After Electra, the index should be 169/2 - 64 = 20 which matches the position
-        // of `finalized_checkpoint` in `BeaconState`.
-        //
-        // Prior to Electra, the index should be 105/2 - 32 = 20 which matches the position
-        // of `finalized_checkpoint` in `BeaconState`.
+        // Before Gloas that offset is recovered from the generalized index: divide by two to
+        // reach `finalized_checkpoint`, then subtract 2**depth (gindex = 2**depth + index). After
+        // Electra that is 169/2 - 64 = 20, and prior to Electra 105/2 - 32 = 20. Gloas is a
+        // progressive container, whose generalized indices are not of that form, so it uses the
+        // field offset directly.
         let checkpoint_index = if self.fork_name_unchecked().gloas_enabled() {
             FINALIZED_CHECKPOINT_FIELD_INDEX
         } else if self.fork_name_unchecked().electra_enabled() {
@@ -3889,11 +3897,10 @@ impl<E: EthSpec> BeaconState<E> {
 
         // [Modified in Gloas:EIP7688] the state is a progressive container.
         if self.fork_name_unchecked().gloas_enabled() {
-            let active_fields = merkle_proof::active_fields_all_active(leaves.len())?;
             return Ok(merkle_proof::progressive_container_proof(
                 leaves,
+                &BEACON_STATE_ACTIVE_FIELDS,
                 field_index,
-                active_fields,
             )?);
         }
 
@@ -4067,6 +4074,26 @@ pub fn compute_weak_subjectivity_period_gloas(
         .safe_add(epochs_for_validator_set_churn)?;
 
     Ok(ws_period)
+}
+
+#[cfg(test)]
+mod progressive_container_tests {
+    use super::*;
+    use crate::MainnetEthSpec;
+
+    /// The `active_fields` used when generating Merkle proofs must describe the same container as
+    /// the `tree_hash` attributes on the progressive-container variants.
+    #[test]
+    fn active_fields_match_num_fields() {
+        assert_eq!(
+            BEACON_STATE_ACTIVE_FIELDS.len(),
+            BeaconStateGloas::<MainnetEthSpec>::NUM_FIELDS
+        );
+        assert_eq!(
+            BEACON_STATE_ACTIVE_FIELDS.len(),
+            BeaconStateHeze::<MainnetEthSpec>::NUM_FIELDS
+        );
+    }
 }
 
 #[cfg(test)]

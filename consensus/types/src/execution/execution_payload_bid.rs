@@ -2,11 +2,18 @@ use crate::kzg_ext::ProgressiveKzgCommitments;
 use crate::{Address, EthSpec, ExecutionBlockHash, ForkName, Hash256, SignedRoot, Slot};
 use context_deserialize::context_deserialize;
 use educe::Educe;
+use metastruct::metastruct;
 use serde::{Deserialize, Serialize};
 use ssz_derive::{Decode, Encode};
 use std::marker::PhantomData;
 use tree_hash::TreeHash;
 use tree_hash_derive::TreeHash;
+
+/// The `active_fields` of the `ExecutionPayloadBid` progressive container (EIP-7688).
+///
+/// Must mirror the `active_fields(..)` list on the `tree_hash` attribute below; the
+/// `field_roots_match_root` test checks that it does.
+pub const EXECUTION_PAYLOAD_BID_ACTIVE_FIELDS: [bool; 12] = [true; 12];
 
 #[derive(Default, Debug, Clone, Serialize, Encode, Decode, Deserialize, TreeHash, Educe)]
 #[cfg_attr(
@@ -22,6 +29,7 @@ use tree_hash_derive::TreeHash;
     struct_behaviour = "progressive_container",
     active_fields(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
 )]
+#[metastruct(mappings(map_execution_payload_bid_fields(exclude(_phantom))))]
 pub struct ExecutionPayloadBid<E: EthSpec> {
     pub parent_block_hash: ExecutionBlockHash,
     pub parent_block_root: Hash256,
@@ -54,20 +62,9 @@ impl<E: EthSpec> ExecutionPayloadBid<E> {
     /// Returns the `tree_hash_root` of every field in declaration order, for use in progressive
     /// container Merkle proofs.
     pub fn field_roots(&self) -> Vec<Hash256> {
-        vec![
-            self.parent_block_hash.tree_hash_root(),
-            self.parent_block_root.tree_hash_root(),
-            self.block_hash.tree_hash_root(),
-            self.prev_randao.tree_hash_root(),
-            self.fee_recipient.tree_hash_root(),
-            self.gas_limit.tree_hash_root(),
-            self.builder_index.tree_hash_root(),
-            self.slot.tree_hash_root(),
-            self.value.tree_hash_root(),
-            self.execution_payment.tree_hash_root(),
-            self.blob_kzg_commitments.tree_hash_root(),
-            self.execution_requests_root.tree_hash_root(),
-        ]
+        let mut roots = vec![];
+        map_execution_payload_bid_fields!(self, |_, field| roots.push(field.tree_hash_root()));
+        roots
     }
 }
 
@@ -99,13 +96,14 @@ mod tests {
             execution_requests_root: Hash256::repeat_byte(6),
             _phantom: PhantomData,
         };
-        // The number of fields must match the `active_fields` attribute on the struct.
+        // A mismatch against the `active_fields` attribute on the struct changes the root.
         let field_roots = bid.field_roots();
-        assert_eq!(field_roots.len(), 12);
-
-        let active_fields = merkle_proof::active_fields_all_active(field_roots.len()).unwrap();
         assert_eq!(
-            merkle_proof::progressive_container_root(&field_roots, active_fields).unwrap(),
+            merkle_proof::progressive_container_root(
+                &field_roots,
+                &EXECUTION_PAYLOAD_BID_ACTIVE_FIELDS
+            )
+            .unwrap(),
             bid.tree_hash_root()
         );
     }
