@@ -1,7 +1,7 @@
 use crate::metrics;
 use beacon_chain::{
-    BeaconChain, BeaconChainTypes, ExecutionStatus,
-    bellatrix_readiness::GenesisExecutionPayloadStatus,
+    BeaconChain, BeaconChainTypes, ExecutionStatus, ExecutionStatusCrossFork,
+    PayloadExecutionStatus, bellatrix_readiness::GenesisExecutionPayloadStatus,
 };
 use execution_layer::{
     EngineCapabilities,
@@ -368,36 +368,57 @@ pub fn spawn_notifier<T: BeaconChainTypes>(
                 };
 
                 let block_hash = match beacon_chain.canonical_head.head_execution_status() {
-                    Ok(ExecutionStatus::PreMerge(_)) => "n/a".to_string(),
-                    Ok(ExecutionStatus::Valid(hash)) => {
-                        metrics::set_gauge(&metrics::IS_OPTIMISTIC_SYNC, 0);
-                        format!("{} (verified)", hash)
-                    }
-                    Ok(ExecutionStatus::Optimistic(hash)) => {
-                        metrics::set_gauge(&metrics::IS_OPTIMISTIC_SYNC, 1);
-                        warn!(
-                            info = "chain not fully verified, \
-                            block and attestation production disabled until execution engine syncs",
-                            execution_block_hash = ?hash,
-                            "Head is optimistic"
-                        );
-                        format!("{} (unverified)", hash)
-                    }
-                    Ok(ExecutionStatus::NotYetRevealed(hash)) => {
-                        debug!(
-                            bid_block_hash = ?hash,
-                            "Head execution payload is not yet revealed"
-                        );
-                        format!("{} (unrevealed)", hash)
-                    }
-                    Ok(ExecutionStatus::Invalid(hash)) => {
-                        crit!(
-                            msg = "this scenario may be unrecoverable",
-                            execution_block_hash = ?hash,
-                            "Head execution payload is invalid"
-                        );
-                        format!("{} (invalid)", hash)
-                    }
+                    Ok(ExecutionStatusCrossFork::PreGloas(status)) => match status {
+                        ExecutionStatus::PreMerge(_) => "n/a".to_string(),
+                        ExecutionStatus::Valid(hash) => {
+                            metrics::set_gauge(&metrics::IS_OPTIMISTIC_SYNC, 0);
+                            format!("{} (verified)", hash)
+                        }
+                        ExecutionStatus::Optimistic(hash) => {
+                            metrics::set_gauge(&metrics::IS_OPTIMISTIC_SYNC, 1);
+                            warn!(
+                                info = "chain not fully verified, \
+                                block and attestation production disabled until execution engine syncs",
+                                execution_block_hash = ?hash,
+                                "Head is optimistic"
+                            );
+                            format!("{} (unverified)", hash)
+                        }
+                        ExecutionStatus::Invalid(hash) => {
+                            crit!(
+                                msg = "this scenario may be unrecoverable",
+                                execution_block_hash = ?hash,
+                                "Head execution payload is invalid"
+                            );
+                            format!("{} (invalid)", hash)
+                        }
+                    },
+                    Ok(ExecutionStatusCrossFork::Gloas(status)) => match status {
+                        PayloadExecutionStatus::Valid => {
+                            metrics::set_gauge(&metrics::IS_OPTIMISTIC_SYNC, 0);
+                            "verified".to_string()
+                        }
+                        PayloadExecutionStatus::Optimistic => {
+                            metrics::set_gauge(&metrics::IS_OPTIMISTIC_SYNC, 1);
+                            warn!(
+                                info = "chain not fully verified, \
+                                block and attestation production disabled until execution engine syncs",
+                                "Head is optimistic"
+                            );
+                            "unverified".to_string()
+                        }
+                        PayloadExecutionStatus::NotYetRevealed => {
+                            debug!("Head execution payload is not yet revealed");
+                            "unrevealed".to_string()
+                        }
+                        PayloadExecutionStatus::Invalid => {
+                            crit!(
+                                msg = "this scenario may be unrecoverable",
+                                "Head execution payload is invalid"
+                            );
+                            "invalid".to_string()
+                        }
+                    },
                     Err(_) => "unknown".to_string(),
                 };
 

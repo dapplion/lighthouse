@@ -100,6 +100,26 @@ pub enum FcBlockHash {
     PostMerge(ExecutionBlockHash),
 }
 
+/// Verification status of a Gloas block's committed payload. The committed hash lives in the
+/// node's `execution_payload_block_hash`; a Gloas payload is never pre-merge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[ssz(enum_behaviour = "tag")]
+pub enum PayloadExecutionStatus {
+    NotYetRevealed,
+    Optimistic,
+    Valid,
+    Invalid,
+}
+
+/// The execution status of a fork choice node whose fork is not statically known. Every
+/// consumer must match both worlds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ExecutionStatusCrossFork {
+    PreGloas(ExecutionStatus),
+    Gloas(PayloadExecutionStatus),
+}
+
 /// Represents the verification status of an execution payload.
 #[derive(Clone, Copy, Debug, PartialEq, Encode, Decode, Serialize, Deserialize)]
 #[ssz(enum_behaviour = "union")]
@@ -118,11 +138,6 @@ pub enum ExecutionStatus {
     /// This `bool` only exists to satisfy our SSZ implementation which requires all variants
     /// to have a value. It can be set to anything.
     PreMerge(bool),
-    /// The Gloas envelope carrying this block's committed payload has not arrived yet, so no EL
-    /// has been asked about it. Unlike `PreMerge`, the payload exists and is unverified.
-    ///
-    /// The `ExecutionBlockHash` is the bid's committed block hash.
-    NotYetRevealed(ExecutionBlockHash),
 }
 
 /// Represents the status of an execution payload post-Gloas.
@@ -167,8 +182,7 @@ impl ExecutionStatus {
         match self {
             ExecutionStatus::Valid(hash)
             | ExecutionStatus::Invalid(hash)
-            | ExecutionStatus::Optimistic(hash)
-            | ExecutionStatus::NotYetRevealed(hash) => FcBlockHash::PostMerge(*hash),
+            | ExecutionStatus::Optimistic(hash) => FcBlockHash::PostMerge(*hash),
             ExecutionStatus::PreMerge(_) => FcBlockHash::PreMerge,
         }
     }
@@ -242,7 +256,117 @@ impl fmt::Display for ExecutionStatus {
             ExecutionStatus::Invalid(_) => write!(f, "invalid"),
             ExecutionStatus::Optimistic(_) => write!(f, "optimistic"),
             ExecutionStatus::PreMerge(_) => write!(f, "pre_merge"),
-            ExecutionStatus::NotYetRevealed(_) => write!(f, "not_yet_revealed"),
+        }
+    }
+}
+
+impl PayloadExecutionStatus {
+    pub fn is_strictly_optimistic(&self) -> bool {
+        match self {
+            PayloadExecutionStatus::Optimistic => true,
+            PayloadExecutionStatus::NotYetRevealed
+            | PayloadExecutionStatus::Valid
+            | PayloadExecutionStatus::Invalid => false,
+        }
+    }
+
+    pub fn is_optimistic_or_invalid(&self) -> bool {
+        match self {
+            PayloadExecutionStatus::Optimistic | PayloadExecutionStatus::Invalid => true,
+            PayloadExecutionStatus::NotYetRevealed | PayloadExecutionStatus::Valid => false,
+        }
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        match self {
+            PayloadExecutionStatus::Invalid => true,
+            PayloadExecutionStatus::NotYetRevealed
+            | PayloadExecutionStatus::Optimistic
+            | PayloadExecutionStatus::Valid => false,
+        }
+    }
+}
+
+impl fmt::Display for PayloadExecutionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PayloadExecutionStatus::NotYetRevealed => write!(f, "not_yet_revealed"),
+            PayloadExecutionStatus::Optimistic => write!(f, "optimistic"),
+            PayloadExecutionStatus::Valid => write!(f, "valid"),
+            PayloadExecutionStatus::Invalid => write!(f, "invalid"),
+        }
+    }
+}
+
+impl ExecutionStatusCrossFork {
+    pub fn is_execution_enabled(&self) -> bool {
+        match self {
+            ExecutionStatusCrossFork::PreGloas(status) => status.is_execution_enabled(),
+            // Execution is always enabled in Gloas.
+            ExecutionStatusCrossFork::Gloas(_) => true,
+        }
+    }
+
+    pub fn is_strictly_optimistic(&self) -> bool {
+        match self {
+            ExecutionStatusCrossFork::PreGloas(status) => status.is_strictly_optimistic(),
+            ExecutionStatusCrossFork::Gloas(status) => status.is_strictly_optimistic(),
+        }
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        match self {
+            ExecutionStatusCrossFork::PreGloas(status) => status.is_invalid(),
+            ExecutionStatusCrossFork::Gloas(status) => status.is_invalid(),
+        }
+    }
+
+    pub fn is_optimistic_or_invalid(&self) -> bool {
+        match self {
+            ExecutionStatusCrossFork::PreGloas(status) => status.is_optimistic_or_invalid(),
+            ExecutionStatusCrossFork::Gloas(status) => status.is_optimistic_or_invalid(),
+        }
+    }
+
+    pub fn is_pre_merge(&self) -> bool {
+        match self {
+            ExecutionStatusCrossFork::PreGloas(status) => status.is_pre_merge(),
+            // A Gloas payload is never pre-merge.
+            ExecutionStatusCrossFork::Gloas(_) => false,
+        }
+    }
+
+    pub fn is_valid_and_post_bellatrix(&self) -> bool {
+        match self {
+            ExecutionStatusCrossFork::PreGloas(status) => status.is_valid_and_post_bellatrix(),
+            ExecutionStatusCrossFork::Gloas(status) => match status {
+                PayloadExecutionStatus::Valid => true,
+                PayloadExecutionStatus::NotYetRevealed
+                | PayloadExecutionStatus::Optimistic
+                | PayloadExecutionStatus::Invalid => false,
+            },
+        }
+    }
+
+    /// Whenever this returns `true`, the chain ending at this node is fully verified.
+    pub fn is_valid_or_pre_merge(&self) -> bool {
+        match self {
+            ExecutionStatusCrossFork::PreGloas(status) => status.is_valid_or_pre_merge(),
+            ExecutionStatusCrossFork::Gloas(status) => match status {
+                PayloadExecutionStatus::Valid => true,
+                PayloadExecutionStatus::NotYetRevealed
+                | PayloadExecutionStatus::Optimistic
+                | PayloadExecutionStatus::Invalid => false,
+            },
+        }
+    }
+}
+
+impl fmt::Display for ExecutionStatusCrossFork {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExecutionStatusCrossFork::PreGloas(status) => status.fmt(f),
+            ExecutionStatusCrossFork::Gloas(status) => status.fmt(f),
         }
     }
 }
@@ -261,9 +385,10 @@ pub struct Block {
     pub next_epoch_shuffling_id: AttestationShufflingId,
     pub justified_checkpoint: Checkpoint,
     pub finalized_checkpoint: Checkpoint,
-    /// Indicates if an execution node has marked this block as valid. Also contains the execution
-    /// block hash.
-    pub execution_status: ExecutionStatus,
+    /// Fork-aware validity of this block's own payload: the `(root, FULL)` node for Gloas. An
+    /// empty head inherits from an ancestor instead; use `get_node_execution_status` when the
+    /// side is unknown.
+    pub execution_status: ExecutionStatusCrossFork,
     pub unrealized_justified_checkpoint: Option<Checkpoint>,
     pub unrealized_finalized_checkpoint: Option<Checkpoint>,
 
@@ -502,7 +627,7 @@ impl ProtoArrayForkChoice {
         finalized_checkpoint: Checkpoint,
         current_epoch_shuffling_id: AttestationShufflingId,
         next_epoch_shuffling_id: AttestationShufflingId,
-        execution_status: ExecutionStatus,
+        execution_status: ExecutionStatusCrossFork,
         execution_payload_parent_hash: Option<ExecutionBlockHash>,
         execution_payload_block_hash: Option<ExecutionBlockHash>,
         proposer_index: u64,
@@ -561,10 +686,10 @@ impl ProtoArrayForkChoice {
     pub fn on_payload_envelope_received(
         &mut self,
         block_root: Hash256,
-        execution_status: ExecutionStatus,
+        payload_execution_status: PayloadExecutionStatus,
     ) -> Result<(), String> {
         self.proto_array
-            .on_payload_envelope_received(block_root, execution_status)
+            .on_payload_envelope_received(block_root, payload_execution_status)
             .map_err(|e| format!("Failed to process execution payload: {:?}", e))
     }
 
@@ -854,7 +979,7 @@ impl ProtoArrayForkChoice {
         self.proto_array
             .nodes
             .iter()
-            .any(|node| node.execution_status().is_invalid())
+            .any(|node| node.execution_status_cross_fork().is_invalid())
     }
 
     /// For all nodes, regardless of their relationship to the finalized block, set their execution
@@ -876,60 +1001,77 @@ impl ProtoArrayForkChoice {
                 .get_mut(node_index)
                 .ok_or("unreachable index out of bounds in proto_array nodes")?;
 
-            match node.execution_status() {
-                ExecutionStatus::Invalid(block_hash) => {
-                    *node.execution_status_mut() = ExecutionStatus::Optimistic(block_hash);
+            // Reset this node's verdict, remembering whether it was invalid: an invalidated
+            // node had its weight zeroed and must have it restored.
+            let was_invalid = match node {
+                ProtoNode::V17(node) => match node.execution_status {
+                    ExecutionStatus::Invalid(block_hash) => {
+                        node.execution_status = ExecutionStatus::Optimistic(block_hash);
+                        true
+                    }
+                    ExecutionStatus::Valid(block_hash)
+                    | ExecutionStatus::Optimistic(block_hash) => {
+                        node.execution_status = ExecutionStatus::Optimistic(block_hash);
+                        false
+                    }
+                    // A pre-merge node cannot become optimistic.
+                    ExecutionStatus::PreMerge(_) => false,
+                },
+                ProtoNode::V29(node) => match node.payload_execution_status {
+                    PayloadExecutionStatus::Invalid => {
+                        node.payload_execution_status = PayloadExecutionStatus::Optimistic;
+                        true
+                    }
+                    PayloadExecutionStatus::Valid | PayloadExecutionStatus::Optimistic => {
+                        node.payload_execution_status = PayloadExecutionStatus::Optimistic;
+                        false
+                    }
+                    // No EL has seen this payload, so there is no verdict to reset.
+                    PayloadExecutionStatus::NotYetRevealed => false,
+                },
+            };
 
-                    // Restore the weight of the node, it would have been set to `0` in
-                    // `apply_score_changes` when it was invalidated.
-                    let restored_weight: u64 = self
-                        .votes
-                        .0
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(validator_index, vote)| {
-                            if vote.current_root == node.root() {
-                                // Any voting validator that does not have a balance should be
-                                // ignored. This is consistent with `compute_deltas`.
-                                self.balances.effective_balances.get(validator_index)
-                            } else {
-                                None
-                            }
-                        })
-                        .sum();
+            if was_invalid {
+                // Restore the weight of the node, it would have been set to `0` in
+                // `apply_score_changes` when it was invalidated.
+                let restored_weight: u64 = self
+                    .votes
+                    .0
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(validator_index, vote)| {
+                        if vote.current_root == node.root() {
+                            // Any voting validator that does not have a balance should be
+                            // ignored. This is consistent with `compute_deltas`.
+                            self.balances.effective_balances.get(validator_index)
+                        } else {
+                            None
+                        }
+                    })
+                    .sum();
 
-                    // Add the restored weight to the node and all ancestors.
-                    if restored_weight > 0 {
-                        let mut node_or_ancestor = node;
-                        loop {
-                            *node_or_ancestor.weight_mut() = node_or_ancestor
-                                .weight()
-                                .checked_add(restored_weight)
-                                .ok_or("Overflow when adding weight to ancestor")?;
+                // Add the restored weight to the node and all ancestors.
+                if restored_weight > 0 {
+                    let mut node_or_ancestor = node;
+                    loop {
+                        *node_or_ancestor.weight_mut() = node_or_ancestor
+                            .weight()
+                            .checked_add(restored_weight)
+                            .ok_or("Overflow when adding weight to ancestor")?;
 
-                            if let Some(parent_index) = node_or_ancestor.parent() {
-                                node_or_ancestor = self
-                                    .proto_array
-                                    .nodes
-                                    .get_mut(parent_index)
-                                    .ok_or(format!("Missing parent index: {}", parent_index))?;
-                            } else {
-                                // This is either the finalized block or a block that does not
-                                // descend from the finalized block.
-                                break;
-                            }
+                        if let Some(parent_index) = node_or_ancestor.parent() {
+                            node_or_ancestor = self
+                                .proto_array
+                                .nodes
+                                .get_mut(parent_index)
+                                .ok_or(format!("Missing parent index: {}", parent_index))?;
+                        } else {
+                            // This is either the finalized block or a block that does not
+                            // descend from the finalized block.
+                            break;
                         }
                     }
                 }
-                // There are no balance changes required if the node was either valid or
-                // optimistic.
-                ExecutionStatus::Valid(block_hash) | ExecutionStatus::Optimistic(block_hash) => {
-                    *node.execution_status_mut() = ExecutionStatus::Optimistic(block_hash);
-                }
-                // An irrelevant node cannot become optimistic, this is a no-op.
-                ExecutionStatus::PreMerge(_) => (),
-                // No EL has seen this payload, so there is no verdict to reset.
-                ExecutionStatus::NotYetRevealed(_) => (),
             }
         }
 
@@ -1002,7 +1144,7 @@ impl ProtoArrayForkChoice {
             next_epoch_shuffling_id: block.next_epoch_shuffling_id().clone(),
             justified_checkpoint: *block.justified_checkpoint(),
             finalized_checkpoint: *block.finalized_checkpoint(),
-            execution_status: block.execution_status(),
+            execution_status: block.execution_status_cross_fork(),
             unrealized_justified_checkpoint: block.unrealized_justified_checkpoint(),
             unrealized_finalized_checkpoint: block.unrealized_finalized_checkpoint(),
             execution_payload_parent_hash: block.execution_payload_parent_hash().ok(),
@@ -1069,10 +1211,13 @@ impl ProtoArrayForkChoice {
             .map_err(|e| format!("{e:?}"))
     }
 
-    /// Returns the `block.execution_status` field, if the block is present.
-    pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
+    /// Returns the fork-aware execution status of the block's own payload, if present.
+    pub fn get_block_execution_status(
+        &self,
+        block_root: &Hash256,
+    ) -> Option<ExecutionStatusCrossFork> {
         let block = self.get_proto_node(block_root)?;
-        Some(block.execution_status())
+        Some(block.execution_status_cross_fork())
     }
 
     /// Execution status of one fork choice node of a Gloas block.
@@ -1087,7 +1232,7 @@ impl ProtoArrayForkChoice {
         &self,
         block_root: &Hash256,
         payload_status: PayloadStatus,
-    ) -> Result<Option<ExecutionStatus>, Error> {
+    ) -> Result<Option<ExecutionStatusCrossFork>, Error> {
         match self
             .proto_array
             .get_node_execution_status(*block_root, payload_status)
@@ -1414,7 +1559,7 @@ mod test_compute_deltas {
         let unknown = Hash256::from_low_u64_be(4);
         let junk_shuffling_id =
             AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
-        let execution_status = ExecutionStatus::pre_merge();
+        let execution_status = ExecutionStatusCrossFork::PreGloas(ExecutionStatus::pre_merge());
 
         let genesis_checkpoint = Checkpoint {
             epoch: genesis_epoch,
@@ -1575,7 +1720,7 @@ mod test_compute_deltas {
         let junk_state_root = Hash256::zero();
         let junk_shuffling_id =
             AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
-        let execution_status = ExecutionStatus::pre_merge();
+        let execution_status = ExecutionStatusCrossFork::PreGloas(ExecutionStatus::pre_merge());
 
         let genesis_checkpoint = Checkpoint {
             epoch: Epoch::new(0),

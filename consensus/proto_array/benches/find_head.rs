@@ -1,6 +1,8 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fixed_bytes::FixedBytesExtended;
-use proto_array::{Block, ExecutionStatus, JustifiedBalances, ProtoArrayForkChoice};
+use proto_array::{
+    Block, ExecutionStatus, ExecutionStatusCrossFork, JustifiedBalances, ProtoArrayForkChoice,
+};
 use std::collections::BTreeSet;
 use std::time::Duration;
 use types::{
@@ -38,7 +40,7 @@ fn build_chain(num_blocks: u64, gloas: bool) -> (ProtoArrayForkChoice, types::Ch
         finalized_checkpoint,
         junk_shuffling_id.clone(),
         junk_shuffling_id.clone(),
-        ExecutionStatus::Optimistic(ExecutionBlockHash::zero()),
+        ExecutionStatusCrossFork::PreGloas(ExecutionStatus::Optimistic(ExecutionBlockHash::zero())),
         None,
         None,
         0,
@@ -58,7 +60,9 @@ fn build_chain(num_blocks: u64, gloas: bool) -> (ProtoArrayForkChoice, types::Ch
             next_epoch_shuffling_id: junk_shuffling_id.clone(),
             justified_checkpoint: finalized_checkpoint,
             finalized_checkpoint,
-            execution_status: ExecutionStatus::Optimistic(ExecutionBlockHash::zero()),
+            execution_status: ExecutionStatusCrossFork::PreGloas(ExecutionStatus::Optimistic(
+                ExecutionBlockHash::zero(),
+            )),
             unrealized_justified_checkpoint: Some(finalized_checkpoint),
             unrealized_finalized_checkpoint: Some(finalized_checkpoint),
             execution_payload_parent_hash: if is_gloas {

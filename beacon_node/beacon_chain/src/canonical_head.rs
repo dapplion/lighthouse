@@ -53,8 +53,9 @@ use fast_confirmation::{
     Error as FastConfirmationError, FastConfirmationRule, metrics as fcr_metrics,
 };
 use fork_choice::{
-    ExecutionStatus, ForkChoiceStore, ForkChoiceView, ForkchoiceUpdateParameters, PayloadStatus,
-    ProtoBlock, ResetPayloadStatuses,
+    ExecutionStatus, ExecutionStatusCrossFork, ForkChoiceStore, ForkChoiceView,
+    ForkchoiceUpdateParameters, PayloadExecutionStatus, PayloadStatus, ProtoBlock,
+    ResetPayloadStatuses,
 };
 use itertools::process_results;
 use proto_array::FcBlockHash;
@@ -597,7 +598,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     /// This will only return `Err` in the scenario where `self.fork_choice` has advanced
     /// significantly past the cached `head_snapshot`. In such a scenario it is likely prudent to
     /// run `BeaconChain::recompute_head` to update the cached values.
-    pub fn head_execution_status(&self) -> Result<ExecutionStatus, Error> {
+    pub fn head_execution_status(&self) -> Result<ExecutionStatusCrossFork, Error> {
         let head = self.cached_head();
         let head_block_root = head.head_block_root();
         self.fork_choice_read_lock()
@@ -613,7 +614,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     /// run `BeaconChain::recompute_head` to update the cached values.
     pub fn head_and_execution_status(
         &self,
-    ) -> Result<(CachedHead<T::EthSpec>, ExecutionStatus), Error> {
+    ) -> Result<(CachedHead<T::EthSpec>, ExecutionStatusCrossFork), Error> {
         let head = self.cached_head();
         let head_block_root = head.head_block_root();
         let execution_status = self
@@ -1370,14 +1371,22 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     ))
                 })?
         } else {
-            match confirmed_node.execution_status.block_hash() {
+            match confirmed_node.execution_status {
                 // Pre-Gloas: the confirmed block's own executed payload.
-                FcBlockHash::PostMerge(hash) => hash,
-                // A pre-merge confirmed block has no payload hash to report.
-                FcBlockHash::PreMerge => {
-                    return Err(FastConfirmationError::NodeHasNoBlockHash(
-                        fcr.confirmed_root,
-                    ));
+                ExecutionStatusCrossFork::PreGloas(status) => match status.block_hash() {
+                    FcBlockHash::PostMerge(hash) => hash,
+                    // A pre-merge confirmed block has no payload hash to report.
+                    FcBlockHash::PreMerge => {
+                        return Err(FastConfirmationError::NodeHasNoBlockHash(
+                            fcr.confirmed_root,
+                        ));
+                    }
+                },
+                ExecutionStatusCrossFork::Gloas(_) => {
+                    return Err(FastConfirmationError::Unexpected(format!(
+                        "gloas status on pre-gloas confirmed node: {:?}",
+                        fcr.confirmed_root
+                    )));
                 }
             }
         };
@@ -1751,7 +1760,22 @@ fn check_finalized_payload_validity<T: BeaconChainTypes>(
     chain: &BeaconChain<T>,
     finalized_proto_block: &ProtoBlock,
 ) -> Result<(), Error> {
-    if let ExecutionStatus::Invalid(block_hash) = finalized_proto_block.execution_status {
+    let invalid_block_hash = match finalized_proto_block.execution_status {
+        ExecutionStatusCrossFork::PreGloas(status) => match status {
+            ExecutionStatus::Invalid(block_hash) => Some(block_hash),
+            ExecutionStatus::Valid(_)
+            | ExecutionStatus::Optimistic(_)
+            | ExecutionStatus::PreMerge(_) => None,
+        },
+        ExecutionStatusCrossFork::Gloas(status) => match status {
+            // The bid hash the finalized block committed to.
+            PayloadExecutionStatus::Invalid => finalized_proto_block.execution_payload_block_hash,
+            PayloadExecutionStatus::NotYetRevealed
+            | PayloadExecutionStatus::Optimistic
+            | PayloadExecutionStatus::Valid => None,
+        },
+    };
+    if let Some(block_hash) = invalid_block_hash {
         crit!(
             ?block_hash,
             msg = "You must use the `--purge-db` flag to clear the database and restart sync. \

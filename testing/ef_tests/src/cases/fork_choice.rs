@@ -21,8 +21,8 @@ use bls::AggregateSignature;
 use execution_layer::{
     PayloadStatusV1, PayloadStatusV1Status, json_structures::JsonPayloadStatusV1Status,
 };
-use proto_array::FcBlockHash;
 use proto_array::ReOrgThreshold;
+use proto_array::{ExecutionStatusCrossFork, FcBlockHash};
 use serde::Deserialize;
 use ssz_derive::Decode;
 use ssz_types::VariableList;
@@ -1260,11 +1260,7 @@ impl<E: EthSpec> Tester<E> {
                 .chain
                 .canonical_head
                 .fork_choice_write_lock()
-                .on_payload_envelope_received(
-                    block_root,
-                    PayloadVerificationStatus::Verified,
-                    block_hash,
-                )
+                .on_payload_envelope_received(block_root, PayloadVerificationStatus::Verified)
                 .map_err(|e| {
                     Error::InternalError(format!(
                         "on_execution_payload for block root {} failed: {:?}",
@@ -1422,10 +1418,14 @@ impl<E: EthSpec> Tester<E> {
         // have no `execution_payload_parent_hash` and keep the hash of their own payload.
         let actual = block
             .execution_payload_parent_hash
-            .or_else(|| match block.execution_status.block_hash() {
+            .or_else(|| match block.execution_status {
                 // Pre-Gloas: the block's own executed payload.
-                FcBlockHash::PostMerge(hash) => Some(hash),
-                FcBlockHash::PreMerge => None,
+                ExecutionStatusCrossFork::PreGloas(status) => match status.block_hash() {
+                    FcBlockHash::PostMerge(hash) => Some(hash),
+                    FcBlockHash::PreMerge => None,
+                },
+                // Gloas nodes always have `execution_payload_parent_hash`.
+                ExecutionStatusCrossFork::Gloas(_) => None,
             })
             .unwrap_or_else(ExecutionBlockHash::zero);
         check_equal("safe_execution_block_hash", actual, expected)

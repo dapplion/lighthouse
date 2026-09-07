@@ -3090,8 +3090,6 @@ where
             slot = %signed_envelope.slot(),
             "Processing execution payload envelope"
         );
-        let payload_block_hash = signed_envelope.message.payload.block_hash;
-
         state_processing::envelope_processing::verify_execution_payload_envelope(
             state,
             &signed_envelope,
@@ -3178,11 +3176,7 @@ where
         self.chain
             .canonical_head
             .fork_choice_write_lock()
-            .on_payload_envelope_received(
-                block_root,
-                PayloadVerificationStatus::Verified,
-                payload_block_hash,
-            )
+            .on_payload_envelope_received(block_root, PayloadVerificationStatus::Verified)
             .expect("should update fork choice with envelope");
 
         // Run fork choice because the envelope could become the head.

@@ -3441,11 +3441,7 @@ async fn weak_subjectivity_sync_test(
         beacon_chain
             .canonical_head
             .fork_choice_write_lock()
-            .on_payload_envelope_received(
-                wss_block_root,
-                PayloadVerificationStatus::Verified,
-                ExecutionBlockHash::zero(),
-            )
+            .on_payload_envelope_received(wss_block_root, PayloadVerificationStatus::Verified)
             .unwrap();
     }
 
@@ -3525,11 +3521,7 @@ async fn weak_subjectivity_sync_test(
             beacon_chain
                 .canonical_head
                 .fork_choice_write_lock()
-                .on_payload_envelope_received(
-                    block_root,
-                    PayloadVerificationStatus::Verified,
-                    ExecutionBlockHash::zero(),
-                )
+                .on_payload_envelope_received(block_root, PayloadVerificationStatus::Verified)
                 .unwrap();
         }
 
@@ -5952,16 +5944,16 @@ fn assert_chains_pretty_much_the_same<T: BeaconChainTypes>(a: &BeaconChain<T>, b
     );
 
     let slot = a.slot().unwrap();
-    let spec = T::EthSpec::default_spec();
+    let spec = &a.spec;
     assert!(
         a.canonical_head
             .fork_choice_write_lock()
-            .get_head(slot, &spec)
+            .get_head(slot, spec)
             .unwrap()
             .0
             == b.canonical_head
                 .fork_choice_write_lock()
-                .get_head(slot, &spec)
+                .get_head(slot, spec)
                 .unwrap()
                 .0,
         "fork_choice heads should be equal"

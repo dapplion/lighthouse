@@ -15,7 +15,7 @@ use execution_layer::{
     json_structures::{JsonForkchoiceStateV1, JsonPayloadAttributes, JsonPayloadAttributesV1},
 };
 use fork_choice::{Error as ForkChoiceError, InvalidationOperation, PayloadVerificationStatus};
-use proto_array::{Error as ProtoArrayError, ExecutionStatus};
+use proto_array::{Error as ProtoArrayError, ExecutionStatusCrossFork, PayloadExecutionStatus};
 use slot_clock::SlotClock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -100,7 +100,7 @@ impl InvalidPayloadRig {
             .unwrap()
     }
 
-    fn execution_status(&self, block_root: Hash256) -> ExecutionStatus {
+    fn execution_status(&self, block_root: Hash256) -> ExecutionStatusCrossFork {
         self.harness
             .chain
             .canonical_head
@@ -659,13 +659,18 @@ async fn latest_valid_hash_will_not_validate() {
         } else if slot == 0 {
             if fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
                 // A Gloas genesis has no envelope, so its payload is never revealed.
-                assert!(matches!(
+                assert_eq!(
                     execution_status,
-                    ExecutionStatus::NotYetRevealed(_)
-                ));
+                    ExecutionStatusCrossFork::Gloas(PayloadExecutionStatus::NotYetRevealed)
+                );
             } else {
                 // Pre-Gloas the genesis block is simply pre-merge.
-                assert!(execution_status.is_pre_merge());
+                match execution_status {
+                    ExecutionStatusCrossFork::PreGloas(status) => assert!(status.is_pre_merge()),
+                    ExecutionStatusCrossFork::Gloas(status) => {
+                        panic!("gloas status on a pre-gloas genesis: {status:?}")
+                    }
+                }
             }
         } else if slot == 1 {
             assert!(execution_status.is_valid_and_post_bellatrix())
@@ -1252,7 +1257,7 @@ async fn attesting_to_optimistic_head() {
                     beacon_block_root,
                     execution_status
                 })
-                if beacon_block_root == root && matches!(execution_status, ExecutionStatus::Optimistic(_))
+                if beacon_block_root == root && execution_status.is_strictly_optimistic()
             ));
         }
     }

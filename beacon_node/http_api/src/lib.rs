@@ -2157,11 +2157,12 @@ pub async fn serve<T: BeaconChainTypes>(
                         .iter()
                         .map(|node| {
                             let execution_status = node
-                                .execution_status()
+                                .execution_status_cross_fork()
                                 .is_execution_enabled()
-                                .then(|| node.execution_status().to_string());
+                                .then(|| node.execution_status_cross_fork().to_string());
 
-                            let execution_status_string = node.execution_status().to_string();
+                            let execution_status_string =
+                                node.execution_status_cross_fork().to_string();
 
                             ForkChoiceNode {
                                 slot: node.slot(),
@@ -2174,7 +2175,7 @@ pub async fn serve<T: BeaconChainTypes>(
                                 finalized_epoch: node.finalized_checkpoint().epoch,
                                 weight: node.weight(),
                                 validity: execution_status,
-                                execution_block_hash: match node.execution_status().block_hash() {
+                                execution_block_hash: match node.block_hash() {
                                     proto_array::FcBlockHash::PostMerge(block_hash) => {
                                         Some(block_hash.into_root())
                                     }

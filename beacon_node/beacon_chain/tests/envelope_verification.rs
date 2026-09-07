@@ -3,7 +3,7 @@ use beacon_chain::payload_envelope_verification::EnvelopeSource;
 use beacon_chain::test_utils::{BeaconChainHarness, fork_name_from_env};
 use bls::PublicKeyBytes;
 use eth2::types::EventKind;
-use proto_array::ExecutionStatus;
+use proto_array::{ExecutionStatusCrossFork, PayloadExecutionStatus};
 use std::sync::Arc;
 use types::{Address, Hash256, MinimalEthSpec, Slot, WithdrawalRequest};
 
@@ -402,17 +402,23 @@ async fn import_block_and_envelope(
 }
 
 /// Helper: the execution status that fork choice holds for the payload of a block.
-fn execution_status(
+fn payload_execution_status(
     harness: &BeaconChainHarness<beacon_chain::test_utils::EphemeralHarnessType<E>>,
     block_root: Hash256,
-) -> ExecutionStatus {
-    harness
+) -> PayloadExecutionStatus {
+    match harness
         .chain
         .canonical_head
         .fork_choice_read_lock()
         .get_block(&block_root)
         .expect("block should be in fork choice")
         .execution_status
+    {
+        ExecutionStatusCrossFork::Gloas(status) => status,
+        ExecutionStatusCrossFork::PreGloas(status) => {
+            panic!("expected a gloas execution status, got {status:?}")
+        }
+    }
 }
 
 /// An execution layer that answers `SYNCING` must not stop the import of an envelope. The
@@ -436,8 +442,9 @@ async fn syncing_execution_layer_imports_payload_optimistically() {
 
     let block_root = import_block_and_envelope(&harness, Slot::new(2)).await;
 
-    assert!(
-        execution_status(&harness, block_root).is_strictly_optimistic(),
+    assert_eq!(
+        payload_execution_status(&harness, block_root),
+        PayloadExecutionStatus::Optimistic,
         "a payload the execution layer could not validate must be held as optimistic",
     );
 }
@@ -463,23 +470,32 @@ async fn a_later_valid_payload_promotes_its_optimistic_ancestors() {
     let first_root = import_block_and_envelope(&harness, Slot::new(2)).await;
     let second_root = import_block_and_envelope(&harness, Slot::new(3)).await;
 
-    assert!(execution_status(&harness, first_root).is_strictly_optimistic());
-    assert!(execution_status(&harness, second_root).is_strictly_optimistic());
+    assert_eq!(
+        payload_execution_status(&harness, first_root),
+        PayloadExecutionStatus::Optimistic
+    );
+    assert_eq!(
+        payload_execution_status(&harness, second_root),
+        PayloadExecutionStatus::Optimistic
+    );
 
     // The execution layer catches up and validates the next payload.
     mock.server.all_payloads_valid();
     let third_root = import_block_and_envelope(&harness, Slot::new(4)).await;
 
-    assert!(
-        execution_status(&harness, third_root).is_valid_and_post_bellatrix(),
+    assert_eq!(
+        payload_execution_status(&harness, third_root),
+        PayloadExecutionStatus::Valid,
         "the payload the execution layer validated must be valid",
     );
-    assert!(
-        execution_status(&harness, second_root).is_valid_and_post_bellatrix(),
+    assert_eq!(
+        payload_execution_status(&harness, second_root),
+        PayloadExecutionStatus::Valid,
         "its parent's payload is vouched for by the valid descendant",
     );
-    assert!(
-        execution_status(&harness, first_root).is_valid_and_post_bellatrix(),
+    assert_eq!(
+        payload_execution_status(&harness, first_root),
+        PayloadExecutionStatus::Valid,
         "promotion must walk the whole ancestry, not just one step",
     );
 }
