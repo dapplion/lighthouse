@@ -13,9 +13,10 @@
 //! 1. `RwLock<BeaconForkChoice>`: Contains `proto_array` fork choice.
 //! 2. `RwLock<CachedHead>`: Contains a cached block/state from the last run of `proto_array`.
 //! 3. `Mutex<()>`: Is used to prevent concurrent execution of `BeaconChain::recompute_head`.
-//! 4. `Option<Mutex<FastConfirmationRule>>`: FCR state (None when disabled), only locked inside
-//!    `recompute_head_at_slot_internal` while the fork choice read lock (1) is held and
-//!    `recompute_head_lock` (3) serializes access.
+//! 4. `Option<Mutex<FastConfirmationRule>>`: FCR state (None when disabled). Locked inside
+//!    `recompute_head_at_slot_internal` while the fork choice read lock (1) is held, and briefly
+//!    by `persist_fork_choice` and `restore_from_store`, in both cases after any fork choice lock
+//!    has been released. Never lock the fork choice after this mutex.
 //!
 //! This module has to take great efforts to avoid causing a deadlock with these three methods. Any
 //! developers working in this module should tread carefully and seek a detailed review.
@@ -35,6 +36,7 @@
 //! stack.
 
 use crate::chain_config::FastConfirmationMode;
+use crate::persisted_fast_confirmation::{FAST_CONFIRMATION_DB_KEY, PersistedFastConfirmation};
 use crate::persisted_fork_choice::PersistedForkChoice;
 use crate::shuffling_cache::BlockShufflingIds;
 use crate::state_advance_timer::MAX_ADVANCE_DISTANCE;
@@ -69,7 +71,8 @@ use std::panic::Location;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use store::{
-    Error as StoreError, KeyValueStore, KeyValueStoreOp, StoreConfig, iter::StateRootsIterator,
+    DBColumn, Error as StoreError, KeyValueStore, KeyValueStoreOp, StoreConfig, StoreItem,
+    iter::StateRootsIterator,
 };
 use task_executor::{JoinHandle, ShutdownReason};
 use tracing::{debug, error, info, instrument, warn};
@@ -450,11 +453,7 @@ pub struct CanonicalHead<T: BeaconChainTypes> {
     ///
     /// This lock **should not be made public**, it should only be used inside this module.
     recompute_head_lock: Mutex<()>,
-    /// Fast Confirmation Rule state. `None` = FCR disabled.
-    ///
-    /// Updated inside `recompute_head_at_slot_internal` after `get_head` completes, while
-    /// the fork-choice read lock is still held. The Mutex is only locked briefly during
-    /// FCR computation, which is already serialized by `recompute_head_lock`.
+    /// Fast Confirmation Rule state. `None` = FCR disabled. See the lock ordering above.
     pub fast_confirmation: Option<Mutex<FastConfirmationRule>>,
     /// Per-validator committee slot assignments across the last 3 epochs.
     pub slot_assignments: Mutex<SlotAssignments>,
@@ -478,8 +477,8 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
 
         let fcr = if fast_confirmation.is_enabled() {
             Some(Mutex::new(
-                <BeaconChain<T>>::new_fast_confirmation_rule(
-                    fork_choice_view.finalized_checkpoint,
+                <BeaconChain<T>>::load_fast_confirmation_rule(
+                    &fork_choice,
                     &snapshot,
                     slot_assignments.clone(),
                     store,
@@ -576,16 +575,17 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         drop(fork_choice_write_lock);
         *self.cached_head.write() = cached_head;
 
-        // Reset FCR to the restored finalized checkpoint so it doesn't carry stale state.
+        // The fork choice read lock is released before the FCR mutex is taken.
         if let Some(ref fcr_mutex) = self.fast_confirmation {
-            *fcr_mutex.lock() = <BeaconChain<T>>::new_fast_confirmation_rule(
-                fork_choice_view.finalized_checkpoint,
+            let rule = <BeaconChain<T>>::load_fast_confirmation_rule(
+                &self.fork_choice_read_lock(),
                 &snapshot,
                 slot_assignments.clone(),
                 store,
                 spec,
             )
             .map_err(|e| Error::DBInconsistent(format!("fast confirmation rule reset: {e:?}")))?;
+            *fcr_mutex.lock() = rule;
         }
         *self.slot_assignments.lock() = slot_assignments;
 
@@ -1332,23 +1332,35 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let old_confirmed_root = fcr.confirmed_root;
 
         let finalized_cp = fork_choice.finalized_checkpoint();
+        let justified_cp = fork_choice.justified_checkpoint();
         let unrealized_justified_cp = fork_choice.unrealized_justified_checkpoint();
         let proto_array = fork_choice.proto_array().core_proto_array();
         let votes = fork_choice.proto_array().votes();
         let equivocating_indices = fork_choice.fc_store().equivocating_indices();
+        let old_update_slot = fcr.last_update_slot();
+
+        let head_slot = fork_choice
+            .get_block(&head_root)
+            .ok_or(FastConfirmationError::NodeNotFound(head_root))?
+            .slot;
 
         // Load the checkpoint state if it will be required.
         let checkpoint_state = fcr
-            .checkpoint_state_needed::<T::EthSpec>(current_slot)
+            .checkpoint_state_needed::<T::EthSpec>(
+                current_slot,
+                head_slot,
+                &justified_cp,
+                &unrealized_justified_cp,
+            )
             .map(|checkpoint| {
                 Self::load_fcr_checkpoint_state(store, builder_onboarding_cache, checkpoint)
             })
             .transpose()?;
 
-        let old_update_slot = fcr.last_update_slot();
         fcr.on_fast_confirmation::<T::EthSpec>(
             head_root,
             &finalized_cp,
+            &justified_cp,
             &unrealized_justified_cp,
             current_slot,
             proto_array,
@@ -1382,6 +1394,101 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         })
     }
 
+    /// Restore the persisted FCR state, or seed from the finalized checkpoint as a fresh node does.
+    fn load_fast_confirmation_rule(
+        fork_choice: &BeaconForkChoice<T>,
+        snapshot: &BeaconSnapshot<T::EthSpec>,
+        slot_assignments: SlotAssignments,
+        store: &BeaconStore<T>,
+        spec: &ChainSpec,
+    ) -> Result<FastConfirmationRule, FastConfirmationError> {
+        match Self::restore_fast_confirmation_rule(
+            fork_choice,
+            snapshot,
+            slot_assignments.clone(),
+            store,
+            spec,
+        ) {
+            Ok(Some(rule)) => return Ok(rule),
+            Ok(None) => {}
+            Err(e) => warn!(error = ?e, "Ignoring persisted fast confirmation state"),
+        }
+        Self::new_fast_confirmation_rule(
+            fork_choice.cached_fork_choice_view().finalized_checkpoint,
+            snapshot,
+            slot_assignments,
+            store,
+            spec,
+        )
+    }
+
+    /// `None` when nothing is persisted. Fork choice only serves descendants of the finalized
+    /// checkpoint; a reference behind it — the previous observed-justified checkpoint can be, after
+    /// justification lag — is clamped to the finalized checkpoint, and a confirmed root behind it is
+    /// reverted by the first run.
+    fn restore_fast_confirmation_rule(
+        fork_choice: &BeaconForkChoice<T>,
+        snapshot: &BeaconSnapshot<T::EthSpec>,
+        slot_assignments: SlotAssignments,
+        store: &BeaconStore<T>,
+        spec: &ChainSpec,
+    ) -> Result<Option<FastConfirmationRule>, FastConfirmationError> {
+        let Some(persisted) = store
+            .get_item::<PersistedFastConfirmation>(&FAST_CONFIRMATION_DB_KEY)
+            .map_err(|e| {
+                FastConfirmationError::UnableToObtainCheckpointState(format!(
+                    "persisted fast confirmation state: {e:?}"
+                ))
+            })?
+        else {
+            return Ok(None);
+        };
+        let finalized = fork_choice.cached_fork_choice_view().finalized_checkpoint;
+        let clamp_checkpoint = |checkpoint: Checkpoint| {
+            if fork_choice.get_block(&checkpoint.root).is_some() {
+                checkpoint
+            } else {
+                debug!(?checkpoint, "Persisted FCR checkpoint older than finalized");
+                finalized
+            }
+        };
+        let clamp_root = |root: Hash256| {
+            if fork_choice.get_block(&root).is_some() {
+                root
+            } else {
+                finalized.root
+            }
+        };
+
+        let previous = clamp_checkpoint(persisted.previous_epoch_observed_justified_checkpoint);
+        let current = clamp_checkpoint(persisted.current_epoch_observed_justified_checkpoint);
+        if previous.epoch > current.epoch {
+            return Ok(None);
+        }
+        let previous_state = Self::load_fcr_checkpoint_state(store, None, previous)?;
+        let current_state = if current == previous {
+            None
+        } else {
+            Some(Self::load_fcr_checkpoint_state(store, None, current)?)
+        };
+        FastConfirmationRule::new(
+            snapshot.beacon_block_root,
+            &snapshot.beacon_state,
+            slot_assignments,
+            persisted.confirmed_root,
+            (previous, &previous_state),
+            (current, current_state.as_ref().unwrap_or(&previous_state)),
+            clamp_checkpoint(persisted.previous_epoch_greatest_unrealized_checkpoint),
+            clamp_root(persisted.previous_slot_head),
+            clamp_root(persisted.current_slot_head),
+            persisted.previous_update_slot(),
+            persisted.current_update_slot(),
+            spec.confirmation_byzantine_threshold,
+            spec.proposer_score_boost,
+        )
+        .map(Some)
+    }
+
     /// Build a `FastConfirmationRule` seeded from `finalized_checkpoint`, sourcing its balance
     /// snapshots from the finalized checkpoint's state (spec: `store.checkpoint_states[checkpoint]`)
     /// and its head-derived caches from the `snapshot` state.
@@ -1410,7 +1517,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 finalized_checkpoint,
             )?)
         };
-        FastConfirmationRule::new(
+        FastConfirmationRule::new_from_finalized_checkpoint(
             snapshot.beacon_block_root,
             &snapshot.beacon_state,
             slot_assignments,
@@ -1711,9 +1818,25 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Persist fork choice to disk, writing immediately.
     pub fn persist_fork_choice(&self) -> Result<(), Error> {
         let _fork_choice_timer = metrics::start_timer(&metrics::PERSIST_FORK_CHOICE);
-        let batch = vec![self.persist_fork_choice_in_batch()?];
+        let batch = vec![
+            self.persist_fork_choice_in_batch()?,
+            self.persist_fast_confirmation_in_batch(),
+        ];
         self.store.hot_db.do_atomically(batch)?;
         Ok(())
+    }
+
+    /// The FCR tracking variables; with FCR disabled the item is deleted instead, so enabling it
+    /// again later cannot restore stale state.
+    fn persist_fast_confirmation_in_batch(&self) -> KeyValueStoreOp {
+        match self.canonical_head.fast_confirmation.as_ref() {
+            Some(fcr) => PersistedFastConfirmation::from_rule(&fcr.lock())
+                .as_kv_store_op(FAST_CONFIRMATION_DB_KEY),
+            None => KeyValueStoreOp::DeleteKey(
+                DBColumn::ForkChoice,
+                FAST_CONFIRMATION_DB_KEY.as_slice().to_vec(),
+            ),
+        }
     }
 
     /// Return a database operation for writing fork choice to disk.

@@ -148,6 +148,8 @@ pub struct FastConfirmationRule {
     /// `None` means no update has occurred yet (avoids using Slot(0) as sentinel,
     /// since slot 0 is a real slot with real committee assignments).
     last_update_slot: Option<Slot>,
+    /// Spec: `previous_update_slot`; `last_update_slot` is the spec's `current_update_slot`.
+    previous_update_slot: Option<Slot>,
 
     /// When `true`, `on_fast_confirmation` updates tracking variables but skips
     /// the `get_latest_confirmed` call. The spec test runner runs FCR implicitly
@@ -161,10 +163,58 @@ impl FastConfirmationRule {
     /// Maximum valid value for `byzantine_threshold` (25%).
     const MAX_BYZANTINE_THRESHOLD: u64 = 25;
 
-    /// Initialize FCR from the finalized checkpoint, seeding both observed-justified balance
-    /// sources from `checkpoint_state` as the spec does. `byzantine_threshold` is clamped
-    /// to [0, 25].
+    /// `byzantine_threshold` is clamped to [0, 25]. Each observed-justified checkpoint comes with
+    /// its state advanced to the checkpoint's epoch (spec: `store.checkpoint_states[checkpoint]`).
+    #[allow(clippy::too_many_arguments)]
     pub fn new<E: EthSpec>(
+        head_root: Hash256,
+        head_state: &BeaconState<E>,
+        slot_assignments: SlotAssignments,
+        confirmed_root: Hash256,
+        previous_epoch_observed_justified: (Checkpoint, &BeaconState<E>),
+        current_epoch_observed_justified: (Checkpoint, &BeaconState<E>),
+        previous_epoch_greatest_unrealized_checkpoint: Checkpoint,
+        previous_slot_head: Hash256,
+        current_slot_head: Hash256,
+        previous_update_slot: Option<Slot>,
+        last_update_slot: Option<Slot>,
+        byzantine_threshold: u64,
+        proposer_score_boost: u64,
+    ) -> Result<Self, Error> {
+        let byzantine_threshold = byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD);
+        let observed_justified = |(checkpoint, state): (Checkpoint, &BeaconState<E>)| {
+            // Sanity: the supplied state must be the checkpoint's state, advanced to the
+            // checkpoint's epoch.
+            if state.current_epoch() != checkpoint.epoch {
+                return Err(Error::MissingCheckpointState(checkpoint));
+            }
+            Ok(CheckpointAndBalance::new(
+                checkpoint,
+                BalanceSourceData::new(state, checkpoint.root)?,
+            ))
+        };
+        Ok(Self {
+            confirmed_root,
+            previous_epoch_observed_justified: observed_justified(
+                previous_epoch_observed_justified,
+            )?,
+            current_epoch_observed_justified: observed_justified(current_epoch_observed_justified)?,
+            previous_epoch_greatest_unrealized_checkpoint,
+            previous_slot_head,
+            current_slot_head,
+            byzantine_threshold,
+            proposer_score_boost,
+            slot_assignments,
+            head_balance_source: BalanceSourceData::new(head_state, head_root)?,
+            last_update_slot,
+            previous_update_slot,
+            spec_test_mode: false,
+        })
+    }
+
+    /// Spec: `get_fast_confirmation_store`. Initialize FCR from the finalized checkpoint, seeding
+    /// both observed-justified balance sources from `checkpoint_state`.
+    pub fn new_from_finalized_checkpoint<E: EthSpec>(
         head_root: Hash256,
         head_state: &BeaconState<E>,
         slot_assignments: SlotAssignments,
@@ -173,34 +223,21 @@ impl FastConfirmationRule {
         byzantine_threshold: u64,
         proposer_score_boost: u64,
     ) -> Result<Self, Error> {
-        let byzantine_threshold = byzantine_threshold.min(Self::MAX_BYZANTINE_THRESHOLD);
-        // Sanity: the supplied state must be the checkpoint's state, advanced to the
-        // checkpoint's epoch.
-        if checkpoint_state.current_epoch() != finalized_checkpoint.epoch {
-            return Err(Error::MissingCheckpointState(finalized_checkpoint));
-        }
-        let checkpoint_balance =
-            BalanceSourceData::new(checkpoint_state, finalized_checkpoint.root)?;
-        Ok(Self {
-            confirmed_root: finalized_checkpoint.root,
-            previous_epoch_observed_justified: CheckpointAndBalance::new(
-                finalized_checkpoint,
-                checkpoint_balance.clone(),
-            ),
-            current_epoch_observed_justified: CheckpointAndBalance::new(
-                finalized_checkpoint,
-                checkpoint_balance,
-            ),
-            previous_epoch_greatest_unrealized_checkpoint: finalized_checkpoint,
-            previous_slot_head: finalized_checkpoint.root,
-            current_slot_head: finalized_checkpoint.root,
+        Self::new(
+            head_root,
+            head_state,
+            slot_assignments,
+            finalized_checkpoint.root,
+            (finalized_checkpoint, checkpoint_state),
+            (finalized_checkpoint, checkpoint_state),
+            finalized_checkpoint,
+            finalized_checkpoint.root,
+            finalized_checkpoint.root,
+            None,
+            None,
             byzantine_threshold,
             proposer_score_boost,
-            slot_assignments,
-            head_balance_source: BalanceSourceData::new(head_state, head_root)?,
-            last_update_slot: None,
-            spec_test_mode: false,
-        })
+        )
     }
 
     /// Enable spec test mode: `on_fast_confirmation` still tracks variables but
@@ -229,6 +266,7 @@ impl FastConfirmationRule {
         &mut self,
         head_root: Hash256,
         finalized_checkpoint: &Checkpoint,
+        justified_checkpoint: &Checkpoint,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
         proto_array: &ProtoArray,
@@ -240,14 +278,17 @@ impl FastConfirmationRule {
     ) -> Result<(), Error> {
         let _span = debug_span!("fcr_on_fast_confirmation", slot = %current_slot).entered();
 
-        self.update_fast_confirmation_variables::<E>(
-            head_root,
-            unrealized_justified_checkpoint,
-            current_slot,
-            head_state,
-            slot_assignments,
-            checkpoint_state,
-        )?;
+        if !self.catch_up_deferred::<E>(current_slot, get_block_slot(head_root, proto_array)?) {
+            self.update_fast_confirmation_variables::<E>(
+                head_root,
+                justified_checkpoint,
+                unrealized_justified_checkpoint,
+                current_slot,
+                head_state,
+                slot_assignments,
+                checkpoint_state,
+            )?;
+        }
 
         if !self.spec_test_mode {
             let _span = debug_span!("fcr_get_latest_confirmed").entered();
@@ -271,23 +312,91 @@ impl FastConfirmationRule {
         self.last_update_slot
     }
 
+    /// Spec: `previous_update_slot`.
+    pub fn previous_update_slot(&self) -> Option<Slot> {
+        self.previous_update_slot
+    }
+
+    /// Spec: `is_epoch_start_update`, for the update at `current_update_slot` after the one at
+    /// `previous_update_slot`.
+    fn is_epoch_start_update<E: EthSpec>(
+        current_update_slot: Slot,
+        previous_update_slot: Option<Slot>,
+    ) -> bool {
+        let slots_per_epoch = E::slots_per_epoch();
+        is_start_slot_at_epoch::<E>(current_update_slot)
+            || previous_update_slot.is_some_and(|previous| {
+                current_update_slot.epoch(slots_per_epoch) > previous.epoch(slots_per_epoch)
+            })
+    }
+
+    /// Spec: `get_previous_epoch_greatest_unrealized_checkpoint`, for the update at `current_slot`
+    /// after the one at `previous_update_slot`.
+    fn get_previous_epoch_greatest_unrealized_checkpoint<E: EthSpec>(
+        &self,
+        previous_update_slot: Option<Slot>,
+        current_slot: Slot,
+        justified_checkpoint: &Checkpoint,
+        unrealized_justified_checkpoint: &Checkpoint,
+    ) -> Checkpoint {
+        let slots_per_epoch = E::slots_per_epoch();
+        let current_epoch = current_slot.epoch(slots_per_epoch);
+        let epoch_start = current_epoch.start_slot(slots_per_epoch);
+        if previous_update_slot.is_none_or(|previous| previous.saturating_add(1u64) >= epoch_start)
+        {
+            self.previous_epoch_greatest_unrealized_checkpoint
+        } else if unrealized_justified_checkpoint.epoch < current_epoch {
+            *unrealized_justified_checkpoint
+        } else {
+            *justified_checkpoint
+        }
+    }
+
+    /// Spec: the update that catches up on a skipped epoch start SHOULD wait for the skipped slots'
+    /// blocks and attestations, so it is deferred while exactly one epoch start was skipped and the
+    /// head is more than a slot behind the clock. More skipped epoch starts revert the confirmed
+    /// root anyway. `get_latest_confirmed` still runs every slot on the variables of the last
+    /// update, whose epoch-start checks it does not repeat.
+    fn catch_up_deferred<E: EthSpec>(&self, current_slot: Slot, head_slot: Slot) -> bool {
+        let slots_per_epoch = E::slots_per_epoch();
+        self.last_update_slot.is_some_and(|last| {
+            current_slot > last.saturating_add(1u64)
+                && current_slot.epoch(slots_per_epoch)
+                    == last.epoch(slots_per_epoch).saturating_add(1u64)
+                && head_slot.saturating_add(1u64) < current_slot
+        })
+    }
+
     /// True iff `update_fast_confirmation_variables` will rotate the observed-justified
-    /// checkpoint pairs when run at `current_slot` (once per slot, at the first slot of an
+    /// checkpoint pairs when run at `current_slot` (once per slot, at the first update of an
     /// epoch).
     fn will_rotate<E: EthSpec>(&self, current_slot: Slot) -> bool {
         self.last_update_slot.is_none_or(|s| current_slot > s)
-            && is_start_slot_at_epoch::<E>(current_slot)
+            && Self::is_epoch_start_update::<E>(current_slot, self.last_update_slot)
     }
 
     /// The checkpoint whose state (spec: `store.checkpoint_states[checkpoint]`) must be
     /// supplied to `on_fast_confirmation` at `current_slot`, or `None` if no state is
     /// required — either no rotation happens this slot, or the rotating checkpoint is
     /// unchanged so its existing balance snapshot is reused.
-    pub fn checkpoint_state_needed<E: EthSpec>(&self, current_slot: Slot) -> Option<Checkpoint> {
-        (self.will_rotate::<E>(current_slot)
-            && self.previous_epoch_greatest_unrealized_checkpoint
-                != self.current_epoch_observed_justified.checkpoint())
-        .then_some(self.previous_epoch_greatest_unrealized_checkpoint)
+    pub fn checkpoint_state_needed<E: EthSpec>(
+        &self,
+        current_slot: Slot,
+        head_slot: Slot,
+        justified_checkpoint: &Checkpoint,
+        unrealized_justified_checkpoint: &Checkpoint,
+    ) -> Option<Checkpoint> {
+        (!self.catch_up_deferred::<E>(current_slot, head_slot)
+            && self.will_rotate::<E>(current_slot))
+        .then(|| {
+            self.get_previous_epoch_greatest_unrealized_checkpoint::<E>(
+                self.last_update_slot,
+                current_slot,
+                justified_checkpoint,
+                unrealized_justified_checkpoint,
+            )
+        })
+        .filter(|checkpoint| *checkpoint != self.current_epoch_observed_justified.checkpoint())
     }
 
     /// Spec: `get_previous_balance_source`.
@@ -301,9 +410,11 @@ impl FastConfirmationRule {
     }
 
     /// Spec: `update_fast_confirmation_variables`.
+    #[allow(clippy::too_many_arguments)]
     fn update_fast_confirmation_variables<E: EthSpec>(
         &mut self,
         head_root: Hash256,
+        justified_checkpoint: &Checkpoint,
         unrealized_justified_checkpoint: &Checkpoint,
         current_slot: Slot,
         head_state: &BeaconState<E>,
@@ -332,13 +443,18 @@ impl FastConfirmationRule {
                     *unrealized_justified_checkpoint;
             }
 
-            // At first slot of epoch: rotate the (checkpoint, balances) pairs. `previous` takes
+            // At the first update of an epoch: rotate the (checkpoint, balances) pairs. `previous` takes
             // `current`'s snapshot (spec-equal, no O(V) re-derive); `current` is rebuilt in one
             // step so the pair stays coherent, with balances from the new checkpoint's state
             // (spec: `store.checkpoint_states[checkpoint]`) evaluated at the checkpoint's epoch.
             // The first conjunct of `will_rotate` is always true inside the once-per-slot guard.
             if self.will_rotate::<E>(current_slot) {
-                let new_current_cp = self.previous_epoch_greatest_unrealized_checkpoint;
+                let new_current_cp = self.get_previous_epoch_greatest_unrealized_checkpoint::<E>(
+                    self.last_update_slot,
+                    current_slot,
+                    justified_checkpoint,
+                    unrealized_justified_checkpoint,
+                );
                 let new_current =
                     if new_current_cp == self.current_epoch_observed_justified.checkpoint() {
                         // Same checkpoint keys the same `checkpoint_states` entry — reuse the snapshot.
@@ -360,6 +476,7 @@ impl FastConfirmationRule {
                     std::mem::replace(&mut self.current_epoch_observed_justified, new_current);
             }
 
+            self.previous_update_slot = self.last_update_slot;
             self.last_update_slot = Some(current_slot);
         }
 
@@ -379,7 +496,11 @@ impl FastConfirmationRule {
         equivocating_indices: &BTreeSet<u64>,
     ) -> Result<Hash256, Error> {
         let current_epoch = current_slot.epoch(E::slots_per_epoch());
-        let is_epoch_start = is_start_slot_at_epoch::<E>(current_slot);
+        let is_epoch_start = Self::is_epoch_start_update::<E>(
+            self.last_update_slot.unwrap_or(current_slot),
+            self.previous_update_slot,
+        ) && !self
+            .catch_up_deferred::<E>(current_slot, get_block_slot(head_root, proto_array)?);
         let mut confirmed_root = self.confirmed_root;
 
         let confirmed_block_epoch_result = get_block_epoch::<E>(confirmed_root, proto_array);
@@ -1587,7 +1708,7 @@ mod tests {
         };
         let head_root_a = Hash256::repeat_byte(2);
         let slot_assignments = SlotAssignments::new(&state, &spec, None).expect("slot assignments");
-        let mut fcr = FastConfirmationRule::new::<E>(
+        let mut fcr = FastConfirmationRule::new_from_finalized_checkpoint::<E>(
             head_root_a,
             &state,
             slot_assignments.clone(),
@@ -1617,6 +1738,7 @@ mod tests {
         fcr.update_fast_confirmation_variables::<E>(
             head_root_b,
             &checkpoint,
+            &checkpoint,
             state.slot(),
             &state,
             &slot_assignments,
@@ -1638,6 +1760,7 @@ mod tests {
         let head_root_c = Hash256::repeat_byte(4);
         fcr.update_fast_confirmation_variables::<E>(
             head_root_c,
+            &checkpoint,
             &checkpoint,
             state.slot(),
             &state,
