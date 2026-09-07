@@ -1539,7 +1539,7 @@ mod tests {
     #[test]
     fn head_balance_source_rebuilt_after_intra_epoch_slashing() {
         use state_processing::{GloasVerificationContext, per_slot_processing};
-        use types::MinimalEthSpec;
+        use types::{MinimalEthSpec, Shufflings};
         type E = MinimalEthSpec;
 
         let spec = E::default_spec();
@@ -1561,26 +1561,21 @@ mod tests {
                 .push(spec.max_effective_balance)
                 .expect("push balance");
         }
-        state
-            .build_all_committee_caches(&spec)
-            .expect("committee caches");
 
         // Advance to a mid-epoch slot: at an epoch start the dependent root changes and would
         // rebuild the source regardless, masking the bug.
         let mid_epoch_slot = Slot::new(E::slots_per_epoch() + 4);
+        let mut shufflings = Shufflings::for_state(&state, &spec).expect("shufflings");
         while state.slot() < mid_epoch_slot {
             per_slot_processing(
                 &mut state,
+                &mut shufflings,
                 None,
                 GloasVerificationContext::FullVerification,
                 &spec,
             )
             .expect("should advance slot");
         }
-        state
-            .build_all_committee_caches(&spec)
-            .expect("committee caches");
-
         let checkpoint = Checkpoint {
             epoch: state.current_epoch(),
             root: Hash256::repeat_byte(1),

@@ -6,7 +6,9 @@ use eth2::types::{self as api_types};
 use slot_clock::SlotClock;
 use state_processing::builder_deposits_cache::OnboardBuildersCache;
 use state_processing::state_advance::partial_state_advance;
-use types::{AttestationDuty, BeaconState, ChainSpec, Epoch, EthSpec, Hash256, RelativeEpoch};
+use types::{
+    AttestationDuty, BeaconState, ChainSpec, Epoch, EthSpec, Hash256, RelativeEpoch, Shufflings,
+};
 
 /// The struct that is returned to the requesting HTTP client.
 type ApiDuties = api_types::DutiesResponse<Vec<api_types::AttesterData>>;
@@ -106,7 +108,7 @@ fn compute_historic_attester_duties<T: BeaconChainTypes>(
         }
     };
 
-    let (mut state, execution_optimistic) =
+    let (state, execution_optimistic) =
         if let Some((state_root, mut state, execution_optimistic)) = state_opt {
             // If we've loaded the head state it might be from a previous epoch, ensure it's in a
             // suitable epoch.
@@ -139,8 +141,7 @@ fn compute_historic_attester_duties<T: BeaconChainTypes>(
             warp_utils::reject::custom_server_error(format!("invalid epoch for state: {:?}", e))
         })?;
 
-    state
-        .build_committee_cache(relative_epoch, &chain.spec)
+    let shufflings = Shufflings::for_state(&state, &chain.spec)
         .map_err(BeaconChainError::from)
         .map_err(warp_utils::reject::unhandled_error)?;
 
@@ -153,7 +154,7 @@ fn compute_historic_attester_duties<T: BeaconChainTypes>(
     let duties = request_indices
         .iter()
         .map(|&validator_index| {
-            state
+            shufflings
                 .get_attestation_duties(validator_index as usize, relative_epoch)
                 .map_err(BeaconChainError::from)
         })
@@ -191,8 +192,12 @@ fn ensure_state_knows_attester_duties_for_epoch<E: EthSpec>(
             .start_slot(E::slots_per_epoch());
 
         // A "partial" state advance is adequate since attester duties don't rely on state roots.
+        let mut shufflings = Shufflings::for_state(state, spec)
+            .map_err(BeaconChainError::from)
+            .map_err(warp_utils::reject::unhandled_error)?;
         partial_state_advance(
             state,
+            &mut shufflings,
             Some(state_root),
             target_slot,
             builder_onboarding_cache,

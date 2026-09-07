@@ -9,7 +9,7 @@ use state_processing::state_advance::partial_state_advance;
 use tracing::debug;
 use types::{
     AttestationShufflingId, BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec, Hash256, PTC,
-    RelativeEpoch, Slot, state::CommitteeCache,
+    RelativeEpoch, Shufflings, Slot, state::CommitteeCache,
 };
 
 use crate::{
@@ -451,8 +451,11 @@ where
         if state.current_epoch() + 1 < shuffling_epoch || advance_to_gloas_fork {
             // Advance the state into the required slot, using the "partial" method since the state
             // roots are not relevant for the shuffling.
+            let mut shufflings =
+                Shufflings::for_state(&state, spec).map_err(BeaconChainError::from)?;
             partial_state_advance(
                 &mut state,
+                &mut shufflings,
                 Some(state_root),
                 target_slot,
                 builder_onboarding_cache,
@@ -468,14 +471,9 @@ where
         let relative_epoch = RelativeEpoch::from_epoch(state.current_epoch(), shuffling_epoch)
             .map_err(BeaconChainError::IncorrectStateForAttestation)?;
 
-        state
-            .build_committee_cache(relative_epoch, spec)
-            .map_err(BeaconChainError::from)?;
-
         let committee_cache = state
-            .committee_cache(relative_epoch)
-            .map_err(BeaconChainError::from)?
-            .clone();
+            .initialize_committee_cache(relative_epoch.into_epoch(state.current_epoch()), spec)
+            .map_err(BeaconChainError::from)?;
         // The state has been advanced through the upgrade if needed, so `try_from_state`
         // cannot return None here.
         let ptcs = CachedPTCs::try_from_state(&state, shuffling_epoch, spec)?.ok_or(
@@ -596,18 +594,10 @@ mod test {
             .deterministic_keypairs(8)
             .fresh_ephemeral_store()
             .build();
-        let mut state = harness.get_current_state();
-        state
-            .build_committee_cache(RelativeEpoch::Current, &harness.chain.spec)
-            .unwrap();
-        state
-            .build_committee_cache(RelativeEpoch::Next, &harness.chain.spec)
-            .unwrap();
-        let committee_a = state
-            .committee_cache(RelativeEpoch::Current)
-            .unwrap()
-            .clone();
-        let committee_b = state.committee_cache(RelativeEpoch::Next).unwrap().clone();
+        let state = harness.get_current_state();
+        let shufflings = harness.shufflings(&state);
+        let committee_a = shufflings.committee_cache(RelativeEpoch::Current).clone();
+        let committee_b = shufflings.committee_cache(RelativeEpoch::Next).clone();
         assert!(committee_a != committee_b);
         (committee_a, committee_b)
     }

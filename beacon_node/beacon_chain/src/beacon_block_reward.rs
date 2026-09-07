@@ -14,12 +14,11 @@ use state_processing::{
     },
 };
 use std::collections::HashSet;
-use store::{
-    RelativeEpoch,
-    consts::altair::{PARTICIPATION_FLAG_WEIGHTS, PROPOSER_WEIGHT, WEIGHT_DENOMINATOR},
-};
+use store::consts::altair::{PARTICIPATION_FLAG_WEIGHTS, PROPOSER_WEIGHT, WEIGHT_DENOMINATOR};
 use tracing::error;
-use types::{AbstractExecPayload, BeaconBlockRef, BeaconState, BeaconStateError, EthSpec};
+use types::{
+    AbstractExecPayload, BeaconBlockRef, BeaconState, BeaconStateError, EthSpec, Shufflings,
+};
 
 type BeaconBlockSubRewardValue = u64;
 
@@ -33,8 +32,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(BeaconChainError::BlockRewardSlotError);
         }
 
-        state.build_committee_cache(RelativeEpoch::Previous, &self.spec)?;
-        state.build_committee_cache(RelativeEpoch::Current, &self.spec)?;
+        let shufflings = Shufflings::for_state(state, &self.spec)?;
         initialize_epoch_cache(state, &self.spec)?;
 
         // [New in Gloas:EIP7732] Since payload processing is deferred to the next block, the
@@ -58,7 +56,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             }
         }
 
-        self.compute_beacon_block_reward_with_cache(block, state)
+        self.compute_beacon_block_reward_with_cache(block, state, &shufflings)
     }
 
     // This should only be called after a committee cache has been built
@@ -67,6 +65,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         &self,
         block: BeaconBlockRef<'_, T::EthSpec, Payload>,
         state: &BeaconState<T::EthSpec>,
+        shufflings: &Shufflings,
     ) -> Result<StandardBlockReward, BeaconChainError> {
         let proposer_index = block.proposer_index();
 
@@ -94,7 +93,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             })?;
 
         let block_attestation_reward = if let BeaconState::Base(_) = state {
-            self.compute_beacon_block_attestation_reward_base(block, state)
+            self.compute_beacon_block_attestation_reward_base(block, state, shufflings)
                 .map_err(|e| {
                     error!(
                         error = ?e,
@@ -103,7 +102,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     BeaconChainError::BlockRewardAttestationError
                 })?
         } else {
-            self.compute_beacon_block_attestation_reward_altair_and_later(block, state)
+            self.compute_beacon_block_attestation_reward_altair_and_later(block, state, shufflings)
                 .map_err(|e| {
                     error!(
                         error = ?e,
@@ -190,6 +189,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         &self,
         block: BeaconBlockRef<'_, T::EthSpec, Payload>,
         state: &BeaconState<T::EthSpec>,
+        shufflings: &Shufflings,
     ) -> Result<BeaconBlockSubRewardValue, BeaconChainError> {
         // In phase0, rewards for including attestations are awarded at epoch boundaries when the corresponding
         // attestations are contained in state.previous_epoch_attestations. So, if an attestation within this block has
@@ -243,12 +243,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             let inclusion_delay = state.slot().safe_sub(attestation.data().slot)?.as_u64();
             let sqrt_total_active_balance =
                 SqrtTotalActiveBalance::new(processing_epoch_end.get_total_active_balance()?);
-            for attester in get_attesting_indices_from_state(state, attestation)? {
+            for attester in get_attesting_indices_from_state(shufflings, attestation)? {
                 let validator = processing_epoch_end.get_validator(attester as usize)?;
                 if !validator.slashed
                     && !rewarded_attesters.contains(&attester)
                     && !has_earlier_attestation(
-                        state,
+                        shufflings,
                         processing_epoch_end,
                         inclusion_delay,
                         attester,
@@ -276,6 +276,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         &self,
         block: BeaconBlockRef<'_, T::EthSpec, Payload>,
         state: &BeaconState<T::EthSpec>,
+        shufflings: &Shufflings,
     ) -> Result<BeaconBlockSubRewardValue, BeaconChainError> {
         let mut total_proposer_reward = 0;
 
@@ -306,7 +307,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 &self.spec,
             )?;
 
-            let attesting_indices = get_attesting_indices_from_state(state, attestation)?;
+            let attesting_indices = get_attesting_indices_from_state(shufflings, attestation)?;
             let mut proposer_reward_numerator = 0;
             for index in attesting_indices {
                 let index = index as usize;
@@ -341,7 +342,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 }
 
 fn has_earlier_attestation<E: EthSpec>(
-    state: &BeaconState<E>,
+    shufflings: &Shufflings,
     processing_epoch_end: &BeaconState<E>,
     inclusion_delay: u64,
     attester: u64,
@@ -350,7 +351,7 @@ fn has_earlier_attestation<E: EthSpec>(
         for epoch_att in processing_epoch_end.previous_epoch_attestations()? {
             if epoch_att.inclusion_delay < inclusion_delay {
                 let committee =
-                    state.get_beacon_committee(epoch_att.data.slot, epoch_att.data.index)?;
+                    shufflings.get_beacon_committee(epoch_att.data.slot, epoch_att.data.index)?;
                 let earlier_attesters =
                     get_attesting_indices::<E>(committee.committee, &epoch_att.aggregation_bits)?;
                 if earlier_attesters.contains(&attester) {

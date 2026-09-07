@@ -19,10 +19,7 @@ pub struct CommitteeLengths {
 impl CommitteeLengths {
     /// Instantiate `Self` using `state.current_epoch()`.
     pub fn new<E: EthSpec>(state: &BeaconState<E>) -> Result<Self, Error> {
-        let active_validator_indices_len = state
-            .committee_cache(RelativeEpoch::Current)?
-            .active_validator_indices()
-            .len();
+        let active_validator_indices_len = state.get_active_validator_count()? as usize;
 
         Ok(Self {
             epoch: state.current_epoch(),

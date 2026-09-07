@@ -22,25 +22,21 @@ fn genesis_state(n: usize) -> (BeaconState<E>, ChainSpec) {
             .push(spec.max_effective_balance)
             .expect("push balance");
     }
-    state
-        .build_all_committee_caches(&spec)
-        .expect("committee caches");
     (state, spec)
 }
 
 fn advance_state(state: &mut BeaconState<E>, target: Slot, spec: &ChainSpec) {
+    let mut shufflings = Shufflings::for_state(state, spec).expect("shufflings");
     while state.slot() < target {
         per_slot_processing(
             state,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             spec,
         )
         .expect("advance slot");
     }
-    state
-        .build_all_committee_caches(spec)
-        .expect("committee caches");
 }
 
 #[test]

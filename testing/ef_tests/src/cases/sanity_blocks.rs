@@ -7,7 +7,7 @@ use state_processing::{
     BlockProcessingError, BlockSignatureStrategy, ConsensusContext, GloasVerificationContext,
     VerifyBlockRoot, per_block_processing, per_slot_processing,
 };
-use types::{BeaconState, RelativeEpoch, SignedBeaconBlock};
+use types::{BeaconState, Shufflings, SignedBeaconBlock};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Metadata {
@@ -99,6 +99,8 @@ impl<E: EthSpec> Case for SanityBlocks<E> {
         // Spawning a second state to call the VerifyIndiviual strategy to avoid bitrot.
         // See https://github.com/sigp/lighthouse/issues/742.
         let mut indiv_state = bulk_state.clone();
+        let mut bulk_shufflings = Shufflings::for_state(&bulk_state, spec).unwrap();
+        let mut indiv_shufflings = Shufflings::for_state(&indiv_state, spec).unwrap();
 
         let result = self
             .blocks
@@ -108,6 +110,7 @@ impl<E: EthSpec> Case for SanityBlocks<E> {
                 while bulk_state.slot() < block.slot() {
                     per_slot_processing(
                         &mut bulk_state,
+                        &mut bulk_shufflings,
                         None,
                         GloasVerificationContext::FullVerification,
                         spec,
@@ -115,6 +118,7 @@ impl<E: EthSpec> Case for SanityBlocks<E> {
                     .unwrap();
                     per_slot_processing(
                         &mut indiv_state,
+                        &mut indiv_shufflings,
                         None,
                         GloasVerificationContext::FullVerification,
                         spec,
@@ -122,15 +126,7 @@ impl<E: EthSpec> Case for SanityBlocks<E> {
                     .unwrap();
                 }
 
-                bulk_state
-                    .build_committee_cache(RelativeEpoch::Current, spec)
-                    .unwrap();
-
-                indiv_state
-                    .build_committee_cache(RelativeEpoch::Current, spec)
-                    .unwrap();
-
-                let mut ctxt = ConsensusContext::new(indiv_state.slot());
+                let mut ctxt = ConsensusContext::new(indiv_state.slot(), indiv_shufflings.clone());
                 per_block_processing(
                     &mut indiv_state,
                     signed_block,
@@ -140,7 +136,7 @@ impl<E: EthSpec> Case for SanityBlocks<E> {
                     spec,
                 )?;
 
-                let mut ctxt = ConsensusContext::new(indiv_state.slot());
+                let mut ctxt = ConsensusContext::new(bulk_state.slot(), bulk_shufflings.clone());
                 per_block_processing(
                     &mut bulk_state,
                     signed_block,

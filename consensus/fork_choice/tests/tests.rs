@@ -22,7 +22,8 @@ use types::SingleAttestation;
 use types::{
     BeaconBlockRef, BeaconState, ChainSpec, Checkpoint, Epoch, EthSpec, ForkName, Hash256,
     IndexedAttestation, IndexedPayloadAttestation, MainnetEthSpec, PayloadAttestationData,
-    RelativeEpoch, SignedBeaconBlock, Slot, SubnetId, test_utils::generate_deterministic_keypair,
+    RelativeEpoch, Shufflings, SignedBeaconBlock, Slot, SubnetId,
+    test_utils::generate_deterministic_keypair,
 };
 
 pub type E = MainnetEthSpec;
@@ -195,7 +196,16 @@ impl ForkChoiceTest {
             // Skip slashed proposers, as we expect validators to get slashed in these tests.
             // Presently `make_block` will panic if the proposer is slashed, so we just avoid
             // calling it in this case.
-            complete_state_advance(&mut state, None, slot, None, &self.harness.spec).unwrap();
+            let mut shufflings = Shufflings::for_state(&state, &self.harness.spec).unwrap();
+            complete_state_advance(
+                &mut state,
+                &mut shufflings,
+                None,
+                slot,
+                None,
+                &self.harness.spec,
+            )
+            .unwrap();
             state.build_caches(&self.harness.spec).unwrap();
             let proposer_index = state
                 .get_beacon_proposer_index(slot, &self.harness.chain.spec)
@@ -248,8 +258,9 @@ impl ForkChoiceTest {
     /// Slash a validator from the previous epoch committee.
     pub async fn add_previous_epoch_attester_slashing(self) -> Self {
         let state = self.harness.get_current_state();
-        let previous_epoch_shuffling = state.get_shuffling(RelativeEpoch::Previous).unwrap();
-        let validator_indices = previous_epoch_shuffling
+        let shufflings = Shufflings::for_state(&state, &self.harness.spec).unwrap();
+        let validator_indices = shufflings
+            .get_shuffling(RelativeEpoch::Previous)
             .iter()
             .map(|idx| *idx as u64)
             .take(1)
@@ -461,16 +472,16 @@ impl ForkChoiceTest {
         // index used post-Electra.
         let committee_index = 0;
 
-        let validator_index = *head
-            .beacon_state
+        let shufflings = Shufflings::for_state(&head.beacon_state, &self.harness.chain.spec)
+            .expect("should build shufflings");
+        let validator_index = *shufflings
             .get_beacon_committee(current_slot, committee_index)
             .expect("should get committees")
             .committee
             .get(validator_index_in_committee)
             .expect("there should be an attesting validator");
 
-        let committee_count = head
-            .beacon_state
+        let committee_count = shufflings
             .get_committee_count_at_slot(current_slot)
             .expect("should not error while getting committee count");
 

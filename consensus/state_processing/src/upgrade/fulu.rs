@@ -103,9 +103,8 @@ pub fn upgrade_state_to_fulu<E: EthSpec>(
         pending_partial_withdrawals: pre.pending_partial_withdrawals.clone(),
         pending_consolidations: pre.pending_consolidations.clone(),
         // Caches
-        total_active_balance: pre.total_active_balance,
+        active_totals: pre.active_totals,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),
-        committee_caches: mem::take(&mut pre.committee_caches),
         pubkey_cache: mem::take(&mut pre.pubkey_cache),
         exit_cache: mem::take(&mut pre.exit_cache),
         slashings_cache: mem::take(&mut pre.slashings_cache),

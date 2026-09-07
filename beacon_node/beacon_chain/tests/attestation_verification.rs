@@ -29,8 +29,9 @@ use tree_hash::TreeHash;
 use typenum::Unsigned;
 use types::{
     Address, Attestation, AttestationRef, ChainSpec, Epoch, EthSpec, ForkName, Hash256,
-    MainnetEthSpec, SelectionProof, SignedAggregateAndProof, SingleAttestation, Slot, SubnetId,
-    attestation::SignedAggregateAndProofRefMut, test_utils::generate_deterministic_keypair,
+    MainnetEthSpec, SelectionProof, Shufflings, SignedAggregateAndProof, SingleAttestation, Slot,
+    SubnetId, attestation::SignedAggregateAndProofRefMut,
+    test_utils::generate_deterministic_keypair,
 };
 
 pub type E = MainnetEthSpec;
@@ -133,8 +134,9 @@ fn get_valid_unaggregated_attestation<T: BeaconChainTypes>(
         .expect("should not error while producing attestation");
 
     let validator_committee_index = 0;
-    let validator_index = *head
-        .beacon_state
+    let shufflings =
+        Shufflings::for_state(&head.beacon_state, &chain.spec).expect("should build shufflings");
+    let validator_index = *shufflings
         .get_beacon_committee(
             current_slot,
             valid_attestation
@@ -167,7 +169,7 @@ fn get_valid_unaggregated_attestation<T: BeaconChainTypes>(
 
     let subnet_id = SubnetId::compute_subnet_for_single_attestation::<T::EthSpec>(
         &single_attestation,
-        head.beacon_state
+        shufflings
             .get_committee_count_at_slot(current_slot)
             .expect("should get committee count"),
         &chain.spec,
@@ -185,7 +187,8 @@ fn get_valid_aggregated_attestation<T: BeaconChainTypes>(
     let state = &head.beacon_state;
     let current_slot = chain.slot().expect("should get slot");
 
-    let committee = state
+    let shufflings = Shufflings::for_state(state, &chain.spec).expect("should build shufflings");
+    let committee = shufflings
         .get_beacon_committee(
             current_slot,
             aggregate
@@ -240,7 +243,8 @@ fn get_non_aggregator<T: BeaconChainTypes>(
     let state = &head.beacon_state;
     let current_slot = chain.slot().expect("should get slot");
 
-    let committee = state
+    let shufflings = Shufflings::for_state(state, &chain.spec).expect("should build shufflings");
+    let committee = shufflings
         .get_beacon_committee(
             current_slot,
             aggregate
@@ -318,7 +322,8 @@ impl GossipTester {
 
         let head = harness.chain.head_snapshot();
         let state = &head.beacon_state;
-        let committee = state
+        let shufflings = harness.shufflings(state);
+        let committee = shufflings
             .get_beacon_committee(
                 valid_attestation.data.slot,
                 valid_attestation.committee_index,
@@ -773,9 +778,7 @@ async fn aggregated_gossip_verification() {
             |tester, a| {
                 let committee_len = tester
                     .harness
-                    .chain
-                    .head_snapshot()
-                    .beacon_state
+                    .shufflings(&tester.harness.chain.head_snapshot().beacon_state)
                     .get_beacon_committee(tester.slot(), a.message().aggregate().committee_index().expect("should get committee index"))
                     .expect("should get committees")
                     .committee
@@ -1092,9 +1095,7 @@ async fn unaggregated_gossip_verification() {
             |tester, a, _, _| {
                 let committee_index = tester
                     .harness
-                    .chain
-                    .head_snapshot()
-                    .beacon_state
+                    .shufflings(&tester.harness.chain.head_snapshot().beacon_state)
                     .get_committee_count_at_slot(a.data.slot)
                     .unwrap();
 
@@ -1320,8 +1321,10 @@ async fn attestation_that_skips_epochs() {
         .expect("should find state");
 
     while state.slot() < current_slot {
+        let mut shufflings = Shufflings::for_state(&state, &harness.spec).unwrap();
         per_slot_processing(
             &mut state,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             &harness.spec,
@@ -1437,8 +1440,10 @@ async fn attestation_validator_receive_proposer_reward_and_withdrawals() {
         .expect("should find state");
 
     while state.slot() < current_slot {
+        let mut shufflings = Shufflings::for_state(&state, &harness.spec).unwrap();
         per_slot_processing(
             &mut state,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             &harness.spec,
@@ -1520,8 +1525,10 @@ async fn attestation_to_finalized_block() {
         .expect("should find state");
 
     while state.slot() < current_slot {
+        let mut shufflings = Shufflings::for_state(&state, &harness.spec).unwrap();
         per_slot_processing(
             &mut state,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             &harness.spec,
@@ -1593,7 +1600,8 @@ async fn verify_aggregate_for_gossip_doppelganger_detection() {
 
     let head = harness.chain.head_snapshot();
     let state = &head.beacon_state;
-    let committee = state
+    let shufflings = harness.shufflings(state);
+    let committee = shufflings
         .get_beacon_committee(
             valid_attestation.data.slot,
             valid_attestation.committee_index,
@@ -2057,8 +2065,8 @@ async fn gloas_aggregated_attestation_same_slot_index_must_be_zero() {
     );
 
     // Convert to aggregate
-    let committee = head
-        .beacon_state
+    let shufflings = harness.shufflings(&head.beacon_state);
+    let committee = shufflings
         .get_beacon_committee(current_slot, valid_attestation.committee_index)
         .expect("should get committee");
     let fork_name = harness
@@ -2228,8 +2236,8 @@ async fn gloas_aggregated_attestation_unknown_payload_envelope() {
         valid_attestation.data.beacon_block_root, block_root,
         "attestation should be for the payload-less head block"
     );
-    let committee = head
-        .beacon_state
+    let shufflings = harness.shufflings(&head.beacon_state);
+    let committee = shufflings
         .get_beacon_committee(current_slot, valid_attestation.committee_index)
         .expect("should get committee");
     let fork_name = harness

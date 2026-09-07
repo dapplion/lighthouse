@@ -6,7 +6,7 @@ use eth2::types::{self as api_types, PtcDuty};
 use slot_clock::SlotClock;
 use state_processing::builder_deposits_cache::OnboardBuildersCache;
 use state_processing::state_advance::partial_state_advance;
-use types::{BeaconState, ChainSpec, Epoch, EthSpec, Hash256};
+use types::{BeaconState, ChainSpec, Epoch, EthSpec, Hash256, Shufflings};
 
 type ApiDuties = api_types::DutiesResponse<Vec<PtcDuty>>;
 
@@ -164,8 +164,12 @@ fn ensure_state_knows_ptc_duties_for_epoch<E: EthSpec>(
             .saturating_sub(1_u64)
             .start_slot(E::slots_per_epoch());
 
+        let mut shufflings = Shufflings::for_state(state, spec)
+            .map_err(BeaconChainError::from)
+            .map_err(warp_utils::reject::unhandled_error)?;
         partial_state_advance(
             state,
+            &mut shufflings,
             Some(state_root),
             target_slot,
             builder_onboarding_cache,

@@ -1,7 +1,7 @@
 use crate::common::update_progressive_balances_cache::initialize_progressive_balances_cache;
 use crate::epoch_cache::initialize_epoch_cache;
 use tracing::instrument;
-use types::{BeaconState, ChainSpec, EpochCacheError, EthSpec, Hash256, RelativeEpoch};
+use types::{BeaconState, ChainSpec, EpochCacheError, EthSpec, Hash256};
 
 /// Mixin trait for the beacon state that provides operations on *all* caches.
 ///
@@ -38,9 +38,6 @@ impl<E: EthSpec> AllCaches for BeaconState<E> {
         };
         self.get_total_active_balance_at_epoch(current_epoch)
             .is_ok()
-            && self.committee_cache_is_initialized(RelativeEpoch::Previous)
-            && self.committee_cache_is_initialized(RelativeEpoch::Current)
-            && self.committee_cache_is_initialized(RelativeEpoch::Next)
             && self
                 .progressive_balances_cache()
                 .is_initialized_at(current_epoch)

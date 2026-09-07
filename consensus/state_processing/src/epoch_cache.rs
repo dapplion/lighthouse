@@ -12,6 +12,7 @@ use types::{ActivationQueue, BeaconState, ChainSpec, EthSpec, ForkName, Hash256}
 pub struct PreEpochCache {
     epoch_key: EpochCacheKey,
     effective_balances: Vec<u64>,
+    active_validator_count: u64,
     total_active_balance: u64,
 }
 
@@ -40,6 +41,7 @@ impl PreEpochCache {
         Ok(Self {
             epoch_key,
             effective_balances: Vec::with_capacity(state.validators().len()),
+            active_validator_count: 0,
             total_active_balance: 0,
         })
     }
@@ -53,6 +55,7 @@ impl PreEpochCache {
         if validator_index == self.effective_balances.len() {
             self.effective_balances.push(effective_balance);
             if is_active_next_epoch {
+                self.active_validator_count.safe_add_assign(1)?;
                 self.total_active_balance
                     .safe_add_assign(effective_balance)?;
             }
@@ -78,6 +81,10 @@ impl PreEpochCache {
     /// `into_epoch_cache` and `set_total_active_balance`. This returns the raw sum.
     pub fn get_total_active_balance(&self) -> u64 {
         self.total_active_balance
+    }
+
+    pub fn get_active_validator_count(&self) -> u64 {
+        self.active_validator_count
     }
 
     pub fn into_epoch_cache(
@@ -155,7 +162,7 @@ pub fn initialize_epoch_cache<E: EthSpec>(
         .epoch_cache_decision_root(Hash256::zero())
         .map_err(EpochCacheError::BeaconState)?;
 
-    state.build_total_active_balance_cache(spec)?;
+    state.build_active_totals_cache(spec)?;
     let total_active_balance = state.get_total_active_balance_at_epoch(current_epoch)?;
 
     // Collect effective balances and compute activation queue.
@@ -177,6 +184,7 @@ pub fn initialize_epoch_cache<E: EthSpec>(
             decision_block_root,
         },
         effective_balances,
+        active_validator_count: state.get_active_validator_count()?,
         total_active_balance,
     };
     *state.epoch_cache_mut() = pre_epoch_cache.into_epoch_cache(activation_queue, spec)?;
@@ -200,6 +208,7 @@ mod tests {
         let spec = ChainSpec::minimal();
 
         let cache = PreEpochCache {
+            active_validator_count: 0,
             epoch_key: EpochCacheKey {
                 epoch: Epoch::new(1),
                 decision_block_root: Hash256::zero(),

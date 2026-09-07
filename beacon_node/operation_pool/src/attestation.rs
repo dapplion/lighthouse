@@ -7,7 +7,7 @@ use state_processing::common::{
 };
 use std::collections::HashMap;
 use types::{
-    Attestation, BeaconState, ChainSpec, EthSpec,
+    Attestation, BeaconState, ChainSpec, EthSpec, Shufflings,
     consts::altair::{PARTICIPATION_FLAG_WEIGHTS, PROPOSER_WEIGHT, WEIGHT_DENOMINATOR},
     state::BeaconStateBase,
 };
@@ -27,12 +27,20 @@ impl<'a, E: EthSpec> AttMaxCover<'a, E> {
     pub fn new(
         att: CompactAttestationRef<'a, E>,
         state: &BeaconState<E>,
+        shufflings: &Shufflings,
         reward_cache: &'a RewardCache,
         total_active_balance: u64,
         spec: &ChainSpec,
     ) -> Option<Self> {
         if let BeaconState::Base(base_state) = state {
-            Self::new_for_base(att, state, base_state, total_active_balance, spec)
+            Self::new_for_base(
+                att,
+                state,
+                shufflings,
+                base_state,
+                total_active_balance,
+                spec,
+            )
         } else {
             Self::new_for_altair_or_later(att, state, reward_cache, spec)
         }
@@ -42,12 +50,13 @@ impl<'a, E: EthSpec> AttMaxCover<'a, E> {
     pub fn new_for_base(
         att: CompactAttestationRef<'a, E>,
         state: &BeaconState<E>,
+        shufflings: &Shufflings,
         base_state: &BeaconStateBase<E>,
         total_active_balance: u64,
         spec: &ChainSpec,
     ) -> Option<Self> {
         let fresh_validators = earliest_attestation_validators(&att, state, base_state);
-        let committee = state
+        let committee = shufflings
             .get_beacon_committee(att.data.slot, att.data.index)
             .ok()?;
         let indices = get_attesting_indices::<E>(committee.committee, &fresh_validators).ok()?;

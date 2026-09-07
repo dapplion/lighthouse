@@ -6,7 +6,7 @@ use errors::EpochProcessingError as Error;
 pub use justification_and_finalization_state::JustificationAndFinalizationState;
 use safe_arith::SafeArith;
 use tracing::instrument;
-use types::{BeaconState, ChainSpec, EthSpec};
+use types::{BeaconState, ChainSpec, EthSpec, Shufflings};
 
 pub use registry_updates::{process_registry_updates, process_registry_updates_slow};
 pub use slashings::{process_slashings, process_slashings_slow};
@@ -34,6 +34,7 @@ pub mod weigh_justification_and_finalization;
 #[instrument(skip_all)]
 pub fn process_epoch<E: EthSpec>(
     state: &mut BeaconState<E>,
+    shufflings: &mut Shufflings,
     spec: &ChainSpec,
 ) -> Result<EpochProcessingSummary<E>, Error> {
     let _timer = metrics::start_timer(&metrics::PROCESS_EPOCH_TIME);
@@ -44,9 +45,9 @@ pub fn process_epoch<E: EthSpec>(
         .map_err(Error::InconsistentStateFork)?;
 
     if state.fork_name_unchecked().altair_enabled() {
-        altair::process_epoch(state, spec)
+        altair::process_epoch(state, shufflings, spec)
     } else {
-        base::process_epoch(state, spec)
+        base::process_epoch(state, shufflings, spec)
     }
 }
 

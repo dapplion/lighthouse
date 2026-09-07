@@ -33,7 +33,7 @@ use types::{
     BeaconBlockBodyGloas, BeaconBlockGloas, BeaconState, BeaconStateError, BlobsList, BuilderIndex,
     ChainSpec, Deposit, Eth1Data, EthSpec, ExecutionBlockHash, ExecutionPayloadBid,
     ExecutionPayloadEnvelope, ExecutionRequestsGloas, FullPayload, Graffiti, Hash256,
-    IndexedAttestation, KzgProofs, PayloadAttestation, ProposerSlashing, RelativeEpoch,
+    IndexedAttestation, KzgProofs, PayloadAttestation, ProposerSlashing, Shufflings,
     SignedBeaconBlock, SignedBlsToExecutionChange, SignedExecutionPayloadBid,
     SignedExecutionPayloadEnvelope, SignedProposerPreferences, SignedVoluntaryExit, Slot,
     SyncAggregate, Uint256, Withdrawal, Withdrawals,
@@ -376,8 +376,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let slot_timer = metrics::start_timer(&metrics::BLOCK_PRODUCTION_SLOT_PROCESS_TIMES);
 
         // Ensure the state has performed a complete transition into the required slot.
+        let mut shufflings = Shufflings::for_state(&state, &self.spec)
+            .map_err(|e| BlockProductionError::BeaconChain(Box::new(e.into())))?;
         complete_state_advance(
             &mut state,
+            &mut shufflings,
             state_root_opt,
             produce_at_slot,
             self.builder_onboarding_cache.as_deref(),
@@ -386,7 +389,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         drop(slot_timer);
 
-        state.build_committee_cache(RelativeEpoch::Current, &self.spec)?;
         state.apply_pending_mutations()?;
 
         let parent_root = if state.slot() > 0 {
@@ -396,6 +398,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         } else {
             state.latest_block_header().canonical_root()
         };
+
+        let shufflings = self
+            .shufflings_for_state(&state, parent_root)
+            .map_err(|e| BlockProductionError::BeaconChain(Box::new(e)))?;
 
         let proposer_index = state.get_beacon_proposer_index(state.slot(), &self.spec)? as u64;
 
@@ -431,7 +437,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             for attestation in self.naive_aggregation_pool.read().iter() {
                 let import = |attestation: &Attestation<T::EthSpec>| {
                     let attesting_indices =
-                        get_attesting_indices_from_state(&state, attestation.to_ref())?;
+                        get_attesting_indices_from_state(&shufflings, attestation.to_ref())?;
                     self.op_pool
                         .insert_attestation(attestation.clone(), attesting_indices)
                 };
@@ -451,7 +457,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 metrics::start_timer(&metrics::BLOCK_PRODUCTION_ATTESTATION_TIMES);
 
             // Epoch cache and total balance cache are required for op pool packing.
-            state.build_total_active_balance_cache(&self.spec)?;
+            state.build_active_totals_cache(&self.spec)?;
             initialize_epoch_cache(&mut state, &self.spec)?;
 
             // [New in Gloas:EIP7732] Since payload processing is deferred to the next block, the
@@ -479,6 +485,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             self.op_pool
                 .get_attestations(
                     &state,
+                    &shufflings,
                     prev_attestation_filter,
                     curr_attestation_filter,
                     &self.spec,
@@ -495,7 +502,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // This will be a lot slower but guards against bugs in block production and can be
         // quickly rolled out without a release.
         if self.config.paranoid_block_proposal {
-            let mut tmp_ctxt = ConsensusContext::new(state.slot());
+            let mut tmp_ctxt = ConsensusContext::new(state.slot(), shufflings.clone());
             attestations.retain(|att| {
                 verify_attestation_for_block_inclusion(
                     &state,
@@ -783,7 +790,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         };
 
         // Use a context without block root or proposer index so that both are checked.
-        let mut ctxt = ConsensusContext::new(signed_beacon_block.slot());
+        let shufflings = Shufflings::for_state(&state, &self.spec)?;
+        let mut ctxt = ConsensusContext::new(signed_beacon_block.slot(), shufflings);
 
         let consensus_block_value = self
             .compute_beacon_block_reward(signed_beacon_block.message(), &mut state)

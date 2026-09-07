@@ -12,7 +12,7 @@ use genesis::{InteropGenesisBuilder, bls_withdrawal_credentials};
 use http_api::test_utils::*;
 use std::collections::HashSet;
 use types::{
-    Address, ChainSpec, Epoch, EthSpec, Hash256, MinimalEthSpec, Slot,
+    Address, ChainSpec, Epoch, EthSpec, Hash256, MinimalEthSpec, Shufflings, Slot,
     test_utils::{generate_deterministic_keypair, generate_deterministic_keypairs},
 };
 
@@ -157,7 +157,8 @@ async fn attestations_across_fork_with_skip_slots() {
 
             let aggregation_bit = *aggregation_bits.first().unwrap();
 
-            let committee = fork_state
+            let shufflings = Shufflings::for_state(&fork_state, &harness.chain.spec).unwrap();
+            let committee = shufflings
                 .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
                 .unwrap();
 

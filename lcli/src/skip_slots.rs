@@ -58,7 +58,7 @@ use std::io::prelude::*;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::info;
-use types::{BeaconState, EthSpec, Hash256};
+use types::{BeaconState, EthSpec, Hash256, Shufflings};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -130,15 +130,31 @@ pub fn run<E: EthSpec>(
 
     for i in 0..runs {
         let mut state = state.clone();
+        let mut shufflings = Shufflings::for_state(&state, spec)
+            .map_err(|e| format!("Unable to build shufflings: {:?}", e))?;
 
         let start = Instant::now();
 
         if partial {
-            partial_state_advance(&mut state, Some(state_root), target_slot, None, spec)
-                .map_err(|e| format!("Unable to perform partial advance: {:?}", e))?;
+            partial_state_advance(
+                &mut state,
+                &mut shufflings,
+                Some(state_root),
+                target_slot,
+                None,
+                spec,
+            )
+            .map_err(|e| format!("Unable to perform partial advance: {:?}", e))?;
         } else {
-            complete_state_advance(&mut state, Some(state_root), target_slot, None, spec)
-                .map_err(|e| format!("Unable to perform complete advance: {:?}", e))?;
+            complete_state_advance(
+                &mut state,
+                &mut shufflings,
+                Some(state_root),
+                target_slot,
+                None,
+                spec,
+            )
+            .map_err(|e| format!("Unable to perform complete advance: {:?}", e))?;
         }
 
         let duration = Instant::now().duration_since(start);

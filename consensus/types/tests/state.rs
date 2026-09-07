@@ -114,11 +114,10 @@ async fn beacon_proposer_index() {
 
 /// Test that
 ///
-/// 1. Using the cache before it's built fails.
-/// 2. Using the cache after it's build passes.
-/// 3. Using the cache after it's dropped fails.
+/// 1. Shufflings built from a state serve committees for every epoch they cover.
+/// 2. Shufflings cannot be built around an uninitialized cache.
 fn test_cache_initialization<E: EthSpec>(
-    state: &mut BeaconState<E>,
+    state: &BeaconState<E>,
     relative_epoch: RelativeEpoch,
     spec: &ChainSpec,
 ) {
@@ -126,20 +125,22 @@ fn test_cache_initialization<E: EthSpec>(
         .into_epoch(state.slot().epoch(E::slots_per_epoch()))
         .start_slot(E::slots_per_epoch());
 
-    // Build the cache.
-    state.build_committee_cache(relative_epoch, spec).unwrap();
+    Shufflings::for_state(state, spec)
+        .unwrap()
+        .get_beacon_committee(slot, 0)
+        .unwrap();
 
-    // Assert a call to a cache-using function passes.
-    state.get_beacon_committee(slot, 0).unwrap();
-
-    // Drop the cache.
-    state.drop_committee_cache(relative_epoch).unwrap();
-
-    // Assert a call to a cache-using function fail.
+    let uninitialized = std::sync::Arc::new(CommitteeCache::default());
     assert_eq!(
-        state.get_beacon_committee(slot, 0),
-        Err(BeaconStateError::CommitteeCacheUninitialized(Some(
-            relative_epoch
+        Shufflings::new::<E>(
+            state.current_epoch(),
+            uninitialized.clone(),
+            uninitialized.clone(),
+            uninitialized,
+        )
+        .err(),
+        Some(BeaconStateError::CommitteeCacheUninitialized(Some(
+            RelativeEpoch::Previous
         )))
     );
 }
@@ -153,9 +154,9 @@ async fn cache_initialization() {
     *state.slot_mut() =
         (MinimalEthSpec::genesis_epoch() + 1).start_slot(MinimalEthSpec::slots_per_epoch());
 
-    test_cache_initialization(&mut state, RelativeEpoch::Previous, &spec);
-    test_cache_initialization(&mut state, RelativeEpoch::Current, &spec);
-    test_cache_initialization(&mut state, RelativeEpoch::Next, &spec);
+    test_cache_initialization(&state, RelativeEpoch::Previous, &spec);
+    test_cache_initialization(&state, RelativeEpoch::Current, &spec);
+    test_cache_initialization(&state, RelativeEpoch::Next, &spec);
 }
 
 /// Tests committee-specific components
@@ -171,13 +172,13 @@ mod committees {
         validator_count: usize,
         spec: &ChainSpec,
     ) {
+        let shufflings = Shufflings::for_state(&state, spec).unwrap();
         let active_indices: Vec<usize> = (0..validator_count).collect();
         let seed = state.get_seed(epoch, Domain::BeaconAttester, spec).unwrap();
         let relative_epoch = RelativeEpoch::from_epoch(state.current_epoch(), epoch).unwrap();
 
-        let mut ordered_indices = state
+        let mut ordered_indices = shufflings
             .get_cached_active_validator_indices(relative_epoch)
-            .unwrap()
             .to_vec();
         ordered_indices.sort_unstable();
         assert_eq!(
@@ -192,13 +193,13 @@ mod committees {
 
         // Loop through all slots in the epoch being tested.
         for slot in epoch.slot_iter(E::slots_per_epoch()) {
-            let beacon_committees = state.get_beacon_committees_at_slot(slot).unwrap();
+            let beacon_committees = shufflings.get_beacon_committees_at_slot(slot).unwrap();
 
             // Assert that the number of committees in this slot is consistent with the reported number
             // of committees in an epoch.
             assert_eq!(
                 beacon_committees.len() as u64,
-                state
+                shufflings
                     .get_epoch_committee_count(relative_epoch)
                     .unwrap()
                     .div(E::slots_per_epoch())
@@ -209,7 +210,10 @@ mod committees {
                 assert_eq!(committee_index as u64, bc.index);
                 // Assert that a committee lookup via slot is identical to a committee lookup via
                 // index.
-                assert_eq!(state.get_beacon_committee(bc.slot, bc.index).unwrap(), *bc);
+                assert_eq!(
+                    shufflings.get_beacon_committee(bc.slot, bc.index).unwrap(),
+                    *bc
+                );
 
                 // Loop through each validator in the committee.
                 for (committee_i, validator_i) in bc.committee.iter().enumerate() {
@@ -221,7 +225,7 @@ mod committees {
                     );
                     // Assert a call to `get_attestation_duties` is consistent with a call to
                     // `get_beacon_committees_at_slot`
-                    let attestation_duty = state
+                    let attestation_duty = shufflings
                         .get_attestation_duties(*validator_i, relative_epoch)
                         .unwrap()
                         .unwrap();
@@ -251,16 +255,6 @@ mod committees {
         let distinct_hashes =
             (0..E::epochs_per_historical_vector()).map(|i| Hash256::from_low_u64_be(i as u64));
         *new_head_state.randao_mixes_mut() = Vector::try_from_iter(distinct_hashes).unwrap();
-
-        new_head_state
-            .force_build_committee_cache(RelativeEpoch::Previous, spec)
-            .unwrap();
-        new_head_state
-            .force_build_committee_cache(RelativeEpoch::Current, spec)
-            .unwrap();
-        new_head_state
-            .force_build_committee_cache(RelativeEpoch::Next, spec)
-            .unwrap();
 
         let cache_epoch = cache_epoch.into_epoch(state_epoch);
 

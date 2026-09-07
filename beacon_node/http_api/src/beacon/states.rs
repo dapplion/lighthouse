@@ -441,13 +441,6 @@ pub fn get_beacon_state_committees<T: BeaconChainTypes>(
                                             current_epoch,
                                             epoch,
                                         ) {
-                                            Ok(relative_epoch)
-                                                if state.committee_cache_is_initialized(
-                                                    relative_epoch,
-                                                ) =>
-                                            {
-                                                state.committee_cache(relative_epoch).cloned()
-                                            }
                                             Ok(_) | Err(RelativeEpochError::EpochTooLow { .. }) => {
                                                 CommitteeCache::initialized(
                                                     state,

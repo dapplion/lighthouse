@@ -8,7 +8,7 @@ use crate::builder_deposits_cache::OnboardBuildersCache;
 use crate::*;
 use fixed_bytes::FixedBytesExtended;
 use tracing::instrument;
-use types::{BeaconState, ChainSpec, EthSpec, Hash256, Slot};
+use types::{BeaconState, ChainSpec, EthSpec, Hash256, Shufflings, Slot};
 
 #[derive(Debug, PartialEq)]
 pub enum Error {
@@ -30,6 +30,7 @@ pub enum Error {
 /// do anything hacky like the "partial" method (see `partial_state_advance`).
 pub fn complete_state_advance<E: EthSpec>(
     state: &mut BeaconState<E>,
+    shufflings: &mut Shufflings,
     mut state_root_opt: Option<Hash256>,
     target_slot: Slot,
     builder_onboarding_cache: Option<&OnboardBuildersCache>,
@@ -44,6 +45,7 @@ pub fn complete_state_advance<E: EthSpec>(
 
         per_slot_processing(
             state,
+            shufflings,
             state_root_opt,
             GloasVerificationContext::from_cache(builder_onboarding_cache),
             spec,
@@ -71,6 +73,7 @@ pub fn complete_state_advance<E: EthSpec>(
 #[instrument(skip_all, level = "debug")]
 pub fn partial_state_advance<E: EthSpec>(
     state: &mut BeaconState<E>,
+    shufflings: &mut Shufflings,
     state_root_opt: Option<Hash256>,
     target_slot: Slot,
     builder_onboarding_cache: Option<&OnboardBuildersCache>,
@@ -106,6 +109,7 @@ pub fn partial_state_advance<E: EthSpec>(
 
         per_slot_processing(
             state,
+            shufflings,
             Some(state_root),
             GloasVerificationContext::from_cache(builder_onboarding_cache),
             spec,

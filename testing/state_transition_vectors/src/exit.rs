@@ -4,7 +4,7 @@ use state_processing::{
     BlockProcessingError, BlockSignatureStrategy, ConsensusContext, VerifyBlockRoot,
     per_block_processing, per_block_processing::errors::ExitInvalid,
 };
-use types::{BeaconBlock, Epoch};
+use types::{BeaconBlock, Epoch, Shufflings};
 
 // Default validator index to exit.
 pub const VALIDATOR_INDEX: u64 = 0;
@@ -38,7 +38,7 @@ impl Default for ExitTest {
 }
 
 impl ExitTest {
-    async fn block_and_pre_state(self) -> (SignedBeaconBlock<E>, BeaconState<E>) {
+    async fn block_and_pre_state(self) -> (SignedBeaconBlock<E>, BeaconState<E>, Shufflings) {
         let harness = get_harness::<E>(
             self.state_epoch.start_slot(E::slots_per_epoch()),
             VALIDATOR_COUNT,
@@ -57,14 +57,16 @@ impl ExitTest {
                 block_modifier(&harness, block);
             })
             .await;
-        ((*signed_block.0).clone(), state)
+        let shufflings = harness.shufflings(&state);
+        ((*signed_block.0).clone(), state, shufflings)
     }
 
     fn process(
         block: &SignedBeaconBlock<E>,
         state: &mut BeaconState<E>,
+        shufflings: Shufflings,
     ) -> Result<(), BlockProcessingError> {
-        let mut ctxt = ConsensusContext::new(block.slot());
+        let mut ctxt = ConsensusContext::new(block.slot(), shufflings);
         per_block_processing(
             state,
             block,
@@ -81,9 +83,9 @@ impl ExitTest {
         let expected = self.expected.clone();
         assert_eq!(STATE_EPOCH, spec.shard_committee_period);
 
-        let (block, mut state) = self.block_and_pre_state().await;
+        let (block, mut state, shufflings) = self.block_and_pre_state().await;
 
-        let result = Self::process(&block, &mut state);
+        let result = Self::process(&block, &mut state, shufflings);
 
         assert_eq!(result, expected);
 
@@ -91,9 +93,9 @@ impl ExitTest {
     }
 
     async fn test_vector(self, title: String) -> TestVector {
-        let (block, pre_state) = self.block_and_pre_state().await;
+        let (block, pre_state, shufflings) = self.block_and_pre_state().await;
         let mut post_state = pre_state.clone();
-        let (post_state, error) = match Self::process(&block, &mut post_state) {
+        let (post_state, error) = match Self::process(&block, &mut post_state, shufflings) {
             Ok(_) => (Some(post_state), None),
             Err(e) => (None, Some(format!("{:?}", e))),
         };

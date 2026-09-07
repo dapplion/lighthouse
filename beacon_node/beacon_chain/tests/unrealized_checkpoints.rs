@@ -15,7 +15,7 @@ use beacon_chain::{
 use state_processing::per_epoch_processing::{self, base::ValidatorStatuses};
 use std::sync::Arc;
 use types::{
-    BeaconState, ChainSpec, Checkpoint, Epoch, EthSpec, MinimalEthSpec,
+    BeaconState, ChainSpec, Checkpoint, Epoch, EthSpec, MinimalEthSpec, Shufflings,
     consts::altair::TIMELY_TARGET_FLAG_INDEX,
 };
 
@@ -354,10 +354,11 @@ where
 /// Builds the Phase0 `ValidatorStatuses` for `state`, mirroring the fork choice `on_block` logic
 /// used to compute unrealized checkpoints for pre-Altair blocks.
 fn base_validator_statuses(state: &BeaconState<E>, spec: &ChainSpec) -> ValidatorStatuses {
+    let shufflings = Shufflings::for_state(state, spec).expect("should build shufflings");
     let mut validator_statuses =
         ValidatorStatuses::new(state, spec).expect("should initialize Phase0 validator statuses");
     validator_statuses
-        .process_attestations(state)
+        .process_attestations(state, &shufflings)
         .expect("should process Phase0 attestations");
     validator_statuses
 }

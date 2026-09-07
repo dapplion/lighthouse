@@ -11,7 +11,7 @@ use tree_hash::TreeHash;
 use types::{
     AbstractExecPayload, AttestationRef, BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec,
     Hash256, IndexedAttestation, IndexedAttestationRef, IndexedPayloadAttestation,
-    PayloadAttestation, SignedBeaconBlock, Slot,
+    PayloadAttestation, Shufflings, SignedBeaconBlock, Slot,
 };
 
 #[derive(Debug, PartialEq, Clone)]
@@ -26,6 +26,8 @@ pub struct ConsensusContext<E: EthSpec> {
     pub proposer_index: Option<u64>,
     /// Block root of the block at `slot`.
     pub current_block_root: Option<Hash256>,
+    /// Committee shufflings for the state this context is used with.
+    shufflings: Shufflings,
     /// Cache of indexed attestations constructed during block processing.
     pub indexed_attestations: HashMap<Hash256, IndexedAttestation<E>>,
     /// Cache of indexed payload attestations constructed during block processing.
@@ -53,7 +55,19 @@ impl From<EpochCacheError> for ContextError {
 }
 
 impl<E: EthSpec> ConsensusContext<E> {
-    pub fn new(slot: Slot) -> Self {
+    /// Replace the shufflings, for when the context moves to a state at a different slot.
+    #[must_use]
+    pub fn set_shufflings(mut self, shufflings: Shufflings) -> Self {
+        self.shufflings = shufflings;
+        self
+    }
+
+    /// The shufflings for the state this context is used with.
+    pub fn shufflings(&self) -> &Shufflings {
+        &self.shufflings
+    }
+
+    pub fn new(slot: Slot, shufflings: Shufflings) -> Self {
         let current_epoch = slot.epoch(E::slots_per_epoch());
         let previous_epoch = current_epoch.saturating_sub(1u64);
         Self {
@@ -62,6 +76,7 @@ impl<E: EthSpec> ConsensusContext<E> {
             current_epoch,
             proposer_index: None,
             current_block_root: None,
+            shufflings,
             indexed_attestations: HashMap::new(),
             indexed_payload_attestations: HashMap::new(),
         }
@@ -164,11 +179,16 @@ impl<E: EthSpec> ConsensusContext<E> {
         attestation: AttestationRef<'a, E>,
     ) -> Result<IndexedAttestationRef<'a, E>, BlockOperationError<AttestationInvalid>> {
         let key = attestation.tree_hash_root();
+        // Borrow the field rather than calling `self.shufflings()`, which would hold an immutable
+        // borrow of `self` across the `indexed_attestations` entry below.
+        let shufflings = &self.shufflings;
+        shufflings.check_matches(state)?;
         match attestation {
             AttestationRef::Base(attn) => match self.indexed_attestations.entry(key) {
                 Entry::Occupied(occupied) => Ok(occupied.into_mut()),
                 Entry::Vacant(vacant) => {
-                    let committee = state.get_beacon_committee(attn.data.slot, attn.data.index)?;
+                    let committee =
+                        shufflings.get_beacon_committee(attn.data.slot, attn.data.index)?;
                     let indexed_attestation =
                         attesting_indices_base::get_indexed_attestation(committee.committee, attn)?;
                     Ok(vacant.insert(indexed_attestation))
@@ -178,7 +198,9 @@ impl<E: EthSpec> ConsensusContext<E> {
                 Entry::Occupied(occupied) => Ok(occupied.into_mut()),
                 Entry::Vacant(vacant) => {
                     let indexed_attestation =
-                        attesting_indices_electra::get_indexed_attestation_from_state(state, attn)?;
+                        attesting_indices_electra::get_indexed_attestation_from_state(
+                            shufflings, attn,
+                        )?;
                     Ok(vacant.insert(indexed_attestation))
                 }
             },
@@ -186,7 +208,9 @@ impl<E: EthSpec> ConsensusContext<E> {
                 Entry::Occupied(occupied) => Ok(occupied.into_mut()),
                 Entry::Vacant(vacant) => {
                     let indexed_attestation =
-                        attesting_indices_gloas::get_indexed_attestation_from_state(state, attn)?;
+                        attesting_indices_gloas::get_indexed_attestation_from_state(
+                            shufflings, attn,
+                        )?;
                     Ok(vacant.insert(indexed_attestation))
                 }
             },

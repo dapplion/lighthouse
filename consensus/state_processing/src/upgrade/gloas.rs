@@ -170,9 +170,8 @@ pub fn upgrade_state_to_gloas<E: EthSpec>(
         payload_expected_withdrawals: ProgressiveList::default(),
         ptc_window: Vector::from_elem(FixedVector::from_elem(0))?, // placeholder, will be initialized below
         // Caches
-        total_active_balance: pre.total_active_balance,
+        active_totals: pre.active_totals,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),
-        committee_caches: mem::take(&mut pre.committee_caches),
         pubkey_cache: mem::take(&mut pre.pubkey_cache),
         exit_cache: mem::take(&mut pre.exit_cache),
         slashings_cache: mem::take(&mut pre.slashings_cache),

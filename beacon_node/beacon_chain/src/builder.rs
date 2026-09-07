@@ -50,7 +50,7 @@ use tree_hash::TreeHash;
 use types::data::CustodyIndex;
 use types::{
     BeaconState, BlobSidecarList, ChainSpec, ColumnIndex, DataColumnSidecarList, EthSpec, Hash256,
-    SignedBeaconBlock, Slot,
+    Shufflings, SignedBeaconBlock, Slot,
 };
 
 /// An empty struct used to "witness" all the `BeaconChainTypes` traits. It has no user-facing
@@ -426,9 +426,12 @@ where
                 block_slot = %weak_subj_block.slot(),
                 "Advancing checkpoint state to boundary"
             );
+            let mut weak_subj_shufflings = Shufflings::for_state(&weak_subj_state, &self.spec)
+                .map_err(|e| format!("Error building weak subjectivity shufflings: {e:?}"))?;
             while weak_subj_state.slot() % slots_per_epoch != 0 {
                 per_slot_processing(
                     &mut weak_subj_state,
+                    &mut weak_subj_shufflings,
                     None,
                     GloasVerificationContext::FullVerification,
                     &self.spec,
@@ -1309,9 +1312,12 @@ where
         // needs an epoch-aligned state, so derive that view separately for `from_anchor`.
         let mut fork_choice_state = initial_state.clone();
         if fork_choice_state.slot() < fork_choice_slot {
+            let mut fork_choice_shufflings = Shufflings::for_state(&fork_choice_state, &self.spec)
+                .map_err(|e| format!("Error building fork choice state shufflings: {e:?}"))?;
             while fork_choice_state.slot() < fork_choice_slot {
                 per_slot_processing(
                     &mut fork_choice_state,
+                    &mut fork_choice_shufflings,
                     None,
                     GloasVerificationContext::FullVerification,
                     &self.spec,

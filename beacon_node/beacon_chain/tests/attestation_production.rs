@@ -53,14 +53,6 @@ async fn produces_attestations_from_attestation_simulator_service() {
         }
         // Set the state to the current slot
         let slot = Slot::from(slot);
-        let mut state = chain
-            .state_at_slot(slot, StateSkipConfig::WithStateRoots)
-            .expect("should get state");
-
-        // Prebuild the committee cache for the current epoch
-        state
-            .build_committee_cache(RelativeEpoch::Current, &harness.chain.spec)
-            .unwrap();
 
         // Produce an unaggragetated attestation
         produce_unaggregated_attestation(chain.clone(), chain.slot().unwrap());
@@ -288,7 +280,7 @@ async fn produces_attestations() {
         }
 
         let slot = Slot::from(slot);
-        let mut state = chain
+        let state = chain
             .state_at_slot(slot, StateSkipConfig::WithStateRoots)
             .expect("should get state");
 
@@ -319,12 +311,8 @@ async fn produces_attestations() {
                 .expect("should get target block root")
         };
 
-        state
-            .build_committee_cache(RelativeEpoch::Current, &harness.chain.spec)
-            .unwrap();
-        let committee_cache = state
-            .committee_cache(RelativeEpoch::Current)
-            .expect("should get committee_cache");
+        let shufflings = harness.shufflings(&state);
+        let committee_cache = shufflings.committee_cache(RelativeEpoch::Current);
 
         let committee_count = committee_cache.committees_per_slot();
 

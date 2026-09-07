@@ -16,8 +16,8 @@ use tree_hash::TreeHash;
 use typenum::Unsigned;
 use types::consts::altair::SYNC_COMMITTEE_SUBNET_COUNT;
 use types::{
-    Epoch, EthSpec, Hash256, MainnetEthSpec, Slot, SyncContributionData, SyncSelectionProof,
-    SyncSubnetId,
+    Epoch, EthSpec, Hash256, MainnetEthSpec, Shufflings, Slot, SyncContributionData,
+    SyncSelectionProof, SyncSubnetId,
 };
 
 pub type E = MainnetEthSpec;
@@ -766,8 +766,10 @@ async fn unaggregated_gossip_verification() {
 
         // Advance the state to simulate a pre-state for block production.
         let slot = valid_sync_committee_message.slot + 1;
+        let mut shufflings = Shufflings::for_state(&state, &chain.spec).unwrap();
         complete_state_advance(
             &mut state,
+            &mut shufflings,
             Some(block.state_root()),
             slot,
             None,

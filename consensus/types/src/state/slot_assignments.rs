@@ -61,18 +61,13 @@ impl WindowEpoch {
         ))
     }
 
-    /// `Current`/`Previous` come from the state's caches when built; `PrevPrev` is always
-    /// recomputed.
+    /// Shufflings unchanged from `prev` are reused by `SlotAssignment::new`; anything else is
+    /// computed here.
     fn committee_cache<E: EthSpec>(
         self,
         state: &BeaconState<E>,
         spec: &ChainSpec,
     ) -> Result<Arc<CommitteeCache>, BeaconStateError> {
-        if let Some(relative_epoch) = self.relative_epoch()
-            && let Ok(cache) = state.committee_cache(relative_epoch)
-        {
-            return Ok(cache.clone());
-        }
         state.initialize_committee_cache(self.epoch(state), spec)
     }
 }

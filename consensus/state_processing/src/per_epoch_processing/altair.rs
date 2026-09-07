@@ -14,7 +14,7 @@ pub use justification_and_finalization::process_justification_and_finalization;
 pub use participation_flag_updates::process_participation_flag_updates;
 pub use rewards_and_penalties::process_rewards_and_penalties_slow;
 pub use sync_committee_updates::process_sync_committee_updates;
-use types::{BeaconState, ChainSpec, EthSpec, RelativeEpoch};
+use types::{BeaconState, ChainSpec, EthSpec, RelativeEpoch, Shufflings};
 
 pub mod inactivity_updates;
 pub mod justification_and_finalization;
@@ -24,13 +24,11 @@ pub mod sync_committee_updates;
 
 pub fn process_epoch<E: EthSpec>(
     state: &mut BeaconState<E>,
+    shufflings: &mut Shufflings,
     spec: &ChainSpec,
 ) -> Result<EpochProcessingSummary<E>, Error> {
     // Ensure the required caches are built.
-    state.build_committee_cache(RelativeEpoch::Previous, spec)?;
-    state.build_committee_cache(RelativeEpoch::Current, spec)?;
-    state.build_committee_cache(RelativeEpoch::Next, spec)?;
-    state.build_total_active_balance_cache(spec)?;
+    state.build_active_totals_cache(spec)?;
     initialize_epoch_cache(state, spec)?;
     initialize_progressive_balances_cache::<E>(state, spec)?;
 
@@ -77,14 +75,15 @@ pub fn process_epoch<E: EthSpec>(
 
     process_sync_committee_updates(state, spec)?;
 
-    // Rotate the epoch caches to suit the epoch transition.
-    state.advance_caches()?;
-
-    // Install the lookahead committee cache (built during PTC window processing) as the Next
-    // cache. After advance_caches, the lookahead epoch becomes the Next relative epoch.
-    if let Some(cache) = epoch_result.lookahead_committee_cache {
-        state.set_committee_cache(RelativeEpoch::Next, cache)?;
-    }
+    // Rotate the shufflings to suit the epoch transition. The incoming next shuffling is the
+    // lookahead built during PTC window processing when Gloas is enabled, and is computed here
+    // otherwise. `advance` rejects a cache that is not initialized for that epoch.
+    let lookahead_epoch = RelativeEpoch::Next.into_epoch(state.next_epoch()?);
+    let next_shuffling = match epoch_result.lookahead_committee_cache {
+        Some(cache) => cache,
+        None => state.initialize_committee_cache_for_lookahead(lookahead_epoch, spec)?,
+    };
+    shufflings.advance(next_shuffling)?;
 
     update_progressive_balances_on_epoch_transition(state, spec)?;
 

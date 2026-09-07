@@ -13,7 +13,7 @@ use state_processing::{
         base::{self, ValidatorStatuses, rewards_and_penalties::AttestationDelta},
     },
 };
-use types::BeaconState;
+use types::{BeaconState, Shufflings};
 
 #[derive(Debug, Clone, PartialEq, Decode, Encode, CompareFields)]
 pub struct Deltas {
@@ -121,11 +121,10 @@ impl<E: EthSpec> Case for RewardsTest<E> {
 
         if let BeaconState::Base(_) = state {
             let deltas: Result<AllDeltas, EpochProcessingError> = (|| {
-                // Processing requires the committee caches.
-                state.build_all_committee_caches(spec)?;
+                let shufflings = Shufflings::for_state(&state, spec)?;
 
                 let mut validator_statuses = ValidatorStatuses::new(&state, spec)?;
-                validator_statuses.process_attestations(&state)?;
+                validator_statuses.process_attestations(&state, &shufflings)?;
 
                 let deltas = base::rewards_and_penalties::get_attestation_deltas_all(
                     &state,
@@ -138,11 +137,8 @@ impl<E: EthSpec> Case for RewardsTest<E> {
             })();
             compare_result_detailed(&deltas, &Some(self.deltas.clone()))?;
         } else {
-            let deltas: Result<TotalDeltas, EpochProcessingError> = (|| {
-                // Processing requires the committee caches.
-                state.build_all_committee_caches(spec)?;
-                compute_altair_deltas(&mut state, spec)
-            })();
+            let deltas: Result<TotalDeltas, EpochProcessingError> =
+                compute_altair_deltas(&mut state, spec);
 
             let expected = all_deltas_to_total_deltas(&self.deltas);
 

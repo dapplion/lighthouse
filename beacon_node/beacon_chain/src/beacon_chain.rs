@@ -1533,11 +1533,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     StateSkipConfig::WithoutStateRoots => Some(Hash256::zero()),
                 };
 
+                let mut shufflings = Shufflings::for_state(&state, &self.spec)?;
                 while state.slot() < slot {
                     // Note: supplying some `state_root` when it is known would be a cheap and easy
                     // optimization.
                     match per_slot_processing(
                         &mut state,
+                        &mut shufflings,
                         skip_state_root,
                         GloasVerificationContext::from_cache(
                             self.builder_onboarding_cache.as_deref(),
@@ -2096,7 +2098,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 // required to attest is available on the head state.
                 Some((
                     head_state.current_justified_checkpoint(),
-                    head_state
+                    self.shufflings_for_state(head_state, beacon_block_root)?
                         .get_beacon_committee(request_slot, request_index)?
                         .committee
                         .len(),
@@ -2144,22 +2146,22 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     .store
                     .get_advanced_hot_state(beacon_block_root, request_slot, beacon_state_root)?
                     .ok_or(Error::MissingBeaconState(beacon_state_root))?;
+                let mut shufflings = self.shufflings_for_state(&state, beacon_block_root)?;
                 if state.current_epoch() < request_epoch {
                     partial_state_advance(
                         &mut state,
+                        &mut shufflings,
                         Some(advanced_state_root),
                         request_epoch.start_slot(T::EthSpec::slots_per_epoch()),
                         self.builder_onboarding_cache.as_deref(),
                         &self.spec,
                     )
                     .map_err(Error::StateAdvanceError)?;
-
-                    state.build_committee_cache(RelativeEpoch::Current, &self.spec)?;
                 }
 
                 (
                     state.current_justified_checkpoint(),
-                    state
+                    shufflings
                         .get_beacon_committee(request_slot, request_index)?
                         .committee
                         .len(),
@@ -5082,6 +5084,54 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
     }
 
+    /// Obtain the committee shufflings describing `state`, whose latest applied block is
+    /// `block_root`.
+    ///
+    /// Shufflings are shared through `self.shuffling_cache`, so states on competing forks which
+    /// agree on a shuffling decision root reuse one `CommitteeCache` rather than each allocating
+    /// their own.
+    pub fn shufflings_for_state(
+        &self,
+        state: &BeaconState<T::EthSpec>,
+        block_root: Hash256,
+    ) -> Result<Shufflings, Error> {
+        let state_epoch = state.current_epoch();
+
+        let shuffling = |relative_epoch: RelativeEpoch| -> Result<Arc<CommitteeCache>, Error> {
+            let epoch = relative_epoch.into_epoch(state_epoch);
+            let shuffling_id = AttestationShufflingId::new(block_root, state, relative_epoch)?;
+
+            if let Some(cached) = self
+                .shuffling_cache
+                .read()
+                .get_shuffling_if_cached(&shuffling_id)
+            {
+                return Ok(cached.committee_cache);
+            }
+
+            let committee_cache = state.initialize_committee_cache(epoch, &self.spec)?;
+
+            // `try_from_state` yields `None` only at the Gloas fork boundary, where the PTCs this
+            // entry would need cannot be read from a pre-Gloas state. Such an entry is incomplete
+            // for other consumers of the cache, so it is used here but not shared.
+            if let Some(ptcs) = CachedPTCs::try_from_state(state, epoch, &self.spec)? {
+                self.shuffling_cache.write().insert_committee_cache(
+                    shuffling_id,
+                    CachedShuffling::new(committee_cache.clone(), ptcs),
+                );
+            }
+
+            Ok(committee_cache)
+        };
+
+        Ok(Shufflings::new::<T::EthSpec>(
+            state_epoch,
+            shuffling(RelativeEpoch::Previous)?,
+            shuffling(RelativeEpoch::Current)?,
+            shuffling(RelativeEpoch::Next)?,
+        )?)
+    }
+
     // For the current and next epoch of this state, ensure we have the shuffling from this
     // block in our cache.
     #[instrument(skip_all, level = "debug")]
@@ -5111,8 +5161,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 continue;
             }
 
-            state.build_committee_cache(relative_epoch, &self.spec)?;
-            let committee_cache = state.committee_cache(relative_epoch)?.clone();
+            let committee_cache = state.initialize_committee_cache(
+                relative_epoch.into_epoch(state.current_epoch()),
+                &self.spec,
+            )?;
 
             if let Some(ptcs) = CachedPTCs::try_from_state(state, shuffling_epoch, &self.spec)? {
                 self.shuffling_cache.write().insert_committee_cache(
@@ -5341,8 +5393,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             "Advancing state for withdrawals calculation"
         );
         let mut advanced_state = unadvanced_state.into_owned();
+        let mut shufflings = Shufflings::for_state(&advanced_state, &self.spec)?;
         partial_state_advance(
             &mut advanced_state,
+            &mut shufflings,
             Some(unadvanced_state_root),
             proposal_slot,
             self.builder_onboarding_cache.as_deref(),
@@ -5763,8 +5817,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let slot_timer = metrics::start_timer(&metrics::BLOCK_PRODUCTION_SLOT_PROCESS_TIMES);
 
         // Ensure the state has performed a complete transition into the required slot.
+        let mut shufflings = Shufflings::for_state(&state, &self.spec)?;
         complete_state_advance(
             &mut state,
+            &mut shufflings,
             state_root_opt,
             produce_at_slot,
             self.builder_onboarding_cache.as_deref(),
@@ -5773,7 +5829,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         drop(slot_timer);
 
-        state.build_committee_cache(RelativeEpoch::Current, &self.spec)?;
         state.apply_pending_mutations()?;
 
         let parent_root = if state.slot() > 0 {
@@ -5783,6 +5838,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         } else {
             state.latest_block_header().canonical_root()
         };
+
+        let shufflings = self
+            .shufflings_for_state(&state, parent_root)
+            .map_err(|e| BlockProductionError::BeaconChain(Box::new(e)))?;
 
         let proposer_index = state.get_beacon_proposer_index(state.slot(), &self.spec)? as u64;
 
@@ -5843,7 +5902,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             for attestation in self.naive_aggregation_pool.read().iter() {
                 let import = |attestation: &Attestation<T::EthSpec>| {
                     let attesting_indices =
-                        get_attesting_indices_from_state(&state, attestation.to_ref())?;
+                        get_attesting_indices_from_state(&shufflings, attestation.to_ref())?;
                     self.op_pool
                         .insert_attestation(attestation.clone(), attesting_indices)
                 };
@@ -5863,7 +5922,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 metrics::start_timer(&metrics::BLOCK_PRODUCTION_ATTESTATION_TIMES);
 
             // Epoch cache and total balance cache are required for op pool packing.
-            state.build_total_active_balance_cache(&self.spec)?;
+            state.build_active_totals_cache(&self.spec)?;
             initialize_epoch_cache(&mut state, &self.spec)?;
 
             let mut prev_filter_cache = HashMap::new();
@@ -5878,6 +5937,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             self.op_pool
                 .get_attestations(
                     &state,
+                    &shufflings,
                     prev_attestation_filter,
                     curr_attestation_filter,
                     &self.spec,
@@ -5889,7 +5949,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // This will be a lot slower but guards against bugs in block production and can be
         // quickly rolled out without a release.
         if self.config.paranoid_block_proposal {
-            let mut tmp_ctxt = ConsensusContext::new(state.slot());
+            let mut tmp_ctxt = ConsensusContext::new(state.slot(), shufflings.clone());
             attestations.retain(|att| {
                 verify_attestation_for_block_inclusion(
                     &state,
@@ -6428,7 +6488,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         };
 
         // Use a context without block root or proposer index so that both are checked.
-        let mut ctxt = ConsensusContext::new(block.slot());
+        let shufflings = Shufflings::for_state(&state, &self.spec)?;
+        let mut ctxt = ConsensusContext::new(block.slot(), shufflings);
 
         let consensus_block_value = self
             .compute_beacon_block_reward(block.message(), &mut state)
@@ -7409,7 +7470,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // address this.
             beacon_state.apply_pending_mutations()?;
             if let Some(prev) = prev_beacon_state {
-                beacon_state.rebase_on(&prev, &self.spec)?;
+                beacon_state.rebase_on(&prev)?;
             }
             beacon_state.build_caches(&self.spec)?;
             prev_beacon_state = Some(beacon_state.clone());

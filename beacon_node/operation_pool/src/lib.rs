@@ -41,9 +41,9 @@ use typenum::Unsigned;
 use types::{
     AbstractExecPayload, Attestation, AttestationData, AttesterSlashing, BeaconState,
     BeaconStateError, ChainSpec, Epoch, EthSpec, Hash256, PayloadAttestation,
-    PayloadAttestationData, PayloadAttestationMessage, ProposerSlashing, SignedBeaconBlock,
-    SignedBlsToExecutionChange, SignedVoluntaryExit, Slot, SyncAggregate, SyncAggregateError,
-    SyncCommitteeContribution, Validator,
+    PayloadAttestationData, PayloadAttestationMessage, ProposerSlashing, Shufflings,
+    SignedBeaconBlock, SignedBlsToExecutionChange, SignedVoluntaryExit, Slot, SyncAggregate,
+    SyncAggregateError, SyncCommitteeContribution, Validator,
 };
 
 type SyncContributions<E> = RwLock<HashMap<SyncAggregateId, Vec<SyncCommitteeContribution<E>>>>;
@@ -73,6 +73,7 @@ pub struct OperationPool<E: EthSpec + Default> {
 #[derive(Debug, PartialEq)]
 pub enum OpPoolError {
     GetAttestationsTotalBalanceError(BeaconStateError),
+    ShufflingsMismatch(BeaconStateError),
     GetBlockRootError(BeaconStateError),
     SyncAggregateError(SyncAggregateError),
     RewardCacheUpdatePrevEpoch(BeaconStateError),
@@ -327,6 +328,7 @@ impl<E: EthSpec> OperationPool<E> {
         checkpoint_key: &'a CheckpointKey,
         all_attestations: &'a AttestationMap<E>,
         state: &'a BeaconState<E>,
+        shufflings: &'a Shufflings,
         reward_cache: &'a RewardCache,
         total_active_balance: u64,
         validity_filter: impl FnMut(&CompactAttestationRef<'a, E>) -> bool + Send,
@@ -340,7 +342,14 @@ impl<E: EthSpec> OperationPool<E> {
             })
             .filter(validity_filter)
             .filter_map(move |att| {
-                AttMaxCover::new(att, state, reward_cache, total_active_balance, spec)
+                AttMaxCover::new(
+                    att,
+                    state,
+                    shufflings,
+                    reward_cache,
+                    total_active_balance,
+                    spec,
+                )
             })
     }
 
@@ -353,6 +362,7 @@ impl<E: EthSpec> OperationPool<E> {
     pub fn get_attestations(
         &self,
         state: &BeaconState<E>,
+        shufflings: &Shufflings,
         prev_epoch_validity_filter: impl for<'a> FnMut(&CompactAttestationRef<'a, E>) -> bool + Send,
         curr_epoch_validity_filter: impl for<'a> FnMut(&CompactAttestationRef<'a, E>) -> bool + Send,
         spec: &ChainSpec,
@@ -366,6 +376,10 @@ impl<E: EthSpec> OperationPool<E> {
                 return Err(OpPoolError::EpochCacheNotInitialized);
             }
         }
+
+        shufflings
+            .check_matches(state)
+            .map_err(OpPoolError::ShufflingsMismatch)?;
 
         // Attestations for the current fork, which may be from the current or previous epoch.
         let (prev_epoch_key, curr_epoch_key) = CheckpointKey::keys_for_state(state);
@@ -400,6 +414,7 @@ impl<E: EthSpec> OperationPool<E> {
                 &prev_epoch_key,
                 &*all_attestations,
                 state,
+                shufflings,
                 &reward_cache,
                 total_active_balance,
                 prev_epoch_validity_filter,
@@ -411,6 +426,7 @@ impl<E: EthSpec> OperationPool<E> {
                 &curr_epoch_key,
                 &*all_attestations,
                 state,
+                shufflings,
                 &reward_cache,
                 total_active_balance,
                 curr_epoch_validity_filter,
@@ -1012,7 +1028,8 @@ mod release_tests {
 
         let (mut state, state_root) = get_current_state_initialize_epoch_cache(&harness, spec);
         let slot = state.slot();
-        let committees = state
+        let shufflings = Shufflings::for_state(&state, spec).unwrap();
+        let committees = shufflings
             .get_beacon_committees_at_slot(slot)
             .unwrap()
             .into_iter()
@@ -1047,8 +1064,9 @@ mod release_tests {
                 })
                 .unwrap();
 
-            let att1_indices = get_attesting_indices_from_state(&state, att1.to_ref()).unwrap();
-            let att2_indices = get_attesting_indices_from_state(&state, att2).unwrap();
+            let att1_indices =
+                get_attesting_indices_from_state(&shufflings, att1.to_ref()).unwrap();
+            let att2_indices = get_attesting_indices_from_state(&shufflings, att2).unwrap();
             let att1_split = SplitAttestation::new(att1.clone(), att1_indices);
             let att2_split = SplitAttestation::new(att2.clone_as_attestation(), att2_indices);
 
@@ -1095,7 +1113,8 @@ mod release_tests {
         let (mut state, state_root) = get_current_state_initialize_epoch_cache(&harness, spec);
 
         let slot = state.slot();
-        let committees = state
+        let shufflings = Shufflings::for_state(&state, spec).unwrap();
+        let committees = shufflings
             .get_beacon_committees_at_slot(slot)
             .unwrap()
             .into_iter()
@@ -1122,7 +1141,7 @@ mod release_tests {
         for (atts, _) in attestations {
             for (att, _) in atts {
                 let attesting_indices =
-                    get_attesting_indices_from_state(&state, att.to_ref()).unwrap();
+                    get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
                 op_pool.insert_attestation(att, attesting_indices).unwrap();
             }
         }
@@ -1132,7 +1151,7 @@ mod release_tests {
         // Before the min attestation inclusion delay, get_attestations shouldn't return anything.
         assert_eq!(
             op_pool
-                .get_attestations(&state, |_| true, |_| true, spec)
+                .get_attestations(&state, &shufflings, |_| true, |_| true, spec,)
                 .expect("should have attestations")
                 .len(),
             0
@@ -1142,7 +1161,7 @@ mod release_tests {
         *state.slot_mut() += spec.min_attestation_inclusion_delay;
 
         let block_attestations = op_pool
-            .get_attestations(&state, |_| true, |_| true, spec)
+            .get_attestations(&state, &shufflings, |_| true, |_| true, spec)
             .expect("Should have block attestations");
         assert_eq!(block_attestations.len(), committees.len());
 
@@ -1173,7 +1192,8 @@ mod release_tests {
         let op_pool = OperationPool::<MainnetEthSpec>::new();
 
         let slot = state.slot();
-        let committees = state
+        let shufflings = Shufflings::for_state(&state, spec).unwrap();
+        let committees = shufflings
             .get_beacon_committees_at_slot(slot)
             .unwrap()
             .into_iter()
@@ -1193,7 +1213,7 @@ mod release_tests {
         for (_, aggregate) in attestations {
             let agg = aggregate.unwrap();
             let att = agg.message().aggregate();
-            let attesting_indices = get_attesting_indices_from_state(&state, att).unwrap();
+            let attesting_indices = get_attesting_indices_from_state(&shufflings, att).unwrap();
             op_pool
                 .insert_attestation(att.clone_as_attestation(), attesting_indices.clone())
                 .unwrap();
@@ -1216,7 +1236,8 @@ mod release_tests {
         let op_pool = OperationPool::<MainnetEthSpec>::new();
 
         let slot = state.slot();
-        let committees = state
+        let shufflings = Shufflings::for_state(&state, spec).unwrap();
+        let committees = shufflings
             .get_beacon_committees_at_slot(slot)
             .unwrap()
             .into_iter()
@@ -1280,7 +1301,7 @@ mod release_tests {
 
             for att in aggs1.into_iter().chain(aggs2) {
                 let attesting_indices =
-                    get_attesting_indices_from_state(&state, att.to_ref()).unwrap();
+                    get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
                 op_pool.insert_attestation(att, attesting_indices).unwrap();
             }
         }
@@ -1311,7 +1332,8 @@ mod release_tests {
         let op_pool = OperationPool::<MainnetEthSpec>::new();
 
         let slot = state.slot();
-        let committees = state
+        let shufflings = Shufflings::for_state(&state, spec).unwrap();
+        let committees = shufflings
             .get_beacon_committees_at_slot(slot)
             .unwrap()
             .into_iter()
@@ -1353,7 +1375,7 @@ mod release_tests {
 
             for att in aggs {
                 let attesting_indices =
-                    get_attesting_indices_from_state(&state, att.to_ref()).unwrap();
+                    get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
                 op_pool.insert_attestation(att, attesting_indices).unwrap();
             }
         };
@@ -1386,7 +1408,7 @@ mod release_tests {
 
         *state.slot_mut() += spec.min_attestation_inclusion_delay;
         let best_attestations = op_pool
-            .get_attestations(&state, |_| true, |_| true, spec)
+            .get_attestations(&state, &shufflings, |_| true, |_| true, spec)
             .expect("should have best attestations");
         if fork_name.electra_enabled() {
             assert_eq!(best_attestations.len(), 8);
@@ -1416,7 +1438,8 @@ mod release_tests {
         let op_pool = OperationPool::<MainnetEthSpec>::new();
 
         let slot = state.slot();
-        let committees = state
+        let shufflings = Shufflings::for_state(&state, spec).unwrap();
+        let committees = shufflings
             .get_beacon_committees_at_slot(slot)
             .unwrap()
             .into_iter()
@@ -1464,7 +1487,7 @@ mod release_tests {
 
             for att in aggs {
                 let attesting_indices =
-                    get_attesting_indices_from_state(&state, att.to_ref()).unwrap();
+                    get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
                 op_pool.insert_attestation(att, attesting_indices).unwrap();
             }
         };
@@ -1498,7 +1521,7 @@ mod release_tests {
 
         *state.slot_mut() += spec.min_attestation_inclusion_delay;
         let best_attestations = op_pool
-            .get_attestations(&state, |_| true, |_| true, spec)
+            .get_attestations(&state, &shufflings, |_| true, |_| true, spec)
             .expect("should have valid best attestations");
 
         if fork_name.electra_enabled() {
@@ -1518,11 +1541,13 @@ mod release_tests {
         reward_cache.update(&state).unwrap();
 
         for att in best_attestations {
-            let attesting_indices = get_attesting_indices_from_state(&state, att.to_ref()).unwrap();
+            let attesting_indices =
+                get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
             let split_attestation = SplitAttestation::new(att, attesting_indices);
             let mut fresh_validators_rewards = AttMaxCover::new(
                 split_attestation.as_ref(),
                 &state,
+                &shufflings,
                 &reward_cache,
                 total_active_balance,
                 spec,
@@ -2388,8 +2413,10 @@ mod release_tests {
 
         // Advance state to slot 2 so get_payload_attestations looks at slot 1.
         let mut advanced_state = state.clone();
+        let mut shufflings = Shufflings::for_state(&advanced_state, &spec).unwrap();
         state_processing::state_advance::complete_state_advance(
             &mut advanced_state,
+            &mut shufflings,
             None,
             Slot::new(2),
             None,
@@ -2466,8 +2493,10 @@ mod release_tests {
         }
 
         let mut advanced_state = state.clone();
+        let mut shufflings = Shufflings::for_state(&advanced_state, &spec).unwrap();
         state_processing::state_advance::complete_state_advance(
             &mut advanced_state,
+            &mut shufflings,
             None,
             Slot::new(2),
             None,
@@ -2548,8 +2577,10 @@ mod release_tests {
 
         // When: we pack attestations for block production at slot 2.
         let mut advanced_state = state.clone();
+        let mut shufflings = Shufflings::for_state(&advanced_state, &spec).unwrap();
         state_processing::state_advance::complete_state_advance(
             &mut advanced_state,
+            &mut shufflings,
             None,
             Slot::new(2),
             None,

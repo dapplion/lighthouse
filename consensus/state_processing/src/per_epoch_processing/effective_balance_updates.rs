@@ -13,6 +13,7 @@ pub fn process_effective_balance_updates<E: EthSpec>(
     // Compute new total active balance for the next epoch as a side-effect of iterating the
     // effective balances.
     let next_epoch = state.next_epoch()?;
+    let mut new_active_validator_count: u64 = 0;
     let mut new_total_active_balance = 0;
 
     let hysteresis_increment = spec
@@ -43,6 +44,7 @@ pub fn process_effective_balance_updates<E: EthSpec>(
         };
 
         if validator.is_active_at(next_epoch) {
+            new_active_validator_count.safe_add_assign(1)?;
             new_total_active_balance.safe_add_assign(new_effective_balance)?;
         }
 
@@ -51,7 +53,12 @@ pub fn process_effective_balance_updates<E: EthSpec>(
         }
     }
 
-    state.set_total_active_balance(next_epoch, new_total_active_balance, spec);
+    state.set_active_totals(
+        next_epoch,
+        new_active_validator_count,
+        new_total_active_balance,
+        spec,
+    );
 
     Ok(())
 }
