@@ -9,10 +9,15 @@ use crate::{
     generic_signature::{SIGNATURE_BYTES_LEN, SIGNATURE_UNCOMPRESSED_BYTES_LEN, TSignature},
 };
 pub use blst::min_pk as blst_core;
-use blst::{BLST_ERROR, blst_scalar};
+use blst::{BLST_ERROR, MultiPoint, blst_scalar};
 use rand::Rng;
 pub const DST: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 pub const RAND_BITS: usize = 64;
+
+/// Minimum number of public keys for which blst's batch-affine addition is used when
+/// aggregating. Batch addition amortises one field inversion across the whole set, but is
+/// slower than sequential aggregation for small sets.
+pub const BATCH_AGGREGATE_THRESHOLD: usize = 64;
 
 /// Provides the externally-facing, core BLS types.
 pub mod types {
@@ -87,22 +92,32 @@ pub fn verify_signature_sets<'a>(
             return false;
         }
 
-        // Collect all the public keys into a point, to satisfy the blst API.
-        //
-        // Note: we could potentially have the `SignatureSet` take a pubkey point instead of a
-        // `GenericPublicKey` and avoid this allocation.
-        let signing_keys = set
-            .signing_keys
-            .iter()
-            .map(|pk| pk.point())
-            .collect::<Vec<_>>();
-
         // Aggregate all the public keys.
         // Public keys have already been checked for subgroup and infinity
-        let Ok(agg_pk) = blst_core::AggregatePublicKey::aggregate(&signing_keys, false) else {
-            return false;
+        let agg_pk = if set.signing_keys.len() >= BATCH_AGGREGATE_THRESHOLD {
+            let points = set
+                .signing_keys
+                .iter()
+                .map(|pk| *pk.point())
+                .collect::<Vec<_>>();
+            points.add().to_public_key()
+        } else {
+            // Collect all the public keys into a point, to satisfy the blst API.
+            //
+            // Note: we could potentially have the `SignatureSet` take a pubkey point instead of a
+            // `GenericPublicKey` and avoid this allocation.
+            let signing_keys = set
+                .signing_keys
+                .iter()
+                .map(|pk| pk.point())
+                .collect::<Vec<_>>();
+
+            let Ok(agg_pk) = blst_core::AggregatePublicKey::aggregate(&signing_keys, false) else {
+                return false;
+            };
+            agg_pk.to_public_key()
         };
-        pks.push(agg_pk.to_public_key());
+        pks.push(agg_pk);
     }
 
     let (sig_refs, pks_refs): (Vec<_>, Vec<_>) = sigs.iter().zip(pks.iter()).unzip();
@@ -175,6 +190,11 @@ impl TAggregatePublicKey<blst_core::PublicKey> for BlstAggregatePublicKey {
     }
 
     fn aggregate(pubkeys: &[GenericPublicKey<blst_core::PublicKey>]) -> Result<Self, Error> {
+        if pubkeys.len() >= BATCH_AGGREGATE_THRESHOLD {
+            let points = pubkeys.iter().map(|pk| *pk.point()).collect::<Vec<_>>();
+            return Ok(BlstAggregatePublicKey(points.add()));
+        }
+
         let pubkey_refs = pubkeys.iter().map(|pk| pk.point()).collect::<Vec<_>>();
 
         // Public keys have already been checked for subgroup and infinity
