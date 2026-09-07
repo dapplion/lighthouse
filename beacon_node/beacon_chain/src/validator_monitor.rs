@@ -389,7 +389,13 @@ pub struct ValidatorMonitor<E: EthSpec> {
     /// The validators that require additional monitoring.
     validators: HashMap<PublicKeyBytes, MonitoredValidator>,
     /// A map of validator index (state.validators) to a validator public key.
+    ///
+    /// Only contains monitored validators, unless `auto_register` is enabled, in which case it
+    /// contains every validator (auto-registration must resolve arbitrary indices). Restricting
+    /// it to monitored validators saves ~250 MB at mainnet validator counts.
     indices: HashMap<u64, PublicKeyBytes>,
+    /// The number of entries of `state.validators` already scanned for `indices`.
+    scanned_indices: usize,
     /// If true, allow the automatic registration of validators.
     auto_register: bool,
     /// Once the number of monitored validators goes above this threshold, we
@@ -420,6 +426,7 @@ impl<E: EthSpec> ValidatorMonitor<E> {
         let mut s = Self {
             validators: <_>::default(),
             indices: <_>::default(),
+            scanned_indices: 0,
             auto_register,
             individual_tracking_threshold,
             missed_blocks: <_>::default(),
@@ -447,6 +454,12 @@ impl<E: EthSpec> ValidatorMonitor<E> {
             .iter()
             .find(|(_, candidate_pk)| **candidate_pk == pubkey)
             .map(|(index, _)| *index);
+
+        if index_opt.is_none() {
+            // The validator may exist but be absent from the monitored-only `indices` map;
+            // trigger a re-scan on the next `process_valid_state` to resolve its index.
+            self.scanned_indices = 0;
+        }
 
         self.validators.entry(pubkey).or_insert_with(|| {
             info!(
@@ -489,14 +502,21 @@ impl<E: EthSpec> ValidatorMonitor<E> {
             .validators()
             .iter()
             .enumerate()
-            .skip(self.indices.len())
+            .skip(self.scanned_indices)
             .for_each(|(i, validator)| {
                 let i = i as u64;
-                if let Some(validator) = self.validators.get_mut(&validator.pubkey) {
-                    validator.set_index(i)
+                let is_monitored =
+                    if let Some(monitored) = self.validators.get_mut(&validator.pubkey) {
+                        monitored.set_index(i);
+                        true
+                    } else {
+                        false
+                    };
+                if is_monitored || self.auto_register {
+                    self.indices.insert(i, validator.pubkey);
                 }
-                self.indices.insert(i, validator.pubkey);
             });
+        self.scanned_indices = state.validators().len();
 
         // Add missed non-finalized blocks for the monitored validators
         self.add_validators_missed_blocks(state, spec);
