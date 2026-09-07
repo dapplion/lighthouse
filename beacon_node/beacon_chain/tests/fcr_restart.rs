@@ -2,8 +2,8 @@
 
 //! The Fast Confirmation Rule's `confirmed_root` must not move backwards across a restart.
 //!
-//! Oracle: a control node that never restarts is fed the same blocks, attestations and clock as
-//! the node under test. The node may only regress when the control does, which excludes the
+//! Oracle: a harness node that never restarts is fed the same blocks, attestations and clock as
+//! the node under test. The node may only regress when the harness does, which excludes the
 //! reverts the spec mandates. Restarts go through `BeaconChainBuilder::resume_from_db`.
 
 use beacon_chain::{
@@ -57,8 +57,8 @@ fn config(fcr: bool, reset_payload_statuses: bool) -> ChainConfig {
     }
 }
 
-/// The control owns the mock execution layer and the clock; the node shares both.
-fn control(store: Store) -> Harness {
+/// The harness owns the mock execution layer and the clock; the node shares both.
+fn harness(store: Store) -> Harness {
     let harness = Harness::builder(MinimalEthSpec)
         .spec(store.get_chain_spec().clone())
         .keypairs(KEYPAIRS.to_vec())
@@ -70,7 +70,7 @@ fn control(store: Store) -> Harness {
     harness
 }
 
-fn node(store: Store, control: &Harness, fresh: bool, fcr: bool, reset: bool) -> Harness {
+fn node(store: Store, harness: &Harness, fresh: bool, fcr: bool, reset: bool) -> Harness {
     let builder = Harness::builder(MinimalEthSpec)
         .spec(store.get_chain_spec().clone())
         .keypairs(KEYPAIRS.to_vec());
@@ -80,8 +80,8 @@ fn node(store: Store, control: &Harness, fresh: bool, fcr: bool, reset: bool) ->
         builder.resumed_disk_store(store)
     };
     builder
-        .testing_slot_clock(control.chain.slot_clock.clone())
-        .execution_layer(control.chain.execution_layer.clone())
+        .testing_slot_clock(harness.chain.slot_clock.clone())
+        .execution_layer(harness.chain.execution_layer.clone())
         .chain_config(config(fcr, reset))
         .build()
 }
@@ -115,7 +115,7 @@ struct Produced {
 }
 
 struct Rig {
-    control: Harness,
+    harness: Harness,
     node: Option<Harness>,
     node_store: Store,
     _dbs: (TempDir, TempDir),
@@ -129,15 +129,15 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        let (control_db, node_db) = (tempdir().unwrap(), tempdir().unwrap());
-        let control = control(store(&control_db));
+        let (harness_db, node_db) = (tempdir().unwrap(), tempdir().unwrap());
+        let harness = harness(store(&harness_db));
         let node_store = store(&node_db);
-        let node = node(node_store.clone(), &control, true, true, false);
+        let node = node(node_store.clone(), &harness, true, true, false);
         Self {
-            control,
+            harness,
             node: Some(node),
             node_store,
-            _dbs: (control_db, node_db),
+            _dbs: (harness_db, node_db),
             blocks: vec![],
             stopped: None,
             high_water: Slot::new(0),
@@ -150,31 +150,31 @@ impl Rig {
     }
 
     fn slot(&self) -> Slot {
-        self.control.chain.slot().unwrap()
+        self.harness.chain.slot().unwrap()
     }
 
-    /// One slot: tick both nodes, then (unless stalled) the control proposes, the node imports,
+    /// One slot: tick both nodes, then (unless stalled) the harness proposes, the node imports,
     /// `attesters` attest, both recompute the head.
     async fn step(&mut self, attesters: &[usize], propose: bool) {
-        self.control.advance_slot();
+        self.harness.advance_slot();
         let slot = self.slot();
         self.recompute("tick").await;
         if !propose {
             return;
         }
 
-        let state = self.control.get_current_state();
+        let state = self.harness.get_current_state();
         let (contents, envelope, mut post_state) =
-            self.control.make_block_with_envelope(state, slot).await;
+            self.harness.make_block_with_envelope(state, slot).await;
         let root = contents.0.canonical_root();
         let block_hash = self
-            .control
+            .harness
             .process_block(slot, root, contents.clone())
             .await
             .unwrap();
         if let Some(envelope) = &envelope {
             let state_root = contents.0.state_root();
-            self.control
+            self.harness
                 .process_envelope(root, envelope.clone(), &post_state, state_root)
                 .await;
         }
@@ -192,7 +192,7 @@ impl Rig {
 
         if !attesters.is_empty() {
             let state_root = post_state.canonical_root().unwrap();
-            let attestations = self.control.make_attestations(
+            let attestations = self.harness.make_attestations(
                 attesters,
                 &post_state,
                 state_root,
@@ -202,7 +202,7 @@ impl Rig {
             if let Some(node) = &self.node {
                 node.process_attestations(attestations.clone(), &post_state);
             }
-            self.control.process_attestations(attestations, &post_state);
+            self.harness.process_attestations(attestations, &post_state);
         }
         self.recompute("slot").await;
     }
@@ -219,7 +219,7 @@ impl Rig {
     }
 
     async fn recompute(&mut self, phase: &str) {
-        self.control.chain.recompute_head_at_current_slot().await;
+        self.harness.chain.recompute_head_at_current_slot().await;
         if let Some(node) = &self.node {
             node.chain.recompute_head_at_current_slot().await;
         }
@@ -251,7 +251,7 @@ impl Rig {
     async fn boot(&mut self) {
         self.node = Some(node(
             self.node_store.clone(),
-            &self.control,
+            &self.harness,
             false,
             true,
             false,
@@ -274,20 +274,20 @@ impl Rig {
     }
 
     /// The invariant: the node never announces a confirmed slot below its own high-water mark
-    /// unless the control is below it too, and both roots are on the same branch.
+    /// unless the harness is below it too, and both roots are on the same branch.
     fn observe(&mut self, phase: &str) {
         let Some(node) = &self.node else { return };
         let Some((mine_root, mine)) = confirmed(&node.chain) else {
             return;
         };
-        let (control_root, control) = confirmed(&self.control.chain).unwrap();
-        let (ancestor, descendant) = if mine <= control {
-            (mine_root, control_root)
+        let (harness_root, harness) = confirmed(&self.harness.chain).unwrap();
+        let (ancestor, descendant) = if mine <= harness {
+            (mine_root, harness_root)
         } else {
-            (control_root, mine_root)
+            (harness_root, mine_root)
         };
         assert!(
-            self.control
+            self.harness
                 .chain
                 .canonical_head
                 .fork_choice_read_lock()
@@ -295,23 +295,23 @@ impl Rig {
             "confirmed roots on different branches at slot {}",
             self.slot()
         );
-        let floor = self.high_water.min(control);
+        let floor = self.high_water.min(harness);
         let head = node.chain.canonical_head.cached_head().head_slot();
         self.log.push(format!(
-            "slot {:>3} {phase:<8} control={control:>3} node head={head:>3} confirmed={mine:>3}",
+            "slot {:>3} {phase:<8} harness={harness:>3} node head={head:>3} confirmed={mine:>3}",
             self.slot()
         ));
         assert!(
             mine >= floor,
-            "restart-caused unconfirmation ({phase}): node at {mine}, was {}, control at {control}\n{}",
+            "restart-caused unconfirmation ({phase}): node at {mine}, was {}, harness at {harness}\n{}",
             self.high_water,
             self.log.join("\n")
         );
-        // Once caught up the node has at most the control's votes, so it can never be ahead.
-        let control_head = self.control.chain.canonical_head.cached_head().head_slot();
+        // Once caught up the node has at most the harness's votes, so it can never be ahead.
+        let harness_head = self.harness.chain.canonical_head.cached_head().head_slot();
         assert!(
-            head < control_head || mine <= control,
-            "over-confirmation ({phase}): node at {mine}, control at {control}\n{}",
+            head < harness_head || mine <= harness,
+            "over-confirmation ({phase}): node at {mine}, harness at {harness}\n{}",
             self.log.join("\n")
         );
         self.high_water = self.high_water.max(mine);
@@ -325,7 +325,7 @@ struct Scenario {
     stall_before: u64,
     /// Slots the node is down.
     down: u64,
-    /// Whether the control keeps proposing while the node is down.
+    /// Whether the harness keeps proposing while the node is down.
     chain_continues: bool,
     /// Attesters while the node is down.
     attesters_down: usize,
@@ -406,9 +406,9 @@ impl Scenario {
         rig.steps(epoch, &validators(self.attesters_after)).await;
         rig.steps(epoch, &all).await;
         assert_eq!(
-            confirmed(&rig.control.chain),
+            confirmed(&rig.harness.chain),
             confirmed(&rig.node().chain),
-            "node did not converge on the control\n{}",
+            "node did not converge on the harness\n{}",
             rig.log.join("\n")
         );
     }
@@ -454,7 +454,7 @@ async fn downtime_of_more_than_an_epoch() {
     Scenario::default().down(12).run().await;
 }
 
-/// The control re-confirms at the boundary and reverts; the node slept through that boundary and
+/// The harness re-confirms at the boundary and reverts; the node slept through that boundary and
 /// must run the same check when it comes back rather than keep a root the votes no longer carry.
 #[tokio::test]
 async fn downtime_across_an_epoch_boundary_while_participation_drops() {
@@ -523,7 +523,7 @@ async fn disabling_fcr_clears_the_persisted_state() {
     assert!(persisted(&rig).is_some());
     rig.node = Some(node(
         rig.node_store.clone(),
-        &rig.control,
+        &rig.harness,
         false,
         false,
         false,
@@ -533,11 +533,11 @@ async fn disabling_fcr_clears_the_persisted_state() {
     assert!(persisted(&rig).is_none());
 }
 
-/// `--reset-payload-statuses` marks every pre-Gloas block optimistic at boot (Gloas payload
-/// statuses are left alone). A confirmed root must be `VALID` like any block FCR confirms, so an
-/// optimistic persisted root is refused and the rule is seeded from the finalized checkpoint.
+/// A `--reset-payload-statuses` boot marks every pre-Gloas block optimistic. The persisted state
+/// is restored regardless: as for a running node, nothing optimistic gets confirmed and the
+/// epoch-start reconfirmation reverts an optimistic chain.
 #[tokio::test]
-async fn a_payload_status_reset_refuses_an_optimistic_persisted_root() {
+async fn a_payload_status_reset_keeps_the_persisted_root() {
     let all = validators(VALIDATOR_COUNT);
     let mut rig = Rig::new();
     rig.steps(WARMUP_SLOTS, &all).await;
@@ -545,24 +545,11 @@ async fn a_payload_status_reset_refuses_an_optimistic_persisted_root() {
     let (stopped, _) = rig.stopped.unwrap();
     rig.node = Some(node(
         rig.node_store.clone(),
-        &rig.control,
+        &rig.harness,
         false,
         true,
         true,
     ));
-    let chain = &rig.node().chain;
-    let optimistic = chain
-        .canonical_head
-        .fork_choice_read_lock()
-        .get_block(&stopped)
-        .unwrap()
-        .execution_status
-        .is_optimistic_or_invalid();
-    let finalized = chain
-        .canonical_head
-        .cached_head()
-        .finalized_checkpoint()
-        .root;
-    let (root, _) = confirmed(chain).unwrap();
-    assert_eq!(root, if optimistic { finalized } else { stopped });
+    let (root, _) = confirmed(&rig.node().chain).unwrap();
+    assert_eq!(root, stopped);
 }

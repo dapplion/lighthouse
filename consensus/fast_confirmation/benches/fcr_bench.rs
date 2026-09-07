@@ -279,7 +279,7 @@ fn build_chain_inner(
         .expect("committee caches");
     let seed_assignments =
         SlotAssignments::new(&seed_state, &spec, None).expect("slot assignments");
-    let mut fcr = FastConfirmationRule::new(
+    let mut fcr = FastConfirmationRule::new_from_finalized_checkpoint(
         finalized_checkpoint.root,
         &seed_state,
         seed_assignments,

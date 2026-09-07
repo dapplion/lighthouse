@@ -1339,47 +1339,37 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let equivocating_indices = fork_choice.fc_store().equivocating_indices();
         let old_update_slot = fcr.last_update_slot();
 
-        // Spec: the first update after skipped slots catches up on a missed epoch start and SHOULD
-        // wait for the skipped slots' blocks and attestations, so it runs once the head has caught
-        // up with the clock. More than one skipped epoch start reverts the confirmed root anyway.
-        let slots_per_epoch = T::EthSpec::slots_per_epoch();
         let head_slot = fork_choice
             .get_block(&head_root)
             .ok_or(FastConfirmationError::NodeNotFound(head_root))?
             .slot;
-        let catch_up_deferred = old_update_slot.is_some_and(|last| {
-            current_slot > last + 1
-                && current_slot.epoch(slots_per_epoch) == last.epoch(slots_per_epoch) + 1
-                && head_slot + 1 < current_slot
-        });
 
-        if !catch_up_deferred {
-            // Load the checkpoint state if it will be required.
-            let checkpoint_state = fcr
-                .checkpoint_state_needed::<T::EthSpec>(
-                    current_slot,
-                    &justified_cp,
-                    &unrealized_justified_cp,
-                )
-                .map(|checkpoint| {
-                    Self::load_fcr_checkpoint_state(store, builder_onboarding_cache, checkpoint)
-                })
-                .transpose()?;
-
-            fcr.on_fast_confirmation::<T::EthSpec>(
-                head_root,
-                &finalized_cp,
+        // Load the checkpoint state if it will be required.
+        let checkpoint_state = fcr
+            .checkpoint_state_needed::<T::EthSpec>(
+                current_slot,
+                head_slot,
                 &justified_cp,
                 &unrealized_justified_cp,
-                current_slot,
-                proto_array,
-                votes,
-                equivocating_indices,
-                head_state,
-                slot_assignments,
-                checkpoint_state.as_ref(),
-            )?;
-        }
+            )
+            .map(|checkpoint| {
+                Self::load_fcr_checkpoint_state(store, builder_onboarding_cache, checkpoint)
+            })
+            .transpose()?;
+
+        fcr.on_fast_confirmation::<T::EthSpec>(
+            head_root,
+            &finalized_cp,
+            &justified_cp,
+            &unrealized_justified_cp,
+            current_slot,
+            proto_array,
+            votes,
+            equivocating_indices,
+            head_state,
+            slot_assignments,
+            checkpoint_state.as_ref(),
+        )?;
 
         let confirmed_node = fork_choice
             .get_block(&fcr.confirmed_root)
@@ -1432,10 +1422,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         )
     }
 
-    /// `None` unless the persisted confirmed root is still in fork choice and `VALID` (a payload
-    /// status reset at boot makes every block optimistic). Fork choice only serves descendants of
-    /// the finalized checkpoint; any other reference behind it — the previous observed-justified
-    /// checkpoint can be, after justification lag — is clamped to the finalized checkpoint.
+    /// `None` when nothing is persisted. Fork choice only serves descendants of the finalized
+    /// checkpoint; a reference behind it — the previous observed-justified checkpoint can be, after
+    /// justification lag — is clamped to the finalized checkpoint, and a confirmed root behind it is
+    /// reverted by the first run.
     fn restore_fast_confirmation_rule(
         fork_choice: &BeaconForkChoice<T>,
         snapshot: &BeaconSnapshot<T::EthSpec>,
@@ -1453,16 +1443,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         else {
             return Ok(None);
         };
-        let confirmed_root = persisted.confirmed_root;
-        let Some(confirmed_block) = fork_choice.get_block(&confirmed_root) else {
-            debug!(?confirmed_root, "Persisted FCR root not in fork choice");
-            return Ok(None);
-        };
-        if confirmed_block.execution_status.is_optimistic_or_invalid() {
-            debug!(?confirmed_root, "Persisted FCR root is not VALID");
-            return Ok(None);
-        }
-
         let finalized = fork_choice.cached_fork_choice_view().finalized_checkpoint;
         let clamp_checkpoint = |checkpoint: Checkpoint| {
             if fork_choice.get_block(&checkpoint.root).is_some() {
@@ -1491,7 +1471,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         } else {
             Some(Self::load_fcr_checkpoint_state(store, None, current)?)
         };
-        FastConfirmationRule::restore(
+        FastConfirmationRule::new(
             snapshot.beacon_block_root,
             &snapshot.beacon_state,
             slot_assignments,
@@ -1537,7 +1517,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 finalized_checkpoint,
             )?)
         };
-        FastConfirmationRule::new(
+        FastConfirmationRule::new_from_finalized_checkpoint(
             snapshot.beacon_block_root,
             &snapshot.beacon_state,
             slot_assignments,
