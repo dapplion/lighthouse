@@ -196,6 +196,12 @@ cargo-fmt:
 check-benches:
 	cargo check --workspace --benches --features "$(TEST_FEATURES)"
 
+# Runs the block processing perf regression gate against local fixtures.
+# Usage: make perf-regression FIXTURES=/path/to/fixtures
+perf-regression:
+	cargo run --release -p state_processing --example replay_perf -- \
+		"$(FIXTURES)" consensus/state_processing/examples/replay_perf_thresholds.json
+
 
 # Runs EF test vectors
 run-ef-tests:
