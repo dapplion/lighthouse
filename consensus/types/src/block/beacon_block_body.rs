@@ -56,14 +56,14 @@ pub const NUM_BEACON_BLOCK_BODY_HASH_TREE_ROOT_LEAVES: usize = 16;
 /// Index of the `blob_kzg_commitments` leaf in the `BeaconBlockBody` tree post-deneb.
 pub const BLOB_KZG_COMMITMENTS_INDEX: usize = 11;
 
-/// The body of a `BeaconChain` block, containing operations.
-///
 /// The `active_fields` of the progressive-container `BeaconBlockBody` variants (EIP-7688).
 ///
 /// Must mirror the `active_fields(..)` lists on the `tree_hash` attributes below, which Gloas and
 /// Heze currently share; `gloas_body_progressive_container_root` checks that it does.
 pub const BEACON_BLOCK_BODY_ACTIVE_FIELDS: [bool; 13] = [true; 13];
 
+/// The body of a `BeaconChain` block, containing operations.
+///
 /// This *superstruct* abstracts over the hard-fork.
 #[superstruct(
     variants(Base, Altair, Bellatrix, Capella, Deneb, Electra, Fulu, Gloas, Heze),
