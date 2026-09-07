@@ -283,6 +283,7 @@ impl<T: BeaconChainTypes> PendingPayloadCache<T> {
     /// This will silently drop the bid if a bid for this block root already exists in the cache.
     pub fn insert_bid(&self, block_root: Hash256, bid: Arc<SignedExecutionPayloadBid<T::EthSpec>>) {
         let mut write_lock = self.availability_cache.write();
+        // `or_insert_with` marks the entry recently used, as in `update_pending_components`.
         write_lock
             .entry(block_root)
             .or_insert_with(|| PendingComponents::new(block_root, bid));
@@ -557,7 +558,10 @@ impl<T: BeaconChainTypes> PendingPayloadCache<T> {
         {
             // Explicitly drop read lock before acquiring write lock
             drop(pending_components);
-            if let Some(components) = self.availability_cache.write().get_mut(&block_root) {
+            // `peek_mut`, not `get_mut`: this entry has just become available, so it has stopped
+            // being useful. Refreshing its LRU position here would spend a slot on a finished
+            // entry at the expense of one still collecting components.
+            if let Some(components) = self.availability_cache.write().peek_mut(&block_root) {
                 // Clean up span now that data is available
                 components.span = Span::none();
             }
@@ -584,6 +588,12 @@ impl<T: BeaconChainTypes> PendingPayloadCache<T> {
         let mut write_lock = self.availability_cache.write();
 
         let outcome = {
+            // `Entry::or_insert_with` moves an occupied entry to the back of the LRU list, and
+            // inserts a vacant one there. Every component insertion goes through here, so a
+            // block root that keeps receiving components keeps refreshing its position and
+            // outlives idle ones. That recency bump is load-bearing: do not swap this for
+            // `Entry::and_modify` or a hand-rolled match on the `Entry`, neither of which moves
+            // the entry.
             let pending_components = write_lock
                 .entry(block_root)
                 .or_insert_with(|| PendingComponents::new(block_root, bid.clone()));
@@ -601,6 +611,15 @@ impl<T: BeaconChainTypes> PendingPayloadCache<T> {
         Ok((outcome, pending_components))
     }
 
+    /// Read an entry *without* refreshing its LRU position.
+    ///
+    /// Not bumping here is deliberate. Every read that signals liveness is the `get_bid` at the
+    /// top of a `put_*` / `merge_*` path, and that path immediately inserts through
+    /// `update_pending_components`, which does bump; bumping here would be redundant on exactly
+    /// the paths that matter. The remaining readers serve external queries, where refreshing
+    /// would let a caller keep a dead block root resident at the expense of one still receiving
+    /// data. Bumping would also need the write lock, serialising readers on the hottest path in
+    /// this cache.
     fn peek_pending_components<R, F: FnOnce(Option<&PendingComponents<T::EthSpec>>) -> R>(
         &self,
         block_root: &Hash256,
@@ -1097,5 +1116,129 @@ mod data_availability_checker_tests {
         assert_eq!(result.full_columns.len(), 1, "column 0 becomes complete");
         assert_eq!(result.full_columns[0].index(), 0);
         assert!(s.cache.is_column_complete(&s.block_root, 0));
+    }
+
+    // ────────── LRU recency ordering ───────────────────────────────────────
+    //
+    // The cache must order by *use*, not by insertion: a root still receiving components has to
+    // outlive idle and finished ones. Component insertions refresh an entry's position via
+    // `update_pending_components`; reads deliberately do not.
+
+    /// Register a bid for a fresh random block root, taking one LRU slot. The bid contents are
+    /// irrelevant here — only the slot the entry occupies matters.
+    fn insert_filler(
+        cache: &PendingPayloadCache<T>,
+        bid: Arc<SignedExecutionPayloadBid<E>>,
+    ) -> Hash256 {
+        let block_root = Hash256::random();
+        cache.insert_bid(block_root, bid);
+        block_root
+    }
+
+    /// A root that keeps receiving data columns must survive far more eviction pressure than the
+    /// cache can hold, while a root inserted alongside it and then left idle must not.
+    #[tokio::test]
+    async fn live_entry_survives_eviction_pressure() {
+        let s = setup(NodeCustodyType::Fullnode);
+        let bid = s
+            .cache
+            .get_bid(&s.block_root)
+            .expect("setup registers a bid");
+        let column = s.custody.first().cloned().expect("sampling column");
+
+        let idle_root = insert_filler(&s.cache, bid.clone());
+
+        // Push twice the cache's capacity of fresh roots through it, feeding the live root a
+        // column between each one.
+        for _ in 0..(2 * AVAILABILITY_CACHE_CAPACITY) {
+            insert_filler(&s.cache, bid.clone());
+            s.cache
+                .put_rpc_custody_columns(s.block_root, vec![column.clone()])
+                .expect("a root still receiving columns must stay cached");
+        }
+
+        assert!(
+            s.cache.get_bid(&s.block_root).is_some(),
+            "a root still receiving columns must not be evicted",
+        );
+        assert_eq!(
+            s.cached_indexes(),
+            vec![*column.index()],
+            "the live root keeps its accumulated columns",
+        );
+        assert!(
+            s.cache.get_bid(&idle_root).is_none(),
+            "an idle root must be evicted under the same pressure",
+        );
+    }
+
+    /// A completed entry must not outrank a live one. Once a root reaches `Available` it has
+    /// stopped being useful, so it becomes the eviction candidate even though it finished after
+    /// the live root was first inserted.
+    #[tokio::test]
+    async fn completed_entry_is_evicted_before_live_entry() {
+        let s = setup(NodeCustodyType::Fullnode);
+        let bid = s
+            .cache
+            .get_bid(&s.block_root)
+            .expect("setup registers a bid");
+
+        // Drive the setup root to `Available`. It is now finished.
+        s.put_envelope();
+        assert_available(s.put_columns(s.custody.clone()));
+
+        // A second root that keeps receiving components for as long as the pressure lasts.
+        let live_root = insert_filler(&s.cache, bid.clone());
+
+        for i in 0..(2 * AVAILABILITY_CACHE_CAPACITY) {
+            insert_filler(&s.cache, bid.clone());
+            // Two alternating provers; repeats still exercise the component insertion path.
+            let proof_type = (i % 2) as ProofType;
+            s.cache
+                .put_execution_proof(Arc::new(execution_proof(live_root, proof_type)))
+                .expect("a root still receiving proofs must stay cached");
+        }
+
+        assert!(
+            s.cache.get_bid(&live_root).is_some(),
+            "the root still receiving components must survive",
+        );
+        assert!(
+            s.cache.get_bid(&s.block_root).is_none(),
+            "the completed root must be the eviction candidate",
+        );
+    }
+
+    /// Reads must not refresh LRU position. Querying an idle root cannot rescue it from eviction,
+    /// otherwise an external query could keep a dead block root resident. See
+    /// `peek_pending_components`.
+    #[tokio::test]
+    async fn read_does_not_refresh_lru_position() {
+        let s = setup(NodeCustodyType::Fullnode);
+        let bid = s
+            .cache
+            .get_bid(&s.block_root)
+            .expect("setup registers a bid");
+
+        // `target` is the second-oldest entry, behind the root `setup` registered.
+        let target = insert_filler(&s.cache, bid.clone());
+        while s.cache.cache_size() < AVAILABILITY_CACHE_CAPACITY {
+            insert_filler(&s.cache, bid.clone());
+        }
+        assert!(
+            s.cache.get_bid(&target).is_some(),
+            "the cache is only just full, nothing has been evicted yet",
+        );
+
+        // Just enough pressure to evict the two oldest entries. Had the reads above bumped
+        // `target` to most-recently-used, it would survive this.
+        for _ in 0..4 {
+            insert_filler(&s.cache, bid.clone());
+        }
+
+        assert!(
+            s.cache.get_bid(&target).is_none(),
+            "a read must not refresh LRU position",
+        );
     }
 }
