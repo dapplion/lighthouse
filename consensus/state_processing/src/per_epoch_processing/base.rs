@@ -8,7 +8,7 @@ use crate::per_epoch_processing::{
 pub use justification_and_finalization::process_justification_and_finalization;
 pub use participation_record_updates::process_participation_record_updates;
 pub use rewards_and_penalties::process_rewards_and_penalties;
-use types::{BeaconState, ChainSpec, EthSpec, RelativeEpoch};
+use types::{BeaconState, ChainSpec, EthSpec, Shufflings};
 pub use validator_statuses::{TotalBalances, ValidatorStatus, ValidatorStatuses};
 
 pub mod justification_and_finalization;
@@ -18,12 +18,9 @@ pub mod validator_statuses;
 
 pub fn process_epoch<E: EthSpec>(
     state: &mut BeaconState<E>,
+    shufflings: &mut Shufflings,
     spec: &ChainSpec,
 ) -> Result<EpochProcessingSummary<E>, Error> {
-    // Ensure the committee caches are built.
-    state.build_committee_cache(RelativeEpoch::Previous, spec)?;
-    state.build_committee_cache(RelativeEpoch::Current, spec)?;
-    state.build_committee_cache(RelativeEpoch::Next, spec)?;
     state.build_active_totals_cache(spec)?;
     initialize_epoch_cache(state, spec)?;
 
@@ -31,7 +28,7 @@ pub fn process_epoch<E: EthSpec>(
     //
     // E.g., attestation in the previous epoch, attested to the head, etc.
     let mut validator_statuses = ValidatorStatuses::new(state, spec)?;
-    validator_statuses.process_attestations(state)?;
+    validator_statuses.process_attestations(state, shufflings)?;
 
     // Justification and finalization.
     let justification_and_finalization_state =
@@ -69,8 +66,8 @@ pub fn process_epoch<E: EthSpec>(
     // Rotate current/previous epoch attestations
     process_participation_record_updates(state)?;
 
-    // Rotate the epoch caches to suit the epoch transition.
-    state.advance_caches()?;
+    // Rotate the shufflings to suit the epoch transition.
+    shufflings.advance();
 
     Ok(EpochProcessingSummary::Base {
         total_balances: validator_statuses.total_balances,

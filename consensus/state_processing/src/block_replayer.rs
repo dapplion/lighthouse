@@ -7,8 +7,8 @@ use itertools::Itertools;
 use std::iter::Peekable;
 use std::marker::PhantomData;
 use types::{
-    BeaconState, BeaconStateError, BlindedPayload, ChainSpec, EthSpec, Hash256, SignedBeaconBlock,
-    Slot,
+    BeaconState, BeaconStateError, BlindedPayload, ChainSpec, EthSpec, Hash256, Shufflings,
+    SignedBeaconBlock, Slot,
 };
 
 pub type PreBlockHook<'a, E, Error> = Box<
@@ -217,6 +217,8 @@ where
         blocks: Vec<SignedBeaconBlock<E, BlindedPayload<E>>>,
         target_slot: Option<Slot>,
     ) -> Result<Self, Error> {
+        let mut shufflings =
+            Shufflings::for_state(&self.state, self.spec).map_err(BlockReplayError::from)?;
         for (i, block) in blocks.iter().enumerate() {
             // Allow one additional block at the start which is only used for its state root.
             if i == 0 && block.slot() <= self.state.slot() {
@@ -232,6 +234,7 @@ where
 
                 let summary = per_slot_processing(
                     &mut self.state,
+                    &mut shufflings,
                     Some(state_root),
                     GloasVerificationContext::FullVerification,
                     self.spec,
@@ -283,6 +286,7 @@ where
 
                 let summary = per_slot_processing(
                     &mut self.state,
+                    &mut shufflings,
                     Some(state_root),
                     GloasVerificationContext::FullVerification,
                     self.spec,

@@ -11,7 +11,7 @@ use tree_hash::TreeHash;
 use types::{
     AbstractExecPayload, AttestationRef, BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec,
     Hash256, IndexedAttestation, IndexedAttestationRef, IndexedPayloadAttestation,
-    PayloadAttestation, SignedBeaconBlock, Slot,
+    PayloadAttestation, Shufflings, SignedBeaconBlock, Slot,
 };
 
 #[derive(Debug, PartialEq, Clone)]
@@ -26,6 +26,8 @@ pub struct ConsensusContext<E: EthSpec> {
     pub proposer_index: Option<u64>,
     /// Block root of the block at `slot`.
     pub current_block_root: Option<Hash256>,
+    /// Committee shufflings for the state this context is used with.
+    pub shufflings: Option<Shufflings>,
     /// Cache of indexed attestations constructed during block processing.
     pub indexed_attestations: HashMap<Hash256, IndexedAttestation<E>>,
     /// Cache of indexed payload attestations constructed during block processing.
@@ -62,6 +64,7 @@ impl<E: EthSpec> ConsensusContext<E> {
             current_epoch,
             proposer_index: None,
             current_block_root: None,
+            shufflings: None,
             indexed_attestations: HashMap::new(),
             indexed_payload_attestations: HashMap::new(),
         }
@@ -168,7 +171,11 @@ impl<E: EthSpec> ConsensusContext<E> {
             AttestationRef::Base(attn) => match self.indexed_attestations.entry(key) {
                 Entry::Occupied(occupied) => Ok(occupied.into_mut()),
                 Entry::Vacant(vacant) => {
-                    let committee = state.get_beacon_committee(attn.data.slot, attn.data.index)?;
+                    let committee = self
+                        .shufflings
+                        .as_ref()
+                        .ok_or(BeaconStateError::CommitteeCacheUninitialized(None))?
+                        .get_beacon_committee(attn.data.slot, attn.data.index)?;
                     let indexed_attestation =
                         attesting_indices_base::get_indexed_attestation(committee.committee, attn)?;
                     Ok(vacant.insert(indexed_attestation))
@@ -178,7 +185,12 @@ impl<E: EthSpec> ConsensusContext<E> {
                 Entry::Occupied(occupied) => Ok(occupied.into_mut()),
                 Entry::Vacant(vacant) => {
                     let indexed_attestation =
-                        attesting_indices_electra::get_indexed_attestation_from_state(state, attn)?;
+                        attesting_indices_electra::get_indexed_attestation_from_state(
+                            self.shufflings
+                                .as_ref()
+                                .ok_or(BeaconStateError::CommitteeCacheUninitialized(None))?,
+                            attn,
+                        )?;
                     Ok(vacant.insert(indexed_attestation))
                 }
             },
@@ -186,7 +198,12 @@ impl<E: EthSpec> ConsensusContext<E> {
                 Entry::Occupied(occupied) => Ok(occupied.into_mut()),
                 Entry::Vacant(vacant) => {
                     let indexed_attestation =
-                        attesting_indices_gloas::get_indexed_attestation_from_state(state, attn)?;
+                        attesting_indices_gloas::get_indexed_attestation_from_state(
+                            self.shufflings
+                                .as_ref()
+                                .ok_or(BeaconStateError::CommitteeCacheUninitialized(None))?,
+                            attn,
+                        )?;
                     Ok(vacant.insert(indexed_attestation))
                 }
             },

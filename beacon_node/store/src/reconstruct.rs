@@ -10,7 +10,7 @@ use state_processing::{
 };
 use std::sync::Arc;
 use tracing::{debug, info};
-use types::{EthSpec, Slot};
+use types::{EthSpec, Shufflings, Slot};
 
 impl<E, Hot, Cold> HotColdDB<E, Hot, Cold>
 where
@@ -132,6 +132,8 @@ where
             let mut io_batch = vec![];
             let mut prev_state_root = None;
 
+            let mut shufflings = Shufflings::for_state(&state, &self.spec)?;
+
             for ((prev_block_root, _), (block_root, slot)) in iter.tuple_windows() {
                 let is_skipped_slot = prev_block_root == block_root;
 
@@ -147,6 +149,7 @@ where
                 // Advance state to slot.
                 per_slot_processing(
                     &mut state,
+                    &mut shufflings,
                     prev_state_root.take(),
                     GloasVerificationContext::FullVerification,
                     &self.spec,

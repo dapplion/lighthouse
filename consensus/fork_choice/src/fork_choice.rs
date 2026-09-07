@@ -19,8 +19,8 @@ use tracing::{debug, instrument, warn};
 use types::{
     AbstractExecPayload, AttestationShufflingId, AttesterSlashingRef, BeaconBlockRef, BeaconState,
     BeaconStateError, ChainSpec, Checkpoint, Epoch, EthSpec, ExecPayload, ExecutionBlockHash,
-    Hash256, IndexedAttestationRef, IndexedPayloadAttestation, RelativeEpoch, SignedBeaconBlock,
-    Slot,
+    Hash256, IndexedAttestationRef, IndexedPayloadAttestation, RelativeEpoch, Shufflings,
+    SignedBeaconBlock, Slot,
 };
 
 #[derive(Debug)]
@@ -948,8 +948,10 @@ where
                         let mut validator_statuses =
                             per_epoch_processing::base::ValidatorStatuses::new(state, spec)
                                 .map_err(Error::ValidatorStatuses)?;
+                        let shufflings =
+                            Shufflings::for_state(state, spec).map_err(Error::BeaconStateError)?;
                         validator_statuses
-                            .process_attestations(state)
+                            .process_attestations(state, &shufflings)
                             .map_err(Error::ValidatorStatuses)?;
                         per_epoch_processing::base::process_justification_and_finalization(
                             state,

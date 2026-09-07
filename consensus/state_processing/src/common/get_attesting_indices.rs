@@ -72,19 +72,19 @@ pub mod attesting_indices_electra {
     }
 
     pub fn get_indexed_attestation_from_state<E: EthSpec>(
-        beacon_state: &BeaconState<E>,
+        shufflings: &Shufflings,
         attestation: &AttestationElectra<E>,
     ) -> Result<IndexedAttestation<E>, BlockOperationError<Invalid>> {
-        let committees = beacon_state.get_beacon_committees_at_slot(attestation.data.slot)?;
+        let committees = shufflings.get_beacon_committees_at_slot(attestation.data.slot)?;
         get_indexed_attestation(&committees, attestation)
     }
 
     /// Shortcut for getting the attesting indices while fetching the committee from the state's cache.
     pub fn get_attesting_indices_from_state<E: EthSpec>(
-        state: &BeaconState<E>,
+        shufflings: &Shufflings,
         att: &AttestationElectra<E>,
     ) -> Result<Vec<u64>, BeaconStateError> {
-        let committees = state.get_beacon_committees_at_slot(att.data.slot)?;
+        let committees = shufflings.get_beacon_committees_at_slot(att.data.slot)?;
         get_attesting_indices::<E, _>(&committees, &att.aggregation_bits, &att.committee_bits)
     }
 
@@ -190,19 +190,19 @@ pub mod attesting_indices_gloas {
     }
 
     pub fn get_indexed_attestation_from_state<E: EthSpec>(
-        beacon_state: &BeaconState<E>,
+        shufflings: &Shufflings,
         attestation: &AttestationGloas<E>,
     ) -> Result<IndexedAttestation<E>, BlockOperationError<Invalid>> {
-        let committees = beacon_state.get_beacon_committees_at_slot(attestation.data.slot)?;
+        let committees = shufflings.get_beacon_committees_at_slot(attestation.data.slot)?;
         get_indexed_attestation(&committees, attestation)
     }
 
     /// Shortcut for getting the attesting indices while fetching the committee from the state's cache.
     pub fn get_attesting_indices_from_state<E: EthSpec>(
-        state: &BeaconState<E>,
+        shufflings: &Shufflings,
         att: &AttestationGloas<E>,
     ) -> Result<Vec<u64>, BeaconStateError> {
-        let committees = state.get_beacon_committees_at_slot(att.data.slot)?;
+        let committees = shufflings.get_beacon_committees_at_slot(att.data.slot)?;
         attesting_indices_electra::get_attesting_indices::<E, _>(
             &committees,
             &att.aggregation_bits,
@@ -213,22 +213,22 @@ pub mod attesting_indices_gloas {
 
 /// Shortcut for getting the attesting indices while fetching the committee from the state's cache.
 pub fn get_attesting_indices_from_state<E: EthSpec>(
-    state: &BeaconState<E>,
+    shufflings: &Shufflings,
     att: AttestationRef<E>,
 ) -> Result<Vec<u64>, BeaconStateError> {
     match att {
         AttestationRef::Base(att) => {
-            let committee = state.get_beacon_committee(att.data.slot, att.data.index)?;
+            let committee = shufflings.get_beacon_committee(att.data.slot, att.data.index)?;
             attesting_indices_base::get_attesting_indices::<E>(
                 committee.committee,
                 &att.aggregation_bits,
             )
         }
         AttestationRef::Electra(att) => {
-            attesting_indices_electra::get_attesting_indices_from_state::<E>(state, att)
+            attesting_indices_electra::get_attesting_indices_from_state::<E>(shufflings, att)
         }
         AttestationRef::Gloas(att) => {
-            attesting_indices_gloas::get_attesting_indices_from_state::<E>(state, att)
+            attesting_indices_gloas::get_attesting_indices_from_state::<E>(shufflings, att)
         }
     }
 }

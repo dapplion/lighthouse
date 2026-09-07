@@ -38,9 +38,6 @@ impl<E: EthSpec> AllCaches for BeaconState<E> {
         };
         self.get_total_active_balance_at_epoch(current_epoch)
             .is_ok()
-            && self.committee_cache_is_initialized(RelativeEpoch::Previous)
-            && self.committee_cache_is_initialized(RelativeEpoch::Current)
-            && self.committee_cache_is_initialized(RelativeEpoch::Next)
             && self
                 .progressive_balances_cache()
                 .is_initialized_at(current_epoch)

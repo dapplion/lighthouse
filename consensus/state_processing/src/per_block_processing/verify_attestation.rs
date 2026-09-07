@@ -67,7 +67,12 @@ pub fn verify_attestation_for_state<'ctxt, E: EthSpec>(
     match attestation {
         AttestationRef::Base(_) => {
             verify!(
-                data.index < state.get_committee_count_at_slot(data.slot)?,
+                data.index
+                    < ctxt
+                        .shufflings
+                        .as_ref()
+                        .ok_or(BeaconStateError::CommitteeCacheUninitialized(None))?
+                        .get_committee_count_at_slot(data.slot)?,
                 Invalid::BadCommitteeIndex
             );
         }

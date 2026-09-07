@@ -37,6 +37,7 @@ impl From<ssz::BitfieldError> for Error {
 #[instrument(level = "debug", skip_all)]
 pub fn per_slot_processing<E: EthSpec>(
     state: &mut BeaconState<E>,
+    shufflings: &mut Shufflings,
     state_root: Option<Hash256>,
     gloas_context: GloasVerificationContext<'_>,
     spec: &ChainSpec,
@@ -51,7 +52,7 @@ pub fn per_slot_processing<E: EthSpec>(
     let summary = if state.slot() > spec.genesis_slot
         && state.slot().safe_add(1)?.safe_rem(E::slots_per_epoch())? == 0
     {
-        Some(per_epoch_processing(state, spec)?)
+        Some(per_epoch_processing(state, shufflings, spec)?)
     } else {
         None
     };

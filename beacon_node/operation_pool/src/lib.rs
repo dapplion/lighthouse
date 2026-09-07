@@ -41,9 +41,9 @@ use typenum::Unsigned;
 use types::{
     AbstractExecPayload, Attestation, AttestationData, AttesterSlashing, BeaconState,
     BeaconStateError, ChainSpec, Epoch, EthSpec, Hash256, PayloadAttestation,
-    PayloadAttestationData, PayloadAttestationMessage, ProposerSlashing, SignedBeaconBlock,
-    SignedBlsToExecutionChange, SignedVoluntaryExit, Slot, SyncAggregate, SyncAggregateError,
-    SyncCommitteeContribution, Validator,
+    PayloadAttestationData, PayloadAttestationMessage, ProposerSlashing, Shufflings,
+    SignedBeaconBlock, SignedBlsToExecutionChange, SignedVoluntaryExit, Slot, SyncAggregate,
+    SyncAggregateError, SyncCommitteeContribution, Validator,
 };
 
 type SyncContributions<E> = RwLock<HashMap<SyncAggregateId, Vec<SyncCommitteeContribution<E>>>>;
@@ -327,6 +327,7 @@ impl<E: EthSpec> OperationPool<E> {
         checkpoint_key: &'a CheckpointKey,
         all_attestations: &'a AttestationMap<E>,
         state: &'a BeaconState<E>,
+        shufflings: &'a Shufflings,
         reward_cache: &'a RewardCache,
         total_active_balance: u64,
         validity_filter: impl FnMut(&CompactAttestationRef<'a, E>) -> bool + Send,
@@ -340,7 +341,14 @@ impl<E: EthSpec> OperationPool<E> {
             })
             .filter(validity_filter)
             .filter_map(move |att| {
-                AttMaxCover::new(att, state, reward_cache, total_active_balance, spec)
+                AttMaxCover::new(
+                    att,
+                    state,
+                    shufflings,
+                    reward_cache,
+                    total_active_balance,
+                    spec,
+                )
             })
     }
 
@@ -353,6 +361,7 @@ impl<E: EthSpec> OperationPool<E> {
     pub fn get_attestations(
         &self,
         state: &BeaconState<E>,
+        shufflings: &Shufflings,
         prev_epoch_validity_filter: impl for<'a> FnMut(&CompactAttestationRef<'a, E>) -> bool + Send,
         curr_epoch_validity_filter: impl for<'a> FnMut(&CompactAttestationRef<'a, E>) -> bool + Send,
         spec: &ChainSpec,
@@ -400,6 +409,7 @@ impl<E: EthSpec> OperationPool<E> {
                 &prev_epoch_key,
                 &*all_attestations,
                 state,
+                shufflings,
                 &reward_cache,
                 total_active_balance,
                 prev_epoch_validity_filter,
@@ -411,6 +421,7 @@ impl<E: EthSpec> OperationPool<E> {
                 &curr_epoch_key,
                 &*all_attestations,
                 state,
+                shufflings,
                 &reward_cache,
                 total_active_balance,
                 curr_epoch_validity_filter,

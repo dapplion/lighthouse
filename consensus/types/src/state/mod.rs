@@ -10,6 +10,7 @@ mod historical_summary;
 mod iter;
 mod progressive_balances_cache;
 mod pubkey_cache;
+mod shufflings;
 mod slashings_cache;
 mod slot_assignments;
 
@@ -35,5 +36,6 @@ pub use progressive_balances_cache::{
     EpochTotalBalances, ProgressiveBalancesCache, is_progressive_balances_enabled,
 };
 pub use pubkey_cache::PubkeyCache;
+pub use shufflings::Shufflings;
 pub use slashings_cache::SlashingsCache;
 pub use slot_assignments::SlotAssignments;

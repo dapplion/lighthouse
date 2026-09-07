@@ -182,10 +182,6 @@ pub fn per_block_processing<E: EthSpec, Payload: AbstractExecPayload<E>>(
     } else {
         verify_signatures
     };
-    // Ensure the current and previous epoch committee caches are built.
-    state.build_committee_cache(RelativeEpoch::Previous, spec)?;
-    state.build_committee_cache(RelativeEpoch::Current, spec)?;
-
     let mut parent_slot = None;
     // The call to the `process_execution_payload` must happen before the call to the
     // `process_randao` as the former depends on the `randao_mix` computed with the reveal of the

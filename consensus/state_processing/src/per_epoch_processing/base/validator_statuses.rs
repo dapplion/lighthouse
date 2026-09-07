@@ -1,6 +1,8 @@
 use crate::common::attesting_indices_base::get_attesting_indices;
 use safe_arith::SafeArith;
-use types::{BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec, PendingAttestation};
+use types::{
+    BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec, PendingAttestation, Shufflings,
+};
 
 #[cfg(feature = "arbitrary")]
 use arbitrary::Arbitrary;
@@ -241,6 +243,7 @@ impl ValidatorStatuses {
     pub fn process_attestations<E: EthSpec>(
         &mut self,
         state: &BeaconState<E>,
+        shufflings: &Shufflings,
     ) -> Result<(), BeaconStateError> {
         // The `validator_statuses` in `process_epoch` are used in three functions:
         // 1. `process_justification_and_finalization` - this function is a no-operation at the genesis_epoch
@@ -257,7 +260,7 @@ impl ValidatorStatuses {
             .iter()
             .chain(base_state.current_epoch_attestations.iter())
         {
-            let committee = state.get_beacon_committee(a.data.slot, a.data.index)?;
+            let committee = shufflings.get_beacon_committee(a.data.slot, a.data.index)?;
             let attesting_indices =
                 get_attesting_indices::<E>(committee.committee, &a.aggregation_bits)?;
 

@@ -16,8 +16,11 @@ pub fn translate_participation<E: EthSpec>(
     pending_attestations: &List<PendingAttestation<E>, E::MaxPendingAttestations>,
     spec: &ChainSpec,
 ) -> Result<(), Error> {
-    // Previous epoch committee cache is required for `get_attesting_indices`.
-    state.build_committee_cache(RelativeEpoch::Previous, spec)?;
+    // Previous epoch shuffling is required for `get_attesting_indices`.
+    let committee_cache = state.initialize_committee_cache(
+        RelativeEpoch::Previous.into_epoch(state.current_epoch()),
+        spec,
+    )?;
 
     for attestation in pending_attestations {
         let data = &attestation.data;
@@ -28,7 +31,12 @@ pub fn translate_participation<E: EthSpec>(
             get_attestation_participation_flag_indices(state, data, None, inclusion_delay, spec)?;
 
         // Apply flags to all attesting validators.
-        let committee = state.get_beacon_committee(data.slot, data.index)?;
+        let committee = committee_cache
+            .get_beacon_committee(data.slot, data.index)
+            .ok_or(Error::NoCommittee {
+                slot: data.slot,
+                index: data.index,
+            })?;
         let attesting_indices =
             get_attesting_indices::<E>(committee.committee, &attestation.aggregation_bits)?;
         let mut epoch_participation = state.previous_epoch_participation_mut()?;
@@ -106,7 +114,6 @@ pub fn upgrade_to_altair<E: EthSpec>(
         // Caches
         active_totals: pre.active_totals,
         progressive_balances_cache: mem::take(&mut pre.progressive_balances_cache),
-        committee_caches: mem::take(&mut pre.committee_caches),
         pubkey_cache: mem::take(&mut pre.pubkey_cache),
         exit_cache: mem::take(&mut pre.exit_cache),
         slashings_cache: mem::take(&mut pre.slashings_cache),

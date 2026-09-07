@@ -160,8 +160,6 @@ pub fn process_epoch_single_pass<E: EthSpec>(
     initialize_epoch_cache(state, spec)?;
     initialize_progressive_balances_cache(state, spec)?;
     state.build_exit_cache(spec)?;
-    state.build_committee_cache(RelativeEpoch::Previous, spec)?;
-    state.build_committee_cache(RelativeEpoch::Current, spec)?;
     state.update_pubkey_cache()?;
 
     let previous_epoch = state.previous_epoch();
