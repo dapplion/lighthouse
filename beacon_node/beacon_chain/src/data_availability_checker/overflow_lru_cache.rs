@@ -1130,6 +1130,30 @@ mod pending_components_tests {
         RuntimeFixedVector<Option<KzgVerifiedBlob<E>>>,
     );
 
+    /// A state with enough validators to service a shuffling; a default state has an empty
+    /// registry and cannot.
+    fn dummy_state_with_validators() -> BeaconState<E> {
+        let spec = E::default_spec();
+        let mut state: BeaconState<E> = BeaconState::new(0, Default::default(), &spec);
+        for _ in 0..64 {
+            state
+                .validators_mut()
+                .push(types::Validator {
+                    effective_balance: spec.max_effective_balance,
+                    activation_epoch: Epoch::new(0),
+                    exit_epoch: spec.far_future_epoch,
+                    withdrawable_epoch: spec.far_future_epoch,
+                    ..Default::default()
+                })
+                .expect("push validator");
+            state
+                .balances_mut()
+                .push(spec.max_effective_balance)
+                .expect("push balance");
+        }
+        state
+    }
+
     pub fn setup_pending_components(
         block: SignedBeaconBlock<E>,
         valid_blobs: RuntimeFixedVector<Option<Arc<BlobSidecar<E>>>>,
@@ -1156,7 +1180,7 @@ mod pending_components_tests {
                 .collect::<Vec<_>>(),
         );
         let dummy_parent = block.clone_as_blinded();
-        let dummy_state = BeaconState::new(0, Default::default(), &ChainSpec::minimal());
+        let dummy_state = dummy_state_with_validators();
         let block = AvailabilityPendingExecutedBlock {
             block: Arc::new(block),
             import_data: BlockImportData {
@@ -1165,7 +1189,7 @@ mod pending_components_tests {
                 parent_block: dummy_parent,
                 consensus_context: ConsensusContext::new(
                     Slot::new(0),
-                    Shufflings::for_state(&dummy_state, &ChainSpec::minimal())
+                    Shufflings::for_state(&dummy_state, &E::default_spec())
                         .expect("dummy shufflings"),
                 ),
             },

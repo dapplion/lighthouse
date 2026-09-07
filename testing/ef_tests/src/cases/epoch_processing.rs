@@ -4,6 +4,7 @@ use crate::case_result::compare_beacon_state_results_without_caches;
 use crate::decode::{ssz_decode_state, yaml_decode_file};
 use crate::type_name;
 use serde::Deserialize;
+use state_processing::AllCaches;
 use state_processing::EpochProcessingError;
 use state_processing::common::update_progressive_balances_cache::initialize_progressive_balances_cache;
 use state_processing::epoch_cache::initialize_epoch_cache;
@@ -441,8 +442,8 @@ impl<E: EthSpec, T: EpochTransition<E>> Case for EpochProcessing<E, T> {
         let spec = &testing_spec::<E>(fork_name);
         let mut pre_state = self.pre.clone();
 
-        // Proposer index computation (e.g. proposer lookahead) requires the slashings cache post-Gloas
-        pre_state.build_slashings_cache().unwrap();
+        // Processing requires the state's caches.
+        pre_state.build_all_caches(spec).unwrap();
 
         let mut state = pre_state.clone();
         let mut expected = self.post.clone();

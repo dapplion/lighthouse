@@ -81,12 +81,15 @@ mod release_tests {
         );
 
         // Check the state is valid before starting this test.
-        let mut altair_shufflings = Shufflings::for_state(&altair_state, &spec).unwrap();
-        process_epoch(&mut altair_state.clone(), &mut altair_shufflings, &spec)
-            .expect("state passes intial epoch processing");
+        process_epoch(
+            &mut altair_state.clone(),
+            &mut Shufflings::for_state(&altair_state, &spec).unwrap(),
+            &spec,
+        )
+        .expect("state passes intial epoch processing");
         per_slot_processing(
             &mut altair_state.clone(),
-            &mut altair_shufflings,
+            &mut Shufflings::for_state(&altair_state, &spec).unwrap(),
             None,
             GloasVerificationContext::FullVerification,
             &spec,
@@ -103,13 +106,17 @@ mod release_tests {
 
         assert_eq!(altair_state.fork_name(&spec), Err(expected_err));
         assert_eq!(
-            process_epoch(&mut altair_state.clone(), &mut altair_shufflings, &spec),
+            process_epoch(
+                &mut altair_state.clone(),
+                &mut Shufflings::for_state(&altair_state, &spec).unwrap(),
+                &spec
+            ),
             Err(EpochProcessingError::InconsistentStateFork(expected_err))
         );
         assert_eq!(
             per_slot_processing(
                 &mut altair_state.clone(),
-                &mut altair_shufflings,
+                &mut Shufflings::for_state(&altair_state, &spec).unwrap(),
                 None,
                 GloasVerificationContext::FullVerification,
                 &spec
@@ -154,12 +161,15 @@ mod release_tests {
         );
 
         // Check the state is valid before starting this test.
-        let mut base_shufflings = Shufflings::for_state(&base_state, &spec).unwrap();
-        process_epoch(&mut base_state.clone(), &mut base_shufflings, &spec)
-            .expect("state passes intial epoch processing");
+        process_epoch(
+            &mut base_state.clone(),
+            &mut Shufflings::for_state(&base_state, &spec).unwrap(),
+            &spec,
+        )
+        .expect("state passes intial epoch processing");
         per_slot_processing(
             &mut base_state.clone(),
-            &mut base_shufflings,
+            &mut Shufflings::for_state(&base_state, &spec).unwrap(),
             None,
             GloasVerificationContext::FullVerification,
             &spec,
@@ -176,13 +186,17 @@ mod release_tests {
 
         assert_eq!(base_state.fork_name(&spec), Err(expected_err));
         assert_eq!(
-            process_epoch(&mut base_state.clone(), &mut base_shufflings, &spec),
+            process_epoch(
+                &mut base_state.clone(),
+                &mut Shufflings::for_state(&base_state, &spec).unwrap(),
+                &spec
+            ),
             Err(EpochProcessingError::InconsistentStateFork(expected_err))
         );
         assert_eq!(
             per_slot_processing(
                 &mut base_state.clone(),
-                &mut base_shufflings,
+                &mut Shufflings::for_state(&base_state, &spec).unwrap(),
                 None,
                 GloasVerificationContext::FullVerification,
                 &spec

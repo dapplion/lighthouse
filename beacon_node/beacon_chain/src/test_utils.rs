@@ -964,7 +964,10 @@ where
 
     /// Build the committee shufflings for `state`, for tests that need committees.
     pub fn shufflings(&self, state: &BeaconState<E>) -> Shufflings {
-        Shufflings::for_state(state, &self.spec).expect("should build shufflings")
+        // Go through the chain's pool, as production does, so tests exercise the same lookup.
+        self.chain
+            .shufflings_for_state(state, self.chain.head_beacon_block_root())
+            .expect("should build shufflings")
     }
 
     pub fn get_current_state(&self) -> BeaconState<E> {
