@@ -20,7 +20,8 @@ pub struct PersistedFastConfirmation {
     pub previous_epoch_greatest_unrealized_checkpoint: Checkpoint,
     pub previous_slot_head: Hash256,
     pub current_slot_head: Hash256,
-    last_update_slot: u64,
+    previous_update_slot: u64,
+    current_update_slot: u64,
 }
 
 impl PersistedFastConfirmation {
@@ -37,14 +38,25 @@ impl PersistedFastConfirmation {
                 .previous_epoch_greatest_unrealized_checkpoint,
             previous_slot_head: rule.previous_slot_head,
             current_slot_head: rule.current_slot_head,
-            last_update_slot: rule
-                .last_update_slot()
-                .map_or(NO_UPDATE_SLOT, |slot| slot.as_u64()),
+            previous_update_slot: Self::raw_slot(rule.previous_update_slot()),
+            current_update_slot: Self::raw_slot(rule.last_update_slot()),
         }
     }
 
-    pub fn last_update_slot(&self) -> Option<Slot> {
-        (self.last_update_slot != NO_UPDATE_SLOT).then(|| Slot::new(self.last_update_slot))
+    fn raw_slot(slot: Option<Slot>) -> u64 {
+        slot.map_or(NO_UPDATE_SLOT, |slot| slot.as_u64())
+    }
+
+    fn slot(raw: u64) -> Option<Slot> {
+        (raw != NO_UPDATE_SLOT).then(|| Slot::new(raw))
+    }
+
+    pub fn previous_update_slot(&self) -> Option<Slot> {
+        Self::slot(self.previous_update_slot)
+    }
+
+    pub fn current_update_slot(&self) -> Option<Slot> {
+        Self::slot(self.current_update_slot)
     }
 }
 

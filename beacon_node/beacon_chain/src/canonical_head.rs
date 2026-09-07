@@ -1332,42 +1332,54 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let old_confirmed_root = fcr.confirmed_root;
 
         let finalized_cp = fork_choice.finalized_checkpoint();
+        let justified_cp = fork_choice.justified_checkpoint();
         let unrealized_justified_cp = fork_choice.unrealized_justified_checkpoint();
         let proto_array = fork_choice.proto_array().core_proto_array();
         let votes = fork_choice.proto_array().votes();
         let equivocating_indices = fork_choice.fc_store().equivocating_indices();
-
-        // A restart that slept across an epoch boundary first performs the rotation it missed.
-        fcr.catch_up_missed_boundary::<T::EthSpec>(
-            current_slot,
-            fork_choice.justified_checkpoint(),
-            unrealized_justified_cp,
-            |checkpoint| {
-                Self::load_fcr_checkpoint_state(store, builder_onboarding_cache, checkpoint)
-            },
-        )?;
-
-        // Load the checkpoint state if it will be required.
-        let checkpoint_state = fcr
-            .checkpoint_state_needed::<T::EthSpec>(current_slot)
-            .map(|checkpoint| {
-                Self::load_fcr_checkpoint_state(store, builder_onboarding_cache, checkpoint)
-            })
-            .transpose()?;
-
         let old_update_slot = fcr.last_update_slot();
-        fcr.on_fast_confirmation::<T::EthSpec>(
-            head_root,
-            &finalized_cp,
-            &unrealized_justified_cp,
-            current_slot,
-            proto_array,
-            votes,
-            equivocating_indices,
-            head_state,
-            slot_assignments,
-            checkpoint_state.as_ref(),
-        )?;
+
+        // Spec: the first update after skipped slots catches up on a missed epoch start and SHOULD
+        // wait for the skipped slots' blocks and attestations, so it runs once the head has caught
+        // up with the clock. More than one skipped epoch start reverts the confirmed root anyway.
+        let slots_per_epoch = T::EthSpec::slots_per_epoch();
+        let head_slot = fork_choice
+            .get_block(&head_root)
+            .ok_or(FastConfirmationError::NodeNotFound(head_root))?
+            .slot;
+        let catch_up_deferred = old_update_slot.is_some_and(|last| {
+            current_slot > last + 1
+                && current_slot.epoch(slots_per_epoch) == last.epoch(slots_per_epoch) + 1
+                && head_slot + 1 < current_slot
+        });
+
+        if !catch_up_deferred {
+            // Load the checkpoint state if it will be required.
+            let checkpoint_state = fcr
+                .checkpoint_state_needed::<T::EthSpec>(
+                    current_slot,
+                    &justified_cp,
+                    &unrealized_justified_cp,
+                )
+                .map(|checkpoint| {
+                    Self::load_fcr_checkpoint_state(store, builder_onboarding_cache, checkpoint)
+                })
+                .transpose()?;
+
+            fcr.on_fast_confirmation::<T::EthSpec>(
+                head_root,
+                &finalized_cp,
+                &justified_cp,
+                &unrealized_justified_cp,
+                current_slot,
+                proto_array,
+                votes,
+                equivocating_indices,
+                head_state,
+                slot_assignments,
+                checkpoint_state.as_ref(),
+            )?;
+        }
 
         let confirmed_node = fork_choice
             .get_block(&fcr.confirmed_root)
@@ -1489,7 +1501,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             clamp_checkpoint(persisted.previous_epoch_greatest_unrealized_checkpoint),
             clamp_root(persisted.previous_slot_head),
             clamp_root(persisted.current_slot_head),
-            persisted.last_update_slot(),
+            persisted.previous_update_slot(),
+            persisted.current_update_slot(),
             spec.confirmation_byzantine_threshold,
             spec.proposer_score_boost,
         )
