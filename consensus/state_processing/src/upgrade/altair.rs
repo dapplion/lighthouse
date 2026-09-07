@@ -7,7 +7,7 @@ use std::mem;
 use std::sync::Arc;
 use types::{
     BeaconState, BeaconStateAltair, BeaconStateError as Error, ChainSpec, EpochCache, EthSpec,
-    Fork, ParticipationFlags, PendingAttestation, RelativeEpoch, SyncCommittee,
+    Fork, ParticipationFlags, PendingAttestation, SyncCommittee,
 };
 
 /// Translate the participation information from the epoch prior to the fork into Altair's format.
@@ -17,10 +17,7 @@ pub fn translate_participation<E: EthSpec>(
     spec: &ChainSpec,
 ) -> Result<(), Error> {
     // Previous epoch shuffling is required for `get_attesting_indices`.
-    let committee_cache = state.initialize_committee_cache(
-        RelativeEpoch::Previous.into_epoch(state.current_epoch()),
-        spec,
-    )?;
+    let committee_cache = state.initialize_committee_cache(state.previous_epoch(), spec)?;
 
     for attestation in pending_attestations {
         let data = &attestation.data;

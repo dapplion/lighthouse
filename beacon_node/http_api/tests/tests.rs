@@ -2513,14 +2513,13 @@ impl ApiTester {
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = Shufflings::for_state(state, &self.chain.spec)
-                    .unwrap()
+                let shufflings = Shufflings::for_state(state, &self.chain.spec).unwrap();
+                let committee = shufflings
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap()
-                    .committee
-                    .to_vec();
+                    .unwrap();
 
                 let attester_index = committee
+                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {
@@ -2586,17 +2585,16 @@ impl ApiTester {
 
             let aggregation_bit = *aggregation_bits.first().unwrap();
 
-            let committee = Shufflings::for_state(state, &self.chain.spec)
-                .unwrap()
+            let shufflings = Shufflings::for_state(state, &self.chain.spec).unwrap();
+            let committee = shufflings
                 .get_beacon_committee(
                     attestation.data().slot,
                     attestation.committee_index().unwrap(),
                 )
-                .unwrap()
-                .committee
-                .to_vec();
+                .unwrap();
 
             let attester_index = committee
+                .committee
                 .iter()
                 .enumerate()
                 .find_map(|(i, &index)| {
@@ -2619,17 +2617,16 @@ impl ApiTester {
 
             let aggregation_bit = *aggregation_bits.first().unwrap();
 
-            let committee = Shufflings::for_state(state, &self.chain.spec)
-                .unwrap()
+            let shufflings = Shufflings::for_state(state, &self.chain.spec).unwrap();
+            let committee = shufflings
                 .get_beacon_committee(
                     invalid_attestation.data().slot,
                     invalid_attestation.committee_index().unwrap(),
                 )
-                .unwrap()
-                .committee
-                .to_vec();
+                .unwrap();
 
             let attester_index = committee
+                .committee
                 .iter()
                 .enumerate()
                 .find_map(|(i, &index)| {
@@ -6532,14 +6529,13 @@ impl ApiTester {
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = Shufflings::for_state(&head_state, &self.chain.spec)
-                    .unwrap()
+                let shufflings = Shufflings::for_state(&head_state, &self.chain.spec).unwrap();
+                let committee = shufflings
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap()
-                    .committee
-                    .to_vec();
+                    .unwrap();
 
                 let attester_index = committee
+                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {
@@ -6572,16 +6568,13 @@ impl ApiTester {
             .unwrap()
             .data;
 
-        let committees = Shufflings::for_state(&head_state, &self.chain.spec)
-            .unwrap()
+        let shufflings = Shufflings::for_state(&head_state, &self.chain.spec).unwrap();
+        let committees = shufflings
             .get_beacon_committees_at_slot(self.chain.slot().unwrap())
-            .unwrap()
-            .into_iter()
-            .map(|c| c.committee.to_vec())
-            .collect::<Vec<_>>();
+            .unwrap();
         let attesting_validators: Vec<usize> = committees
             .into_iter()
-            .flat_map(|committee| committee.into_iter())
+            .flat_map(|committee| committee.committee.iter().cloned())
             .collect();
         // All attesters should now be considered live
         let expected = expected
@@ -8377,14 +8370,13 @@ impl ApiTester {
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = Shufflings::for_state(&head_state, &self.chain.spec)
-                    .unwrap()
+                let shufflings = Shufflings::for_state(&head_state, &self.chain.spec).unwrap();
+                let committee = shufflings
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap()
-                    .committee
-                    .to_vec();
+                    .unwrap();
 
                 let attester_index = committee
+                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {
@@ -8417,16 +8409,13 @@ impl ApiTester {
             .unwrap()
             .data;
 
-        let committees = Shufflings::for_state(&head_state, &self.chain.spec)
-            .unwrap()
+        let shufflings = Shufflings::for_state(&head_state, &self.chain.spec).unwrap();
+        let committees = shufflings
             .get_beacon_committees_at_slot(self.chain.slot().unwrap())
-            .unwrap()
-            .into_iter()
-            .map(|c| c.committee.to_vec())
-            .collect::<Vec<_>>();
+            .unwrap();
         let attesting_validators: Vec<usize> = committees
             .into_iter()
-            .flat_map(|committee| committee.into_iter())
+            .flat_map(|committee| committee.committee.iter().cloned())
             .collect();
         // All attesters should now be considered live
         let expected = expected
@@ -8479,14 +8468,13 @@ impl ApiTester {
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = Shufflings::for_state(&state, &self.chain.spec)
-                    .unwrap()
+                let shufflings = Shufflings::for_state(&state, &self.chain.spec).unwrap();
+                let committee = shufflings
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap()
-                    .committee
-                    .to_vec();
+                    .unwrap();
 
                 let attester_index = committee
+                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {

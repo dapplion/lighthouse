@@ -3367,14 +3367,13 @@ where
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = Shufflings::for_state(state, &self.spec)
-                    .unwrap()
+                let shufflings = Shufflings::for_state(state, &self.spec).unwrap();
+                let committee = shufflings
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap()
-                    .committee
-                    .to_vec();
+                    .unwrap();
 
                 let attester_index = committee
+                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {

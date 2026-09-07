@@ -473,7 +473,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let fork_choice_view = fork_choice.cached_fork_choice_view();
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
 
-        let slot_assignments = SlotAssignments::new(&snapshot.beacon_state, spec, None, None)
+        let slot_assignments = SlotAssignments::new(&snapshot.beacon_state, spec, None)
             .map_err(|e| format!("Unable to initialize slot assignments: {e:?}"))?;
 
         let fcr = if fast_confirmation.is_enabled() {
@@ -557,7 +557,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             beacon_state,
         });
 
-        let slot_assignments = SlotAssignments::new(&snapshot.beacon_state, spec, None, None)
+        let slot_assignments = SlotAssignments::new(&snapshot.beacon_state, spec, None)
             .map_err(|e| Error::DBInconsistent(format!("slot assignments reset: {e:?}")))?;
 
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
@@ -1274,18 +1274,17 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // `SlotAssignments::new` might recompute a shuffling, so we avoid
         // holding the lock during this calculation.
         let prev_assignments = self.canonical_head.slot_assignments.lock().clone();
-        let rebuilt =
-            match SlotAssignments::new(&head_state, &self.spec, Some(&prev_assignments), None) {
-                Ok(rebuilt) => rebuilt,
-                Err(e) => {
-                    metrics::inc_counter_vec(
-                        &metrics::SLOT_ASSIGNMENTS_ERRORS,
-                        &["committee_cache_error"],
-                    );
-                    error!("Error rebuilding slot assignments: {e:?}");
-                    return Some(Err(e.into()));
-                }
-            };
+        let rebuilt = match SlotAssignments::new(&head_state, &self.spec, Some(&prev_assignments)) {
+            Ok(rebuilt) => rebuilt,
+            Err(e) => {
+                metrics::inc_counter_vec(
+                    &metrics::SLOT_ASSIGNMENTS_ERRORS,
+                    &["committee_cache_error"],
+                );
+                error!("Error rebuilding slot assignments: {e:?}");
+                return Some(Err(e.into()));
+            }
+        };
         *self.canonical_head.slot_assignments.lock() = rebuilt.clone();
         Some(Ok((head_state, rebuilt)))
     }

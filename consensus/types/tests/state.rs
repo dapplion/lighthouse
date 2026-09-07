@@ -132,9 +132,8 @@ fn test_cache_initialization<E: EthSpec>(
 
     let uninitialized = std::sync::Arc::new(CommitteeCache::default());
     assert_eq!(
-        Shufflings::new(
+        Shufflings::new::<E>(
             state.current_epoch(),
-            E::slots_per_epoch(),
             uninitialized.clone(),
             uninitialized.clone(),
             uninitialized,
@@ -169,11 +168,11 @@ mod committees {
 
     fn execute_committee_consistency_test<E: EthSpec>(
         state: BeaconState<E>,
-        shufflings: &Shufflings,
         epoch: Epoch,
         validator_count: usize,
         spec: &ChainSpec,
     ) {
+        let shufflings = Shufflings::for_state(&state, spec).unwrap();
         let active_indices: Vec<usize> = (0..validator_count).collect();
         let seed = state.get_seed(epoch, Domain::BeaconAttester, spec).unwrap();
         let relative_epoch = RelativeEpoch::from_epoch(state.current_epoch(), epoch).unwrap();
@@ -257,17 +256,9 @@ mod committees {
             (0..E::epochs_per_historical_vector()).map(|i| Hash256::from_low_u64_be(i as u64));
         *new_head_state.randao_mixes_mut() = Vector::try_from_iter(distinct_hashes).unwrap();
 
-        let shufflings = Shufflings::for_state(&new_head_state, spec).unwrap();
-
         let cache_epoch = cache_epoch.into_epoch(state_epoch);
 
-        execute_committee_consistency_test(
-            new_head_state,
-            &shufflings,
-            cache_epoch,
-            validator_count,
-            spec,
-        );
+        execute_committee_consistency_test(new_head_state, cache_epoch, validator_count, spec);
     }
 
     async fn committee_consistency_test_suite<E: EthSpec>(cached_epoch: RelativeEpoch) {

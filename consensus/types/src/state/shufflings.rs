@@ -34,9 +34,8 @@ impl Shufflings {
         spec: &ChainSpec,
     ) -> Result<Self, BeaconStateError> {
         let state_epoch = state.current_epoch();
-        Self::new(
+        Self::new::<E>(
             state_epoch,
-            E::slots_per_epoch(),
             state.initialize_committee_cache(
                 RelativeEpoch::Previous.into_epoch(state_epoch),
                 spec,
@@ -47,9 +46,8 @@ impl Shufflings {
         )
     }
 
-    pub fn new(
+    pub fn new<E: EthSpec>(
         state_epoch: Epoch,
-        slots_per_epoch: u64,
         previous: Arc<CommitteeCache>,
         current: Arc<CommitteeCache>,
         next: Arc<CommitteeCache>,
@@ -59,7 +57,7 @@ impl Shufflings {
         check_initialized(&next, RelativeEpoch::Next, state_epoch)?;
         Ok(Self {
             state_epoch,
-            slots_per_epoch,
+            slots_per_epoch: E::slots_per_epoch(),
             previous,
             current,
             next,

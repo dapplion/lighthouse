@@ -1140,11 +1140,8 @@ mod release_tests {
 
         for (atts, _) in attestations {
             for (att, _) in atts {
-                let attesting_indices = get_attesting_indices_from_state(
-                    &Shufflings::for_state(&state, spec).unwrap(),
-                    att.to_ref(),
-                )
-                .unwrap();
+                let attesting_indices =
+                    get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
                 op_pool.insert_attestation(att, attesting_indices).unwrap();
             }
         }
@@ -1154,13 +1151,7 @@ mod release_tests {
         // Before the min attestation inclusion delay, get_attestations shouldn't return anything.
         assert_eq!(
             op_pool
-                .get_attestations(
-                    &state,
-                    &Shufflings::for_state(&state, spec).unwrap(),
-                    |_| true,
-                    |_| true,
-                    spec,
-                )
+                .get_attestations(&state, &shufflings, |_| true, |_| true, spec,)
                 .expect("should have attestations")
                 .len(),
             0
@@ -1170,13 +1161,7 @@ mod release_tests {
         *state.slot_mut() += spec.min_attestation_inclusion_delay;
 
         let block_attestations = op_pool
-            .get_attestations(
-                &state,
-                &Shufflings::for_state(&state, spec).unwrap(),
-                |_| true,
-                |_| true,
-                spec,
-            )
+            .get_attestations(&state, &shufflings, |_| true, |_| true, spec)
             .expect("Should have block attestations");
         assert_eq!(block_attestations.len(), committees.len());
 
@@ -1228,11 +1213,7 @@ mod release_tests {
         for (_, aggregate) in attestations {
             let agg = aggregate.unwrap();
             let att = agg.message().aggregate();
-            let attesting_indices = get_attesting_indices_from_state(
-                &Shufflings::for_state(&state, spec).unwrap(),
-                att,
-            )
-            .unwrap();
+            let attesting_indices = get_attesting_indices_from_state(&shufflings, att).unwrap();
             op_pool
                 .insert_attestation(att.clone_as_attestation(), attesting_indices.clone())
                 .unwrap();
@@ -1319,11 +1300,8 @@ mod release_tests {
                 .collect::<Vec<_>>();
 
             for att in aggs1.into_iter().chain(aggs2) {
-                let attesting_indices = get_attesting_indices_from_state(
-                    &Shufflings::for_state(&state, spec).unwrap(),
-                    att.to_ref(),
-                )
-                .unwrap();
+                let attesting_indices =
+                    get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
                 op_pool.insert_attestation(att, attesting_indices).unwrap();
             }
         }
@@ -1396,11 +1374,8 @@ mod release_tests {
                 .collect::<Vec<_>>();
 
             for att in aggs {
-                let attesting_indices = get_attesting_indices_from_state(
-                    &Shufflings::for_state(&state, spec).unwrap(),
-                    att.to_ref(),
-                )
-                .unwrap();
+                let attesting_indices =
+                    get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
                 op_pool.insert_attestation(att, attesting_indices).unwrap();
             }
         };
@@ -1433,13 +1408,7 @@ mod release_tests {
 
         *state.slot_mut() += spec.min_attestation_inclusion_delay;
         let best_attestations = op_pool
-            .get_attestations(
-                &state,
-                &Shufflings::for_state(&state, spec).unwrap(),
-                |_| true,
-                |_| true,
-                spec,
-            )
+            .get_attestations(&state, &shufflings, |_| true, |_| true, spec)
             .expect("should have best attestations");
         if fork_name.electra_enabled() {
             assert_eq!(best_attestations.len(), 8);
@@ -1517,11 +1486,8 @@ mod release_tests {
                 .collect::<Vec<_>>();
 
             for att in aggs {
-                let attesting_indices = get_attesting_indices_from_state(
-                    &Shufflings::for_state(&state, spec).unwrap(),
-                    att.to_ref(),
-                )
-                .unwrap();
+                let attesting_indices =
+                    get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
                 op_pool.insert_attestation(att, attesting_indices).unwrap();
             }
         };
@@ -1555,13 +1521,7 @@ mod release_tests {
 
         *state.slot_mut() += spec.min_attestation_inclusion_delay;
         let best_attestations = op_pool
-            .get_attestations(
-                &state,
-                &Shufflings::for_state(&state, spec).unwrap(),
-                |_| true,
-                |_| true,
-                spec,
-            )
+            .get_attestations(&state, &shufflings, |_| true, |_| true, spec)
             .expect("should have valid best attestations");
 
         if fork_name.electra_enabled() {
@@ -1581,16 +1541,13 @@ mod release_tests {
         reward_cache.update(&state).unwrap();
 
         for att in best_attestations {
-            let attesting_indices = get_attesting_indices_from_state(
-                &Shufflings::for_state(&state, spec).unwrap(),
-                att.to_ref(),
-            )
-            .unwrap();
+            let attesting_indices =
+                get_attesting_indices_from_state(&shufflings, att.to_ref()).unwrap();
             let split_attestation = SplitAttestation::new(att, attesting_indices);
             let mut fresh_validators_rewards = AttMaxCover::new(
                 split_attestation.as_ref(),
                 &state,
-                &Shufflings::for_state(&state, spec).unwrap(),
+                &shufflings,
                 &reward_cache,
                 total_active_balance,
                 spec,

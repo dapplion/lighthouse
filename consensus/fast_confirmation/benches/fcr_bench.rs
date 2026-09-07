@@ -275,7 +275,7 @@ fn build_chain_inner(
             .expect("push balance");
     }
     let seed_assignments =
-        SlotAssignments::new(&seed_state, &spec, None, None).expect("slot assignments");
+        SlotAssignments::new(&seed_state, &spec, None).expect("slot assignments");
     let mut fcr = FastConfirmationRule::new(
         finalized_checkpoint.root,
         &seed_state,

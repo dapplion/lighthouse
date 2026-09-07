@@ -5082,9 +5082,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
     }
 
-    // For the current and next epoch of this state, ensure we have the shuffling from this
-    // block in our cache.
-    #[instrument(skip_all, level = "debug")]
     /// Obtain the committee shufflings describing `state`, whose latest applied block is
     /// `block_root`.
     ///
@@ -5097,13 +5094,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         block_root: Hash256,
     ) -> Result<Shufflings, Error> {
         let state_epoch = state.current_epoch();
-        let mut caches = Vec::with_capacity(CACHED_EPOCHS);
 
-        for relative_epoch in [
-            RelativeEpoch::Previous,
-            RelativeEpoch::Current,
-            RelativeEpoch::Next,
-        ] {
+        let shuffling = |relative_epoch: RelativeEpoch| -> Result<Arc<CommitteeCache>, Error> {
             let epoch = relative_epoch.into_epoch(state_epoch);
             let shuffling_id = AttestationShufflingId::new(block_root, state, relative_epoch)?;
 
@@ -5112,8 +5104,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .read()
                 .get_shuffling_if_cached(&shuffling_id)
             {
-                caches.push(cached.committee_cache);
-                continue;
+                return Ok(cached.committee_cache);
             }
 
             let committee_cache = state.initialize_committee_cache(epoch, &self.spec)?;
@@ -5128,27 +5119,20 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 );
             }
 
-            caches.push(committee_cache);
-        }
-
-        let mut caches = caches.into_iter();
-        let (Some(previous), Some(current), Some(next)) =
-            (caches.next(), caches.next(), caches.next())
-        else {
-            return Err(Error::BeaconStateError(
-                BeaconStateError::CommitteeCacheUninitialized(None),
-            ));
+            Ok(committee_cache)
         };
 
-        Ok(Shufflings::new(
+        Ok(Shufflings::new::<T::EthSpec>(
             state_epoch,
-            T::EthSpec::slots_per_epoch(),
-            previous,
-            current,
-            next,
+            shuffling(RelativeEpoch::Previous)?,
+            shuffling(RelativeEpoch::Current)?,
+            shuffling(RelativeEpoch::Next)?,
         )?)
     }
 
+    // For the current and next epoch of this state, ensure we have the shuffling from this
+    // block in our cache.
+    #[instrument(skip_all, level = "debug")]
     fn import_block_update_shuffling_cache(
         &self,
         block_root: Hash256,

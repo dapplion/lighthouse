@@ -1580,8 +1580,7 @@ mod tests {
             root: Hash256::repeat_byte(1),
         };
         let head_root_a = Hash256::repeat_byte(2);
-        let slot_assignments =
-            SlotAssignments::new(&state, &spec, None, None).expect("slot assignments");
+        let slot_assignments = SlotAssignments::new(&state, &spec, None).expect("slot assignments");
         let mut fcr = FastConfirmationRule::new::<E>(
             head_root_a,
             &state,

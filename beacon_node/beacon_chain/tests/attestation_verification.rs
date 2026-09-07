@@ -322,21 +322,20 @@ impl GossipTester {
 
         let head = harness.chain.head_snapshot();
         let state = &head.beacon_state;
-        let committee = Shufflings::for_state(state, &harness.chain.spec)
-            .unwrap()
+        let shufflings = harness.shufflings(state);
+        let committee = shufflings
             .get_beacon_committee(
                 valid_attestation.data.slot,
                 valid_attestation.committee_index,
             )
-            .unwrap()
-            .committee
-            .to_vec();
+            .unwrap();
         let fork_name = harness
             .chain
             .spec
             .fork_name_at_slot::<E>(valid_attestation.data.slot);
         let valid_aggregate_attestation =
-            single_attestation_to_attestation(&valid_attestation, &committee, fork_name).unwrap();
+            single_attestation_to_attestation(&valid_attestation, committee.committee, fork_name)
+                .unwrap();
 
         let (valid_aggregate, aggregator_validator_index, aggregator_sk) =
             get_valid_aggregated_attestation(&harness.chain, valid_aggregate_attestation.clone());
@@ -1598,21 +1597,20 @@ async fn verify_aggregate_for_gossip_doppelganger_detection() {
 
     let head = harness.chain.head_snapshot();
     let state = &head.beacon_state;
-    let committee = harness
-        .shufflings(state)
+    let shufflings = harness.shufflings(state);
+    let committee = shufflings
         .get_beacon_committee(
             valid_attestation.data.slot,
             valid_attestation.committee_index,
         )
-        .unwrap()
-        .committee
-        .to_vec();
+        .unwrap();
     let fork_name = harness
         .chain
         .spec
         .fork_name_at_slot::<E>(valid_attestation.data.slot);
     let valid_attestation =
-        single_attestation_to_attestation(&valid_attestation, &committee, fork_name).unwrap();
+        single_attestation_to_attestation(&valid_attestation, committee.committee, fork_name)
+            .unwrap();
     let (valid_aggregate, _, _) =
         get_valid_aggregated_attestation(&harness.chain, valid_attestation);
 
@@ -2064,17 +2062,16 @@ async fn gloas_aggregated_attestation_same_slot_index_must_be_zero() {
     );
 
     // Convert to aggregate
-    let committee = harness
-        .shufflings(&head.beacon_state)
+    let shufflings = harness.shufflings(&head.beacon_state);
+    let committee = shufflings
         .get_beacon_committee(current_slot, valid_attestation.committee_index)
-        .expect("should get committee")
-        .committee
-        .to_vec();
+        .expect("should get committee");
     let fork_name = harness
         .spec
         .fork_name_at_slot::<E>(valid_attestation.data.slot);
     let aggregate_attestation =
-        single_attestation_to_attestation(&valid_attestation, &committee, fork_name).unwrap();
+        single_attestation_to_attestation(&valid_attestation, committee.committee, fork_name)
+            .unwrap();
 
     let (mut valid_aggregate, _, _) =
         get_valid_aggregated_attestation(&harness.chain, aggregate_attestation);
@@ -2236,17 +2233,16 @@ async fn gloas_aggregated_attestation_unknown_payload_envelope() {
         valid_attestation.data.beacon_block_root, block_root,
         "attestation should be for the payload-less head block"
     );
-    let committee = harness
-        .shufflings(&head.beacon_state)
+    let shufflings = harness.shufflings(&head.beacon_state);
+    let committee = shufflings
         .get_beacon_committee(current_slot, valid_attestation.committee_index)
-        .expect("should get committee")
-        .committee
-        .to_vec();
+        .expect("should get committee");
     let fork_name = harness
         .spec
         .fork_name_at_slot::<E>(valid_attestation.data.slot);
     let aggregate_attestation =
-        single_attestation_to_attestation(&valid_attestation, &committee, fork_name).unwrap();
+        single_attestation_to_attestation(&valid_attestation, committee.committee, fork_name)
+            .unwrap();
     let (mut valid_aggregate, _, _) =
         get_valid_aggregated_attestation(&harness.chain, aggregate_attestation);
 

@@ -79,7 +79,7 @@ pub mod attesting_indices_electra {
         get_indexed_attestation(&committees, attestation)
     }
 
-    /// Shortcut for getting the attesting indices while fetching the committee from the state's cache.
+    /// Shortcut for getting the attesting indices from the `shufflings` committees.
     pub fn get_attesting_indices_from_state<E: EthSpec>(
         shufflings: &Shufflings,
         att: &AttestationElectra<E>,
@@ -197,7 +197,7 @@ pub mod attesting_indices_gloas {
         get_indexed_attestation(&committees, attestation)
     }
 
-    /// Shortcut for getting the attesting indices while fetching the committee from the state's cache.
+    /// Shortcut for getting the attesting indices from the `shufflings` committees.
     pub fn get_attesting_indices_from_state<E: EthSpec>(
         shufflings: &Shufflings,
         att: &AttestationGloas<E>,
@@ -211,7 +211,7 @@ pub mod attesting_indices_gloas {
     }
 }
 
-/// Shortcut for getting the attesting indices while fetching the committee from the state's cache.
+/// Shortcut for getting the attesting indices from the `shufflings` committees.
 pub fn get_attesting_indices_from_state<E: EthSpec>(
     shufflings: &Shufflings,
     att: AttestationRef<E>,

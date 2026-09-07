@@ -41,7 +41,7 @@ fn advance_state(state: &mut BeaconState<E>, target: Slot, spec: &ChainSpec) {
 #[test]
 fn builds_from_genesis_state() {
     let (state, spec) = genesis_state(64);
-    SlotAssignments::new::<E>(&state, &spec, None, None).expect("builds from genesis state");
+    SlotAssignments::new::<E>(&state, &spec, None).expect("builds from genesis state");
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn every_validator_attests_once_in_current_epoch() {
     let spe = E::slots_per_epoch();
     let start = Slot::new(spe * 2);
     advance_state(&mut state, start, &spec);
-    let sa = SlotAssignments::new::<E>(&state, &spec, None, None).expect("build");
+    let sa = SlotAssignments::new::<E>(&state, &spec, None).expect("build");
 
     let end = Slot::new(spe * 2 + spe - 1);
     for val_idx in 0..state.validators().len() {
@@ -68,10 +68,10 @@ fn builds_from_state_with_unbuilt_caches() {
     let (mut state, spec) = genesis_state(64);
     let spe = E::slots_per_epoch();
     advance_state(&mut state, Slot::new(spe * 2), &spec);
-    let control = SlotAssignments::new::<E>(&state, &spec, None, None).expect("build with caches");
+    let control = SlotAssignments::new::<E>(&state, &spec, None).expect("build with caches");
 
     state.drop_all_caches().expect("drop caches");
-    let rebuilt = SlotAssignments::new::<E>(&state, &spec, None, None)
+    let rebuilt = SlotAssignments::new::<E>(&state, &spec, None)
         .expect("builds when committee caches are uninitialized");
 
     for val_idx in 0..state.validators().len() {
@@ -89,7 +89,7 @@ fn builds_from_state_with_unbuilt_caches() {
 #[test]
 fn is_in_range_returns_false_for_uncovered_epochs() {
     let (state, spec) = genesis_state(64);
-    let sa = SlotAssignments::new::<E>(&state, &spec, None, None).expect("build");
+    let sa = SlotAssignments::new::<E>(&state, &spec, None).expect("build");
     let far = Slot::new(E::slots_per_epoch() * 5);
     for val_idx in 0..state.validators().len() {
         assert!(!sa.is_in_range(val_idx, far, far).unwrap());

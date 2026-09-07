@@ -182,6 +182,8 @@ impl<E: EthSpec> ConsensusContext<E> {
         attestation: AttestationRef<'a, E>,
     ) -> Result<IndexedAttestationRef<'a, E>, BlockOperationError<AttestationInvalid>> {
         let key = attestation.tree_hash_root();
+        // Borrow the field rather than calling `self.shufflings()`, which would hold an immutable
+        // borrow of `self` across the `indexed_attestations` entry below.
         let shufflings = self
             .shufflings
             .as_ref()

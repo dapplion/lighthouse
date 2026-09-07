@@ -8,7 +8,7 @@ use safe_arith::SafeArith;
 use crate::{
     attestation::AttestationShufflingId,
     core::{ChainSpec, Epoch, EthSpec, Hash256, RelativeEpoch, Slot},
-    state::{BeaconState, BeaconStateError, CommitteeCache, Shufflings},
+    state::{BeaconState, BeaconStateError, CommitteeCache},
 };
 
 /// One of the three epochs the assignment window covers.
@@ -61,20 +61,13 @@ impl WindowEpoch {
         ))
     }
 
-    /// `Current`/`Previous` come from the state's caches when built; `PrevPrev` is always
-    /// recomputed.
+    /// Shufflings unchanged from `prev` are reused by `SlotAssignment::new`; anything else is
+    /// computed here.
     fn committee_cache<E: EthSpec>(
         self,
         state: &BeaconState<E>,
-        shufflings: Option<&Shufflings>,
         spec: &ChainSpec,
     ) -> Result<Arc<CommitteeCache>, BeaconStateError> {
-        if let Some(shufflings) = shufflings {
-            shufflings.check_matches(state)?;
-            if let Some(relative_epoch) = self.relative_epoch() {
-                return Ok(shufflings.committee_cache(relative_epoch).clone());
-            }
-        }
         state.initialize_committee_cache(self.epoch(state), spec)
     }
 }
@@ -94,7 +87,6 @@ impl SlotAssignment {
         window_epoch: WindowEpoch,
         spec: &ChainSpec,
         prev: Option<&SlotAssignments>,
-        shufflings: Option<&Shufflings>,
     ) -> Result<Self, BeaconStateError> {
         let key = window_epoch.shuffling_id(state)?;
         if let Some(existing) =
@@ -105,7 +97,7 @@ impl SlotAssignment {
         let epoch = window_epoch.epoch(state);
         Ok(Self {
             key,
-            committee_cache: window_epoch.committee_cache(state, shufflings, spec)?,
+            committee_cache: window_epoch.committee_cache(state, spec)?,
             epoch_start_slot: epoch.start_slot(E::slots_per_epoch()),
             epoch_end_slot: epoch.end_slot(E::slots_per_epoch()),
         })
@@ -125,13 +117,12 @@ impl SlotAssignments {
         state: &BeaconState<E>,
         spec: &ChainSpec,
         prev: Option<&Self>,
-        shufflings: Option<&Shufflings>,
     ) -> Result<Self, BeaconStateError> {
         Ok(Self {
             assignments: [
-                SlotAssignment::new(state, WindowEpoch::PrevPrev, spec, prev, shufflings)?,
-                SlotAssignment::new(state, WindowEpoch::Previous, spec, prev, shufflings)?,
-                SlotAssignment::new(state, WindowEpoch::Current, spec, prev, shufflings)?,
+                SlotAssignment::new(state, WindowEpoch::PrevPrev, spec, prev)?,
+                SlotAssignment::new(state, WindowEpoch::Previous, spec, prev)?,
+                SlotAssignment::new(state, WindowEpoch::Current, spec, prev)?,
             ],
         })
     }
