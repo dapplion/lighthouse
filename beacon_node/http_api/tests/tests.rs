@@ -6108,9 +6108,11 @@ impl ApiTester {
 
         let mut head = self.chain.head_snapshot().as_ref().clone();
         while head.beacon_state.current_epoch() < epoch {
+            let mut shufflings =
+                Shufflings::for_state(&head.beacon_state, &self.chain.spec).unwrap();
             per_slot_processing(
                 &mut head.beacon_state,
-                None,
+                &mut shufflings,
                 None,
                 GloasVerificationContext::FullVerification,
                 &self.chain.spec,
@@ -8720,9 +8722,10 @@ impl ApiTester {
         let proposal_epoch = proposal_slot.epoch(E::slots_per_epoch());
         let (state_root, _, _) = StateId(state_id).root(&self.chain).unwrap();
         if proposal_epoch != state.current_epoch() {
+            let mut shufflings = Shufflings::for_state(&state, &self.chain.spec).unwrap();
             let _ = partial_state_advance(
                 &mut state,
-                None,
+                &mut shufflings,
                 Some(state_root),
                 proposal_slot,
                 None,

@@ -26,9 +26,8 @@ pub struct ConsensusContext<E: EthSpec> {
     pub proposer_index: Option<u64>,
     /// Block root of the block at `slot`.
     pub current_block_root: Option<Hash256>,
-    /// Committee shufflings for the state this context is used with. Set via `set_shufflings`
-    /// before any operation that needs a committee; reads error rather than assume.
-    shufflings: Option<Shufflings>,
+    /// Committee shufflings for the state this context is used with.
+    shufflings: Shufflings,
     /// Cache of indexed attestations constructed during block processing.
     pub indexed_attestations: HashMap<Hash256, IndexedAttestation<E>>,
     /// Cache of indexed payload attestations constructed during block processing.
@@ -56,21 +55,19 @@ impl From<EpochCacheError> for ContextError {
 }
 
 impl<E: EthSpec> ConsensusContext<E> {
-    /// Provide the committee shufflings for the state this context will be used with.
+    /// Replace the shufflings, for when the context moves to a state at a different slot.
     #[must_use]
     pub fn set_shufflings(mut self, shufflings: Shufflings) -> Self {
-        self.shufflings = Some(shufflings);
+        self.shufflings = shufflings;
         self
     }
 
-    /// The shufflings for the state this context is used with, or an error if none were set.
-    pub fn shufflings(&self) -> Result<&Shufflings, BeaconStateError> {
-        self.shufflings
-            .as_ref()
-            .ok_or(BeaconStateError::ShufflingsNotProvided)
+    /// The shufflings for the state this context is used with.
+    pub fn shufflings(&self) -> &Shufflings {
+        &self.shufflings
     }
 
-    pub fn new(slot: Slot) -> Self {
+    pub fn new(slot: Slot, shufflings: Shufflings) -> Self {
         let current_epoch = slot.epoch(E::slots_per_epoch());
         let previous_epoch = current_epoch.saturating_sub(1u64);
         Self {
@@ -79,7 +76,7 @@ impl<E: EthSpec> ConsensusContext<E> {
             current_epoch,
             proposer_index: None,
             current_block_root: None,
-            shufflings: None,
+            shufflings,
             indexed_attestations: HashMap::new(),
             indexed_payload_attestations: HashMap::new(),
         }
@@ -184,10 +181,7 @@ impl<E: EthSpec> ConsensusContext<E> {
         let key = attestation.tree_hash_root();
         // Borrow the field rather than calling `self.shufflings()`, which would hold an immutable
         // borrow of `self` across the `indexed_attestations` entry below.
-        let shufflings = self
-            .shufflings
-            .as_ref()
-            .ok_or(BeaconStateError::ShufflingsNotProvided)?;
+        let shufflings = &self.shufflings;
         shufflings.check_matches(state)?;
         match attestation {
             AttestationRef::Base(attn) => match self.indexed_attestations.entry(key) {

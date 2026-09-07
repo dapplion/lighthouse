@@ -30,7 +30,7 @@ fn get_epoch_processing_summary<E: EthSpec>(
 ) -> Result<EpochProcessingSummary<E>, warp::reject::Rejection> {
     let mut shufflings = Shufflings::for_state(state, spec)
         .map_err(|e| warp_utils::reject::custom_server_error(format!("{:?}", e)))?;
-    process_epoch(state, Some(&mut shufflings), spec)
+    process_epoch(state, &mut shufflings, spec)
         .map_err(|e| warp_utils::reject::custom_server_error(format!("{:?}", e)))
 }
 

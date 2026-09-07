@@ -887,7 +887,7 @@ mod test {
             .collect();
 
         let slot = block.slot();
-        let consensus_context = ConsensusContext::<E>::new(slot);
+        let consensus_context = ConsensusContext::<E>::new(slot, harness.shufflings(&state));
         let import_data: BlockImportData<E> = BlockImportData {
             block_root,
             state,
@@ -1085,7 +1085,7 @@ mod pending_components_tests {
     use fork_choice::PayloadVerificationStatus;
     use kzg::KzgCommitment;
     use state_processing::ConsensusContext;
-    use types::{BeaconState, ForkName, MainnetEthSpec, SignedBeaconBlock, Slot};
+    use types::{BeaconState, ForkName, MainnetEthSpec, Shufflings, SignedBeaconBlock, Slot};
 
     type E = MainnetEthSpec;
 
@@ -1156,13 +1156,18 @@ mod pending_components_tests {
                 .collect::<Vec<_>>(),
         );
         let dummy_parent = block.clone_as_blinded();
+        let dummy_state = BeaconState::new(0, Default::default(), &ChainSpec::minimal());
         let block = AvailabilityPendingExecutedBlock {
             block: Arc::new(block),
             import_data: BlockImportData {
                 block_root: Default::default(),
-                state: BeaconState::new(0, Default::default(), &ChainSpec::minimal()),
+                state: dummy_state.clone(),
                 parent_block: dummy_parent,
-                consensus_context: ConsensusContext::new(Slot::new(0)),
+                consensus_context: ConsensusContext::new(
+                    Slot::new(0),
+                    Shufflings::for_state(&dummy_state, &ChainSpec::minimal())
+                        .expect("dummy shufflings"),
+                ),
             },
             payload_verification_outcome: PayloadVerificationOutcome {
                 payload_verification_status: PayloadVerificationStatus::Verified,

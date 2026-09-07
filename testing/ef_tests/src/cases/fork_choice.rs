@@ -37,7 +37,8 @@ use types::{
     BlobSidecar, BlobsList, BlockImportSource, Checkpoint, DataColumnSidecar,
     DataColumnSidecarList, DataColumnSubnetId, Epoch, ExecutionBlockHash, Hash256,
     IndexedAttestation, IndexedPayloadAttestation, KzgProof, PayloadAttestationMessage,
-    ProposerPreparationData, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot, Uint256,
+    ProposerPreparationData, Shufflings, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
+    Uint256,
 };
 
 // When set to true, cache any states fetched from the db.
@@ -927,9 +928,11 @@ impl<E: EthSpec> Tester<E> {
                 .unwrap()
                 .unwrap();
 
+            let mut shufflings = Shufflings::for_state(&state, &self.harness.chain.spec)
+                .map_err(|e| Error::InternalError(format!("{e:?}")))?;
             complete_state_advance(
                 &mut state,
-                None,
+                &mut shufflings,
                 Some(parent_state_root),
                 block.slot(),
                 None,

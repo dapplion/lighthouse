@@ -196,7 +196,16 @@ impl ForkChoiceTest {
             // Skip slashed proposers, as we expect validators to get slashed in these tests.
             // Presently `make_block` will panic if the proposer is slashed, so we just avoid
             // calling it in this case.
-            complete_state_advance(&mut state, None, None, slot, None, &self.harness.spec).unwrap();
+            let mut shufflings = Shufflings::for_state(&state, &self.harness.spec).unwrap();
+            complete_state_advance(
+                &mut state,
+                &mut shufflings,
+                None,
+                slot,
+                None,
+                &self.harness.spec,
+            )
+            .unwrap();
             state.build_caches(&self.harness.spec).unwrap();
             let proposer_index = state
                 .get_beacon_proposer_index(slot, &self.harness.chain.spec)

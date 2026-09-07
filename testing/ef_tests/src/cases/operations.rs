@@ -4,6 +4,7 @@ use crate::case_result::compare_beacon_state_results_without_caches;
 use crate::decode::{ssz_decode_file, ssz_decode_file_with, ssz_decode_state, yaml_decode_file};
 use serde::Deserialize;
 use ssz::Decode;
+use state_processing::AllCaches;
 use state_processing::common::update_progressive_balances_cache::initialize_progressive_balances_cache;
 use state_processing::envelope_processing::verify_execution_payload_envelope;
 use state_processing::epoch_cache::initialize_epoch_cache;
@@ -27,6 +28,7 @@ use state_processing::{
     },
 };
 use std::fmt::Debug;
+use types::Shufflings;
 use types::{
     Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconBlockBodyBellatrix,
     BeaconBlockBodyCapella, BeaconBlockBodyDeneb, BeaconBlockBodyElectra, BeaconBlockBodyFulu,
@@ -129,7 +131,7 @@ impl<E: EthSpec> Operation<E> for Attestation<E> {
     ) -> Result<(), BlockProcessingError> {
         initialize_epoch_cache(state, spec)?;
         initialize_progressive_balances_cache(state, spec)?;
-        let mut ctxt = ConsensusContext::new(state.slot());
+        let mut ctxt = ConsensusContext::new(state.slot(), Shufflings::for_state(state, spec)?);
         if state.fork_name_unchecked().gloas_enabled() {
             let parent_slot = Some(state.latest_execution_payload_bid()?.slot);
             gloas::process_attestation(
@@ -185,7 +187,7 @@ impl<E: EthSpec> Operation<E> for AttesterSlashing<E> {
         spec: &ChainSpec,
         _: &Operations<E, Self>,
     ) -> Result<(), BlockProcessingError> {
-        let mut ctxt = ConsensusContext::new(state.slot());
+        let mut ctxt = ConsensusContext::new(state.slot(), Shufflings::for_state(state, spec)?);
         initialize_progressive_balances_cache(state, spec)?;
         process_attester_slashings(
             state,
@@ -245,7 +247,7 @@ impl<E: EthSpec> Operation<E> for ProposerSlashing {
         spec: &ChainSpec,
         _: &Operations<E, Self>,
     ) -> Result<(), BlockProcessingError> {
-        let mut ctxt = ConsensusContext::new(state.slot());
+        let mut ctxt = ConsensusContext::new(state.slot(), Shufflings::for_state(state, spec)?);
         initialize_progressive_balances_cache(state, spec)?;
         process_proposer_slashings(
             state,
@@ -338,7 +340,7 @@ impl<E: EthSpec> Operation<E> for BeaconBlock<E> {
         spec: &ChainSpec,
         _: &Operations<E, Self>,
     ) -> Result<(), BlockProcessingError> {
-        let mut ctxt = ConsensusContext::new(state.slot());
+        let mut ctxt = ConsensusContext::new(state.slot(), Shufflings::for_state(state, spec)?);
         process_block_header(
             state,
             self.to_ref().temporary_block_header(),
@@ -824,7 +826,7 @@ impl<E: EthSpec> Operation<E> for PayloadAttestation<E> {
         spec: &ChainSpec,
         _extra: &Operations<E, Self>,
     ) -> Result<(), BlockProcessingError> {
-        let mut ctxt = ConsensusContext::new(state.slot());
+        let mut ctxt = ConsensusContext::new(state.slot(), Shufflings::for_state(state, spec)?);
         process_payload_attestation(state, self, 0, VerifySignatures::True, &mut ctxt, spec)
     }
 }
@@ -894,7 +896,11 @@ impl<E: EthSpec, O: Operation<E>> Case for Operations<E, O> {
         let spec = &testing_spec::<E>(fork_name);
 
         let mut state = self.pre.clone();
+        state.build_all_caches(spec).unwrap();
         let mut expected = self.post.clone();
+        if let Some(post_state) = expected.as_mut() {
+            post_state.build_all_caches(spec).unwrap();
+        }
 
         let mut result = self
             .operation

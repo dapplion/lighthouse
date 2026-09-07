@@ -20,7 +20,9 @@ use state_processing::state_advance::partial_state_advance;
 use std::sync::Arc;
 use tracing::{debug, instrument};
 use typenum::Unsigned;
-use types::{BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec, Fork, Hash256, Slot};
+use types::{
+    BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec, Fork, Hash256, Shufflings, Slot,
+};
 
 /// The number of sets of proposer indices that should be cached.
 const CACHE_SIZE: usize = 16;
@@ -342,9 +344,10 @@ pub fn ensure_state_can_determine_proposers_for_epoch<E: EthSpec>(
     } else {
         // State's current epoch is less than the minimum epoch.
         // Advance the state up to the minimum epoch.
+        let mut shufflings = Shufflings::for_state(state, spec)?;
         partial_state_advance(
             state,
-            None,
+            &mut shufflings,
             Some(state_root),
             minimum_slot,
             builder_onboarding_cache,

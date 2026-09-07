@@ -2413,9 +2413,10 @@ mod release_tests {
 
         // Advance state to slot 2 so get_payload_attestations looks at slot 1.
         let mut advanced_state = state.clone();
+        let mut shufflings = Shufflings::for_state(&advanced_state, &spec).unwrap();
         state_processing::state_advance::complete_state_advance(
             &mut advanced_state,
-            None,
+            &mut shufflings,
             None,
             Slot::new(2),
             None,
@@ -2492,9 +2493,10 @@ mod release_tests {
         }
 
         let mut advanced_state = state.clone();
+        let mut shufflings = Shufflings::for_state(&advanced_state, &spec).unwrap();
         state_processing::state_advance::complete_state_advance(
             &mut advanced_state,
-            None,
+            &mut shufflings,
             None,
             Slot::new(2),
             None,
@@ -2575,9 +2577,10 @@ mod release_tests {
 
         // When: we pack attestations for block production at slot 2.
         let mut advanced_state = state.clone();
+        let mut shufflings = Shufflings::for_state(&advanced_state, &spec).unwrap();
         state_processing::state_advance::complete_state_advance(
             &mut advanced_state,
-            None,
+            &mut shufflings,
             None,
             Slot::new(2),
             None,

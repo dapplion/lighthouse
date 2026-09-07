@@ -52,8 +52,6 @@ use crate::{
     withdrawal::PendingPartialWithdrawal,
 };
 
-pub const CACHED_EPOCHS: usize = 3;
-
 // Pre-electra WS calculations are not supported. On mainnet, pre-electra epochs are outside the
 // weak subjectivity period. The default pre-electra WS value is set to 256 to allow for `basic-sim`
 // and `fallback-sim` tests to pass. 256 is a small enough number to trigger the WS safety check
@@ -94,8 +92,6 @@ pub enum BeaconStateError {
     /// A state for a different hard-fork was required -- a severe logic error.
     IncorrectStateVariant,
     EpochOutOfBounds,
-    /// A caller needed committee shufflings but none were supplied.
-    ShufflingsNotProvided,
     /// The supplied shufflings do not describe the state they were passed with.
     ShufflingsEpochMismatch {
         shufflings: Epoch,
@@ -2567,6 +2563,7 @@ impl<E: EthSpec> BeaconState<E> {
     /// Build all caches (except the tree hash cache), if they need to be built.
     #[instrument(skip_all, level = "debug")]
     pub fn build_caches(&mut self, spec: &ChainSpec) -> Result<(), BeaconStateError> {
+        self.build_active_totals_cache(spec)?;
         self.update_pubkey_cache()?;
         self.build_exit_cache(spec)?;
         self.build_slashings_cache()?;

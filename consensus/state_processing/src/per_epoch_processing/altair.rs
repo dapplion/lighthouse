@@ -24,7 +24,7 @@ pub mod sync_committee_updates;
 
 pub fn process_epoch<E: EthSpec>(
     state: &mut BeaconState<E>,
-    shufflings: Option<&mut Shufflings>,
+    shufflings: &mut Shufflings,
     spec: &ChainSpec,
 ) -> Result<EpochProcessingSummary<E>, Error> {
     // Ensure the required caches are built.
@@ -75,17 +75,15 @@ pub fn process_epoch<E: EthSpec>(
 
     process_sync_committee_updates(state, spec)?;
 
-    // Rotate the caller's shufflings to suit the epoch transition. The incoming next shuffling is
-    // the lookahead built during PTC window processing when Gloas is enabled, and is computed here
+    // Rotate the shufflings to suit the epoch transition. The incoming next shuffling is the
+    // lookahead built during PTC window processing when Gloas is enabled, and is computed here
     // otherwise. `advance` rejects a cache that is not initialized for that epoch.
-    if let Some(shufflings) = shufflings {
-        let lookahead_epoch = RelativeEpoch::Next.into_epoch(state.next_epoch()?);
-        let next_shuffling = match epoch_result.lookahead_committee_cache {
-            Some(cache) => cache,
-            None => state.initialize_committee_cache_for_lookahead(lookahead_epoch, spec)?,
-        };
-        shufflings.advance(next_shuffling)?;
-    }
+    let lookahead_epoch = RelativeEpoch::Next.into_epoch(state.next_epoch()?);
+    let next_shuffling = match epoch_result.lookahead_committee_cache {
+        Some(cache) => cache,
+        None => state.initialize_committee_cache_for_lookahead(lookahead_epoch, spec)?,
+    };
+    shufflings.advance(next_shuffling)?;
 
     update_progressive_balances_on_epoch_transition(state, spec)?;
 

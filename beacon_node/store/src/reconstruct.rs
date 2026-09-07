@@ -149,7 +149,7 @@ where
                 // Advance state to slot.
                 per_slot_processing(
                     &mut state,
-                    Some(&mut shufflings),
+                    &mut shufflings,
                     prev_state_root.take(),
                     GloasVerificationContext::FullVerification,
                     &self.spec,
@@ -158,10 +158,9 @@ where
 
                 // Apply block.
                 if let Some(block) = block {
-                    let mut ctxt = ConsensusContext::new(block.slot())
+                    let mut ctxt = ConsensusContext::new(block.slot(), shufflings.clone())
                         .set_current_block_root(block_root)
-                        .set_proposer_index(block.message().proposer_index())
-                        .set_shufflings(shufflings.clone());
+                        .set_proposer_index(block.message().proposer_index());
 
                     per_block_processing(
                         &mut state,

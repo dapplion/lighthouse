@@ -8,7 +8,7 @@ use crate::per_epoch_processing::{
 pub use justification_and_finalization::process_justification_and_finalization;
 pub use participation_record_updates::process_participation_record_updates;
 pub use rewards_and_penalties::process_rewards_and_penalties;
-use types::{BeaconState, BeaconStateError, ChainSpec, EthSpec, RelativeEpoch, Shufflings};
+use types::{BeaconState, ChainSpec, EthSpec, RelativeEpoch, Shufflings};
 pub use validator_statuses::{TotalBalances, ValidatorStatus, ValidatorStatuses};
 
 pub mod justification_and_finalization;
@@ -18,11 +18,9 @@ pub mod validator_statuses;
 
 pub fn process_epoch<E: EthSpec>(
     state: &mut BeaconState<E>,
-    shufflings: Option<&mut Shufflings>,
+    shufflings: &mut Shufflings,
     spec: &ChainSpec,
 ) -> Result<EpochProcessingSummary<E>, Error> {
-    // Phase0 rewards read attestation committees, so shufflings are mandatory here.
-    let shufflings = shufflings.ok_or(BeaconStateError::ShufflingsNotProvided)?;
     shufflings.check_matches(state)?;
 
     state.build_active_totals_cache(spec)?;

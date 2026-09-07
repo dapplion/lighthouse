@@ -34,7 +34,7 @@ pub mod weigh_justification_and_finalization;
 #[instrument(skip_all)]
 pub fn process_epoch<E: EthSpec>(
     state: &mut BeaconState<E>,
-    shufflings: Option<&mut Shufflings>,
+    shufflings: &mut Shufflings,
     spec: &ChainSpec,
 ) -> Result<EpochProcessingSummary<E>, Error> {
     let _timer = metrics::start_timer(&metrics::PROCESS_EPOCH_TIME);

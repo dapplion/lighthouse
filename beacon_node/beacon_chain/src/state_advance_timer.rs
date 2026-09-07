@@ -288,9 +288,10 @@ fn advance_head<T: BeaconChainTypes>(beacon_chain: &Arc<BeaconChain<T>>) -> Resu
     let initial_epoch = state.current_epoch();
 
     // Advance the state a single slot.
+    let mut shufflings = beacon_chain.shufflings_for_state(&state, head_block_root)?;
     if let Some(summary) = per_slot_processing(
         &mut state,
-        None,
+        &mut shufflings,
         Some(head_state_root),
         GloasVerificationContext::from_cache(beacon_chain.builder_onboarding_cache.as_deref()),
         &beacon_chain.spec,

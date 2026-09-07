@@ -192,9 +192,12 @@ fn ensure_state_knows_attester_duties_for_epoch<E: EthSpec>(
             .start_slot(E::slots_per_epoch());
 
         // A "partial" state advance is adequate since attester duties don't rely on state roots.
+        let mut shufflings = Shufflings::for_state(state, spec)
+            .map_err(BeaconChainError::from)
+            .map_err(warp_utils::reject::unhandled_error)?;
         partial_state_advance(
             state,
-            None,
+            &mut shufflings,
             Some(state_root),
             target_slot,
             builder_onboarding_cache,

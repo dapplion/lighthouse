@@ -73,7 +73,8 @@ async fn valid_block_ok() {
         .make_block_return_pre_state(state, slot + Slot::new(1))
         .await;
 
-    let mut ctxt = ConsensusContext::new(block.slot());
+    let mut ctxt =
+        ConsensusContext::new(block.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = per_block_processing(
         &mut state,
         &block,
@@ -98,7 +99,8 @@ async fn invalid_block_header_state_slot() {
     let (mut block, signature) = (*signed_block).clone().deconstruct();
     *block.slot_mut() = slot + Slot::new(1);
 
-    let mut ctxt = ConsensusContext::new(block.slot());
+    let mut ctxt =
+        ConsensusContext::new(block.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = per_block_processing(
         &mut state,
         &SignedBeaconBlock::from_block(block, signature),
@@ -130,7 +132,8 @@ async fn invalid_parent_block_root() {
     let (mut block, signature) = (*signed_block).clone().deconstruct();
     *block.parent_root_mut() = Hash256::from([0xAA; 32]);
 
-    let mut ctxt = ConsensusContext::new(block.slot());
+    let mut ctxt =
+        ConsensusContext::new(block.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = per_block_processing(
         &mut state,
         &SignedBeaconBlock::from_block(block, signature),
@@ -160,7 +163,8 @@ async fn invalid_block_signature() {
         .await;
     let (block, _) = (*signed_block).clone().deconstruct();
 
-    let mut ctxt = ConsensusContext::new(block.slot());
+    let mut ctxt =
+        ConsensusContext::new(block.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = per_block_processing(
         &mut state,
         &SignedBeaconBlock::from_block(block, Signature::empty()),
@@ -192,7 +196,10 @@ async fn invalid_randao_reveal_signature() {
         })
         .await;
 
-    let mut ctxt = ConsensusContext::new(signed_block.slot());
+    let mut ctxt = ConsensusContext::new(
+        signed_block.slot(),
+        Shufflings::for_state(&state, &spec).unwrap(),
+    );
     let result = per_block_processing(
         &mut state,
         &signed_block,
@@ -440,7 +447,8 @@ async fn invalid_attestation_no_committee_for_index() {
         .unwrap()
         .into_data_mut()
         .index += 1;
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let parent_slot = state
         .latest_execution_payload_bid()
         .ok()
@@ -495,7 +503,8 @@ async fn invalid_attestation_wrong_justified_checkpoint() {
         .into_data_mut()
         .source = new_justified_checkpoint;
 
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let parent_slot = state
         .latest_execution_payload_bid()
         .ok()
@@ -554,7 +563,8 @@ async fn invalid_attestation_bad_aggregation_bitfield_len() {
         panic!("harness should produce Electra attestations");
     }
 
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let parent_slot = state
         .latest_execution_payload_bid()
         .ok()
@@ -599,7 +609,8 @@ async fn invalid_attestation_bad_signature() {
         .unwrap()
         .into_signature_mut() = AggregateSignature::empty();
 
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let parent_slot = state
         .latest_execution_payload_bid()
         .ok()
@@ -648,7 +659,8 @@ async fn invalid_attestation_included_too_early() {
         .into_data_mut()
         .slot = new_attesation_slot;
 
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let parent_slot = state
         .latest_execution_payload_bid()
         .ok()
@@ -704,7 +716,8 @@ async fn invalid_attestation_target_epoch_slot_mismatch() {
         .target
         .epoch += Epoch::new(1);
 
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let parent_slot = state
         .latest_execution_payload_bid()
         .ok()
@@ -737,7 +750,8 @@ async fn valid_insert_attester_slashing() {
     let attester_slashing = harness.make_attester_slashing(vec![1, 2]);
 
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_attester_slashings(
         &mut state,
         [attester_slashing.to_ref()].into_iter(),
@@ -769,7 +783,8 @@ async fn invalid_attester_slashing_not_slashable() {
     }
 
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_attester_slashings(
         &mut state,
         [attester_slashing.to_ref()].into_iter(),
@@ -810,7 +825,8 @@ async fn invalid_attester_slashing_1_invalid() {
     }
 
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_attester_slashings(
         &mut state,
         [attester_slashing.to_ref()].into_iter(),
@@ -854,7 +870,8 @@ async fn invalid_attester_slashing_2_invalid() {
     }
 
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_attester_slashings(
         &mut state,
         [attester_slashing.to_ref()].into_iter(),
@@ -882,7 +899,8 @@ async fn valid_insert_proposer_slashing() {
     let spec = harness.spec.clone();
     let proposer_slashing = harness.make_proposer_slashing(1);
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
@@ -903,7 +921,8 @@ async fn invalid_proposer_slashing_proposals_identical() {
     proposer_slashing.signed_header_1.message = proposer_slashing.signed_header_2.message.clone();
 
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
@@ -932,7 +951,8 @@ async fn invalid_proposer_slashing_proposer_unknown() {
     proposer_slashing.signed_header_2.message.proposer_index = 3_141_592;
 
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
@@ -958,7 +978,8 @@ async fn invalid_proposer_slashing_duplicate_slashing() {
 
     let proposer_slashing = harness.make_proposer_slashing(1);
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result_1 = process_operations::process_proposer_slashings(
         &mut state,
         std::slice::from_ref(&proposer_slashing),
@@ -992,7 +1013,8 @@ async fn invalid_bad_proposal_1_signature() {
     let mut proposer_slashing = harness.make_proposer_slashing(1);
     proposer_slashing.signed_header_1.signature = Signature::empty();
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
@@ -1018,7 +1040,8 @@ async fn invalid_bad_proposal_2_signature() {
     let mut proposer_slashing = harness.make_proposer_slashing(1);
     proposer_slashing.signed_header_2.signature = Signature::empty();
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],
@@ -1045,7 +1068,8 @@ async fn invalid_proposer_slashing_proposal_epoch_mismatch() {
     proposer_slashing.signed_header_1.message.slot = Slot::new(0);
     proposer_slashing.signed_header_2.message.slot = Slot::new(128);
     let mut state = harness.get_current_state();
-    let mut ctxt = ConsensusContext::new(state.slot());
+    let mut ctxt =
+        ConsensusContext::new(state.slot(), Shufflings::for_state(&state, &spec).unwrap());
     let result = process_operations::process_proposer_slashings(
         &mut state,
         &[proposer_slashing],

@@ -1321,9 +1321,10 @@ async fn attestation_that_skips_epochs() {
         .expect("should find state");
 
     while state.slot() < current_slot {
+        let mut shufflings = Shufflings::for_state(&state, &harness.spec).unwrap();
         per_slot_processing(
             &mut state,
-            None,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             &harness.spec,
@@ -1439,9 +1440,10 @@ async fn attestation_validator_receive_proposer_reward_and_withdrawals() {
         .expect("should find state");
 
     while state.slot() < current_slot {
+        let mut shufflings = Shufflings::for_state(&state, &harness.spec).unwrap();
         per_slot_processing(
             &mut state,
-            None,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             &harness.spec,
@@ -1523,9 +1525,10 @@ async fn attestation_to_finalized_block() {
         .expect("should find state");
 
     while state.slot() < current_slot {
+        let mut shufflings = Shufflings::for_state(&state, &harness.spec).unwrap();
         per_slot_processing(
             &mut state,
-            None,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             &harness.spec,

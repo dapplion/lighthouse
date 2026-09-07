@@ -1305,9 +1305,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let current_epoch = current_slot.epoch(T::EthSpec::slots_per_epoch());
         if head_state.current_epoch() < current_epoch {
             let epoch_start = current_epoch.start_slot(T::EthSpec::slots_per_epoch());
+            let mut shufflings = Shufflings::for_state(&head_state, &store.spec)?;
             complete_state_advance(
                 &mut head_state,
-                None,
+                &mut shufflings,
                 Some(state_root),
                 epoch_start,
                 builder_onboarding_cache,
@@ -1449,9 +1450,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 FastConfirmationError::UnableToObtainCheckpointState("not found".to_owned())
             })?;
         if state.slot() < target_slot {
+            let mut shufflings = Shufflings::for_state(&state, &store.spec).map_err(|e| {
+                FastConfirmationError::UnableToObtainCheckpointState(format!("{e:?}"))
+            })?;
             complete_state_advance(
                 &mut state,
-                None,
+                &mut shufflings,
                 Some(state_root),
                 target_slot,
                 builder_onboarding_cache,

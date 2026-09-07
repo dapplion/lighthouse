@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use types::{
     Address, Epoch, EthSpec, ExecPayload, ExecutionBlockHash, ForkName, Hash256, MainnetEthSpec,
-    MinimalEthSpec, ProposerPreparationData, Slot,
+    MinimalEthSpec, ProposerPreparationData, Shufflings, Slot,
 };
 
 type E = MainnetEthSpec;
@@ -587,7 +587,16 @@ pub async fn proposer_boost_re_org_test(
         .unwrap()
         .withdrawals()
         .to_vec();
-    complete_state_advance(&mut state_b, None, None, slot_c, None, &harness.chain.spec).unwrap();
+    let mut shufflings = Shufflings::for_state(&state_b, &harness.chain.spec).unwrap();
+    complete_state_advance(
+        &mut state_b,
+        &mut shufflings,
+        None,
+        slot_c,
+        None,
+        &harness.chain.spec,
+    )
+    .unwrap();
 
     let proposer_index = state_b
         .get_beacon_proposer_index(slot_c, &harness.chain.spec)
@@ -669,9 +678,10 @@ pub async fn proposer_boost_re_org_test(
     // advanced state.
     let expected_withdrawals = if should_re_org {
         let mut state_a_advanced = state_a.clone();
+        let mut shufflings = Shufflings::for_state(&state_a_advanced, &harness.chain.spec).unwrap();
         complete_state_advance(
             &mut state_a_advanced,
-            None,
+            &mut shufflings,
             None,
             slot_c,
             None,

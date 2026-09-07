@@ -1533,12 +1533,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     StateSkipConfig::WithoutStateRoots => Some(Hash256::zero()),
                 };
 
+                let mut shufflings = Shufflings::for_state(&state, &self.spec)?;
                 while state.slot() < slot {
                     // Note: supplying some `state_root` when it is known would be a cheap and easy
                     // optimization.
                     match per_slot_processing(
                         &mut state,
-                        None,
+                        &mut shufflings,
                         skip_state_root,
                         GloasVerificationContext::from_cache(
                             self.builder_onboarding_cache.as_deref(),
@@ -2145,10 +2146,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     .store
                     .get_advanced_hot_state(beacon_block_root, request_slot, beacon_state_root)?
                     .ok_or(Error::MissingBeaconState(beacon_state_root))?;
+                let mut shufflings = self.shufflings_for_state(&state, beacon_block_root)?;
                 if state.current_epoch() < request_epoch {
                     partial_state_advance(
                         &mut state,
-                        None,
+                        &mut shufflings,
                         Some(advanced_state_root),
                         request_epoch.start_slot(T::EthSpec::slots_per_epoch()),
                         self.builder_onboarding_cache.as_deref(),
@@ -2159,7 +2161,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
                 (
                     state.current_justified_checkpoint(),
-                    self.shufflings_for_state(&state, beacon_block_root)?
+                    shufflings
                         .get_beacon_committee(request_slot, request_index)?
                         .committee
                         .len(),
@@ -5391,9 +5393,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             "Advancing state for withdrawals calculation"
         );
         let mut advanced_state = unadvanced_state.into_owned();
+        let mut shufflings = Shufflings::for_state(&advanced_state, &self.spec)?;
         partial_state_advance(
             &mut advanced_state,
-            None,
+            &mut shufflings,
             Some(unadvanced_state_root),
             proposal_slot,
             self.builder_onboarding_cache.as_deref(),
@@ -5814,9 +5817,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let slot_timer = metrics::start_timer(&metrics::BLOCK_PRODUCTION_SLOT_PROCESS_TIMES);
 
         // Ensure the state has performed a complete transition into the required slot.
+        let mut shufflings = Shufflings::for_state(&state, &self.spec)?;
         complete_state_advance(
             &mut state,
-            None,
+            &mut shufflings,
             state_root_opt,
             produce_at_slot,
             self.builder_onboarding_cache.as_deref(),
@@ -5945,7 +5949,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // This will be a lot slower but guards against bugs in block production and can be
         // quickly rolled out without a release.
         if self.config.paranoid_block_proposal {
-            let mut tmp_ctxt = ConsensusContext::new(state.slot());
+            let mut tmp_ctxt = ConsensusContext::new(state.slot(), shufflings.clone());
             attestations.retain(|att| {
                 verify_attestation_for_block_inclusion(
                     &state,
@@ -6484,7 +6488,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         };
 
         // Use a context without block root or proposer index so that both are checked.
-        let mut ctxt = ConsensusContext::new(block.slot());
+        let shufflings = Shufflings::for_state(&state, &self.spec)?;
+        let mut ctxt = ConsensusContext::new(block.slot(), shufflings);
 
         let consensus_block_value = self
             .compute_beacon_block_reward(block.message(), &mut state)

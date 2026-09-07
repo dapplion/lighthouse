@@ -19,7 +19,7 @@ use std::sync::{Arc, LazyLock};
 use types::{
     BeaconState, BeaconStateError, BlockImportSource, ChainSpec, Checkpoint,
     DEFAULT_PRE_ELECTRA_WS_PERIOD, EthSpec, ForkName, Hash256, MainnetEthSpec, MinimalEthSpec,
-    RelativeEpoch, Slot,
+    RelativeEpoch, Shufflings, Slot,
 };
 
 type E = MinimalEthSpec;
@@ -109,9 +109,10 @@ fn massive_skips() {
 
     // Run per_slot_processing until it returns an error.
     let error = loop {
+        let mut shufflings = Shufflings::for_state(&state, spec).unwrap();
         match per_slot_processing(
             &mut state,
-            None,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             spec,

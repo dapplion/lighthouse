@@ -26,10 +26,11 @@ fn genesis_state(n: usize) -> (BeaconState<E>, ChainSpec) {
 }
 
 fn advance_state(state: &mut BeaconState<E>, target: Slot, spec: &ChainSpec) {
+    let mut shufflings = Shufflings::for_state(state, spec).expect("shufflings");
     while state.slot() < target {
         per_slot_processing(
             state,
-            None,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             spec,

@@ -4251,9 +4251,10 @@ async fn process_blocks_and_attestations_for_unaligned_checkpoint() {
         .get_advanced_hot_state(split.block_root, split.slot, split.state_root)
         .unwrap()
         .unwrap();
+    let mut shufflings = Shufflings::for_state(&advanced_split_state, &harness.chain.spec).unwrap();
     complete_state_advance(
         &mut advanced_split_state,
-        None,
+        &mut shufflings,
         Some(split_state_root),
         attestation_start_slot,
         None,
@@ -6048,7 +6049,8 @@ async fn test_gloas_block_and_envelope_storage_generic(
         harness.advance_slot();
 
         if skipped_slots.contains(&i) {
-            complete_state_advance(&mut state, None, None, slot, None, spec)
+            let mut shufflings = Shufflings::for_state(&state, spec).unwrap();
+            complete_state_advance(&mut state, &mut shufflings, None, slot, None, spec)
                 .expect("should be able to advance state to slot");
 
             let state_root = state.canonical_root().unwrap();
@@ -6504,8 +6506,16 @@ async fn bellatrix_produce_and_store_payloads() {
 
         // Advance state to compute correct timestamp and randao.
         let mut pre_state = state.clone();
-        complete_state_advance(&mut pre_state, None, None, slot, None, &harness.spec)
-            .expect("should advance state");
+        let mut shufflings = Shufflings::for_state(&pre_state, &harness.spec).unwrap();
+        complete_state_advance(
+            &mut pre_state,
+            &mut shufflings,
+            None,
+            slot,
+            None,
+            &harness.spec,
+        )
+        .expect("should advance state");
         pre_state
             .build_caches(&harness.spec)
             .expect("should build caches");

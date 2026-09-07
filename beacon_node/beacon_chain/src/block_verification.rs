@@ -650,19 +650,19 @@ pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
         .unwrap_or_else(|| slot);
 
     let (state, shufflings) = cheap_state_advance_to_obtain_committees::<_, BlockError>(
+        chain,
         &mut parent.pre_state,
         parent.beacon_state_root,
+        parent.beacon_block_root,
         highest_slot,
         chain.builder_onboarding_cache.as_deref(),
-        &chain.spec,
     )?;
 
     let mut signature_verified_blocks = Vec::with_capacity(chain_segment.len());
 
     for (block_root, block) in chain_segment {
-        let consensus_context = ConsensusContext::new(block.slot())
-            .set_current_block_root(block_root)
-            .set_shufflings(shufflings.clone());
+        let consensus_context = ConsensusContext::new(block.slot(), shufflings.clone())
+            .set_current_block_root(block_root);
         // This gets columns from the block for pre-gloas and from the envelope for
         // post gloas.
         if let Some(columns) = block.data_columns() {
@@ -706,7 +706,9 @@ pub struct GossipVerifiedBlock<T: BeaconChainTypes> {
     pub block: Arc<SignedBeaconBlock<T::EthSpec>>,
     pub block_root: Hash256,
     parent: Option<PreProcessingSnapshot<T::EthSpec>>,
-    consensus_context: ConsensusContext<T::EthSpec>,
+    /// Checked during gossip verification; carried so the consensus context can be built once a
+    /// state, and therefore its shufflings, are available.
+    proposer_index: u64,
 }
 
 /// A wrapper around a `SignedBeaconBlock` that indicates that all signatures (except the deposit
@@ -1088,16 +1090,11 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
             })));
         }
 
-        // Having checked the proposer index and the block root we can cache them.
-        let consensus_context = ConsensusContext::new(block.slot())
-            .set_current_block_root(block_root)
-            .set_proposer_index(block.as_block().message().proposer_index());
-
         Ok(Self {
+            proposer_index: block.as_block().message().proposer_index(),
             block,
             block_root,
             parent: opt_parent,
-            consensus_context,
         })
     }
 
@@ -1159,20 +1156,20 @@ impl<T: BeaconChainTypes> SignatureVerifiedBlock<T> {
         let (mut parent, block) = load_parent(block, chain)?;
 
         let (state, shufflings) = cheap_state_advance_to_obtain_committees::<_, BlockError>(
+            chain,
             &mut parent.pre_state,
             parent.beacon_state_root,
+            parent.beacon_block_root,
             block.slot(),
             chain.builder_onboarding_cache.as_deref(),
-            &chain.spec,
         )?;
 
         let pubkey_cache = get_validator_pubkey_cache(chain)?;
 
         let mut signature_verifier = get_signature_verifier(&state, &pubkey_cache, &chain.spec);
 
-        let mut consensus_context = ConsensusContext::new(block.slot())
-            .set_current_block_root(block_root)
-            .set_shufflings(shufflings);
+        let mut consensus_context =
+            ConsensusContext::new(block.slot(), shufflings).set_current_block_root(block_root);
 
         signature_verifier.include_all_signatures(block.as_block(), &mut consensus_context)?;
 
@@ -1232,20 +1229,23 @@ impl<T: BeaconChainTypes> SignatureVerifiedBlock<T> {
         };
 
         let (state, shufflings) = cheap_state_advance_to_obtain_committees::<_, BlockError>(
+            chain,
             &mut parent.pre_state,
             parent.beacon_state_root,
+            parent.beacon_block_root,
             block.slot(),
             chain.builder_onboarding_cache.as_deref(),
-            &chain.spec,
         )?;
 
         let pubkey_cache = get_validator_pubkey_cache(chain)?;
 
         let mut signature_verifier = get_signature_verifier(&state, &pubkey_cache, &chain.spec);
 
-        // Gossip verification has already checked the proposer index. Use it to check the RANDAO
-        // signature.
-        let mut consensus_context = from.consensus_context.set_shufflings(shufflings);
+        // Gossip verification has already checked the proposer index and block root, so carry
+        // them into the context now that the shufflings are known.
+        let mut consensus_context = ConsensusContext::new(block.slot(), shufflings)
+            .set_current_block_root(from.block_root)
+            .set_proposer_index(from.proposer_index);
         signature_verifier
             .include_all_signatures_except_proposal(block.as_ref(), &mut consensus_context)?;
 
@@ -1559,6 +1559,10 @@ impl<T: BeaconChainTypes> ExecutionPendingBlock<T> {
         //
         // It is important to note that we're using a "pre-state" here, one that has potentially
         // been advanced one slot forward from `parent.beacon_block.slot`.
+        //
+        // The shufflings are advanced alongside the state and then handed to the consensus
+        // context, so block processing and the slot advance share one pool lookup.
+        let mut shufflings = chain.shufflings_for_state(&state, parent.beacon_block_root)?;
         let mut summaries = vec![];
 
         let distance = block.slot().as_u64().saturating_sub(state.slot().as_u64());
@@ -1594,7 +1598,7 @@ impl<T: BeaconChainTypes> ExecutionPendingBlock<T> {
 
             if let Some(summary) = per_slot_processing(
                 &mut state,
-                None,
+                &mut shufflings,
                 Some(state_root),
                 GloasVerificationContext::from_cache(chain.builder_onboarding_cache.as_deref()),
                 &chain.spec,
@@ -1646,8 +1650,7 @@ impl<T: BeaconChainTypes> ExecutionPendingBlock<T> {
 
         let committee_timer = metrics::start_timer(&metrics::BLOCK_PROCESSING_COMMITTEE);
 
-        consensus_context = consensus_context
-            .set_shufflings(chain.shufflings_for_state(&state, block.parent_root())?);
+        consensus_context = consensus_context.set_shufflings(shufflings);
 
         metrics::stop_timer(committee_timer);
 
@@ -2116,6 +2119,12 @@ impl BlockBlobError for GossipDataColumnError {
     }
 }
 
+/// A state, borrowed or advanced, together with the shufflings that describe it.
+pub type StateAndShufflings<'a, T> = (
+    Cow<'a, BeaconState<<T as BeaconChainTypes>::EthSpec>>,
+    Shufflings,
+);
+
 /// Performs a cheap (time-efficient) state advancement so the committees and proposer shuffling for
 /// `slot` can be obtained from `state`.
 ///
@@ -2128,38 +2137,39 @@ impl BlockBlobError for GossipDataColumnError {
 /// advanced and then returned as a `Cow::Owned`. The end result is that the given `state` is never
 /// mutated to be invalid (in fact, it is never changed beyond a simple committee cache build).
 #[instrument(skip_all, fields(?state_root_opt, %block_slot), level = "debug")]
-pub fn cheap_state_advance_to_obtain_committees<'a, E: EthSpec, Err: BlockBlobError>(
-    state: &'a mut BeaconState<E>,
+pub fn cheap_state_advance_to_obtain_committees<'a, T: BeaconChainTypes, Err: BlockBlobError>(
+    chain: &BeaconChain<T>,
+    state: &'a mut BeaconState<T::EthSpec>,
     state_root_opt: Option<Hash256>,
+    block_root: Hash256,
     block_slot: Slot,
     builder_onboarding_cache: Option<&OnboardBuildersCache>,
-    spec: &ChainSpec,
-) -> Result<(Cow<'a, BeaconState<E>>, Shufflings), Err> {
-    let block_epoch = block_slot.epoch(E::slots_per_epoch());
+) -> Result<StateAndShufflings<'a, T>, Err> {
+    let block_epoch = block_slot.epoch(T::EthSpec::slots_per_epoch());
+
+    // Served from the chain's shuffling cache, so forks agreeing on a decision root share one
+    // `CommitteeCache` and a warm pool makes this three `Arc` clones.
+    let mut shufflings = chain.shufflings_for_state(state, block_root)?;
 
     if state.current_epoch() == block_epoch {
-        let shufflings = Shufflings::for_state(state, spec).map_err(BeaconChainError::from)?;
-
         Ok((Cow::Borrowed(state), shufflings))
     } else if state.slot() > block_slot {
         Err(Err::not_later_than_parent_error(block_slot, state.slot()))
     } else {
         let mut state = state.clone();
-        let target_slot = block_epoch.start_slot(E::slots_per_epoch());
+        let target_slot = block_epoch.start_slot(T::EthSpec::slots_per_epoch());
 
         // Advance the state into the same epoch as the block. Use the "partial" method since state
         // roots are not important for proposer/attester shuffling.
         partial_state_advance(
             &mut state,
-            None,
+            &mut shufflings,
             state_root_opt,
             target_slot,
             builder_onboarding_cache,
-            spec,
+            &chain.spec,
         )
         .map_err(BeaconChainError::from)?;
-
-        let shufflings = Shufflings::for_state(&state, spec).map_err(BeaconChainError::from)?;
 
         Ok((Cow::Owned(state), shufflings))
     }

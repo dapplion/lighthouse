@@ -33,10 +33,10 @@ use types::{
     BeaconBlockBodyGloas, BeaconBlockGloas, BeaconState, BeaconStateError, BlobsList, BuilderIndex,
     ChainSpec, Deposit, Eth1Data, EthSpec, ExecutionBlockHash, ExecutionPayloadBid,
     ExecutionPayloadEnvelope, ExecutionRequestsGloas, FullPayload, Graffiti, Hash256,
-    IndexedAttestation, KzgProofs, PayloadAttestation, ProposerSlashing, SignedBeaconBlock,
-    SignedBlsToExecutionChange, SignedExecutionPayloadBid, SignedExecutionPayloadEnvelope,
-    SignedProposerPreferences, SignedVoluntaryExit, Slot, SyncAggregate, Uint256, Withdrawal,
-    Withdrawals,
+    IndexedAttestation, KzgProofs, PayloadAttestation, ProposerSlashing, Shufflings,
+    SignedBeaconBlock, SignedBlsToExecutionChange, SignedExecutionPayloadBid,
+    SignedExecutionPayloadEnvelope, SignedProposerPreferences, SignedVoluntaryExit, Slot,
+    SyncAggregate, Uint256, Withdrawal, Withdrawals,
 };
 
 use builder_client::BidRequestContext;
@@ -376,9 +376,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let slot_timer = metrics::start_timer(&metrics::BLOCK_PRODUCTION_SLOT_PROCESS_TIMES);
 
         // Ensure the state has performed a complete transition into the required slot.
+        let mut shufflings = Shufflings::for_state(&state, &self.spec)
+            .map_err(|e| BlockProductionError::BeaconChain(Box::new(e.into())))?;
         complete_state_advance(
             &mut state,
-            None,
+            &mut shufflings,
             state_root_opt,
             produce_at_slot,
             self.builder_onboarding_cache.as_deref(),
@@ -500,7 +502,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // This will be a lot slower but guards against bugs in block production and can be
         // quickly rolled out without a release.
         if self.config.paranoid_block_proposal {
-            let mut tmp_ctxt = ConsensusContext::new(state.slot());
+            let mut tmp_ctxt = ConsensusContext::new(state.slot(), shufflings.clone());
             attestations.retain(|att| {
                 verify_attestation_for_block_inclusion(
                     &state,
@@ -788,7 +790,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         };
 
         // Use a context without block root or proposer index so that both are checked.
-        let mut ctxt = ConsensusContext::new(signed_beacon_block.slot());
+        let shufflings = Shufflings::for_state(&state, &self.spec)?;
+        let mut ctxt = ConsensusContext::new(signed_beacon_block.slot(), shufflings);
 
         let consensus_block_value = self
             .compute_beacon_block_reward(signed_beacon_block.message(), &mut state)

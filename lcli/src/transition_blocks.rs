@@ -86,7 +86,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use store::HotColdDB;
 use tracing::{debug, info};
-use types::{BeaconState, ChainSpec, EthSpec, Hash256, SignedBeaconBlock};
+use types::{BeaconState, ChainSpec, EthSpec, Hash256, Shufflings, SignedBeaconBlock};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -338,9 +338,11 @@ fn do_transition<E: EthSpec>(
 
     // Transition the parent state to the block slot.
     let t = Instant::now();
+    let mut shufflings = Shufflings::for_state(&pre_state, spec)
+        .map_err(|e| format!("Unable to build shufflings: {e:?}"))?;
     complete_state_advance(
         &mut pre_state,
-        None,
+        &mut shufflings,
         Some(state_root),
         block.slot(),
         None,
@@ -361,9 +363,13 @@ fn do_transition<E: EthSpec>(
     let mut ctxt = if let Some(ctxt) = saved_ctxt {
         ctxt.clone()
     } else {
-        ConsensusContext::new(pre_state.slot())
-            .set_current_block_root(block_root)
-            .set_proposer_index(block.message().proposer_index())
+        ConsensusContext::new(
+            pre_state.slot(),
+            Shufflings::for_state(&pre_state, spec)
+                .map_err(|e| format!("Unable to build shufflings: {e:?}"))?,
+        )
+        .set_current_block_root(block_root)
+        .set_proposer_index(block.message().proposer_index())
     };
 
     if !config.no_signature_verification {

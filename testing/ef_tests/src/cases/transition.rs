@@ -7,6 +7,7 @@ use state_processing::{
     state_advance::complete_state_advance,
 };
 use std::str::FromStr;
+use types::Shufflings;
 use types::{BeaconState, Epoch, SignedBeaconBlock};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,16 +128,19 @@ impl<E: EthSpec> Case for TransitionTest<E> {
         let mut expected = Some(self.post.clone());
         let spec = &self.spec;
 
+        let mut shufflings = Shufflings::for_state(&state, spec)
+            .map_err(|e| Error::InternalError(format!("Failed to build shufflings: {e:?}")))?;
+
         let mut result: Result<_, String> = self
             .blocks
             .iter()
             .try_for_each(|block| {
                 // Advance to block slot.
-                complete_state_advance(&mut state, None, None, block.slot(), None, spec)
+                complete_state_advance(&mut state, &mut shufflings, None, block.slot(), None, spec)
                     .map_err(|e| format!("Failed to advance: {:?}", e))?;
 
                 // Apply block.
-                let mut ctxt = ConsensusContext::new(state.slot());
+                let mut ctxt = ConsensusContext::new(state.slot(), shufflings.clone());
                 per_block_processing(
                     &mut state,
                     block,

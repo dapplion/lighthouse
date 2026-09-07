@@ -1110,7 +1110,8 @@ where
             return (signed_blinded, pending_state);
         }
 
-        complete_state_advance(&mut state, None, None, slot, None, &self.spec)
+        let mut shufflings = self.shufflings(&state);
+        complete_state_advance(&mut state, &mut shufflings, None, slot, None, &self.spec)
             .expect("should be able to advance state to slot");
 
         state.build_caches(&self.spec).expect("should build caches");
@@ -1176,7 +1177,8 @@ where
             return (block_contents, state);
         }
 
-        complete_state_advance(&mut state, None, None, slot, None, &self.spec)
+        let mut shufflings = self.shufflings(&state);
+        complete_state_advance(&mut state, &mut shufflings, None, slot, None, &self.spec)
             .expect("should be able to advance state to slot");
 
         state.build_caches(&self.spec).expect("should build caches");
@@ -1270,7 +1272,8 @@ where
         if state.fork_name_unchecked().gloas_enabled()
             || self.spec.fork_name_at_slot::<E>(slot).gloas_enabled()
         {
-            complete_state_advance(&mut state, None, None, slot, None, &self.spec)
+            let mut shufflings = self.shufflings(&state);
+            complete_state_advance(&mut state, &mut shufflings, None, slot, None, &self.spec)
                 .expect("should be able to advance state to slot");
             state.build_caches(&self.spec).expect("should build caches");
 
@@ -1373,7 +1376,8 @@ where
         if self.spec.fork_name_at_slot::<E>(slot).gloas_enabled() {
             let pre_state = {
                 let mut s = state.clone();
-                complete_state_advance(&mut s, None, None, slot, None, &self.spec)
+                let mut shufflings = self.shufflings(&s);
+                complete_state_advance(&mut s, &mut shufflings, None, slot, None, &self.spec)
                     .expect("should be able to advance state to slot");
                 s.build_caches(&self.spec).expect("should build caches");
                 s
@@ -1383,7 +1387,8 @@ where
             return (block_contents, pre_state);
         }
 
-        complete_state_advance(&mut state, None, None, slot, None, &self.spec)
+        let mut shufflings = self.shufflings(&state);
+        complete_state_advance(&mut state, &mut shufflings, None, slot, None, &self.spec)
             .expect("should be able to advance state to slot");
 
         state.build_caches(&self.spec).expect("should build caches");
@@ -1489,7 +1494,8 @@ where
         slot: Slot,
         execution_payload: ExecutionPayloadBellatrix<E>,
     ) {
-        complete_state_advance(state, None, None, slot, None, &self.spec)
+        let mut shufflings = self.shufflings(state);
+        complete_state_advance(state, &mut shufflings, None, slot, None, &self.spec)
             .expect("should advance state");
         state.build_caches(&self.spec).expect("should build caches");
 
@@ -1523,7 +1529,8 @@ where
             state.genesis_validators_root(),
             &self.spec,
         );
-        let mut ctxt = ConsensusContext::new(slot).set_proposer_index(proposer_index as u64);
+        let mut ctxt = ConsensusContext::new(slot, self.shufflings(state))
+            .set_proposer_index(proposer_index as u64);
         let mut post_state = state.clone();
         per_block_processing(
             &mut post_state,
@@ -1572,9 +1579,10 @@ where
             return Err(BeaconChainError::CannotAttestToFutureState);
         } else if state.current_epoch() < epoch {
             let mut_state = state.to_mut();
+            let mut shufflings = Shufflings::for_state(mut_state, &self.spec)?;
             complete_state_advance(
                 mut_state,
-                None,
+                &mut shufflings,
                 Some(state_root),
                 epoch.start_slot(E::slots_per_epoch()),
                 None,
@@ -1704,9 +1712,10 @@ where
             return Err(BeaconChainError::CannotAttestToFutureState);
         } else if state.current_epoch() < epoch {
             let mut_state = state.to_mut();
+            let mut shufflings = Shufflings::for_state(mut_state, &self.spec)?;
             complete_state_advance(
                 mut_state,
-                None,
+                &mut shufflings,
                 Some(state_root),
                 epoch.start_slot(E::slots_per_epoch()),
                 None,

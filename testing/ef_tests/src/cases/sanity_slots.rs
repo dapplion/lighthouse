@@ -5,6 +5,7 @@ use crate::decode::{ssz_decode_state, yaml_decode_file};
 use serde::Deserialize;
 use state_processing::{GloasVerificationContext, per_slot_processing};
 use types::BeaconState;
+use types::Shufflings;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Metadata {
@@ -62,12 +63,13 @@ impl<E: EthSpec> Case for SanitySlots<E> {
 
         // Processing requires the epoch cache.
         state.build_caches(spec).unwrap();
+        let mut shufflings = Shufflings::for_state(&state, spec).unwrap();
 
         let mut result = (0..self.slots)
             .try_for_each(|_| {
                 per_slot_processing(
                     &mut state,
-                    None,
+                    &mut shufflings,
                     None,
                     GloasVerificationContext::FullVerification,
                     spec,

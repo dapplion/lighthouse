@@ -9,7 +9,7 @@ use state_processing::state_advance::partial_state_advance;
 use tracing::debug;
 use types::{
     AttestationShufflingId, BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec, Hash256, PTC,
-    RelativeEpoch, Slot, state::CommitteeCache,
+    RelativeEpoch, Shufflings, Slot, state::CommitteeCache,
 };
 
 use crate::{
@@ -451,9 +451,11 @@ where
         if state.current_epoch() + 1 < shuffling_epoch || advance_to_gloas_fork {
             // Advance the state into the required slot, using the "partial" method since the state
             // roots are not relevant for the shuffling.
+            let mut shufflings =
+                Shufflings::for_state(&state, spec).map_err(BeaconChainError::from)?;
             partial_state_advance(
                 &mut state,
-                None,
+                &mut shufflings,
                 Some(state_root),
                 target_slot,
                 builder_onboarding_cache,

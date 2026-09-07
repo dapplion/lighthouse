@@ -472,7 +472,7 @@ impl<E: EthSpec, T: EpochTransition<E>> Case for EpochProcessing<E, T> {
 
                 let mut shufflings = Shufflings::for_state(&pre_epoch_state, spec)
                     .map_err(|e| Error::InternalError(format!("{e:?}")))?;
-                let mut result = process_epoch(&mut pre_epoch_state, Some(&mut shufflings), spec)
+                let mut result = process_epoch(&mut pre_epoch_state, &mut shufflings, spec)
                     .map(|_| pre_epoch_state);
                 compare_beacon_state_results_without_caches(
                     &mut result,

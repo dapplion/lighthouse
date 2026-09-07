@@ -4,7 +4,7 @@ use state_processing::{
     BlockProcessingError, BlockSignatureStrategy, ConsensusContext, VerifyBlockRoot,
     per_block_processing, per_block_processing::errors::ExitInvalid,
 };
-use types::{BeaconBlock, Epoch};
+use types::{BeaconBlock, Epoch, Shufflings};
 
 // Default validator index to exit.
 pub const VALIDATOR_INDEX: u64 = 0;
@@ -64,7 +64,9 @@ impl ExitTest {
         block: &SignedBeaconBlock<E>,
         state: &mut BeaconState<E>,
     ) -> Result<(), BlockProcessingError> {
-        let mut ctxt = ConsensusContext::new(block.slot());
+        let spec = &E::default_spec();
+        let mut ctxt =
+            ConsensusContext::new(block.slot(), Shufflings::for_state(state, spec).unwrap());
         per_block_processing(
             state,
             block,

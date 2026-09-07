@@ -32,7 +32,7 @@ use state_processing::{
 use std::marker::PhantomData;
 use std::sync::{Arc, LazyLock};
 use tempfile::tempdir;
-use types::{test_utils::generate_deterministic_keypair, *};
+use types::{Shufflings, test_utils::generate_deterministic_keypair, *};
 
 type E = MainnetEthSpec;
 
@@ -1830,10 +1830,14 @@ async fn add_base_block_to_altair_chain() {
     // Ensure that it would be impossible to apply this block to `per_block_processing`.
     {
         let mut state = state;
-        let mut ctxt = ConsensusContext::new(base_block.slot());
+        let mut ctxt = ConsensusContext::new(
+            base_block.slot(),
+            Shufflings::for_state(&state, &harness.chain.spec).unwrap(),
+        );
+        let mut shufflings = Shufflings::for_state(&state, &harness.chain.spec).unwrap();
         per_slot_processing(
             &mut state,
-            None,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             &harness.chain.spec,
@@ -1986,10 +1990,14 @@ async fn add_altair_block_to_base_chain() {
     // Ensure that it would be impossible to apply this block to `per_block_processing`.
     {
         let mut state = state;
-        let mut ctxt = ConsensusContext::new(altair_block.slot());
+        let mut ctxt = ConsensusContext::new(
+            altair_block.slot(),
+            Shufflings::for_state(&state, &harness.chain.spec).unwrap(),
+        );
+        let mut shufflings = Shufflings::for_state(&state, &harness.chain.spec).unwrap();
         per_slot_processing(
             &mut state,
-            None,
+            &mut shufflings,
             None,
             GloasVerificationContext::FullVerification,
             &harness.chain.spec,
@@ -2174,9 +2182,10 @@ async fn gloas_get_head_can_return_justified_empty_payload_branch() {
     // chain built off its `Full` branch.
     for slot in (attestation_start_slot.as_u64()..current_slot.as_u64()).map(Slot::new) {
         while attestation_state.slot() < slot {
+            let mut shufflings = Shufflings::for_state(&attestation_state, &spec).unwrap();
             per_slot_processing(
                 &mut attestation_state,
-                None,
+                &mut shufflings,
                 None,
                 GloasVerificationContext::FullVerification,
                 &spec,
