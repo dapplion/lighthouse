@@ -608,9 +608,6 @@ impl<T: BeaconChainTypes> PendingPayloadCache<T> {
     }
 
     /// Read an entry without refreshing its LRU position.
-    ///
-    /// This is deliberate. A read that signals liveness is followed by an insert, which
-    /// refreshes the position. A refresh here also needs the write lock.
     fn peek_pending_components<R, F: FnOnce(Option<&PendingComponents<T::EthSpec>>) -> R>(
         &self,
         block_root: &Hash256,
