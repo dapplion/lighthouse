@@ -17,7 +17,7 @@ use types::light_client::consts::MAX_REQUEST_LIGHT_CLIENT_UPDATES;
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnsByRootIdentifier, Epoch,
     EthSpec, ForkContext, Hash256, LightClientBootstrap, LightClientFinalityUpdate,
-    LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock,
+    LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock, SignedBeaconBlockHeader,
     SignedExecutionPayloadEnvelope, Slot,
 };
 
@@ -500,6 +500,25 @@ pub struct BlocksByHeadRequest {
     pub count: u64,
 }
 
+/// Maximum number of block headers one `BeaconBlockHeadersByRoot` response may carry.
+/// 2**11 headers at ~112 B is ~230 KiB, covering 64 epochs per round trip (spec PR 5179).
+pub const MAX_REQUEST_BLOCK_HEADERS: u64 = 2048;
+
+/// Request block headers by walking the parent chain of `beacon_root`.
+///
+/// See consensus-specs PR 5179. Same walk as `BlocksByHeadRequest`, but returns headers
+/// only: 112 bytes each instead of a full block, so one round trip covers far more slots.
+/// Tree sync's discovery needs nothing but the root, slot and parent of each ancestor.
+#[derive(Encode, Decode, Clone, Debug, PartialEq)]
+pub struct BlockHeadersByRootRequest {
+    /// The block root to start the parent walk from (inclusive).
+    pub beacon_root: Hash256,
+    /// The maximum number of headers to return.
+    pub count: u64,
+    /// Stop once the next ancestor is below this slot.
+    pub min_slot: Slot,
+}
+
 /// Request a number of beacon block bodies from a peer.
 #[superstruct(variants(V1, V2), variant_attributes(derive(Clone, Debug, PartialEq)))]
 #[derive(Clone, Debug, PartialEq)]
@@ -637,6 +656,9 @@ pub enum RpcSuccessResponse<E: EthSpec> {
     /// A response to a get BEACON_BLOCKS_BY_HEAD request.
     BlocksByHead(Arc<SignedBeaconBlock<E>>),
 
+    /// A response to a get BEACON_BLOCK_HEADERS_BY_ROOT request.
+    BlockHeadersByRoot(Arc<SignedBeaconBlockHeader>),
+
     /// A response to a get EXECUTION_PAYLOAD_ENVELOPES_BY_RANGE request. A None response signifies
     /// the end of the batch.
     PayloadEnvelopesByRange(Arc<SignedExecutionPayloadEnvelope<E>>),
@@ -687,6 +709,9 @@ pub enum ResponseTermination {
     /// Blocks by head stream termination.
     BlocksByHead,
 
+    /// Block headers by root stream termination.
+    BlockHeadersByRoot,
+
     /// Execution payload envelopes by range stream termination.
     PayloadEnvelopesByRange,
 
@@ -715,6 +740,7 @@ impl ResponseTermination {
             ResponseTermination::BlocksByRange => Protocol::BlocksByRange,
             ResponseTermination::BlocksByRoot => Protocol::BlocksByRoot,
             ResponseTermination::BlocksByHead => Protocol::BlocksByHead,
+            ResponseTermination::BlockHeadersByRoot => Protocol::BlockHeadersByRoot,
             ResponseTermination::PayloadEnvelopesByRange => Protocol::PayloadEnvelopesByRange,
             ResponseTermination::PayloadEnvelopesByRoot => Protocol::PayloadEnvelopesByRoot,
             ResponseTermination::BlobsByRange => Protocol::BlobsByRange,
@@ -813,6 +839,7 @@ impl<E: EthSpec> RpcSuccessResponse<E> {
             RpcSuccessResponse::BlocksByRange(_) => Protocol::BlocksByRange,
             RpcSuccessResponse::BlocksByRoot(_) => Protocol::BlocksByRoot,
             RpcSuccessResponse::BlocksByHead(_) => Protocol::BlocksByHead,
+            RpcSuccessResponse::BlockHeadersByRoot(_) => Protocol::BlockHeadersByRoot,
             RpcSuccessResponse::PayloadEnvelopesByRange(_) => Protocol::PayloadEnvelopesByRange,
             RpcSuccessResponse::PayloadEnvelopesByRoot(_) => Protocol::PayloadEnvelopesByRoot,
             RpcSuccessResponse::BlobsByRange(_) => Protocol::BlobsByRange,
@@ -835,6 +862,7 @@ impl<E: EthSpec> RpcSuccessResponse<E> {
             Self::BlocksByRange(r) | Self::BlocksByRoot(r) | Self::BlocksByHead(r) => {
                 Some(r.slot())
             }
+            Self::BlockHeadersByRoot(h) => Some(h.message.slot),
             Self::PayloadEnvelopesByRoot(r) | Self::PayloadEnvelopesByRange(r) => Some(r.slot()),
             Self::BlobsByRange(r) | Self::BlobsByRoot(r) => Some(r.slot()),
             Self::DataColumnsByRange(r) | Self::DataColumnsByRoot(r) => Some(r.slot()),
@@ -885,6 +913,13 @@ impl<E: EthSpec> std::fmt::Display for RpcSuccessResponse<E> {
             }
             RpcSuccessResponse::BlocksByRoot(block) => {
                 write!(f, "BlocksByRoot: Block slot: {}", block.slot())
+            }
+            RpcSuccessResponse::BlockHeadersByRoot(header) => {
+                write!(
+                    f,
+                    "BlockHeadersByRoot: Header slot: {}",
+                    header.message.slot
+                )
             }
             RpcSuccessResponse::BlocksByHead(block) => {
                 write!(f, "BlocksByHead: Block slot: {}", block.slot())
@@ -996,6 +1031,16 @@ impl std::fmt::Display for OldBlocksByRangeRequest {
             self.start_slot(),
             self.count(),
             self.step()
+        )
+    }
+}
+
+impl std::fmt::Display for BlockHeadersByRootRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "BlockHeadersByRoot: beacon_root: {}, count: {}, min_slot: {}",
+            self.beacon_root, self.count, self.min_slot
         )
     }
 }

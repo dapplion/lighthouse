@@ -418,7 +418,7 @@ impl<E: EthSpec> RangeBlockComponentsRequest<E> {
         Ok(responses)
     }
 
-    fn responses_with_custody_columns<T>(
+    pub(crate) fn responses_with_custody_columns<T>(
         blocks: Vec<Arc<SignedBeaconBlock<E>>>,
         columns: DataColumnSidecarList<E>,
         custody_context: &CustodyContext<T>,

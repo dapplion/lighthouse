@@ -5,7 +5,7 @@ use std::sync::Arc;
 use types::{
     BlobSidecar, DataColumnSidecar, Epoch, EthSpec, LightClientBootstrap,
     LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock,
-    SignedExecutionPayloadEnvelope,
+    SignedBeaconBlockHeader, SignedExecutionPayloadEnvelope,
 };
 
 pub type Id = u32;
@@ -20,9 +20,16 @@ pub struct SingleLookupReqId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum SyncRequestId {
     /// Request searching for a block given a hash.
-    SingleBlock { id: SingleLookupReqId },
+    SingleBlock {
+        id: SingleLookupReqId,
+    },
+    /// Request walking the ancestors of a block given its root, via `beacon_blocks_by_head`.
+    BlocksByHead(SingleLookupReqId),
+    BlockHeadersByRoot(SingleLookupReqId),
     /// Request searching for a payload envelope given a hash.
-    SinglePayloadEnvelope { id: SingleLookupReqId },
+    SinglePayloadEnvelope {
+        id: SingleLookupReqId,
+    },
     /// Request searching for a set of data columns given a hash and list of column indices.
     DataColumnsByRoot(DataColumnsByRootRequestId),
     /// Blocks by range request
@@ -33,6 +40,10 @@ pub enum SyncRequestId {
     DataColumnsByRange(DataColumnsByRangeRequestId),
     /// Payload envelopes by range request
     PayloadEnvelopesByRange(PayloadEnvelopesByRangeRequestId),
+    /// Blocks by root covering a whole chain, issued by forward sync. Shares the request
+    /// machinery with `SingleBlock`; the separate variant is what routes the response to
+    /// forward sync rather than to lookup sync.
+    BlocksByRootBatch(SingleLookupReqId),
 }
 
 /// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
@@ -174,6 +185,7 @@ pub enum Response<E: EthSpec> {
     /// A response to a get BEACON_BLOCKS_BY_HEAD request. A None response signals the end of the
     /// batch.
     BlocksByHead(Option<Arc<SignedBeaconBlock<E>>>),
+    BlockHeadersByRoot(Option<Arc<SignedBeaconBlockHeader>>),
     /// A response to a get `EXECUTION_PAYLOAD_ENVELOPES_BY_ROOT` request.
     PayloadEnvelopesByRoot(Option<Arc<SignedExecutionPayloadEnvelope<E>>>),
     /// A response to a get `EXECUTION_PAYLOAD_ENVELOPES_BY_RANGE` request.
@@ -198,6 +210,10 @@ impl<E: EthSpec> std::convert::From<Response<E>> for RpcResponse<E> {
             Response::BlocksByRoot(r) => match r {
                 Some(b) => RpcResponse::Success(RpcSuccessResponse::BlocksByRoot(b)),
                 None => RpcResponse::StreamTermination(ResponseTermination::BlocksByRoot),
+            },
+            Response::BlockHeadersByRoot(r) => match r {
+                Some(h) => RpcResponse::Success(RpcSuccessResponse::BlockHeadersByRoot(h)),
+                None => RpcResponse::StreamTermination(ResponseTermination::BlockHeadersByRoot),
             },
             Response::BlocksByHead(r) => match r {
                 Some(b) => RpcResponse::Success(RpcSuccessResponse::BlocksByHead(b)),

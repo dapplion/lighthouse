@@ -6,6 +6,8 @@ mod batch;
 mod block_lookups;
 mod block_sidecar_coupling;
 mod custody_backfill_sync;
+#[allow(dead_code)]
+mod forward_sync;
 pub mod manager;
 mod network_context;
 mod peer_sync_info;

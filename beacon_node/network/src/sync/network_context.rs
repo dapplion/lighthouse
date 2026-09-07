@@ -24,10 +24,11 @@ use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineStat
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, DataColumnsByRangeRequest, PayloadEnvelopesByRangeRequest,
+    BlobsByRangeRequest, BlockHeadersByRootRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
+    PayloadEnvelopesByRangeRequest,
 };
 use lighthouse_network::rpc::{
-    BlocksByRangeRequest, GoodbyeReason, MAX_CONCURRENT_REQUESTS, RPCError, RequestType,
+    BlocksByRangeRequest, GoodbyeReason, MAX_CONCURRENT_REQUESTS, Protocol, RPCError, RequestType,
 };
 pub use lighthouse_network::service::api_types::RangeRequestId;
 use lighthouse_network::service::api_types::{
@@ -41,8 +42,9 @@ use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSourc
 use parking_lot::RwLock;
 pub use requests::LookupVerifyError;
 use requests::{
-    ActiveRequestItems, ActiveRequests, BlobsByRangeRequestItems, BlocksByRangeRequestItems,
-    BlocksByRootRequestItems, DataColumnsByRangeRequestItems, DataColumnsByRootRequestItems,
+    ActiveRequestItems, ActiveRequests, BlobsByRangeRequestItems, BlockHeadersByRootRequestItems,
+    BlocksByHeadRequestItems, BlocksByRangeRequestItems, BlocksByRootRequestItems,
+    DataColumnsByRangeRequestItems, DataColumnsByRootRequestItems,
     PayloadEnvelopesByRangeRequestItems, PayloadEnvelopesByRootRequestItems,
 };
 #[cfg(test)]
@@ -56,9 +58,11 @@ use tokio::sync::mpsc;
 use tracing::{Span, debug, debug_span, error, warn};
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Epoch, EthSpec,
-    ForkContext, Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
+    ForkContext, Hash256, SignedBeaconBlock, SignedBeaconBlockHeader,
+    SignedExecutionPayloadEnvelope, Slot,
 };
 
+pub mod block_components_by_root;
 pub mod custody;
 mod requests;
 
@@ -91,6 +95,10 @@ impl<T> RpcEvent<T> {
 }
 
 pub type RpcResponseResult<T> = Result<T, RpcResponseError>;
+
+/// The blocks of one batched `BlocksByRoot`, or the error that ended it. `None` while the
+/// request is still collecting responses.
+pub type BlocksByRootBatchResult<E> = Option<RpcResponseResult<Vec<Arc<SignedBeaconBlock<E>>>>>;
 
 pub type CustodyByRootResult<T> =
     Result<DownloadResult<DataColumnSidecarList<T>>, RpcResponseError>;
@@ -224,6 +232,12 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active BlocksByRoot requests, including both current slot and parent lookups.
     blocks_by_root_requests:
         ActiveRequests<SingleLookupReqId, BlocksByRootRequestItems<T::EthSpec>>,
+    /// A mapping of active BlocksByHead requests, used by block lookups to walk a block's ancestors.
+    blocks_by_head_requests:
+        ActiveRequests<SingleLookupReqId, BlocksByHeadRequestItems<T::EthSpec>>,
+    /// A mapping of active BlockHeadersByRoot requests: tree sync's ancestor walk.
+    block_headers_by_root_requests:
+        ActiveRequests<SingleLookupReqId, BlockHeadersByRootRequestItems>,
     /// A mapping of active PayloadEnvelopesByRoot requests
     payload_envelopes_by_root_requests:
         ActiveRequests<SingleLookupReqId, PayloadEnvelopesByRootRequestItems<T::EthSpec>>,
@@ -328,6 +342,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             execution_engine_state: EngineState::Online, // always assume `Online` at the start
             request_id: 1,
             blocks_by_root_requests: ActiveRequests::new("blocks_by_root"),
+            blocks_by_head_requests: ActiveRequests::new("blocks_by_head"),
+            block_headers_by_root_requests: ActiveRequests::new("block_headers_by_root"),
             payload_envelopes_by_root_requests: ActiveRequests::new("payload_envelopes_by_root"),
             data_columns_by_root_requests: ActiveRequests::new("data_columns_by_root"),
             blocks_by_range_requests: ActiveRequests::new("blocks_by_range"),
@@ -361,6 +377,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             network_send: _,
             request_id: _,
             blocks_by_root_requests,
+            blocks_by_head_requests,
+            block_headers_by_root_requests,
             payload_envelopes_by_root_requests,
             data_columns_by_root_requests,
             blocks_by_range_requests,
@@ -382,6 +400,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .active_requests_of_peer(peer_id)
             .into_iter()
             .map(|id| SyncRequestId::SingleBlock { id: *id });
+        let blocks_by_head_ids = blocks_by_head_requests
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|id| SyncRequestId::BlocksByHead(*id));
+        let block_headers_by_root_ids = block_headers_by_root_requests
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|id| SyncRequestId::BlockHeadersByRoot(*id));
         let payload_envelopes_by_root_ids = payload_envelopes_by_root_requests
             .active_requests_of_peer(peer_id)
             .into_iter()
@@ -407,6 +433,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .into_iter()
             .map(|req_id| SyncRequestId::PayloadEnvelopesByRange(*req_id));
         blocks_by_root_ids
+            .chain(blocks_by_head_ids)
+            .chain(block_headers_by_root_ids)
             .chain(payload_envelopes_by_root_ids)
             .chain(data_column_by_root_ids)
             .chain(blocks_by_range_ids)
@@ -423,6 +451,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
 
     pub fn network_globals(&self) -> &NetworkGlobals<T::EthSpec> {
         &self.network_beacon_processor.network_globals
+    }
+
+    /// Returns true if the peer advertised support for the `beacon_blocks_by_head` protocol.
+    pub fn peer_supports_blocks_by_head(&self, peer_id: &PeerId) -> bool {
+        self.network_globals()
+            .peers
+            .read()
+            .peer_info(peer_id)
+            .map(|info| info.supports_protocol(Protocol::BlocksByHead))
+            .unwrap_or(false)
     }
 
     /// Returns the Client type of the peer if known
@@ -714,23 +752,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         peers_to_deprioritize: &HashSet<PeerId>,
         block_root: Hash256,
     ) -> Result<LookupRequestResult<Arc<SignedBeaconBlock<T::EthSpec>>>, RpcRequestSendError> {
-        let blocks_by_root_per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
-        let Some(peer_id) = lookup_peers
-            .read()
-            .iter()
-            .map(|peer| {
-                (
-                    // De-prioritize peers that have already failed this request
-                    peers_to_deprioritize.contains(peer),
-                    // Strictly de-prioritize peers already at the per-protocol concurrency limit
-                    blocks_by_root_per_peer.at_concurrency_limit(peer),
-                    // Random factor to break ties, otherwise the PeerID breaks ties
-                    rand::random::<u32>(),
-                    peer,
-                )
-            })
-            .min()
-            .map(|(_, _, _, peer)| *peer)
+        let Some(peer_id) = self.select_blocks_by_root_peer(&lookup_peers, peers_to_deprioritize)
         else {
             // Allow lookup to not have any peers and do nothing. This is an optimization to not
             // lose progress of lookups created from a block with unknown parent before we receive
@@ -768,7 +790,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             req_id: self.next_id(),
         };
 
-        let request = BlocksByRootSingleRequest(block_root);
+        let request = BlocksByRootSingleRequest::new(block_root);
+        let items = BlocksByRootRequestItems::new(&request);
 
         // Lookup sync event safety: If network_send.send() returns Ok(_) we are guaranteed that
         // eventually at least one this 3 events will be received:
@@ -808,11 +831,262 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             // true = enforce max_requests as returned for blocks_by_root. We always request a single
             // block and the peer must have it.
             true,
-            BlocksByRootRequestItems::new(request),
+            items,
             request_span,
         );
 
         Ok(LookupRequestResult::RequestSent(id.req_id))
+    }
+
+    /// Request a batch of block roots in one `BlocksByRoot`. Forward sync asks for a whole
+    /// chain at once rather than one root at a time; the response must cover exactly
+    /// `roots`, so a short response is an error rather than a partial result.
+    /// Picks who to ask for blocks by root: a peer that has not already failed this
+    /// request and is not at its per-protocol concurrency limit, ties broken at random.
+    fn select_blocks_by_root_peer(
+        &self,
+        peers: &Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Option<PeerId> {
+        let per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_root_requests);
+        Self::select_peer(&per_peer, &peers.read(), peers_to_deprioritize)
+    }
+
+    fn select_peer(
+        per_peer: &ActiveRequestsPerPeer,
+        peers: &HashSet<PeerId>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Option<PeerId> {
+        peers
+            .iter()
+            .map(|peer| {
+                (
+                    peers_to_deprioritize.contains(peer),
+                    per_peer.at_concurrency_limit(peer),
+                    rand::random::<u32>(),
+                    peer,
+                )
+            })
+            .min()
+            .map(|(_, _, _, peer)| *peer)
+    }
+
+    /// Walks `count` ancestors back from `beacon_root` in one request. This is forward sync's
+    /// discovery: one round trip per batch of roots rather than one per slot, which is what
+    /// `blocks_by_root` forced. Only peers advertising the protocol are considered, so a peer
+    /// that cannot serve it never costs a retry.
+    pub fn blocks_by_head_request(
+        &mut self,
+        lookup_id: SingleLookupId,
+        beacon_root: Hash256,
+        count: u64,
+        peers: Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Result<SingleLookupReqId, RpcRequestSendError> {
+        let candidates: HashSet<PeerId> = {
+            let peer_db = self.network_globals().peers.read();
+            peers
+                .read()
+                .iter()
+                .filter(|peer| {
+                    peer_db
+                        .peer_info(peer)
+                        .is_some_and(|info| info.supports_protocol(Protocol::BlocksByHead))
+                })
+                .copied()
+                .collect()
+        };
+        let per_peer = ActiveRequestsPerPeer::new(&self.blocks_by_head_requests);
+        let Some(peer_id) = Self::select_peer(&per_peer, &candidates, peers_to_deprioritize) else {
+            return Err(RpcRequestSendError::NoPeer(NoPeerError::BlockPeer));
+        };
+        let req_id = self.send_blocks_by_head(
+            peer_id,
+            lookup_id,
+            BlocksByHeadRequest { beacon_root, count },
+        )?;
+        Ok(SingleLookupReqId { lookup_id, req_id })
+    }
+
+    pub fn blocks_by_root_batch_request(
+        &mut self,
+        lookup_id: SingleLookupId,
+        roots: Vec<Hash256>,
+        peers: Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Result<SingleLookupReqId, RpcRequestSendError> {
+        let Some(peer_id) = self.select_blocks_by_root_peer(&peers, peers_to_deprioritize) else {
+            return Err(RpcRequestSendError::NoPeer(NoPeerError::BlockPeer));
+        };
+
+        let id = SingleLookupReqId {
+            lookup_id,
+            req_id: self.next_id(),
+        };
+        let request = BlocksByRootSingleRequest(roots);
+        let items = BlocksByRootRequestItems::new(&request);
+        let network_request = RequestType::BlocksByRoot(
+            request
+                .into_request(&self.fork_context)
+                .map_err(RpcRequestSendError::InternalError)?,
+        );
+        self.network_send
+            .send(NetworkMessage::SendRequest {
+                peer_id,
+                request: network_request,
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByRootBatch(id)),
+            })
+            .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        let request_span = debug_span!(
+            parent: Span::current(),
+            "lh_outgoing_blocks_by_root_batch_request",
+        );
+        // false: a peer omitting a root it does not have is legal, so the RPC layer must
+        // not penalize it. Completeness is checked by the requester instead, which retries
+        // elsewhere rather than downscoring.
+        self.blocks_by_root_requests
+            .insert(id, peer_id, false, items, request_span);
+        Ok(id)
+    }
+
+    pub(crate) fn on_blocks_by_root_batch_response(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) -> BlocksByRootBatchResult<T::EthSpec> {
+        let resp = self.blocks_by_root_requests.on_response(id, rpc_event);
+        self.on_rpc_response_result(resp, peer_id)
+    }
+
+    /// Walks `count` ancestors back from `beacon_root`, returning headers only. A header is
+    /// ~112 B against ~100 KB for a block, so one round trip covers far more slots — and the
+    /// root, slot and parent it carries are all tree sync's discovery needs.
+    pub fn block_headers_by_root_request(
+        &mut self,
+        lookup_id: SingleLookupId,
+        beacon_root: Hash256,
+        count: u64,
+        min_slot: Slot,
+        peers: Arc<RwLock<HashSet<PeerId>>>,
+        peers_to_deprioritize: &HashSet<PeerId>,
+    ) -> Result<SingleLookupReqId, RpcRequestSendError> {
+        let candidates: HashSet<PeerId> = {
+            let peer_db = self.network_globals().peers.read();
+            peers
+                .read()
+                .iter()
+                .filter(|peer| {
+                    peer_db
+                        .peer_info(peer)
+                        .is_some_and(|info| info.supports_protocol(Protocol::BlockHeadersByRoot))
+                })
+                .copied()
+                .collect()
+        };
+        let per_peer = ActiveRequestsPerPeer::new(&self.block_headers_by_root_requests);
+        let Some(peer_id) = Self::select_peer(&per_peer, &candidates, peers_to_deprioritize) else {
+            return Err(RpcRequestSendError::NoPeer(NoPeerError::BlockPeer));
+        };
+        let id = SingleLookupReqId {
+            lookup_id,
+            req_id: self.next_id(),
+        };
+        let request = BlockHeadersByRootRequest {
+            beacon_root,
+            count,
+            min_slot,
+        };
+        self.network_send
+            .send(NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::BlockHeadersByRoot(request.clone()),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlockHeadersByRoot(id)),
+            })
+            .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        debug!(
+            method = "BlockHeadersByRoot",
+            block_root = ?beacon_root,
+            count,
+            peer = %peer_id,
+            %id,
+            "Sync RPC request sent"
+        );
+
+        let request_span = debug_span!(
+            parent: Span::current(),
+            "lh_outgoing_block_headers_by_root_request",
+            block_root = %beacon_root,
+        );
+        self.block_headers_by_root_requests.insert(
+            id,
+            peer_id,
+            // false: the walk may stop early at `min_slot` or the peer's serving range.
+            false,
+            BlockHeadersByRootRequestItems::new(beacon_root, count as usize),
+            request_span,
+        );
+        Ok(id)
+    }
+
+    pub(crate) fn on_block_headers_by_root_response(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<Arc<SignedBeaconBlockHeader>>,
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedBeaconBlockHeader>>>> {
+        let resp = self
+            .block_headers_by_root_requests
+            .on_response(id, rpc_event);
+        self.on_rpc_response_result(resp, peer_id)
+    }
+
+    /// Sends a `beacon_blocks_by_head` request to `peer_id`, fetching `request.beacon_root` and a
+    /// run of its ancestors in a single request.
+    pub fn send_blocks_by_head(
+        &mut self,
+        peer_id: PeerId,
+        lookup_id: SingleLookupId,
+        request: BlocksByHeadRequest,
+    ) -> Result<Id, RpcRequestSendError> {
+        let id = SingleLookupReqId {
+            lookup_id,
+            req_id: self.next_id(),
+        };
+        self.network_send
+            .send(NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::BlocksByHead(request.clone()),
+                app_request_id: AppRequestId::Sync(SyncRequestId::BlocksByHead(id)),
+            })
+            .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        debug!(
+            method = "BlocksByHead",
+            block_root = ?request.beacon_root,
+            peer = %peer_id,
+            %id,
+            "Sync RPC request sent"
+        );
+
+        let request_span = debug_span!(
+            parent: Span::current(),
+            "lh_outgoing_block_by_head_request",
+            block_root = %request.beacon_root,
+        );
+        self.blocks_by_head_requests.insert(
+            id,
+            peer_id,
+            // false = the peer may return fewer blocks than requested (e.g. reached genesis or
+            // finalization), so the request completes on stream termination.
+            false,
+            BlocksByHeadRequestItems::new(request.beacon_root, request.count as usize),
+            request_span,
+        );
+
+        Ok(id.req_id)
     }
 
     /// Request a payload envelope for a block root via PayloadEnvelopesByRoot RPC.
@@ -1365,6 +1639,28 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         self.on_rpc_response_result(resp, peer_id)
     }
 
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn on_blocks_by_head_response(
+        &mut self,
+        id: SingleLookupReqId,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>> {
+        // The response has the requested `beacon_root` first followed by its ancestors in
+        // descending slot order, and must contain at least the requested block.
+        let resp = self.blocks_by_head_requests.on_response(id, rpc_event);
+        let resp = resp.map(|res| {
+            res.and_then(|blocks| {
+                if blocks.is_empty() {
+                    Err(LookupVerifyError::NotEnoughResponsesReturned { actual: 0 }.into())
+                } else {
+                    Ok(blocks)
+                }
+            })
+        });
+        self.on_rpc_response_result(resp, peer_id)
+    }
+
     pub(crate) fn on_single_payload_envelope_response(
         &mut self,
         id: SingleLookupReqId,
@@ -1719,6 +2015,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     pub(crate) fn register_metrics(&self) {
         for (id, count) in [
             ("blocks_by_root", self.blocks_by_root_requests.len()),
+            ("blocks_by_head", self.blocks_by_head_requests.len()),
             (
                 "data_columns_by_root",
                 self.data_columns_by_root_requests.len(),

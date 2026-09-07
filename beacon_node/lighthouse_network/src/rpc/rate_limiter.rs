@@ -105,6 +105,8 @@ pub struct RPCRateLimiter {
     bbrange_rl: Limiter<PeerId>,
     /// BlocksByRoot rate limiter.
     bbroots_rl: Limiter<PeerId>,
+    /// BlockHeadersByRoot rate limiter.
+    bhroot_rl: Limiter<PeerId>,
     /// BlocksByHead rate limiter.
     bbhead_rl: Limiter<PeerId>,
     /// BlobsByRange rate limiter.
@@ -154,6 +156,8 @@ pub struct RPCRateLimiterBuilder {
     bbrange_quota: Option<Quota>,
     /// Quota for the BlocksByRoot protocol.
     bbroots_quota: Option<Quota>,
+    /// Quota for the BlockHeadersByRoot protocol.
+    bhroot_quota: Option<Quota>,
     /// Quota for the BlocksByHead protocol.
     bbhead_quota: Option<Quota>,
     /// Quota for the ExecutionPayloadEnvelopesByRange protocol.
@@ -190,6 +194,7 @@ impl RPCRateLimiterBuilder {
             Protocol::BlocksByRange => self.bbrange_quota = q,
             Protocol::BlocksByRoot => self.bbroots_quota = q,
             Protocol::BlocksByHead => self.bbhead_quota = q,
+            Protocol::BlockHeadersByRoot => self.bhroot_quota = q,
             Protocol::PayloadEnvelopesByRange => self.perange_quota = q,
             Protocol::PayloadEnvelopesByRoot => self.peroots_quota = q,
             Protocol::BlobsByRange => self.blbrange_quota = q,
@@ -219,6 +224,9 @@ impl RPCRateLimiterBuilder {
         let bbhead_quota = self
             .bbhead_quota
             .ok_or("BlocksByHead quota not specified")?;
+        let bhroot_quota = self
+            .bhroot_quota
+            .ok_or("BlockHeadersByRoot quota not specified")?;
         let perange_quota = self
             .perange_quota
             .ok_or("PayloadEnvelopesByRange quota not specified")?;
@@ -261,6 +269,7 @@ impl RPCRateLimiterBuilder {
         let bbroots_rl = Limiter::from_quota(bbroots_quota)?;
         let bbrange_rl = Limiter::from_quota(bbrange_quota)?;
         let bbhead_rl = Limiter::from_quota(bbhead_quota)?;
+        let bhroot_rl = Limiter::from_quota(bhroot_quota)?;
         let envrange_rl = Limiter::from_quota(perange_quota)?;
         let envroots_rl = Limiter::from_quota(peroots_quota)?;
         let blbrange_rl = Limiter::from_quota(blbrange_quota)?;
@@ -287,6 +296,7 @@ impl RPCRateLimiterBuilder {
             bbroots_rl,
             bbrange_rl,
             bbhead_rl,
+            bhroot_rl,
             envrange_rl,
             envroots_rl,
             blbrange_rl,
@@ -343,6 +353,7 @@ impl RPCRateLimiter {
             blocks_by_range_quota,
             blocks_by_root_quota,
             blocks_by_head_quota,
+            block_headers_by_root_quota,
             payload_envelopes_by_range_quota,
             payload_envelopes_by_root_quota,
             blobs_by_range_quota,
@@ -363,6 +374,7 @@ impl RPCRateLimiter {
             .set_quota(Protocol::BlocksByRange, blocks_by_range_quota)
             .set_quota(Protocol::BlocksByRoot, blocks_by_root_quota)
             .set_quota(Protocol::BlocksByHead, blocks_by_head_quota)
+            .set_quota(Protocol::BlockHeadersByRoot, block_headers_by_root_quota)
             .set_quota(
                 Protocol::PayloadEnvelopesByRange,
                 payload_envelopes_by_range_quota,
@@ -419,6 +431,7 @@ impl RPCRateLimiter {
             Protocol::BlocksByRange => &mut self.bbrange_rl,
             Protocol::BlocksByRoot => &mut self.bbroots_rl,
             Protocol::BlocksByHead => &mut self.bbhead_rl,
+            Protocol::BlockHeadersByRoot => &mut self.bhroot_rl,
             Protocol::PayloadEnvelopesByRange => &mut self.envrange_rl,
             Protocol::PayloadEnvelopesByRoot => &mut self.envroots_rl,
             Protocol::BlobsByRange => &mut self.blbrange_rl,
@@ -446,6 +459,7 @@ impl RPCRateLimiter {
             bbrange_rl,
             bbroots_rl,
             bbhead_rl,
+            bhroot_rl,
             envrange_rl,
             envroots_rl,
             blbrange_rl,

@@ -7,11 +7,32 @@ use crate::{Client, Enr, GossipTopic, Multiaddr, NetworkConfig, PeerId};
 use eth2::lighthouse::sync_state::CustodyBackFillState;
 use network_utils::enr_ext::EnrExt;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, error};
 use types::data::{compute_subnets_from_custody_group, get_custody_groups};
 use types::{ChainSpec, ColumnIndex, DataColumnSubnetId, EthSpec, Slot};
+
+/// A snapshot of one tree sync chain, for `/lighthouse/tree_sync`. Published by forward
+/// sync so the forest can be audited from outside the sync task.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TreeSyncChainInfo {
+    pub id: u32,
+    /// "backfill" while walking ancestors, "forward_sync" once importing.
+    pub kind: String,
+    /// `discovering(root)`, `anchored(root)`, `downloading`, `ready`, or `processing`.
+    pub state: String,
+    /// The block this chain attaches to, once known.
+    pub parent: Option<String>,
+    pub newest_slot: Option<u64>,
+    pub oldest_slot: Option<u64>,
+    pub root_count: usize,
+    /// Every root the chain holds, tip first.
+    pub roots: Vec<String>,
+    pub peers: Vec<String>,
+    pub errors: u8,
+}
 
 pub struct NetworkGlobals<E: EthSpec> {
     /// The current local ENR.
@@ -30,6 +51,8 @@ pub struct NetworkGlobals<E: EthSpec> {
     pub sync_state: RwLock<SyncState>,
     /// The current state of the backfill sync.
     pub backfill_state: RwLock<BackFillState>,
+    /// Tree sync's chain forest, republished on change. Empty when tree sync is off.
+    pub tree_sync: RwLock<Vec<TreeSyncChainInfo>>,
     /// The current state of custody sync.
     pub custody_sync_state: RwLock<CustodyBackFillState>,
     /// The computed sampling subnets and columns is stored to avoid re-computing.
@@ -94,6 +117,7 @@ impl<E: EthSpec> NetworkGlobals<E> {
             gossipsub_subscriptions: RwLock::new(HashSet::new()),
             sync_state: RwLock::new(SyncState::Stalled),
             backfill_state: RwLock::new(BackFillState::Paused),
+            tree_sync: RwLock::new(Vec::new()),
             custody_sync_state: RwLock::new(CustodyBackFillState::Pending(
                 "Custody backfill sync initialized".to_string(),
             )),

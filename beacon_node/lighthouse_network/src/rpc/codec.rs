@@ -22,7 +22,7 @@ use types::{
     LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock, SignedBeaconBlockAltair,
     SignedBeaconBlockBase, SignedBeaconBlockBellatrix, SignedBeaconBlockCapella,
     SignedBeaconBlockDeneb, SignedBeaconBlockElectra, SignedBeaconBlockFulu,
-    SignedBeaconBlockGloas, SignedBeaconBlockHeze,
+    SignedBeaconBlockGloas, SignedBeaconBlockHeader, SignedBeaconBlockHeze,
 };
 use unsigned_varint::codec::Uvi;
 
@@ -78,6 +78,7 @@ impl<E: EthSpec> SSZSnappyInboundCodec<E> {
                 RpcSuccessResponse::BlocksByRange(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::BlocksByRoot(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::BlocksByHead(res) => res.as_ssz_bytes(),
+                RpcSuccessResponse::BlockHeadersByRoot(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::PayloadEnvelopesByRange(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::PayloadEnvelopesByRoot(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::BlobsByRange(res) => res.as_ssz_bytes(),
@@ -361,6 +362,7 @@ impl<E: EthSpec> Encoder<RequestType<E>> for SSZSnappyOutboundCodec<E> {
                 BlocksByRootRequest::V2(req) => req.block_roots.as_ssz_bytes(),
             },
             RequestType::BlocksByHead(req) => req.as_ssz_bytes(),
+            RequestType::BlockHeadersByRoot(req) => req.as_ssz_bytes(),
             RequestType::PayloadEnvelopesByRange(req) => req.as_ssz_bytes(),
             RequestType::PayloadEnvelopesByRoot(req) => req.beacon_block_roots.as_ssz_bytes(),
             RequestType::BlobsByRange(req) => req.as_ssz_bytes(),
@@ -554,6 +556,9 @@ fn handle_rpc_request<E: EthSpec>(
                     spec.max_request_blocks(current_fork),
                 )?,
             }),
+        ))),
+        SupportedProtocol::BlockHeadersByRootV1 => Ok(Some(RequestType::BlockHeadersByRoot(
+            BlockHeadersByRootRequest::from_ssz_bytes(decoded_buffer)?,
         ))),
         SupportedProtocol::BlocksByHeadV1 => Ok(Some(RequestType::BlocksByHead(
             BlocksByHeadRequest::from_ssz_bytes(decoded_buffer)?,
@@ -954,6 +959,12 @@ fn handle_rpc_response<E: EthSpec>(
                 ),
             )),
         },
+        // Headers are fork-agnostic, so no context bytes are involved.
+        SupportedProtocol::BlockHeadersByRootV1 => {
+            Ok(Some(RpcSuccessResponse::BlockHeadersByRoot(Arc::new(
+                SignedBeaconBlockHeader::from_ssz_bytes(decoded_buffer)?,
+            ))))
+        }
         SupportedProtocol::BlocksByHeadV1 => match fork_name {
             Some(fork_name) => Ok(Some(RpcSuccessResponse::BlocksByHead(Arc::new(
                 SignedBeaconBlock::from_ssz_bytes_by_fork(decoded_buffer, fork_name)?,
