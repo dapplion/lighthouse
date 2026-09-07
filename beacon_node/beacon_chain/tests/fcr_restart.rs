@@ -9,6 +9,7 @@
 use beacon_chain::{
     BeaconChain, BeaconChainTypes, ChainConfig,
     chain_config::FastConfirmationMode,
+    persisted_fast_confirmation::{FAST_CONFIRMATION_DB_KEY, PersistedFastConfirmation},
     test_utils::{BeaconChainHarness, DiskHarnessType, test_spec},
 };
 use bls::Keypair;
@@ -44,9 +45,14 @@ fn store(db: &TempDir) -> Store {
     .unwrap()
 }
 
-fn config() -> ChainConfig {
+fn config(fcr: bool, reset_payload_statuses: bool) -> ChainConfig {
     ChainConfig {
-        fast_confirmation: FastConfirmationMode::Enabled,
+        fast_confirmation: if fcr {
+            FastConfirmationMode::Enabled
+        } else {
+            FastConfirmationMode::Disabled
+        },
+        always_reset_payload_statuses: reset_payload_statuses,
         ..ChainConfig::default()
     }
 }
@@ -58,13 +64,13 @@ fn control(store: Store) -> Harness {
         .keypairs(KEYPAIRS.to_vec())
         .fresh_disk_store(store)
         .mock_execution_layer()
-        .chain_config(config())
+        .chain_config(config(true, false))
         .build();
     harness.advance_slot();
     harness
 }
 
-fn node(store: Store, control: &Harness, fresh: bool) -> Harness {
+fn node(store: Store, control: &Harness, fresh: bool, fcr: bool, reset: bool) -> Harness {
     let builder = Harness::builder(MinimalEthSpec)
         .spec(store.get_chain_spec().clone())
         .keypairs(KEYPAIRS.to_vec());
@@ -76,7 +82,7 @@ fn node(store: Store, control: &Harness, fresh: bool) -> Harness {
     builder
         .testing_slot_clock(control.chain.slot_clock.clone())
         .execution_layer(control.chain.execution_layer.clone())
-        .chain_config(config())
+        .chain_config(config(fcr, reset))
         .build()
 }
 
@@ -84,12 +90,11 @@ fn validators(n: usize) -> Vec<usize> {
     (0..n).collect()
 }
 
-fn confirmed<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> (Hash256, Slot) {
+fn confirmed<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> Option<(Hash256, Slot)> {
     let root = chain
         .canonical_head
         .fast_confirmation
-        .as_ref()
-        .unwrap()
+        .as_ref()?
         .lock()
         .confirmed_root;
     let slot = chain
@@ -98,7 +103,7 @@ fn confirmed<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> (Hash256, Slot) {
         .get_block(&root)
         .unwrap()
         .slot;
-    (root, slot)
+    Some((root, slot))
 }
 
 struct Produced {
@@ -127,7 +132,7 @@ impl Rig {
         let (control_db, node_db) = (tempdir().unwrap(), tempdir().unwrap());
         let control = control(store(&control_db));
         let node_store = store(&node_db);
-        let node = node(node_store.clone(), &control, true);
+        let node = node(node_store.clone(), &control, true, true, false);
         Self {
             control,
             node: Some(node),
@@ -231,7 +236,7 @@ impl Rig {
     /// chain's own epoch-transition writes (`BeaconChain::drop` would persist, so leak it).
     fn stop(&mut self, graceful: bool) {
         let node = self.node.take().unwrap();
-        self.stopped = Some(confirmed(&node.chain));
+        self.stopped = confirmed(&node.chain);
         if graceful {
             node.chain.persist_fork_choice().unwrap();
             node.chain.persist_op_pool().unwrap();
@@ -244,15 +249,19 @@ impl Rig {
     /// Boot from the database, run FCR once before any catch-up (as a real boot does), then
     /// import every block after the node's head, as sync would.
     async fn boot(&mut self) {
-        self.node = Some(node(self.node_store.clone(), &self.control, false));
+        self.node = Some(node(
+            self.node_store.clone(),
+            &self.control,
+            false,
+            true,
+            false,
+        ));
         self.node().chain.recompute_head_at_current_slot().await;
-        let (root, slot) = self.stopped.unwrap();
-        if slot == self.slot() {
-            assert_eq!(
-                confirmed(&self.node().chain).0,
-                root,
-                "same slot, same block"
-            );
+        if let Some((root, slot)) = self.stopped
+            && slot == self.slot()
+        {
+            let (now, _) = confirmed(&self.node().chain).unwrap();
+            assert_eq!(now, root, "same slot, same block");
         }
         self.observe("boot");
         let head = self.node().chain.canonical_head.cached_head().head_slot();
@@ -265,11 +274,27 @@ impl Rig {
     }
 
     /// The invariant: the node never announces a confirmed slot below its own high-water mark
-    /// unless the control is below it too.
+    /// unless the control is below it too, and both roots are on the same branch.
     fn observe(&mut self, phase: &str) {
         let Some(node) = &self.node else { return };
-        let (_, control) = confirmed(&self.control.chain);
-        let (_, mine) = confirmed(&node.chain);
+        let Some((mine_root, mine)) = confirmed(&node.chain) else {
+            return;
+        };
+        let (control_root, control) = confirmed(&self.control.chain).unwrap();
+        let (ancestor, descendant) = if mine <= control {
+            (mine_root, control_root)
+        } else {
+            (control_root, mine_root)
+        };
+        assert!(
+            self.control
+                .chain
+                .canonical_head
+                .fork_choice_read_lock()
+                .is_descendant(ancestor, descendant),
+            "confirmed roots on different branches at slot {}",
+            self.slot()
+        );
         let floor = self.high_water.min(control);
         let head = node.chain.canonical_head.cached_head().head_slot();
         self.log.push(format!(
@@ -366,8 +391,8 @@ impl Scenario {
         rig.steps(epoch, &validators(self.attesters_after)).await;
         rig.steps(epoch, &all).await;
         assert_eq!(
-            confirmed(&rig.control.chain).0,
-            confirmed(&rig.node().chain).0,
+            confirmed(&rig.control.chain),
+            confirmed(&rig.node().chain),
             "node did not converge on the control\n{}",
             rig.log.join("\n")
         );
@@ -453,4 +478,64 @@ async fn two_restarts_in_a_row() {
 #[tokio::test]
 async fn crash_instead_of_graceful_shutdown() {
     Scenario::default().down(1).crash().run().await;
+}
+
+/// With FCR disabled the next fork choice persist deletes the item, so enabling FCR again later
+/// seeds afresh instead of restoring stale state.
+#[tokio::test]
+async fn disabling_fcr_clears_the_persisted_state() {
+    let all = validators(VALIDATOR_COUNT);
+    let mut rig = Rig::new();
+    rig.steps(WARMUP_SLOTS, &all).await;
+    rig.stop(true);
+    let persisted = |rig: &Rig| {
+        rig.node_store
+            .get_item::<PersistedFastConfirmation>(&FAST_CONFIRMATION_DB_KEY)
+            .unwrap()
+    };
+    assert!(persisted(&rig).is_some());
+    rig.node = Some(node(
+        rig.node_store.clone(),
+        &rig.control,
+        false,
+        false,
+        false,
+    ));
+    rig.steps(E::slots_per_epoch(), &all).await;
+    rig.stop(true);
+    assert!(persisted(&rig).is_none());
+}
+
+/// `--reset-payload-statuses` marks every pre-Gloas block optimistic at boot (Gloas payload
+/// statuses are left alone). A confirmed root must be `VALID` like any block FCR confirms, so an
+/// optimistic persisted root is refused and the rule is seeded from the justified checkpoint.
+#[tokio::test]
+async fn a_payload_status_reset_refuses_an_optimistic_persisted_root() {
+    let all = validators(VALIDATOR_COUNT);
+    let mut rig = Rig::new();
+    rig.steps(WARMUP_SLOTS, &all).await;
+    rig.stop(true);
+    let (stopped, _) = rig.stopped.unwrap();
+    rig.node = Some(node(
+        rig.node_store.clone(),
+        &rig.control,
+        false,
+        true,
+        true,
+    ));
+    let chain = &rig.node().chain;
+    let optimistic = chain
+        .canonical_head
+        .fork_choice_read_lock()
+        .get_block(&stopped)
+        .unwrap()
+        .execution_status
+        .is_optimistic_or_invalid();
+    let justified = chain
+        .canonical_head
+        .cached_head()
+        .justified_checkpoint()
+        .root;
+    let (root, _) = confirmed(chain).unwrap();
+    assert_eq!(root, if optimistic { justified } else { stopped });
 }

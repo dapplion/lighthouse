@@ -70,7 +70,7 @@ use std::panic::Location;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use store::{
-    Error as StoreError, KeyValueStore, KeyValueStoreOp, StoreConfig, StoreItem,
+    DBColumn, Error as StoreError, KeyValueStore, KeyValueStoreOp, StoreConfig, StoreItem,
     iter::StateRootsIterator,
 };
 use task_executor::{JoinHandle, ShutdownReason};
@@ -1413,8 +1413,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         )
     }
 
-    /// `None` unless the persisted confirmed root is still in fork choice. Other references may
-    /// have been pruned by finality advancing on the first tick; they are clamped to finalized.
+    /// `None` unless the persisted confirmed root is still in fork choice and `VALID` (a payload
+    /// status reset at boot makes every block optimistic). Other references may have been pruned by
+    /// finality advancing on the first tick; they are clamped to finalized.
     fn restore_fast_confirmation_rule(
         fork_choice: &BeaconForkChoice<T>,
         snapshot: &BeaconSnapshot<T::EthSpec>,
@@ -1428,8 +1429,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         else {
             return Ok(None);
         };
-        if fork_choice.get_block(&persisted.confirmed_root).is_none() {
-            debug!(?persisted.confirmed_root, "Persisted FCR root not in fork choice");
+        let confirmed_root = persisted.confirmed_root;
+        let Some(confirmed_block) = fork_choice.get_block(&confirmed_root) else {
+            debug!(?confirmed_root, "Persisted FCR root not in fork choice");
+            return Ok(None);
+        };
+        if confirmed_block.execution_status.is_optimistic_or_invalid() {
+            debug!(?confirmed_root, "Persisted FCR root is not VALID");
             return Ok(None);
         }
 
@@ -1452,6 +1458,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         let previous = clamp_checkpoint(persisted.previous_epoch_observed_justified_checkpoint);
         let current = clamp_checkpoint(persisted.current_epoch_observed_justified_checkpoint);
+        if previous.epoch > current.epoch {
+            debug!(
+                ?previous,
+                ?current,
+                "Persisted FCR checkpoints out of order"
+            );
+            return Ok(None);
+        }
         let previous_state = Self::load_fcr_checkpoint_state(store, None, previous)?;
         let current_state = if current == previous {
             None
@@ -1804,16 +1818,25 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Persist fork choice to disk, writing immediately.
     pub fn persist_fork_choice(&self) -> Result<(), Error> {
         let _fork_choice_timer = metrics::start_timer(&metrics::PERSIST_FORK_CHOICE);
-        let mut batch = vec![self.persist_fork_choice_in_batch()?];
-        batch.extend(self.persist_fast_confirmation_in_batch());
+        let batch = vec![
+            self.persist_fork_choice_in_batch()?,
+            self.persist_fast_confirmation_in_batch(),
+        ];
         self.store.hot_db.do_atomically(batch)?;
         Ok(())
     }
 
-    /// The Fast Confirmation Rule's tracking variables, when FCR is enabled.
-    fn persist_fast_confirmation_in_batch(&self) -> Option<KeyValueStoreOp> {
-        let fcr = self.canonical_head.fast_confirmation.as_ref()?.lock();
-        Some(PersistedFastConfirmation::from_rule(&fcr).as_kv_store_op(FAST_CONFIRMATION_DB_KEY))
+    /// The FCR tracking variables; with FCR disabled the item is deleted instead, so enabling it
+    /// again later cannot restore stale state.
+    fn persist_fast_confirmation_in_batch(&self) -> KeyValueStoreOp {
+        match self.canonical_head.fast_confirmation.as_ref() {
+            Some(fcr) => PersistedFastConfirmation::from_rule(&fcr.lock())
+                .as_kv_store_op(FAST_CONFIRMATION_DB_KEY),
+            None => KeyValueStoreOp::DeleteKey(
+                DBColumn::ForkChoice,
+                FAST_CONFIRMATION_DB_KEY.as_slice().to_vec(),
+            ),
+        }
     }
 
     /// Return a database operation for writing fork choice to disk.
