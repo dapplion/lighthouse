@@ -544,11 +544,23 @@ pub fn progressive_container_root(
     active_fields: &[bool],
 ) -> Result<H256, MerkleTreeError> {
     let field_roots = progressive_container_leaves(active_field_roots, active_fields)?;
-    let progressive_root = progressive_root_from(&field_roots, 0)?;
-    Ok(H256::from(hash32_concat(
-        progressive_root.as_slice(),
-        pack_active_fields(active_fields)?.as_slice(),
-    )))
+
+    // Reuse `tree_hash`'s streaming implementation so that proof generation and the `TreeHash`
+    // derive agree on the container root by construction.
+    let mut hasher = tree_hash::ProgressiveMerkleHasher::new();
+    for root in &field_roots {
+        hasher
+            .write(root.as_slice())
+            .map_err(|_| MerkleTreeError::PleaseNotifyTheDevs)?;
+    }
+    let progressive_root = hasher
+        .finish()
+        .map_err(|_| MerkleTreeError::PleaseNotifyTheDevs)?;
+
+    Ok(tree_hash::mix_in_active_fields(
+        &progressive_root,
+        pack_active_fields(active_fields)?.into(),
+    ))
 }
 
 impl From<ArithError> for MerkleTreeError {
