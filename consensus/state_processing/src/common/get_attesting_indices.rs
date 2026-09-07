@@ -9,7 +9,7 @@ pub mod attesting_indices_base {
     ///
     /// Spec v0.12.1
     pub fn get_indexed_attestation<E: EthSpec>(
-        committee: &[usize],
+        committee: &[u32],
         attestation: &AttestationBase<E>,
     ) -> Result<IndexedAttestation<E>, BlockOperationError<Invalid>> {
         let attesting_indices =
@@ -23,7 +23,7 @@ pub mod attesting_indices_base {
 
     /// Returns validator indices which participated in the attestation, sorted by increasing index.
     pub fn get_attesting_indices<E: EthSpec>(
-        committee: &[usize],
+        committee: &[u32],
         bitlist: &BitList<E::MaxValidatorsPerCommittee>,
     ) -> Result<Vec<u64>, BeaconStateError> {
         if bitlist.len() != committee.len() {
