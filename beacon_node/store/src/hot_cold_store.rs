@@ -1980,9 +1980,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
 
                     // Immediately rebase the state from diffs on the finalized state so that we
                     // can utilise structural sharing and don't consume excess memory.
-                    self.state_cache
-                        .lock()
-                        .rebase_on_finalized(&mut state, &self.spec)?;
+                    self.state_cache.lock().rebase_on_finalized(&mut state)?;
 
                     state
                 }
@@ -2007,7 +2005,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                     // reuse parts of the tree for state root calculation in `replay_blocks`.
                     self.state_cache
                         .lock()
-                        .rebase_on_finalized(&mut base_state, &self.spec)?;
+                        .rebase_on_finalized(&mut base_state)?;
 
                     self.load_hot_state_using_replay(
                         base_state,

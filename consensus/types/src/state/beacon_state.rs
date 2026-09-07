@@ -94,6 +94,13 @@ pub enum BeaconStateError {
     /// A state for a different hard-fork was required -- a severe logic error.
     IncorrectStateVariant,
     EpochOutOfBounds,
+    /// A caller needed committee shufflings but none were supplied.
+    ShufflingsNotProvided,
+    /// The supplied shufflings do not describe the state they were passed with.
+    ShufflingsEpochMismatch {
+        shufflings: Epoch,
+        state: Epoch,
+    },
     SlotOutOfBounds,
     UnknownValidator(usize),
     UnknownBuilder(BuilderIndex),
@@ -3068,7 +3075,7 @@ impl<E: EthSpec> BeaconState<E> {
         }
     }
 
-    pub fn rebase_on(&mut self, base: &Self, spec: &ChainSpec) -> Result<(), BeaconStateError> {
+    pub fn rebase_on(&mut self, base: &Self) -> Result<(), BeaconStateError> {
         // Required for macros (which use type-hints internally).
 
         match (&mut *self, base) {

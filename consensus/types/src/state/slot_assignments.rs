@@ -69,10 +69,11 @@ impl WindowEpoch {
         shufflings: Option<&Shufflings>,
         spec: &ChainSpec,
     ) -> Result<Arc<CommitteeCache>, BeaconStateError> {
-        if let Some(relative_epoch) = self.relative_epoch()
-            && let Some(cache) = shufflings.and_then(|s| s.committee_cache(relative_epoch).ok())
-        {
-            return Ok(cache.clone());
+        if let Some(shufflings) = shufflings {
+            shufflings.check_matches(state)?;
+            if let Some(relative_epoch) = self.relative_epoch() {
+                return Ok(shufflings.committee_cache(relative_epoch).clone());
+            }
         }
         state.initialize_committee_cache(self.epoch(state), spec)
     }

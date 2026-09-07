@@ -7,7 +7,7 @@ use hashlink::lru_cache::LruCache;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use tracing::instrument;
-use types::{BeaconState, ChainSpec, Epoch, EthSpec, Hash256, Slot};
+use types::{BeaconState, Epoch, EthSpec, Hash256, Slot};
 
 /// Fraction of the LRU cache to leave intact during culling.
 const CULL_EXEMPT_NUMERATOR: usize = 1;
@@ -194,18 +194,14 @@ impl<E: EthSpec> StateCache<E> {
     /// nodes with the finalized state, e.g. states loaded from disk.
     ///
     /// If the finalized state is not initialized this function is a no-op.
-    pub fn rebase_on_finalized(
-        &self,
-        state: &mut BeaconState<E>,
-        spec: &ChainSpec,
-    ) -> Result<(), Error> {
+    pub fn rebase_on_finalized(&self, state: &mut BeaconState<E>) -> Result<(), Error> {
         // Do not attempt to rebase states prior to the finalized state. This method might be called
         // with states on the hdiff grid prior to finalization, as part of the reconstruction of
         // some later unfinalized state.
         if let Some(finalized_state) = &self.finalized_state
             && state.slot() >= finalized_state.state.slot()
         {
-            state.rebase_on(&finalized_state.state, spec)?;
+            state.rebase_on(&finalized_state.state)?;
         }
 
         Ok(())

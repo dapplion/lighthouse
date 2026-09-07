@@ -8,7 +8,7 @@ use crate::per_epoch_processing::{
 pub use justification_and_finalization::process_justification_and_finalization;
 pub use participation_record_updates::process_participation_record_updates;
 pub use rewards_and_penalties::process_rewards_and_penalties;
-use types::{BeaconState, ChainSpec, EthSpec, Shufflings};
+use types::{BeaconState, ChainSpec, EthSpec, RelativeEpoch, Shufflings};
 pub use validator_statuses::{TotalBalances, ValidatorStatus, ValidatorStatuses};
 
 pub mod justification_and_finalization;
@@ -66,8 +66,11 @@ pub fn process_epoch<E: EthSpec>(
     // Rotate current/previous epoch attestations
     process_participation_record_updates(state)?;
 
-    // Rotate the shufflings to suit the epoch transition.
-    shufflings.advance();
+    // Rotate the shufflings to suit the epoch transition. `advance` rejects a cache that is not
+    // initialized for the incoming next epoch.
+    let lookahead_epoch = RelativeEpoch::Next.into_epoch(state.next_epoch()?);
+    let next_shuffling = state.initialize_committee_cache_for_lookahead(lookahead_epoch, spec)?;
+    shufflings.advance(next_shuffling)?;
 
     Ok(EpochProcessingSummary::Base {
         total_balances: validator_statuses.total_balances,

@@ -73,6 +73,7 @@ pub struct OperationPool<E: EthSpec + Default> {
 #[derive(Debug, PartialEq)]
 pub enum OpPoolError {
     GetAttestationsTotalBalanceError(BeaconStateError),
+    ShufflingsMismatch(BeaconStateError),
     GetBlockRootError(BeaconStateError),
     SyncAggregateError(SyncAggregateError),
     RewardCacheUpdatePrevEpoch(BeaconStateError),
@@ -375,6 +376,10 @@ impl<E: EthSpec> OperationPool<E> {
                 return Err(OpPoolError::EpochCacheNotInitialized);
             }
         }
+
+        shufflings
+            .check_matches(state)
+            .map_err(OpPoolError::ShufflingsMismatch)?;
 
         // Attestations for the current fork, which may be from the current or previous epoch.
         let (prev_epoch_key, curr_epoch_key) = CheckpointKey::keys_for_state(state);
