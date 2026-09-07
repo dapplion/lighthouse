@@ -768,6 +768,7 @@ async fn unaggregated_gossip_verification() {
         let slot = valid_sync_committee_message.slot + 1;
         complete_state_advance(
             &mut state,
+            None,
             Some(block.state_root()),
             slot,
             None,

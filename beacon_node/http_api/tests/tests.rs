@@ -52,8 +52,9 @@ use tree_hash::TreeHash;
 use types::ApplicationDomain;
 use types::{
     Address, Builder, Domain, EthSpec, ExecutionBlockHash, ExecutionPayloadBid, Hash256,
-    MainnetEthSpec, ProposerPreferences, RelativeEpoch, SelectionProof, SignedExecutionPayloadBid,
-    SignedExecutionPayloadEnvelope, SignedProposerPreferences, SignedRoot, SingleAttestation, Slot,
+    MainnetEthSpec, ProposerPreferences, RelativeEpoch, SelectionProof, Shufflings,
+    SignedExecutionPayloadBid, SignedExecutionPayloadEnvelope, SignedProposerPreferences,
+    SignedRoot, SingleAttestation, Slot,
     attestation::AttestationBase,
     consts::gloas::{BUILDER_INDEX_SELF_BUILD, PAYLOAD_BUILDER_VERSION},
 };
@@ -1486,9 +1487,8 @@ impl ApiTester {
             }
 
             let state = state_opt.as_mut().expect("result should be none");
-
-            state.build_all_committee_caches(&self.chain.spec).unwrap();
-            let committees = state
+            let shufflings = Shufflings::for_state(state, &self.chain.spec).unwrap();
+            let committees = shufflings
                 .get_beacon_committees_at_epoch(RelativeEpoch::Current)
                 .unwrap();
 
@@ -2513,12 +2513,14 @@ impl ApiTester {
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = state
+                let committee = Shufflings::for_state(state, &self.chain.spec)
+                    .unwrap()
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap();
+                    .unwrap()
+                    .committee
+                    .to_vec();
 
                 let attester_index = committee
-                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {
@@ -2584,15 +2586,17 @@ impl ApiTester {
 
             let aggregation_bit = *aggregation_bits.first().unwrap();
 
-            let committee = state
+            let committee = Shufflings::for_state(state, &self.chain.spec)
+                .unwrap()
                 .get_beacon_committee(
                     attestation.data().slot,
                     attestation.committee_index().unwrap(),
                 )
-                .unwrap();
+                .unwrap()
+                .committee
+                .to_vec();
 
             let attester_index = committee
-                .committee
                 .iter()
                 .enumerate()
                 .find_map(|(i, &index)| {
@@ -2615,15 +2619,17 @@ impl ApiTester {
 
             let aggregation_bit = *aggregation_bits.first().unwrap();
 
-            let committee = state
+            let committee = Shufflings::for_state(state, &self.chain.spec)
+                .unwrap()
                 .get_beacon_committee(
                     invalid_attestation.data().slot,
                     invalid_attestation.committee_index().unwrap(),
                 )
-                .unwrap();
+                .unwrap()
+                .committee
+                .to_vec();
 
             let attester_index = committee
-                .committee
                 .iter()
                 .enumerate()
                 .find_map(|(i, &index)| {
@@ -3994,15 +4000,12 @@ impl ApiTester {
 
                 let result_duties = results.data;
 
-                let mut state = self
+                let state = self
                     .chain
                     .state_at_slot(
                         epoch.start_slot(E::slots_per_epoch()),
                         StateSkipConfig::WithStateRoots,
                     )
-                    .unwrap();
-                state
-                    .build_committee_cache(RelativeEpoch::Current, &self.chain.spec)
                     .unwrap();
 
                 let expected_len = indices
@@ -4013,7 +4016,8 @@ impl ApiTester {
                 assert_eq!(result_duties.len(), expected_len);
 
                 for (indices_set, &i) in indices.iter().enumerate() {
-                    if let Some(duty) = state
+                    if let Some(duty) = Shufflings::for_state(&state, &self.chain.spec)
+                        .unwrap()
                         .get_attestation_duties(i as usize, RelativeEpoch::Current)
                         .unwrap()
                     {
@@ -4109,16 +4113,12 @@ impl ApiTester {
                 );
             }
 
-            let mut state = self
+            let state = self
                 .chain
                 .state_at_slot(
                     epoch.start_slot(E::slots_per_epoch()),
                     StateSkipConfig::WithStateRoots,
                 )
-                .unwrap();
-
-            state
-                .build_committee_cache(RelativeEpoch::Current, &self.chain.spec)
                 .unwrap();
 
             let expected_duties = epoch
@@ -4196,16 +4196,12 @@ impl ApiTester {
                 .await
                 .unwrap();
 
-            let mut state = self
+            let state = self
                 .chain
                 .state_at_slot(
                     epoch.start_slot(E::slots_per_epoch()),
                     StateSkipConfig::WithStateRoots,
                 )
-                .unwrap();
-
-            state
-                .build_committee_cache(RelativeEpoch::Current, &self.chain.spec)
                 .unwrap();
 
             let expected_duties = epoch
@@ -5739,13 +5735,11 @@ impl ApiTester {
     }
 
     pub async fn test_get_validator_attestation_data(self) -> Self {
-        let mut state = self.chain.head_beacon_state_cloned();
+        let state = self.chain.head_beacon_state_cloned();
         let slot = state.slot();
-        state
-            .build_committee_cache(RelativeEpoch::Current, &self.chain.spec)
-            .unwrap();
+        let shufflings = Shufflings::for_state(&state, &self.chain.spec).unwrap();
 
-        for index in 0..state.get_committee_count_at_slot(slot).unwrap() {
+        for index in 0..shufflings.get_committee_count_at_slot(slot).unwrap() {
             let result = self
                 .client
                 .get_validator_attestation_data(slot, index)
@@ -5765,7 +5759,7 @@ impl ApiTester {
 
         // The committee_index in the response must always be 0 post-Electra,
         // regardless of the query parameter.
-        let committee_count = state.get_committee_count_at_slot(slot).unwrap();
+        let committee_count = shufflings.get_committee_count_at_slot(slot).unwrap();
         if committee_count > 0 {
             let result = self
                 .client
@@ -5780,12 +5774,10 @@ impl ApiTester {
     }
 
     pub async fn test_get_validator_attestation_data_ssz(self) -> Self {
-        let mut state = self.chain.head_beacon_state_cloned();
+        let state = self.chain.head_beacon_state_cloned();
         let slot = state.slot();
-        state
-            .build_committee_cache(RelativeEpoch::Current, &self.chain.spec)
-            .unwrap();
-        for index in 0..state.get_committee_count_at_slot(slot).unwrap() {
+        let shufflings = Shufflings::for_state(&state, &self.chain.spec).unwrap();
+        for index in 0..shufflings.get_committee_count_at_slot(slot).unwrap() {
             let result = self
                 .client
                 .get_validator_attestation_data_ssz(slot, index)
@@ -6122,16 +6114,16 @@ impl ApiTester {
             per_slot_processing(
                 &mut head.beacon_state,
                 None,
+                None,
                 GloasVerificationContext::FullVerification,
                 &self.chain.spec,
             )
             .unwrap();
         }
-        head.beacon_state
-            .build_committee_cache(RelativeEpoch::Current, &self.chain.spec)
+        let committee_len = Shufflings::for_state(&head.beacon_state, &self.chain.spec)
+            .unwrap()
+            .get_committee_count_at_slot(slot)
             .unwrap();
-
-        let committee_len = head.beacon_state.get_committee_count_at_slot(slot).unwrap();
         let fork = head.beacon_state.fork();
         let genesis_validators_root = self.chain.genesis_validators_root;
 
@@ -6540,12 +6532,14 @@ impl ApiTester {
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = head_state
+                let committee = Shufflings::for_state(&head_state, &self.chain.spec)
+                    .unwrap()
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap();
+                    .unwrap()
+                    .committee
+                    .to_vec();
 
                 let attester_index = committee
-                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {
@@ -6578,12 +6572,16 @@ impl ApiTester {
             .unwrap()
             .data;
 
-        let committees = head_state
+        let committees = Shufflings::for_state(&head_state, &self.chain.spec)
+            .unwrap()
             .get_beacon_committees_at_slot(self.chain.slot().unwrap())
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .map(|c| c.committee.to_vec())
+            .collect::<Vec<_>>();
         let attesting_validators: Vec<usize> = committees
             .into_iter()
-            .flat_map(|committee| committee.committee.iter().cloned())
+            .flat_map(|committee| committee.into_iter())
             .collect();
         // All attesters should now be considered live
         let expected = expected
@@ -8379,12 +8377,14 @@ impl ApiTester {
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = head_state
+                let committee = Shufflings::for_state(&head_state, &self.chain.spec)
+                    .unwrap()
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap();
+                    .unwrap()
+                    .committee
+                    .to_vec();
 
                 let attester_index = committee
-                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {
@@ -8417,12 +8417,16 @@ impl ApiTester {
             .unwrap()
             .data;
 
-        let committees = head_state
+        let committees = Shufflings::for_state(&head_state, &self.chain.spec)
+            .unwrap()
             .get_beacon_committees_at_slot(self.chain.slot().unwrap())
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .map(|c| c.committee.to_vec())
+            .collect::<Vec<_>>();
         let attesting_validators: Vec<usize> = committees
             .into_iter()
-            .flat_map(|committee| committee.committee.iter().cloned())
+            .flat_map(|committee| committee.into_iter())
             .collect();
         // All attesters should now be considered live
         let expected = expected
@@ -8475,12 +8479,14 @@ impl ApiTester {
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = state
+                let committee = Shufflings::for_state(&state, &self.chain.spec)
+                    .unwrap()
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap();
+                    .unwrap()
+                    .committee
+                    .to_vec();
 
                 let attester_index = committee
-                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {
@@ -8728,6 +8734,7 @@ impl ApiTester {
         if proposal_epoch != state.current_epoch() {
             let _ = partial_state_advance(
                 &mut state,
+                None,
                 Some(state_root),
                 proposal_slot,
                 None,

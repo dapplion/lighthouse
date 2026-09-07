@@ -587,7 +587,7 @@ pub async fn proposer_boost_re_org_test(
         .unwrap()
         .withdrawals()
         .to_vec();
-    complete_state_advance(&mut state_b, None, slot_c, None, &harness.chain.spec).unwrap();
+    complete_state_advance(&mut state_b, None, None, slot_c, None, &harness.chain.spec).unwrap();
 
     let proposer_index = state_b
         .get_beacon_proposer_index(slot_c, &harness.chain.spec)
@@ -671,6 +671,7 @@ pub async fn proposer_boost_re_org_test(
         let mut state_a_advanced = state_a.clone();
         complete_state_advance(
             &mut state_a_advanced,
+            None,
             None,
             slot_c,
             None,

@@ -208,6 +208,7 @@ mod tests {
         let spec = ChainSpec::minimal();
 
         let cache = PreEpochCache {
+            active_validator_count: 0,
             epoch_key: EpochCacheKey {
                 epoch: Epoch::new(1),
                 decision_block_root: Hash256::zero(),

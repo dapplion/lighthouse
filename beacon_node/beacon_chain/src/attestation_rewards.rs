@@ -30,7 +30,7 @@ use store::consts::altair::{
 };
 use tracing::debug;
 use types::consts::altair::WEIGHT_DENOMINATOR;
-use types::{BeaconState, Epoch, EthSpec, RelativeEpoch};
+use types::{BeaconState, Epoch, EthSpec, Shufflings};
 
 impl<T: BeaconChainTypes> BeaconChain<T> {
     pub fn compute_attestation_rewards(
@@ -70,8 +70,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         validators: Vec<ValidatorId>,
     ) -> Result<StandardAttestationRewards, BeaconChainError> {
         let spec = &self.spec;
+        let shufflings = Shufflings::for_state(&state, spec)?;
         let mut validator_statuses = ValidatorStatuses::new(&state, spec)?;
-        validator_statuses.process_attestations(&state)?;
+        validator_statuses.process_attestations(&state, &shufflings)?;
 
         process_justification_and_finalization_base(
             &state,
@@ -151,8 +152,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         initialize_epoch_cache(&mut state, spec)?;
         initialize_progressive_balances_cache(&mut state, spec)?;
         state.build_exit_cache(spec)?;
-        state.build_committee_cache(RelativeEpoch::Previous, spec)?;
-        state.build_committee_cache(RelativeEpoch::Current, spec)?;
 
         // Calculate ideal_rewards
         process_justification_and_finalization(&state)?.apply_changes_to_state(&mut state);

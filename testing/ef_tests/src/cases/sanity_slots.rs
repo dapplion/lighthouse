@@ -68,6 +68,7 @@ impl<E: EthSpec> Case for SanitySlots<E> {
                 per_slot_processing(
                     &mut state,
                     None,
+                    None,
                     GloasVerificationContext::FullVerification,
                     spec,
                 )

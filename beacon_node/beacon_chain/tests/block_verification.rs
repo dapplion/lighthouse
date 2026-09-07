@@ -1707,20 +1707,23 @@ async fn verify_block_for_gossip_doppelganger_detection() {
         .await
         .unwrap();
 
+    let shufflings = harness.shufflings(&state);
     for att in attestations.iter() {
         let epoch = att.data().target.epoch;
         let indexed_attestation = match att {
             Attestation::Base(att) => {
-                let committee = state
+                let committee = shufflings
                     .get_beacon_committee(att.data.slot, att.data.index)
                     .unwrap();
                 attesting_indices_base::get_indexed_attestation(committee.committee, att).unwrap()
             }
             Attestation::Electra(att) => {
-                attesting_indices_electra::get_indexed_attestation_from_state(&state, att).unwrap()
+                attesting_indices_electra::get_indexed_attestation_from_state(&shufflings, att)
+                    .unwrap()
             }
             Attestation::Gloas(att) => {
-                attesting_indices_gloas::get_indexed_attestation_from_state(&state, att).unwrap()
+                attesting_indices_gloas::get_indexed_attestation_from_state(&shufflings, att)
+                    .unwrap()
             }
         };
 
@@ -1830,6 +1833,7 @@ async fn add_base_block_to_altair_chain() {
         let mut ctxt = ConsensusContext::new(base_block.slot());
         per_slot_processing(
             &mut state,
+            None,
             None,
             GloasVerificationContext::FullVerification,
             &harness.chain.spec,
@@ -1985,6 +1989,7 @@ async fn add_altair_block_to_base_chain() {
         let mut ctxt = ConsensusContext::new(altair_block.slot());
         per_slot_processing(
             &mut state,
+            None,
             None,
             GloasVerificationContext::FullVerification,
             &harness.chain.spec,
@@ -2171,6 +2176,7 @@ async fn gloas_get_head_can_return_justified_empty_payload_branch() {
         while attestation_state.slot() < slot {
             per_slot_processing(
                 &mut attestation_state,
+                None,
                 None,
                 GloasVerificationContext::FullVerification,
                 &spec,

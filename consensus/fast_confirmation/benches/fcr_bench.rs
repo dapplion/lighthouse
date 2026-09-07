@@ -274,11 +274,8 @@ fn build_chain_inner(
             .push(spec.max_effective_balance)
             .expect("push balance");
     }
-    seed_state
-        .build_all_committee_caches(&spec)
-        .expect("committee caches");
     let seed_assignments =
-        SlotAssignments::new(&seed_state, &spec, None).expect("slot assignments");
+        SlotAssignments::new(&seed_state, &spec, None, None).expect("slot assignments");
     let mut fcr = FastConfirmationRule::new(
         finalized_checkpoint.root,
         &seed_state,

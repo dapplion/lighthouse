@@ -379,13 +379,13 @@ impl<E: EthSpec> CachedHead<E> {
 
     /// Returns the active validator count for the current epoch of the head state.
     ///
-    /// Should only return `None` if the caches have not been built on the head state (this should
-    /// never happen).
+    /// Should only return `None` if the active totals cache has not been built on the head state
+    /// (this should never happen).
     pub fn active_validator_count(&self) -> Option<usize> {
         self.snapshot
             .beacon_state
-            .get_cached_active_validator_indices(RelativeEpoch::Current)
-            .map(|indices| indices.len())
+            .get_active_validator_count()
+            .map(|count| count as usize)
             .ok()
     }
 
@@ -473,7 +473,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let fork_choice_view = fork_choice.cached_fork_choice_view();
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
 
-        let slot_assignments = SlotAssignments::new(&snapshot.beacon_state, spec, None)
+        let slot_assignments = SlotAssignments::new(&snapshot.beacon_state, spec, None, None)
             .map_err(|e| format!("Unable to initialize slot assignments: {e:?}"))?;
 
         let fcr = if fast_confirmation.is_enabled() {
@@ -557,7 +557,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             beacon_state,
         });
 
-        let slot_assignments = SlotAssignments::new(&snapshot.beacon_state, spec, None)
+        let slot_assignments = SlotAssignments::new(&snapshot.beacon_state, spec, None, None)
             .map_err(|e| Error::DBInconsistent(format!("slot assignments reset: {e:?}")))?;
 
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
@@ -1274,17 +1274,18 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // `SlotAssignments::new` might recompute a shuffling, so we avoid
         // holding the lock during this calculation.
         let prev_assignments = self.canonical_head.slot_assignments.lock().clone();
-        let rebuilt = match SlotAssignments::new(&head_state, &self.spec, Some(&prev_assignments)) {
-            Ok(rebuilt) => rebuilt,
-            Err(e) => {
-                metrics::inc_counter_vec(
-                    &metrics::SLOT_ASSIGNMENTS_ERRORS,
-                    &["committee_cache_error"],
-                );
-                error!("Error rebuilding slot assignments: {e:?}");
-                return Some(Err(e.into()));
-            }
-        };
+        let rebuilt =
+            match SlotAssignments::new(&head_state, &self.spec, Some(&prev_assignments), None) {
+                Ok(rebuilt) => rebuilt,
+                Err(e) => {
+                    metrics::inc_counter_vec(
+                        &metrics::SLOT_ASSIGNMENTS_ERRORS,
+                        &["committee_cache_error"],
+                    );
+                    error!("Error rebuilding slot assignments: {e:?}");
+                    return Some(Err(e.into()));
+                }
+            };
         *self.canonical_head.slot_assignments.lock() = rebuilt.clone();
         Some(Ok((head_state, rebuilt)))
     }
@@ -1307,6 +1308,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             let epoch_start = current_epoch.start_slot(T::EthSpec::slots_per_epoch());
             complete_state_advance(
                 &mut head_state,
+                None,
                 Some(state_root),
                 epoch_start,
                 builder_onboarding_cache,
@@ -1450,6 +1452,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         if state.slot() < target_slot {
             complete_state_advance(
                 &mut state,
+                None,
                 Some(state_root),
                 target_slot,
                 builder_onboarding_cache,

@@ -962,6 +962,11 @@ where
         .collect()
     }
 
+    /// Build the committee shufflings for `state`, for tests that need committees.
+    pub fn shufflings(&self, state: &BeaconState<E>) -> Shufflings {
+        Shufflings::for_state(state, &self.spec).expect("should build shufflings")
+    }
+
     pub fn get_current_state(&self) -> BeaconState<E> {
         self.chain.head_beacon_state_cloned()
     }
@@ -1105,7 +1110,7 @@ where
             return (signed_blinded, pending_state);
         }
 
-        complete_state_advance(&mut state, None, slot, None, &self.spec)
+        complete_state_advance(&mut state, None, None, slot, None, &self.spec)
             .expect("should be able to advance state to slot");
 
         state.build_caches(&self.spec).expect("should build caches");
@@ -1171,7 +1176,7 @@ where
             return (block_contents, state);
         }
 
-        complete_state_advance(&mut state, None, slot, None, &self.spec)
+        complete_state_advance(&mut state, None, None, slot, None, &self.spec)
             .expect("should be able to advance state to slot");
 
         state.build_caches(&self.spec).expect("should build caches");
@@ -1265,7 +1270,7 @@ where
         if state.fork_name_unchecked().gloas_enabled()
             || self.spec.fork_name_at_slot::<E>(slot).gloas_enabled()
         {
-            complete_state_advance(&mut state, None, slot, None, &self.spec)
+            complete_state_advance(&mut state, None, None, slot, None, &self.spec)
                 .expect("should be able to advance state to slot");
             state.build_caches(&self.spec).expect("should build caches");
 
@@ -1368,7 +1373,7 @@ where
         if self.spec.fork_name_at_slot::<E>(slot).gloas_enabled() {
             let pre_state = {
                 let mut s = state.clone();
-                complete_state_advance(&mut s, None, slot, None, &self.spec)
+                complete_state_advance(&mut s, None, None, slot, None, &self.spec)
                     .expect("should be able to advance state to slot");
                 s.build_caches(&self.spec).expect("should build caches");
                 s
@@ -1378,7 +1383,7 @@ where
             return (block_contents, pre_state);
         }
 
-        complete_state_advance(&mut state, None, slot, None, &self.spec)
+        complete_state_advance(&mut state, None, None, slot, None, &self.spec)
             .expect("should be able to advance state to slot");
 
         state.build_caches(&self.spec).expect("should build caches");
@@ -1484,7 +1489,8 @@ where
         slot: Slot,
         execution_payload: ExecutionPayloadBellatrix<E>,
     ) {
-        complete_state_advance(state, None, slot, None, &self.spec).expect("should advance state");
+        complete_state_advance(state, None, None, slot, None, &self.spec)
+            .expect("should advance state");
         state.build_caches(&self.spec).expect("should build caches");
 
         let proposer_index = state.get_beacon_proposer_index(slot, &self.spec).unwrap();
@@ -1568,15 +1574,19 @@ where
             let mut_state = state.to_mut();
             complete_state_advance(
                 mut_state,
+                None,
                 Some(state_root),
                 epoch.start_slot(E::slots_per_epoch()),
                 None,
                 &self.spec,
             )?;
-            mut_state.build_committee_cache(RelativeEpoch::Current, &self.spec)?;
         }
 
-        let committee_len = state.get_beacon_committee(slot, index)?.committee.len();
+        let shufflings = Shufflings::for_state(state.as_ref(), &self.spec)?;
+        let committee_len = shufflings
+            .get_beacon_committee(slot, index)?
+            .committee
+            .len();
 
         let target_slot = epoch.start_slot(E::slots_per_epoch());
         let target_root = if state.slot() <= target_slot {
@@ -1628,7 +1638,8 @@ where
 
         let aggregation_bit = *aggregation_bits.first().unwrap();
 
-        let committee = state.get_beacon_committee(slot, index).unwrap();
+        let shufflings = Shufflings::for_state(state.as_ref(), &self.spec).unwrap();
+        let committee = shufflings.get_beacon_committee(slot, index).unwrap();
 
         let attester_index = committee
             .committee
@@ -1695,15 +1706,19 @@ where
             let mut_state = state.to_mut();
             complete_state_advance(
                 mut_state,
+                None,
                 Some(state_root),
                 epoch.start_slot(E::slots_per_epoch()),
                 None,
                 &self.spec,
             )?;
-            mut_state.build_committee_cache(RelativeEpoch::Current, &self.spec)?;
         }
 
-        let committee_len = state.get_beacon_committee(slot, index)?.committee.len();
+        let shufflings = Shufflings::for_state(state.as_ref(), &self.spec)?;
+        let committee_len = shufflings
+            .get_beacon_committee(slot, index)?
+            .committee
+            .len();
 
         let target_slot = epoch.start_slot(E::slots_per_epoch());
         let target_root = if state.slot() <= target_slot {
@@ -1811,10 +1826,13 @@ where
         opts: MakeAttestationOptions,
     ) -> (Vec<CommitteeSingleAttestations>, Vec<usize>) {
         let MakeAttestationOptions { limit, fork, .. } = opts;
-        let committee_count = state.get_committee_count_at_slot(state.slot()).unwrap();
+        let shufflings = Shufflings::for_state(state, &self.spec).unwrap();
+        let committee_count = shufflings
+            .get_committee_count_at_slot(state.slot())
+            .unwrap();
         let num_attesters = AtomicUsize::new(0);
 
-        let (attestations, split_attesters) = state
+        let (attestations, split_attesters) = shufflings
             .get_beacon_committees_at_slot(attestation_slot)
             .expect("should get committees")
             .iter()
@@ -1908,10 +1926,13 @@ where
             fork,
             payload_present_override,
         } = opts;
-        let committee_count = state.get_committee_count_at_slot(state.slot()).unwrap();
+        let shufflings = Shufflings::for_state(state, &self.spec).unwrap();
+        let committee_count = shufflings
+            .get_committee_count_at_slot(state.slot())
+            .unwrap();
         let num_attesters = AtomicUsize::new(0);
 
-        let (attestations, split_attesters) = state
+        let (attestations, split_attesters) = shufflings
             .get_beacon_committees_at_slot(attestation_slot)
             .expect("should get committees")
             .iter()
@@ -2169,7 +2190,8 @@ where
                 .map(|committee_attestations| {
                     // If there are any attestations in this committee, create an aggregate.
                     if let Some((attestation, _)) = committee_attestations.first() {
-                        let bc = state
+                        let shufflings = Shufflings::for_state(state, &self.spec).unwrap();
+                        let bc = shufflings
                             .get_beacon_committee(
                                 attestation.data().slot,
                                 attestation.committee_index().unwrap(),
@@ -3345,12 +3367,14 @@ where
 
                 let aggregation_bit = *aggregation_bits.first().unwrap();
 
-                let committee = state
+                let committee = Shufflings::for_state(state, &self.spec)
+                    .unwrap()
                     .get_beacon_committee(attn.data().slot, attn.committee_index().unwrap())
-                    .unwrap();
+                    .unwrap()
+                    .committee
+                    .to_vec();
 
                 let attester_index = committee
-                    .committee
                     .iter()
                     .enumerate()
                     .find_map(|(i, &index)| {

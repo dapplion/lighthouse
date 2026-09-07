@@ -5,7 +5,7 @@ use eth2::{
     types::ValidatorId,
 };
 use state_processing::per_epoch_processing::{EpochProcessingSummary, process_epoch};
-use types::{BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec};
+use types::{BeaconState, BeaconStateError, ChainSpec, Epoch, EthSpec, Shufflings};
 
 /// Returns the state in the last slot of `epoch`.
 fn end_of_epoch_state<T: BeaconChainTypes>(
@@ -28,7 +28,9 @@ fn get_epoch_processing_summary<E: EthSpec>(
     state: &mut BeaconState<E>,
     spec: &ChainSpec,
 ) -> Result<EpochProcessingSummary<E>, warp::reject::Rejection> {
-    process_epoch(state, spec)
+    let mut shufflings = Shufflings::for_state(state, spec)
+        .map_err(|e| warp_utils::reject::custom_server_error(format!("{:?}", e)))?;
+    process_epoch(state, Some(&mut shufflings), spec)
         .map_err(|e| warp_utils::reject::custom_server_error(format!("{:?}", e)))
 }
 

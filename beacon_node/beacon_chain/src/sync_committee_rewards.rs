@@ -4,7 +4,6 @@ use eth2::types::SyncCommitteeReward;
 use safe_arith::SafeArith;
 use state_processing::per_block_processing::altair::sync_committee::compute_sync_aggregate_rewards;
 use std::collections::HashMap;
-use store::RelativeEpoch;
 use tracing::error;
 use types::{AbstractExecPayload, BeaconBlockRef, BeaconState};
 
@@ -19,8 +18,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
 
         let spec = &self.spec;
-
-        state.build_committee_cache(RelativeEpoch::Current, spec)?;
 
         let sync_aggregate = block.body().sync_aggregate()?;
 

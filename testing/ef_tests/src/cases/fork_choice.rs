@@ -929,6 +929,7 @@ impl<E: EthSpec> Tester<E> {
 
             complete_state_advance(
                 &mut state,
+                None,
                 Some(parent_state_root),
                 block.slot(),
                 None,

@@ -234,7 +234,7 @@ where
 
                 let summary = per_slot_processing(
                     &mut self.state,
-                    &mut shufflings,
+                    Some(&mut shufflings),
                     Some(state_root),
                     GloasVerificationContext::FullVerification,
                     self.spec,
@@ -260,7 +260,8 @@ where
             // Proposer index was already checked when this block was originally processed, we
             // can omit recomputing it during replay.
             let mut ctxt = ConsensusContext::new(block.slot())
-                .set_proposer_index(block.message().proposer_index());
+                .set_proposer_index(block.message().proposer_index())
+                .set_shufflings(shufflings.clone());
             per_block_processing(
                 &mut self.state,
                 block,
@@ -286,7 +287,7 @@ where
 
                 let summary = per_slot_processing(
                     &mut self.state,
-                    &mut shufflings,
+                    Some(&mut shufflings),
                     Some(state_root),
                     GloasVerificationContext::FullVerification,
                     self.spec,

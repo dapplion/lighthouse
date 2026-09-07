@@ -23,7 +23,7 @@ use state_processing::per_epoch_processing::{
     resets::{process_eth1_data_reset, process_randao_mixes_reset, process_slashings_reset},
 };
 use std::marker::PhantomData;
-use types::BeaconState;
+use types::{BeaconState, Shufflings};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Metadata {
@@ -122,8 +122,9 @@ impl<E: EthSpec> EpochTransition<E> for JustificationAndFinalization {
             justification_and_finalization_state.apply_changes_to_state(state);
             Ok(())
         } else {
+            let shufflings = Shufflings::for_state(state, spec)?;
             let mut validator_statuses = base::ValidatorStatuses::new(state, spec)?;
-            validator_statuses.process_attestations(state)?;
+            validator_statuses.process_attestations(state, &shufflings)?;
             let justification_and_finalization_state =
                 base::process_justification_and_finalization(
                     state,
@@ -141,8 +142,9 @@ impl<E: EthSpec> EpochTransition<E> for RewardsAndPenalties {
         if state.fork_name_unchecked().altair_enabled() {
             altair::process_rewards_and_penalties_slow(state, spec)
         } else {
+            let shufflings = Shufflings::for_state(state, spec)?;
             let mut validator_statuses = base::ValidatorStatuses::new(state, spec)?;
-            validator_statuses.process_attestations(state)?;
+            validator_statuses.process_attestations(state, &shufflings)?;
             base::process_rewards_and_penalties(state, &validator_statuses, spec)
         }
     }
@@ -165,8 +167,9 @@ impl<E: EthSpec> EpochTransition<E> for Slashings {
         if state.fork_name_unchecked().altair_enabled() {
             process_slashings_slow(state, spec)?;
         } else {
+            let shufflings = Shufflings::for_state(state, spec)?;
             let mut validator_statuses = base::ValidatorStatuses::new(state, spec)?;
-            validator_statuses.process_attestations(state)?;
+            validator_statuses.process_attestations(state, &shufflings)?;
             process_slashings(
                 state,
                 validator_statuses.total_balances.current_epoch(),
@@ -438,9 +441,6 @@ impl<E: EthSpec, T: EpochTransition<E>> Case for EpochProcessing<E, T> {
         let spec = &testing_spec::<E>(fork_name);
         let mut pre_state = self.pre.clone();
 
-        // Processing requires the committee caches.
-        pre_state.build_all_committee_caches(spec).unwrap();
-
         // Proposer index computation (e.g. proposer lookahead) requires the slashings cache post-Gloas
         pre_state.build_slashings_cache().unwrap();
 
@@ -470,7 +470,10 @@ impl<E: EthSpec, T: EpochTransition<E>> Case for EpochProcessing<E, T> {
                 // Proposer index computation (e.g. proposer lookahead) requires the slashings cache post-Gloas
                 pre_epoch_state.build_slashings_cache().unwrap();
 
-                let mut result = process_epoch(&mut pre_epoch_state, spec).map(|_| pre_epoch_state);
+                let mut shufflings = Shufflings::for_state(&pre_epoch_state, spec)
+                    .map_err(|e| Error::InternalError(format!("{e:?}")))?;
+                let mut result = process_epoch(&mut pre_epoch_state, Some(&mut shufflings), spec)
+                    .map(|_| pre_epoch_state);
                 compare_beacon_state_results_without_caches(
                     &mut result,
                     &mut expected_post_epoch_state,

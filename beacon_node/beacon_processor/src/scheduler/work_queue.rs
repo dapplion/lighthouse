@@ -2,7 +2,7 @@ use crate::Work;
 use logging::TimeLatch;
 use std::collections::VecDeque;
 use tracing::error;
-use types::{BeaconState, ChainSpec, EthSpec, RelativeEpoch};
+use types::{BeaconState, ChainSpec, EthSpec};
 
 /// Over-provision queues based on active validator count by some factor. The beacon chain has
 /// strict churns that prevent the validator set size from changing rapidly. By over-provisioning
@@ -162,14 +162,13 @@ impl BeaconProcessorQueueLengths {
         state: &BeaconState<E>,
         spec: &ChainSpec,
     ) -> Result<Self, String> {
-        let active_validator_count =
-            match state.get_cached_active_validator_indices(RelativeEpoch::Current) {
-                Ok(indices) => indices.len(),
-                Err(_) => state
-                    .get_active_validator_indices(state.current_epoch(), spec)
-                    .map_err(|e| format!("Error computing active indices: {:?}", e))?
-                    .len(),
-            };
+        let active_validator_count = match state.get_active_validator_count() {
+            Ok(count) => count as usize,
+            Err(_) => state
+                .get_active_validator_indices(state.current_epoch(), spec)
+                .map_err(|e| format!("Error computing active indices: {:?}", e))?
+                .len(),
+        };
         let active_validator_count =
             (ACTIVE_VALIDATOR_COUNT_OVERPROVISION_PERCENT * active_validator_count) / 100;
         let slots_per_epoch = E::slots_per_epoch() as usize;

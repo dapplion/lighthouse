@@ -1561,9 +1561,6 @@ mod tests {
                 .push(spec.max_effective_balance)
                 .expect("push balance");
         }
-        state
-            .build_all_committee_caches(&spec)
-            .expect("committee caches");
 
         // Advance to a mid-epoch slot: at an epoch start the dependent root changes and would
         // rebuild the source regardless, masking the bug.
@@ -1572,21 +1569,19 @@ mod tests {
             per_slot_processing(
                 &mut state,
                 None,
+                None,
                 GloasVerificationContext::FullVerification,
                 &spec,
             )
             .expect("should advance slot");
         }
-        state
-            .build_all_committee_caches(&spec)
-            .expect("committee caches");
-
         let checkpoint = Checkpoint {
             epoch: state.current_epoch(),
             root: Hash256::repeat_byte(1),
         };
         let head_root_a = Hash256::repeat_byte(2);
-        let slot_assignments = SlotAssignments::new(&state, &spec, None).expect("slot assignments");
+        let slot_assignments =
+            SlotAssignments::new(&state, &spec, None, None).expect("slot assignments");
         let mut fcr = FastConfirmationRule::new::<E>(
             head_root_a,
             &state,

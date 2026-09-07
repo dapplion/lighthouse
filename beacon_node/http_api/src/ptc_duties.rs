@@ -166,6 +166,7 @@ fn ensure_state_knows_ptc_duties_for_epoch<E: EthSpec>(
 
         partial_state_advance(
             state,
+            None,
             Some(state_root),
             target_slot,
             builder_onboarding_cache,

@@ -7,7 +7,7 @@ use state_processing::{
     BlockProcessingError, BlockSignatureStrategy, ConsensusContext, GloasVerificationContext,
     VerifyBlockRoot, per_block_processing, per_slot_processing,
 };
-use types::{BeaconState, RelativeEpoch, SignedBeaconBlock};
+use types::{BeaconState, Shufflings, SignedBeaconBlock};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Metadata {
@@ -109,6 +109,7 @@ impl<E: EthSpec> Case for SanityBlocks<E> {
                     per_slot_processing(
                         &mut bulk_state,
                         None,
+                        None,
                         GloasVerificationContext::FullVerification,
                         spec,
                     )
@@ -116,21 +117,15 @@ impl<E: EthSpec> Case for SanityBlocks<E> {
                     per_slot_processing(
                         &mut indiv_state,
                         None,
+                        None,
                         GloasVerificationContext::FullVerification,
                         spec,
                     )
                     .unwrap();
                 }
 
-                bulk_state
-                    .build_committee_cache(RelativeEpoch::Current, spec)
-                    .unwrap();
-
-                indiv_state
-                    .build_committee_cache(RelativeEpoch::Current, spec)
-                    .unwrap();
-
-                let mut ctxt = ConsensusContext::new(indiv_state.slot());
+                let mut ctxt = ConsensusContext::new(indiv_state.slot())
+                    .set_shufflings(Shufflings::for_state(&indiv_state, spec).unwrap());
                 per_block_processing(
                     &mut indiv_state,
                     signed_block,

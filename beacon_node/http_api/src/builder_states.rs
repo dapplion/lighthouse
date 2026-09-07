@@ -24,6 +24,7 @@ pub fn get_next_withdrawals<T: BeaconChainTypes>(
     if proposal_epoch != state.current_epoch()
         && let Err(e) = partial_state_advance(
             &mut state,
+            None,
             Some(state_root),
             proposal_slot,
             chain.builder_onboarding_cache.as_deref(),

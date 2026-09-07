@@ -344,6 +344,7 @@ pub fn ensure_state_can_determine_proposers_for_epoch<E: EthSpec>(
         // Advance the state up to the minimum epoch.
         partial_state_advance(
             state,
+            None,
             Some(state_root),
             minimum_slot,
             builder_onboarding_cache,

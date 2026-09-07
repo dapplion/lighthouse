@@ -112,6 +112,7 @@ fn massive_skips() {
         match per_slot_processing(
             &mut state,
             None,
+            None,
             GloasVerificationContext::FullVerification,
             spec,
         ) {
@@ -573,9 +574,11 @@ async fn gloas_packs_attestations_voting_for_available_payload() {
                 .into_iter()
                 .flat_map(|(committee_attestations, _)| committee_attestations)
             {
-                let attesting_indices =
-                    get_attesting_indices_from_state(&head.beacon_state, attestation.to_ref())
-                        .unwrap();
+                let attesting_indices = get_attesting_indices_from_state(
+                    &harness.shufflings(&head.beacon_state),
+                    attestation.to_ref(),
+                )
+                .unwrap();
                 harness
                     .chain
                     .op_pool
@@ -599,11 +602,11 @@ async fn gloas_packs_attestations_voting_for_available_payload() {
     // second must not.
     harness.advance_slot();
     let contested_slot = last_skipped_slot + 1;
-    let mut state = head.beacon_state.clone();
-    state
-        .build_committee_cache(RelativeEpoch::Next, &harness.spec)
+    let state = head.beacon_state.clone();
+    let shufflings = harness.shufflings(&state);
+    let committees = shufflings
+        .get_beacon_committees_at_slot(contested_slot)
         .unwrap();
-    let committees = state.get_beacon_committees_at_slot(contested_slot).unwrap();
     assert_eq!(committees.len(), 1);
     let committee = committees[0].committee;
     let (payload_voters, no_payload_voters) = committee.split_at(committee.len() / 2);
@@ -682,6 +685,7 @@ async fn unaggregated_attestations_added_to_fork_choice_some_none() {
 
     let head = harness.chain.head_snapshot();
     let state = &head.beacon_state;
+    let shufflings = harness.shufflings(state);
     let mut fork_choice = harness.chain.canonical_head.fork_choice_write_lock();
 
     // Move forward a slot so all queued attestations can be processed.
@@ -692,7 +696,7 @@ async fn unaggregated_attestations_added_to_fork_choice_some_none() {
 
     let validator_slots: Vec<(usize, Slot)> = (0..VALIDATOR_COUNT)
         .map(|validator_index| {
-            let slot = state
+            let slot = shufflings
                 .get_attestation_duties(validator_index, RelativeEpoch::Current)
                 .expect("should get attester duties")
                 .unwrap()
@@ -798,6 +802,7 @@ async fn unaggregated_attestations_added_to_fork_choice_all_updated() {
 
     let head = harness.chain.head_snapshot();
     let state = &head.beacon_state;
+    let shufflings = harness.shufflings(state);
     let mut fork_choice = harness.chain.canonical_head.fork_choice_write_lock();
 
     // Move forward a slot so all queued attestations can be processed.
@@ -810,7 +815,7 @@ async fn unaggregated_attestations_added_to_fork_choice_all_updated() {
     let slots: Vec<Slot> = validators
         .iter()
         .map(|&v| {
-            state
+            shufflings
                 .get_attestation_duties(v, RelativeEpoch::Current)
                 .expect("should get attester duties")
                 .unwrap()

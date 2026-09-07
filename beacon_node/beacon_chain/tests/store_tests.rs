@@ -1126,8 +1126,8 @@ async fn multiple_attestations_per_block() {
 
     let head = harness.chain.head_snapshot();
 
-    let committees_per_slot = head
-        .beacon_state
+    let committees_per_slot = harness
+        .shufflings(&head.beacon_state)
         .get_committee_count_at_slot(head.beacon_state.slot())
         .unwrap();
     assert!(committees_per_slot > 1);
@@ -1280,6 +1280,7 @@ fn check_shuffling_compatible(
     head_state: &BeaconState<E>,
     head_block_root: Hash256,
 ) {
+    let head_shufflings = harness.shufflings(head_state);
     for maybe_tuple in harness
         .chain
         .rev_iter_block_roots_from(head_block_root)
@@ -1303,7 +1304,7 @@ fn check_shuffling_compatible(
                 head_state.current_epoch(),
                 |cached_shuffling, _| {
                     let committee_cache = cached_shuffling.committee_cache.as_ref();
-                    let state_cache = head_state.committee_cache(RelativeEpoch::Current).unwrap();
+                    let state_cache = head_shufflings.committee_cache(RelativeEpoch::Current);
                     // We used to check for false negatives here, but had to remove that check
                     // because `shuffling_is_compatible` does not guarantee their absence.
                     //
@@ -1342,7 +1343,7 @@ fn check_shuffling_compatible(
                 head_state.previous_epoch(),
                 |cached_shuffling, _| {
                     let committee_cache = cached_shuffling.committee_cache.as_ref();
-                    let state_cache = head_state.committee_cache(RelativeEpoch::Previous).unwrap();
+                    let state_cache = head_shufflings.committee_cache(RelativeEpoch::Previous);
                     if previous_epoch_shuffling_is_compatible {
                         assert_eq!(committee_cache, state_cache.as_ref());
                     }
@@ -4252,6 +4253,7 @@ async fn process_blocks_and_attestations_for_unaligned_checkpoint() {
         .unwrap();
     complete_state_advance(
         &mut advanced_split_state,
+        None,
         Some(split_state_root),
         attestation_start_slot,
         None,
@@ -6046,7 +6048,7 @@ async fn test_gloas_block_and_envelope_storage_generic(
         harness.advance_slot();
 
         if skipped_slots.contains(&i) {
-            complete_state_advance(&mut state, None, slot, None, spec)
+            complete_state_advance(&mut state, None, None, slot, None, spec)
                 .expect("should be able to advance state to slot");
 
             let state_root = state.canonical_root().unwrap();
@@ -6502,7 +6504,7 @@ async fn bellatrix_produce_and_store_payloads() {
 
         // Advance state to compute correct timestamp and randao.
         let mut pre_state = state.clone();
-        complete_state_advance(&mut pre_state, None, slot, None, &harness.spec)
+        complete_state_advance(&mut pre_state, None, None, slot, None, &harness.spec)
             .expect("should advance state");
         pre_state
             .build_caches(&harness.spec)

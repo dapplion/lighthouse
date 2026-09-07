@@ -33,10 +33,10 @@ use types::{
     BeaconBlockBodyGloas, BeaconBlockGloas, BeaconState, BeaconStateError, BlobsList, BuilderIndex,
     ChainSpec, Deposit, Eth1Data, EthSpec, ExecutionBlockHash, ExecutionPayloadBid,
     ExecutionPayloadEnvelope, ExecutionRequestsGloas, FullPayload, Graffiti, Hash256,
-    IndexedAttestation, KzgProofs, PayloadAttestation, ProposerSlashing, RelativeEpoch,
-    SignedBeaconBlock, SignedBlsToExecutionChange, SignedExecutionPayloadBid,
-    SignedExecutionPayloadEnvelope, SignedProposerPreferences, SignedVoluntaryExit, Slot,
-    SyncAggregate, Uint256, Withdrawal, Withdrawals,
+    IndexedAttestation, KzgProofs, PayloadAttestation, ProposerSlashing, SignedBeaconBlock,
+    SignedBlsToExecutionChange, SignedExecutionPayloadBid, SignedExecutionPayloadEnvelope,
+    SignedProposerPreferences, SignedVoluntaryExit, Slot, SyncAggregate, Uint256, Withdrawal,
+    Withdrawals,
 };
 
 use builder_client::BidRequestContext;
@@ -378,6 +378,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // Ensure the state has performed a complete transition into the required slot.
         complete_state_advance(
             &mut state,
+            None,
             state_root_opt,
             produce_at_slot,
             self.builder_onboarding_cache.as_deref(),
@@ -386,7 +387,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         drop(slot_timer);
 
-        state.build_committee_cache(RelativeEpoch::Current, &self.spec)?;
         state.apply_pending_mutations()?;
 
         let parent_root = if state.slot() > 0 {
@@ -396,6 +396,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         } else {
             state.latest_block_header().canonical_root()
         };
+
+        let shufflings = self
+            .shufflings_for_state(&state, parent_root)
+            .map_err(|e| BlockProductionError::BeaconChain(Box::new(e)))?;
 
         let proposer_index = state.get_beacon_proposer_index(state.slot(), &self.spec)? as u64;
 
@@ -431,7 +435,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             for attestation in self.naive_aggregation_pool.read().iter() {
                 let import = |attestation: &Attestation<T::EthSpec>| {
                     let attesting_indices =
-                        get_attesting_indices_from_state(&state, attestation.to_ref())?;
+                        get_attesting_indices_from_state(&shufflings, attestation.to_ref())?;
                     self.op_pool
                         .insert_attestation(attestation.clone(), attesting_indices)
                 };
@@ -479,6 +483,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             self.op_pool
                 .get_attestations(
                     &state,
+                    &shufflings,
                     prev_attestation_filter,
                     curr_attestation_filter,
                     &self.spec,

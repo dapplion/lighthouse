@@ -430,6 +430,7 @@ where
                 per_slot_processing(
                     &mut weak_subj_state,
                     None,
+                    None,
                     GloasVerificationContext::FullVerification,
                     &self.spec,
                 )
@@ -1312,6 +1313,7 @@ where
             while fork_choice_state.slot() < fork_choice_slot {
                 per_slot_processing(
                     &mut fork_choice_state,
+                    None,
                     None,
                     GloasVerificationContext::FullVerification,
                     &self.spec,

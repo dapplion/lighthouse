@@ -290,6 +290,7 @@ fn advance_head<T: BeaconChainTypes>(beacon_chain: &Arc<BeaconChain<T>>) -> Resu
     // Advance the state a single slot.
     if let Some(summary) = per_slot_processing(
         &mut state,
+        None,
         Some(head_state_root),
         GloasVerificationContext::from_cache(beacon_chain.builder_onboarding_cache.as_deref()),
         &beacon_chain.spec,
@@ -330,14 +331,8 @@ fn advance_head<T: BeaconChainTypes>(beacon_chain: &Arc<BeaconChain<T>>) -> Resu
         "Advanced head state one slot"
     );
 
-    // Build the current epoch cache, to prepare to compute proposer duties.
-    state
-        .build_committee_cache(RelativeEpoch::Current, &beacon_chain.spec)
-        .map_err(BeaconChainError::from)?;
-    // Build the next epoch cache, to prepare to compute attester duties.
-    state
-        .build_committee_cache(RelativeEpoch::Next, &beacon_chain.spec)
-        .map_err(BeaconChainError::from)?;
+    // Prime the shared shuffling pool, to prepare to compute proposer and attester duties.
+    let shufflings = beacon_chain.shufflings_for_state(&state, head_block_root)?;
 
     // The state root is required to prime the proposer cache AND for writing it to disk.
     let advanced_state_root = state.update_tree_hash_cache()?;
@@ -398,10 +393,7 @@ fn advance_head<T: BeaconChainTypes>(beacon_chain: &Arc<BeaconChain<T>>) -> Resu
         let shuffling_id =
             AttestationShufflingId::new(head_block_root, &state, RelativeEpoch::Next)
                 .map_err(BeaconChainError::from)?;
-        let committee_cache = state
-            .committee_cache(RelativeEpoch::Next)
-            .map_err(BeaconChainError::from)?
-            .clone();
+        let committee_cache = shufflings.committee_cache(RelativeEpoch::Next).clone();
         let shuffling_epoch = RelativeEpoch::Next.into_epoch(state.current_epoch());
 
         if let Some(ptcs) = CachedPTCs::try_from_state(&state, shuffling_epoch, &beacon_chain.spec)?

@@ -23,11 +23,9 @@ pub fn run<E: EthSpec>(matches: &ArgMatches) -> Result<(), String> {
     let state_file: PathBuf = parse_required(matches, "state")?;
     let attestations_file: PathBuf = parse_required(matches, "attestations")?;
 
-    let mut state = BeaconState::<E>::from_ssz_bytes(&read_file_bytes(&state_file)?, spec)
+    let state = BeaconState::<E>::from_ssz_bytes(&read_file_bytes(&state_file)?, spec)
         .map_err(|e| format!("Invalid state: {:?}", e))?;
-    state
-        .build_all_committee_caches(spec)
-        .map_err(|e| format!("{:?}", e))?;
+    let shufflings = Shufflings::for_state(&state, spec).map_err(|e| format!("{:?}", e))?;
 
     let attestations: Vec<Attestation<E>> =
         serde_json::from_slice(&read_file_bytes(&attestations_file)?)
@@ -37,14 +35,14 @@ pub fn run<E: EthSpec>(matches: &ArgMatches) -> Result<(), String> {
         .into_iter()
         .map(|att| match att {
             Attestation::Base(att) => {
-                let committee = state.get_beacon_committee(att.data.slot, att.data.index)?;
+                let committee = shufflings.get_beacon_committee(att.data.slot, att.data.index)?;
                 attesting_indices_base::get_indexed_attestation(committee.committee, &att)
             }
             Attestation::Electra(att) => {
-                attesting_indices_electra::get_indexed_attestation_from_state(&state, &att)
+                attesting_indices_electra::get_indexed_attestation_from_state(&shufflings, &att)
             }
             Attestation::Gloas(att) => {
-                attesting_indices_gloas::get_indexed_attestation_from_state(&state, &att)
+                attesting_indices_gloas::get_indexed_attestation_from_state(&shufflings, &att)
             }
         })
         .collect::<Result<Vec<_>, _>>()
