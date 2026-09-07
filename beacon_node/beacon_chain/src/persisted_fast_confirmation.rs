@@ -1,8 +1,5 @@
-//! State that lets the Fast Confirmation Rule carry on across a restart instead of starting over.
-//!
-//! This does not change the database schema: the item lives under its own key in
-//! `DBColumn::ForkChoice`, is written in the same batch as fork choice, and a database without it
-//! (an older version, a fresh sync) simply boots the way it always did.
+//! Fast Confirmation Rule state carried across restarts. Stored under its own key next to fork
+//! choice; absent, the rule is seeded from the justified checkpoint.
 
 use fast_confirmation::FastConfirmationRule;
 use ssz::{Decode, Encode};
@@ -12,11 +9,9 @@ use types::{Checkpoint, Hash256, Slot};
 
 pub const FAST_CONFIRMATION_DB_KEY: Hash256 = Hash256::with_last_byte(1);
 
-/// Marks `last_update_slot` as unset: the rule had not run yet when it was persisted.
 const NO_UPDATE_SLOT: u64 = u64::MAX;
 
-/// The FCR tracking variables (spec: the `FastConfirmationStore` fields) plus the slot of the
-/// rule's last per-slot update. Balance snapshots are rebuilt from the checkpoint states on load.
+/// The spec's `FastConfirmationStore` fields; balance snapshots are rebuilt on load.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct PersistedFastConfirmation {
     pub confirmed_root: Hash256,

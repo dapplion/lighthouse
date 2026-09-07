@@ -161,19 +161,9 @@ impl FastConfirmationRule {
     /// Maximum valid value for `byzantine_threshold` (25%).
     const MAX_BYZANTINE_THRESHOLD: u64 = 25;
 
-    /// Initialize FCR from `anchor_checkpoint`, seeding both observed-justified balance
-    /// sources from `checkpoint_state` as the spec does. `byzantine_threshold` is clamped
-    /// to [0, 25].
-    ///
-    /// The spec seeds every variable from `store.finalized_checkpoint`, on the assumption that the
-    /// fork choice store is being initialized from a trusted checkpoint at the same time. On a
-    /// restart that assumption does not hold: fork choice is restored from the database with a real
-    /// justified checkpoint, and seeding FCR from the finalized one instead throws that away and
-    /// walks the confirmed root backwards by ~2 epochs. Callers therefore pass the justified
-    /// checkpoint, which equals the finalized one at genesis and after checkpoint sync. Seeding is
-    /// still only a starting point: `get_latest_confirmed` re-validates the confirmed root on every
-    /// run and reverts it to finalized if it is not on the canonical chain or cannot be
-    /// re-confirmed.
+    /// Initialize FCR from `anchor_checkpoint` (spec: the finalized checkpoint; on a restart the
+    /// justified one), seeding both observed-justified balance sources from `checkpoint_state`.
+    /// `byzantine_threshold` is clamped to [0, 25].
     pub fn new<E: EthSpec>(
         head_root: Hash256,
         head_state: &BeaconState<E>,
@@ -212,12 +202,8 @@ impl FastConfirmationRule {
         })
     }
 
-    /// Rebuild the rule from the tracking variables a previous run persisted, so a restart carries
-    /// on where the rule left off instead of re-deriving `confirmed_root` from a checkpoint.
-    ///
-    /// Balance snapshots are rebuilt from the two observed-justified checkpoint states, which must
-    /// each be the checkpoint's state advanced to the checkpoint's epoch. The head-derived caches
-    /// come from `head_state` as in `new`.
+    /// Rebuild the rule from persisted tracking variables; each observed-justified checkpoint comes
+    /// with its state advanced to the checkpoint's epoch.
     #[allow(clippy::too_many_arguments)]
     pub fn restore<E: EthSpec>(
         head_root: Hash256,

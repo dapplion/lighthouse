@@ -578,8 +578,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         drop(fork_choice_write_lock);
         *self.cached_head.write() = cached_head;
 
-        // Rebuild FCR from the restored database so it doesn't carry stale state. The fork choice
-        // read lock is taken and released before the FCR mutex is locked.
+        // The fork choice read lock is released before the FCR mutex is taken.
         if let Some(ref fcr_mutex) = self.fast_confirmation {
             let rule = <BeaconChain<T>>::load_fast_confirmation_rule(
                 &self.fork_choice_read_lock(),
@@ -1386,9 +1385,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         })
     }
 
-    /// Restore the Fast Confirmation Rule from the state a previous run persisted alongside fork
-    /// choice, or seed a fresh one from the justified checkpoint when there is nothing usable to
-    /// restore.
+    /// Restore the persisted FCR state, or seed from the justified checkpoint.
     fn load_fast_confirmation_rule(
         fork_choice: &BeaconForkChoice<T>,
         snapshot: &BeaconSnapshot<T::EthSpec>,
@@ -1416,17 +1413,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         )
     }
 
-    /// `Ok(None)` when nothing was persisted, or when the persisted confirmed root is a block fork
-    /// choice no longer knows — the database was rolled back, or FCR was disabled for a while —
-    /// in which case seeding afresh is the honest option. Once restored, `get_latest_confirmed`
-    /// re-validates the confirmed root on its first run like on any other.
-    ///
-    /// The other references can fall behind the finalized checkpoint legitimately: a node that
-    /// sleeps across an epoch boundary pulls justification and finality up on its first tick and
-    /// prunes fork choice below the new finalized root, which is where the previous epoch's
-    /// observed-justified checkpoint may well be. Such a reference is clamped to the finalized
-    /// checkpoint, the closest block that is still available, which is conservative in every
-    /// place the reference is used.
+    /// `None` unless the persisted confirmed root is still in fork choice. Other references may
+    /// have been pruned by finality advancing on the first tick; they are clamped to finalized.
     fn restore_fast_confirmation_rule(
         fork_choice: &BeaconForkChoice<T>,
         snapshot: &BeaconSnapshot<T::EthSpec>,
@@ -1441,10 +1429,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(None);
         };
         if fork_choice.get_block(&persisted.confirmed_root).is_none() {
-            debug!(
-                block_root = ?persisted.confirmed_root,
-                "Persisted fast confirmation root is not in fork choice"
-            );
+            debug!(?persisted.confirmed_root, "Persisted FCR root not in fork choice");
             return Ok(None);
         }
 
@@ -1453,10 +1438,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             if fork_choice.get_block(&checkpoint.root).is_some() {
                 checkpoint
             } else {
-                debug!(
-                    ?checkpoint,
-                    "Persisted fast confirmation checkpoint is older than finalized, clamping"
-                );
+                debug!(?checkpoint, "Persisted FCR checkpoint older than finalized");
                 finalized
             }
         };
