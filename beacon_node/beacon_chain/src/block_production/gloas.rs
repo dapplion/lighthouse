@@ -152,16 +152,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             parent_envelope,
         } = block_production_state;
 
-        // Gloas block production is fork-dispatched, so a pre-Gloas head cannot reach it.
         let parent_payload_status = match parent_payload_status {
             PayloadStatusCrossFork::Gloas(status) => status,
-            PayloadStatusCrossFork::PreGloas => {
-                return Err(BlockProductionError::BeaconChain(Box::new(
-                    BeaconChainError::Unexpected(
-                        "pre-gloas head in gloas block production".to_string(),
-                    ),
-                )));
-            }
+            // The first Gloas block builds on a pre-Gloas head. That head has no separate
+            // payload, which `EMPTY` conveys: `should_build_on_full` answers false and the bid
+            // extends the payload inside the pre-Gloas block.
+            PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
         };
 
         // Part 2/2 (async, with some blocking components)
