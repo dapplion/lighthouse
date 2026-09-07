@@ -535,7 +535,7 @@ async fn disabling_fcr_clears_the_persisted_state() {
 
 /// `--reset-payload-statuses` marks every pre-Gloas block optimistic at boot (Gloas payload
 /// statuses are left alone). A confirmed root must be `VALID` like any block FCR confirms, so an
-/// optimistic persisted root is refused and the rule is seeded from the justified checkpoint.
+/// optimistic persisted root is refused and the rule is seeded from the finalized checkpoint.
 #[tokio::test]
 async fn a_payload_status_reset_refuses_an_optimistic_persisted_root() {
     let all = validators(VALIDATOR_COUNT);
@@ -558,11 +558,11 @@ async fn a_payload_status_reset_refuses_an_optimistic_persisted_root() {
         .unwrap()
         .execution_status
         .is_optimistic_or_invalid();
-    let justified = chain
+    let finalized = chain
         .canonical_head
         .cached_head()
-        .justified_checkpoint()
+        .finalized_checkpoint()
         .root;
     let (root, _) = confirmed(chain).unwrap();
-    assert_eq!(root, if optimistic { justified } else { stopped });
+    assert_eq!(root, if optimistic { finalized } else { stopped });
 }

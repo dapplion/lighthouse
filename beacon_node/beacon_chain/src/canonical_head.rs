@@ -1338,22 +1338,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let equivocating_indices = fork_choice.fc_store().equivocating_indices();
 
         // A restart that slept across an epoch boundary first performs the rotation it missed.
-        if let Some(checkpoint) = fcr.missed_boundary_checkpoint::<T::EthSpec>(
+        fcr.catch_up_missed_boundary::<T::EthSpec>(
             current_slot,
             fork_choice.justified_checkpoint(),
             unrealized_justified_cp,
-        ) {
-            let rotates_now = !current_slot
-                .as_u64()
-                .is_multiple_of(T::EthSpec::slots_per_epoch())
-                && checkpoint != fcr.current_epoch_observed_justified.checkpoint();
-            let state = rotates_now
-                .then(|| {
-                    Self::load_fcr_checkpoint_state(store, builder_onboarding_cache, checkpoint)
-                })
-                .transpose()?;
-            fcr.catch_up_missed_boundary::<T::EthSpec>(current_slot, checkpoint, state.as_ref())?;
-        }
+            |checkpoint| {
+                Self::load_fcr_checkpoint_state(store, builder_onboarding_cache, checkpoint)
+            },
+        )?;
 
         // Load the checkpoint state if it will be required.
         let checkpoint_state = fcr
@@ -1400,8 +1392,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         })
     }
 
-    /// Restore the persisted FCR state, or seed from the justified checkpoint. The seed is read
-    /// before the first tick, so it only helps a restart that stays within the same epoch.
+    /// Restore the persisted FCR state, or seed from the finalized checkpoint as a fresh node does.
     fn load_fast_confirmation_rule(
         fork_choice: &BeaconForkChoice<T>,
         snapshot: &BeaconSnapshot<T::EthSpec>,
@@ -1421,7 +1412,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             Err(e) => warn!(error = ?e, "Ignoring persisted fast confirmation state"),
         }
         Self::new_fast_confirmation_rule(
-            fork_choice.cached_fork_choice_view().justified_checkpoint,
+            fork_choice.cached_fork_choice_view().finalized_checkpoint,
             snapshot,
             slot_assignments,
             store,
@@ -1442,7 +1433,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     ) -> Result<Option<FastConfirmationRule>, FastConfirmationError> {
         let Some(persisted) = store
             .get_item::<PersistedFastConfirmation>(&FAST_CONFIRMATION_DB_KEY)
-            .map_err(|e| FastConfirmationError::UnableToObtainPersistedState(format!("{e:?}")))?
+            .map_err(|e| {
+                FastConfirmationError::UnableToObtainCheckpointState(format!(
+                    "persisted fast confirmation state: {e:?}"
+                ))
+            })?
         else {
             return Ok(None);
         };
@@ -1466,21 +1461,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             }
         };
         let clamp_root = |root: Hash256| {
-            clamp_checkpoint(Checkpoint {
-                epoch: finalized.epoch,
-                root,
-            })
-            .root
+            if fork_choice.get_block(&root).is_some() {
+                root
+            } else {
+                finalized.root
+            }
         };
 
         let previous = clamp_checkpoint(persisted.previous_epoch_observed_justified_checkpoint);
         let current = clamp_checkpoint(persisted.current_epoch_observed_justified_checkpoint);
         if previous.epoch > current.epoch {
-            debug!(
-                ?previous,
-                ?current,
-                "Persisted FCR checkpoints out of order"
-            );
             return Ok(None);
         }
         let previous_state = Self::load_fcr_checkpoint_state(store, None, previous)?;
@@ -1506,24 +1496,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         .map(Some)
     }
 
-    /// Build a `FastConfirmationRule` seeded from `anchor_checkpoint`, sourcing its balance
-    /// snapshots from that checkpoint's state (spec: `store.checkpoint_states[checkpoint]`)
+    /// Build a `FastConfirmationRule` seeded from `finalized_checkpoint`, sourcing its balance
+    /// snapshots from the finalized checkpoint's state (spec: `store.checkpoint_states[checkpoint]`)
     /// and its head-derived caches from the `snapshot` state.
     ///
     /// When the head snapshot *is* the checkpoint state — same block root, state at the first slot
     /// of the checkpoint's epoch, as at genesis or checkpoint-sync startup — it is reused directly;
     /// otherwise the checkpoint state is loaded from the `store`.
     fn new_fast_confirmation_rule(
-        anchor_checkpoint: Checkpoint,
+        finalized_checkpoint: Checkpoint,
         snapshot: &BeaconSnapshot<T::EthSpec>,
         slot_assignments: SlotAssignments,
         store: &BeaconStore<T>,
         spec: &ChainSpec,
     ) -> Result<FastConfirmationRule, FastConfirmationError> {
-        let target_slot = anchor_checkpoint
+        let target_slot = finalized_checkpoint
             .epoch
             .start_slot(T::EthSpec::slots_per_epoch());
-        let snapshot_is_checkpoint_state = snapshot.beacon_block_root == anchor_checkpoint.root
+        let snapshot_is_checkpoint_state = snapshot.beacon_block_root == finalized_checkpoint.root
             && snapshot.beacon_state.slot() == target_slot;
         let loaded_checkpoint_state = if snapshot_is_checkpoint_state {
             None
@@ -1531,14 +1521,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             Some(Self::load_fcr_checkpoint_state(
                 store,
                 None,
-                anchor_checkpoint,
+                finalized_checkpoint,
             )?)
         };
         FastConfirmationRule::new(
             snapshot.beacon_block_root,
             &snapshot.beacon_state,
             slot_assignments,
-            anchor_checkpoint,
+            finalized_checkpoint,
             loaded_checkpoint_state
                 .as_ref()
                 .unwrap_or(&snapshot.beacon_state),
