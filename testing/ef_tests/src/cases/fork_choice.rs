@@ -21,6 +21,7 @@ use bls::AggregateSignature;
 use execution_layer::{
     PayloadStatusV1, PayloadStatusV1Status, json_structures::JsonPayloadStatusV1Status,
 };
+use proto_array::FcBlockHash;
 use proto_array::ReOrgThreshold;
 use serde::Deserialize;
 use ssz_derive::Decode;
@@ -1421,7 +1422,11 @@ impl<E: EthSpec> Tester<E> {
         // have no `execution_payload_parent_hash` and keep the hash of their own payload.
         let actual = block
             .execution_payload_parent_hash
-            .or_else(|| block.execution_status.block_hash())
+            .or_else(|| match block.execution_status.block_hash() {
+                // Pre-Gloas: the block's own executed payload.
+                FcBlockHash::PostMerge(hash) => Some(hash),
+                FcBlockHash::PreMerge => None,
+            })
             .unwrap_or_else(ExecutionBlockHash::zero);
         check_equal("safe_execution_block_hash", actual, expected)
     }

@@ -2174,10 +2174,12 @@ pub async fn serve<T: BeaconChainTypes>(
                                 finalized_epoch: node.finalized_checkpoint().epoch,
                                 weight: node.weight(),
                                 validity: execution_status,
-                                execution_block_hash: node
-                                    .execution_status()
-                                    .block_hash()
-                                    .map(|block_hash| block_hash.into_root()),
+                                execution_block_hash: match node.execution_status().block_hash() {
+                                    proto_array::FcBlockHash::PostMerge(block_hash) => {
+                                        Some(block_hash.into_root())
+                                    }
+                                    proto_array::FcBlockHash::PreMerge => None,
+                                },
                                 extra_data: ForkChoiceExtraData {
                                     target_root: node.target_root(),
                                     justified_root: node.justified_checkpoint().root,

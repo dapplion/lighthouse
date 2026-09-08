@@ -326,21 +326,6 @@ impl<E: EthSpec> MockServer<E> {
         }
     }
 
-    fn invalid_terminal_block_status() -> PayloadStatusV1 {
-        PayloadStatusV1 {
-            status: PayloadStatusV1Status::Invalid,
-            latest_valid_hash: Some(ExecutionBlockHash::zero()),
-            validation_error: Some("static response".into()),
-        }
-    }
-
-    fn invalid_terminal_block_new_payload_response() -> StaticNewPayloadResponse {
-        StaticNewPayloadResponse {
-            status: Self::invalid_terminal_block_status(),
-            should_import: true,
-        }
-    }
-
     pub fn all_payloads_valid(&self) {
         self.all_payloads_valid_on_new_payload();
         self.all_payloads_valid_on_forkchoice_updated();
@@ -391,14 +376,6 @@ impl<E: EthSpec> MockServer<E> {
 
     pub fn all_payloads_invalid_block_hash_on_forkchoice_updated(&self) {
         self.set_forkchoice_updated_response(Self::invalid_block_hash_status());
-    }
-
-    pub fn all_payloads_invalid_terminal_block_on_new_payload(&self) {
-        self.set_new_payload_response(Self::invalid_terminal_block_new_payload_response());
-    }
-
-    pub fn all_payloads_invalid_terminal_block_on_forkchoice_updated(&self) {
-        self.set_forkchoice_updated_response(Self::invalid_terminal_block_status());
     }
 
     /// Disables any static payload responses so the execution block generator will do its own

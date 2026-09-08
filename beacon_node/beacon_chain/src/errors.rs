@@ -65,6 +65,7 @@ pub enum BeaconChainError {
     MissingBeaconBlock(Hash256),
     MissingBeaconState(Hash256),
     MissingExecutionPayloadEnvelope(Hash256),
+    Unexpected(String),
     MissingHotStateSummary(Hash256),
     SlotProcessingError(SlotProcessingError),
     EpochProcessingError(EpochProcessingError),

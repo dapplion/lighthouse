@@ -58,6 +58,7 @@ use types::{
 pub enum Error {
     NodeNotFound(Hash256),
     NodeHasNoBlockHash(Hash256),
+    Unexpected(String),
     ParentRootNotFound(Hash256),
     UnableToObtainHeadState(String),
     UnableToObtainCheckpointState(String),
@@ -1227,7 +1228,7 @@ fn parent_node_of<'a>(
 }
 
 /// Return `true` if the block's execution payload is `Optimistic` or `Invalid`.
-/// Pre-bellatrix `Irrelevant` payloads and missing nodes are treated as not
+/// Pre-bellatrix `PreMerge` payloads and missing nodes are treated as not
 /// optimistic (the spec MUST applies post-merge). A missing node will be
 /// rejected later by `get_block_slot`, so this returning `false` here is safe.
 ///

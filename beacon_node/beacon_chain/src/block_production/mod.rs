@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use fork_choice::PayloadStatus;
-use proto_array::{ProposerHeadError, ReOrgThreshold};
+use proto_array::{ParentPayloadStatus, PayloadStatusCrossFork, ProposerHeadError, ReOrgThreshold};
 use slot_clock::SlotClock;
 use tracing::{debug, error, info, instrument, warn};
 use types::{BeaconState, Epoch, EthSpec, Hash256, SignedExecutionPayloadEnvelope, Slot};
@@ -19,7 +19,7 @@ pub use gloas::PayloadEnvelopeContents;
 pub(crate) struct BlockProductionState<E: EthSpec> {
     pub state: BeaconState<E>,
     pub state_root: Option<Hash256>,
-    pub parent_payload_status: PayloadStatus,
+    pub parent_payload_status: PayloadStatusCrossFork,
     pub parent_envelope: Option<Arc<SignedExecutionPayloadEnvelope<E>>>,
 }
 
@@ -27,7 +27,7 @@ pub(crate) struct BlockProductionState<E: EthSpec> {
 struct ReOrgInputs<E: EthSpec> {
     state: BeaconState<E>,
     state_root: Hash256,
-    parent_payload_status: PayloadStatus,
+    parent_payload_status: PayloadStatusCrossFork,
     parent_envelope: Option<Arc<SignedExecutionPayloadEnvelope<E>>>,
 }
 
@@ -52,11 +52,22 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // clone the `Arc` so we can pass it to block production without a DB load.
         let (head_slot, head_block_root, head_state_root, head_payload_status, head_envelope) = {
             let head = self.canonical_head.cached_head();
+            // The side of the head only means something for a Gloas head; a pre-Gloas head has a
+            // single node and the walk's status for it carries no information.
+            let head_payload_status = if self
+                .spec
+                .fork_name_at_slot::<T::EthSpec>(head.head_slot())
+                .gloas_enabled()
+            {
+                PayloadStatusCrossFork::Gloas(head.head_payload_status())
+            } else {
+                PayloadStatusCrossFork::PreGloas
+            };
             (
                 head.head_slot(),
                 head.head_block_root(),
                 head.head_state_root(),
-                head.head_payload_status(),
+                head_payload_status,
                 head.snapshot.execution_envelope.clone(),
             )
         };
@@ -242,11 +253,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         drop(proposer_head_timer);
         let re_org_parent_block = proposer_head.parent_node.root();
 
-        // The head uniquely determines the parent payload status for the re-org block, whichever
-        // variant (full or empty) it builds on must have more weight, or else we would have already
-        // re-orged away from this block naturally, and it would not be the head, by definition.
-        let parent_payload_status = proposer_head.head_node.get_parent_payload_status();
-
         let (state_root, state) = self
             .store
             .get_advanced_hot_state_from_cache(re_org_parent_block, slot)
@@ -255,7 +261,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 None
             })?;
 
-        let parent_envelope = if parent_payload_status == PayloadStatus::Full {
+        // The head uniquely determines the parent payload status for the re-org block, whichever
+        // variant (full or empty) it builds on must have more weight, or else we would have already
+        // re-orged away from this block naturally, and it would not be the head, by definition.
+        let parent_payload_status = proposer_head.head_node.get_parent_payload_status();
+        let parent_envelope = if parent_payload_status == ParentPayloadStatus::Full {
             let envelope = self
                 .store
                 .get_payload_envelope(&re_org_parent_block)
@@ -285,7 +295,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         Some(ReOrgInputs {
             state,
             state_root,
-            parent_payload_status,
+            parent_payload_status: match parent_payload_status {
+                ParentPayloadStatus::Full => PayloadStatusCrossFork::Gloas(PayloadStatus::Full),
+                ParentPayloadStatus::Empty => PayloadStatusCrossFork::Gloas(PayloadStatus::Empty),
+                ParentPayloadStatus::PreGloas => PayloadStatusCrossFork::PreGloas,
+            },
             parent_envelope,
         })
     }

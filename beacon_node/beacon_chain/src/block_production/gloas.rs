@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use proto_array::PayloadStatus;
+use proto_array::PayloadStatusCrossFork;
 
 use bls::{PublicKeyBytes, Signature};
 use execution_layer::{
@@ -150,6 +151,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             parent_payload_status,
             parent_envelope,
         } = block_production_state;
+
+        let parent_payload_status = match parent_payload_status {
+            PayloadStatusCrossFork::Gloas(status) => status,
+            // The first Gloas block builds on a pre-Gloas head. That head has no separate
+            // payload, which `EMPTY` conveys: `should_build_on_full` answers false and the bid
+            // extends the payload inside the pre-Gloas block.
+            PayloadStatusCrossFork::PreGloas => PayloadStatus::Empty,
+        };
 
         // Part 2/2 (async, with some blocking components)
         //

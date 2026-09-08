@@ -1,3 +1,4 @@
+use proto_array::FcBlockHash;
 use std::sync::Arc;
 
 use crate::{
@@ -109,14 +110,19 @@ pub(crate) fn is_bid_compatible_with_head<T: BeaconChainTypes>(
         .gloas_enabled();
 
     let (head_bid_parent_block_hash, head_bid_block_hash) = if head_is_pre_gloas {
+        // Pre-Gloas arm: V17 statuses always carry the executed payload hash.
         let parent_payload_hash = head_block
             .parent_root
             .and_then(|parent_root| fork_choice_read.get_block(&parent_root))
-            .and_then(|parent| parent.execution_status.block_hash());
-        (
-            parent_payload_hash,
-            head_block.execution_status.block_hash(),
-        )
+            .and_then(|parent| match parent.execution_status.block_hash() {
+                FcBlockHash::PostMerge(hash) => Some(hash),
+                FcBlockHash::PreMerge => None,
+            });
+        let head_payload_hash = match head_block.execution_status.block_hash() {
+            FcBlockHash::PostMerge(hash) => Some(hash),
+            FcBlockHash::PreMerge => None,
+        };
+        (parent_payload_hash, head_payload_hash)
     } else {
         (
             head_block.execution_payload_parent_hash,
