@@ -811,7 +811,7 @@ async fn equivocating_committee_weights_use_raw_justified_balances() {
     while harness.get_current_slot() < Slot::new(29) {
         let slot = harness.get_current_slot();
         let mut state = harness.get_current_state();
-        complete_state_advance(&mut state, None, slot, &harness.chain.spec).unwrap();
+        complete_state_advance(&mut state, None, slot, None, &harness.chain.spec).unwrap();
         state
             .build_committee_cache(RelativeEpoch::Current, &harness.chain.spec)
             .unwrap();
