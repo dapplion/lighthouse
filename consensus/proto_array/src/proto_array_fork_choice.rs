@@ -2565,5 +2565,39 @@ mod test_compute_deltas {
             )
             .unwrap();
         assert_eq!(head, boosted_root);
+
+        // Unknown weights: the equivocation at the parent's slot still invalidates the boost.
+        let (head, _) = fork_choice
+            .find_head::<MainnetEthSpec>(
+                genesis_checkpoint,
+                genesis_checkpoint,
+                &justified_balances,
+                boosted_root,
+                &equivocating_indices,
+                None,
+                Slot::new(2),
+                &spec,
+            )
+            .unwrap();
+        assert_eq!(head, competing_root);
+
+        // A parent that is strong on attestations alone is strong whatever the unknown weight
+        // turns out to be, so the boost survives despite the equivocation.
+        fork_choice
+            .process_attestation(1, parent_root, Slot::new(1), false)
+            .unwrap();
+        let (head, _) = fork_choice
+            .find_head::<MainnetEthSpec>(
+                genesis_checkpoint,
+                genesis_checkpoint,
+                &justified_balances,
+                boosted_root,
+                &equivocating_indices,
+                None,
+                Slot::new(2),
+                &spec,
+            )
+            .unwrap();
+        assert_eq!(head, boosted_root);
     }
 }

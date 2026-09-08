@@ -752,13 +752,10 @@ impl ProtoArray {
             calculate_committee_fraction::<E>(justified_balances, spec.reorg_head_weight_threshold)
                 .unwrap_or(0);
 
-        // With unknown weights we can't tell whether the head is weak, so keep the boost.
-        let Some(equivocating_committee_weights) = equivocating_committee_weights else {
-            return Ok(true);
-        };
+        // Unknown weights can only add to the parent's weight, so treating them as zero never
+        // calls a strong parent weak. If it is weak, the equivocation check below decides.
         let equivocating_committee_weight = equivocating_committee_weights
-            .get(&parent.slot())
-            .copied()
+            .and_then(|weights| weights.get(&parent.slot()).copied())
             .unwrap_or(0);
 
         if !parent.is_head_weak(re_org_head_weight_threshold, equivocating_committee_weight) {
