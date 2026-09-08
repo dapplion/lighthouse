@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use fork_choice::PayloadStatus;
-use proto_array::{PayloadStatusCrossFork, ProposerHeadError, ReOrgThreshold};
+use proto_array::{ParentPayloadStatus, PayloadStatusCrossFork, ProposerHeadError, ReOrgThreshold};
 use slot_clock::SlotClock;
 use tracing::{debug, error, info, instrument, warn};
 use types::{BeaconState, Epoch, EthSpec, Hash256, SignedExecutionPayloadEnvelope, Slot};
@@ -265,25 +265,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // variant (full or empty) it builds on must have more weight, or else we would have already
         // re-orged away from this block naturally, and it would not be the head, by definition.
         let parent_payload_status = proposer_head.head_node.get_parent_payload_status();
-        let parent_envelope =
-            if parent_payload_status == PayloadStatusCrossFork::Gloas(PayloadStatus::Full) {
-                let envelope = self
-                    .store
-                    .get_payload_envelope(&re_org_parent_block)
-                    .ok()
-                    .flatten()
-                    .map(Arc::new)
-                    .or_else(|| {
-                        warn!(
-                            reason = "missing execution payload envelope",
-                            "Not attempting re-org"
-                        );
-                        None
-                    })?;
-                Some(envelope)
-            } else {
-                None
-            };
+        let parent_envelope = if parent_payload_status == ParentPayloadStatus::Full {
+            let envelope = self
+                .store
+                .get_payload_envelope(&re_org_parent_block)
+                .ok()
+                .flatten()
+                .map(Arc::new)
+                .or_else(|| {
+                    warn!(
+                        reason = "missing execution payload envelope",
+                        "Not attempting re-org"
+                    );
+                    None
+                })?;
+            Some(envelope)
+        } else {
+            None
+        };
 
         info!(
             weak_head = ?canonical_head,
@@ -296,7 +295,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         Some(ReOrgInputs {
             state,
             state_root,
-            parent_payload_status,
+            parent_payload_status: match parent_payload_status {
+                ParentPayloadStatus::Full => PayloadStatusCrossFork::Gloas(PayloadStatus::Full),
+                ParentPayloadStatus::Empty => PayloadStatusCrossFork::Gloas(PayloadStatus::Empty),
+                ParentPayloadStatus::PreGloas => PayloadStatusCrossFork::PreGloas,
+            },
             parent_envelope,
         })
     }
