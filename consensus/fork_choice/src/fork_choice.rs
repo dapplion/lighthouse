@@ -3,8 +3,9 @@ use crate::{ForkChoiceStore, InvalidationOperation};
 use fixed_bytes::FixedBytesExtended;
 use logging::crit;
 use proto_array::{
-    Block as ProtoBlock, ExecutionStatus, FcBlockHash, JustifiedBalances, LatestMessage,
-    PayloadStatus, ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice, ReOrgThreshold,
+    Block as ProtoBlock, ExecutionStatus, ExecutionStatusCrossFork, FcBlockHash, JustifiedBalances,
+    LatestMessage, PayloadExecutionStatus, PayloadStatus, ProposerHeadError, ProposerHeadInfo,
+    ProtoArrayForkChoice, ReOrgThreshold,
 };
 use ssz_derive::{Decode, Encode};
 use state_processing::{
@@ -428,29 +429,39 @@ where
 
         let (execution_status, execution_payload_parent_hash, execution_payload_block_hash) =
             if let Ok(signed_bid) = anchor_block.message().body().signed_execution_payload_bid() {
-                // Gloas: execution status is irrelevant post-Gloas; payload validation
-                // is decoupled from beacon blocks.
+                // Gloas: the anchor's envelope never arrives, so its committed payload stays
+                // unrevealed. The committed hashes come from the bid.
                 (
-                    ExecutionStatus::pre_merge(),
+                    ExecutionStatusCrossFork::Gloas(PayloadExecutionStatus::NotYetRevealed),
                     Some(signed_bid.message.parent_block_hash),
                     Some(signed_bid.message.block_hash),
                 )
             } else if let Ok(execution_payload) = anchor_block.message().execution_payload() {
                 // Pre-Gloas forks: do not set payload hashes, they are only used post-Gloas.
                 if execution_payload.is_default_with_empty_roots() {
-                    (ExecutionStatus::pre_merge(), None, None)
+                    (
+                        ExecutionStatusCrossFork::PreGloas(ExecutionStatus::pre_merge()),
+                        None,
+                        None,
+                    )
                 } else {
                     // Assume that this payload is valid, since the anchor should be a
                     // trusted block and state.
                     (
-                        ExecutionStatus::Valid(execution_payload.block_hash()),
+                        ExecutionStatusCrossFork::PreGloas(ExecutionStatus::Valid(
+                            execution_payload.block_hash(),
+                        )),
                         None,
                         None,
                     )
                 }
             } else {
                 // Pre-merge: no execution payload at all.
-                (ExecutionStatus::pre_merge(), None, None)
+                (
+                    ExecutionStatusCrossFork::PreGloas(ExecutionStatus::pre_merge()),
+                    None,
+                    None,
+                )
             };
 
         // If the current slot is not provided, use the value that was last provided to the store.
@@ -619,9 +630,16 @@ where
                         ))
                     })?)
                 } else {
-                    match b.execution_status.block_hash() {
-                        FcBlockHash::PostMerge(hash) => Some(hash),
-                        FcBlockHash::PreMerge => None,
+                    match b.execution_status {
+                        ExecutionStatusCrossFork::PreGloas(status) => match status.block_hash() {
+                            FcBlockHash::PostMerge(hash) => Some(hash),
+                            FcBlockHash::PreMerge => None,
+                        },
+                        ExecutionStatusCrossFork::Gloas(_) => {
+                            return Err(Error::Unexpected(format!(
+                                "gloas status on a pre-gloas head: {head_root:?}"
+                            )));
+                        }
                     }
                 }
             }
@@ -636,9 +654,14 @@ where
                     ))
                 })?))
             } else {
-                match b.execution_status.block_hash() {
-                    FcBlockHash::PostMerge(hash) => Ok(Some(hash)),
-                    FcBlockHash::PreMerge => Ok(None),
+                match b.execution_status {
+                    ExecutionStatusCrossFork::PreGloas(status) => match status.block_hash() {
+                        FcBlockHash::PostMerge(hash) => Ok(Some(hash)),
+                        FcBlockHash::PreMerge => Ok(None),
+                    },
+                    ExecutionStatusCrossFork::Gloas(_) => Err(Error::Unexpected(format!(
+                        "gloas status on a pre-gloas checkpoint node: {root:?}"
+                    ))),
                 }
             }
         };
@@ -755,13 +778,10 @@ where
         &mut self,
         block_root: Hash256,
         payload_verification_status: PayloadVerificationStatus,
-        payload_block_hash: ExecutionBlockHash,
     ) -> Result<(), Error<T::Error>> {
-        let execution_status = match payload_verification_status {
-            PayloadVerificationStatus::Verified => ExecutionStatus::Valid(payload_block_hash),
-            PayloadVerificationStatus::Optimistic => {
-                ExecutionStatus::Optimistic(payload_block_hash)
-            }
+        let payload_execution_status = match payload_verification_status {
+            PayloadVerificationStatus::Verified => PayloadExecutionStatus::Valid,
+            PayloadVerificationStatus::Optimistic => PayloadExecutionStatus::Optimistic,
             // A revealed Gloas payload always has execution enabled, so this is a logic error.
             PayloadVerificationStatus::Irrelevant => {
                 return Err(Error::InvalidPayloadStatus {
@@ -774,7 +794,7 @@ where
 
         // `on_payload_envelope_received` promotes the ancestry itself. It starts at the parent.
         self.proto_array
-            .on_payload_envelope_received(block_root, execution_status)
+            .on_payload_envelope_received(block_root, payload_execution_status)
             .map_err(Error::FailedToProcessValidExecutionPayload)?;
 
         Ok(())
@@ -1065,18 +1085,23 @@ where
             .on_verified_block(block, block_root, state)
             .map_err(Error::AfterBlockFailed)?;
 
-        let execution_status = if let Ok(execution_payload) = block.body().execution_payload() {
+        let execution_status = if block.body().signed_execution_payload_bid().is_ok() {
+            // Gloas: the block only commits to a payload; its envelope arrives later.
+            ExecutionStatusCrossFork::Gloas(PayloadExecutionStatus::NotYetRevealed)
+        } else if let Ok(execution_payload) = block.body().execution_payload() {
             let block_hash = execution_payload.block_hash();
 
             if block_hash == ExecutionBlockHash::zero() {
                 // The block is post-merge-fork, but pre-terminal-PoW block. We don't need to verify
                 // the payload.
-                ExecutionStatus::pre_merge()
+                ExecutionStatusCrossFork::PreGloas(ExecutionStatus::pre_merge())
             } else {
                 match payload_verification_status {
-                    PayloadVerificationStatus::Verified => ExecutionStatus::Valid(block_hash),
+                    PayloadVerificationStatus::Verified => {
+                        ExecutionStatusCrossFork::PreGloas(ExecutionStatus::Valid(block_hash))
+                    }
                     PayloadVerificationStatus::Optimistic => {
-                        ExecutionStatus::Optimistic(block_hash)
+                        ExecutionStatusCrossFork::PreGloas(ExecutionStatus::Optimistic(block_hash))
                     }
                     // It would be a logic error to declare a block irrelevant if it has an
                     // execution payload with a non-zero block hash.
@@ -1091,7 +1116,7 @@ where
             }
         } else {
             // There is no payload to verify.
-            ExecutionStatus::pre_merge()
+            ExecutionStatusCrossFork::PreGloas(ExecutionStatus::pre_merge())
         };
 
         let (execution_payload_parent_hash, execution_payload_block_hash) =
@@ -1716,19 +1741,23 @@ where
             .map_err(Error::ProtoArrayStringError)
     }
 
-    /// Returns an `ExecutionStatus` if the block is known **and** a descendant of the finalized root.
-    pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
+    /// Returns the execution status if the block is known **and** a descendant of the finalized root.
+    pub fn get_block_execution_status(
+        &self,
+        block_root: &Hash256,
+    ) -> Option<ExecutionStatusCrossFork> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
             match self.proto_array.get_block_execution_status(block_root) {
                 // The block's own payload has not arrived, so the chain that ends at this block
                 // runs on an ancestor's payload. Callers gate attestation production and report
                 // `execution_optimistic` on this method, and both must reflect the payload the
                 // chain executed, not the one it has never seen.
-                Some(ExecutionStatus::NotYetRevealed(_)) => self
-                    .proto_array
-                    .get_node_execution_status(block_root, PayloadStatus::Empty)
-                    .ok()
-                    .flatten(),
+                Some(ExecutionStatusCrossFork::Gloas(PayloadExecutionStatus::NotYetRevealed)) => {
+                    self.proto_array
+                        .get_node_execution_status(block_root, PayloadStatus::Empty)
+                        .ok()
+                        .flatten()
+                }
                 other => other,
             }
         } else {
@@ -1741,7 +1770,7 @@ where
         &self,
         block_root: &Hash256,
         payload_status: PayloadStatus,
-    ) -> Result<Option<ExecutionStatus>, Error<T::Error>> {
+    ) -> Result<Option<ExecutionStatusCrossFork>, Error<T::Error>> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
             self.proto_array
                 .get_node_execution_status(block_root, payload_status)

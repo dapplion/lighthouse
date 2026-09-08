@@ -3829,9 +3829,9 @@ impl ApiTester {
             .iter()
             .map(|node| {
                 let execution_status = node
-                    .execution_status()
+                    .execution_status_cross_fork()
                     .is_execution_enabled()
-                    .then(|| node.execution_status().to_string());
+                    .then(|| node.execution_status_cross_fork().to_string());
                 ForkChoiceNode {
                     slot: node.slot(),
                     block_root: node.root(),
@@ -3843,7 +3843,7 @@ impl ApiTester {
                     finalized_epoch: node.finalized_checkpoint().epoch,
                     weight: node.weight(),
                     validity: execution_status,
-                    execution_block_hash: match node.execution_status().block_hash() {
+                    execution_block_hash: match node.block_hash() {
                         proto_array::FcBlockHash::PostMerge(block_hash) => {
                             Some(block_hash.into_root())
                         }
@@ -3865,7 +3865,7 @@ impl ApiTester {
                         unrealized_finalized_epoch: node
                             .unrealized_finalized_checkpoint()
                             .map(|checkpoint| checkpoint.epoch),
-                        execution_status: node.execution_status().to_string(),
+                        execution_status: node.execution_status_cross_fork().to_string(),
                         best_child: node
                             .best_child()
                             .ok()

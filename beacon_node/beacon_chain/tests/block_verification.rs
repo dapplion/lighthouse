@@ -282,7 +282,6 @@ fn update_fork_choice_with_envelopes(
                 .on_payload_envelope_received(
                     snapshot.beacon_block_root,
                     PayloadVerificationStatus::Verified,
-                    ExecutionBlockHash::zero(),
                 );
         }
     }
@@ -1293,7 +1292,6 @@ async fn block_gossip_verification() {
                 .on_payload_envelope_received(
                     snapshot.beacon_block_root,
                     PayloadVerificationStatus::Verified,
-                    ExecutionBlockHash::zero(),
                 )
                 .expect("should update fork choice with envelope");
         }
@@ -2630,11 +2628,7 @@ async fn process_chain_segment_ignores_duplicate_gloas_block_when_payload_receiv
         .chain
         .canonical_head
         .fork_choice_write_lock()
-        .on_payload_envelope_received(
-            block_root,
-            PayloadVerificationStatus::Verified,
-            ExecutionBlockHash::zero(),
-        )
+        .on_payload_envelope_received(block_root, PayloadVerificationStatus::Verified)
         .expect("payload should be marked received");
 
     let data_sidecars = Some(DataSidecars::DataColumns(

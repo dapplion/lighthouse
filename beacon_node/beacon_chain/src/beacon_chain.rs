@@ -101,7 +101,7 @@ use execution_layer::{
 };
 use fixed_bytes::FixedBytesExtended;
 use fork_choice::{
-    AttestationFromBlock, ExecutionStatus, ForkChoice, ForkchoiceUpdateParameters,
+    AttestationFromBlock, ExecutionStatusCrossFork, ForkChoice, ForkchoiceUpdateParameters,
     InvalidationOperation, PayloadVerificationStatus, ResetPayloadStatuses,
 };
 use futures::channel::mpsc::Sender;
@@ -1696,7 +1696,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         validator_indices: &[u64],
         epoch: Epoch,
         head_block_root: Hash256,
-    ) -> Result<(Vec<Option<AttestationDuty>>, Hash256, ExecutionStatus), Error> {
+    ) -> Result<
+        (
+            Vec<Option<AttestationDuty>>,
+            Hash256,
+            ExecutionStatusCrossFork,
+        ),
+        Error,
+    > {
         let execution_status = self
             .canonical_head
             .fork_choice_read_lock()
@@ -5513,7 +5520,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
 
         // The Gloas early-return above means the head, and therefore its parent, are pre-Gloas.
-        let parent_head_hash = match info.parent_node.execution_status().block_hash() {
+        let parent_head_hash = match info.parent_node.block_hash() {
             FcBlockHash::PostMerge(hash) => hash,
             // We never build blocks on top of pre-merge parents.
             FcBlockHash::PreMerge => {
@@ -6519,9 +6526,15 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // Return an error here to try and prevent progression by upstream functions.
             return Err(Error::JustifiedPayloadInvalid {
                 justified_root: justified_block.root,
-                execution_block_hash: match justified_block.execution_status.block_hash() {
-                    FcBlockHash::PostMerge(hash) => Some(hash),
-                    FcBlockHash::PreMerge => None,
+                execution_block_hash: match justified_block.execution_status {
+                    ExecutionStatusCrossFork::PreGloas(status) => match status.block_hash() {
+                        FcBlockHash::PostMerge(hash) => Some(hash),
+                        FcBlockHash::PreMerge => None,
+                    },
+                    // The bid hash the justified block committed to.
+                    ExecutionStatusCrossFork::Gloas(_) => {
+                        justified_block.execution_payload_block_hash
+                    }
                 },
             });
         }

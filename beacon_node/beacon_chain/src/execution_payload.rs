@@ -16,7 +16,7 @@ use execution_layer::{
     PayloadParameters, PayloadStatus,
 };
 use fork_choice::{InvalidationOperation, PayloadVerificationStatus};
-use proto_array::{Block as ProtoBlock, ExecutionStatus};
+use proto_array::{Block as ProtoBlock, ExecutionStatus, ExecutionStatusCrossFork};
 use slot_clock::SlotClock;
 use state_processing::per_block_processing::{
     compute_timestamp_at_slot, get_expected_withdrawals, is_execution_enabled,
@@ -235,18 +235,21 @@ pub fn validate_execution_payload_for_gossip<T: BeaconChainTypes>(
         // during gossip verification.
 
         let parent_has_execution = match parent_block.execution_status {
-            // Parent has valid or optimistic execution status.
-            ExecutionStatus::Valid(_) | ExecutionStatus::Optimistic(_) => true,
-            // Pre-merge blocks have irrelevant execution status.
-            // A pre-Gloas block cannot have a Gloas parent, so `NotYetRevealed` is unreachable.
-            ExecutionStatus::PreMerge(_) | ExecutionStatus::NotYetRevealed(_) => false,
-            // If the parent has an invalid payload then it's impossible to build a valid block upon
-            // it. Reject the block.
-            ExecutionStatus::Invalid(_) => {
-                return Err(BlockError::ParentExecutionPayloadInvalid {
-                    parent_root: parent_block.root,
-                });
-            }
+            ExecutionStatusCrossFork::PreGloas(status) => match status {
+                // Parent has valid or optimistic execution status.
+                ExecutionStatus::Valid(_) | ExecutionStatus::Optimistic(_) => true,
+                // Pre-merge blocks have irrelevant execution status.
+                ExecutionStatus::PreMerge(_) => false,
+                // If the parent has an invalid payload then it's impossible to build a valid block
+                // upon it. Reject the block.
+                ExecutionStatus::Invalid(_) => {
+                    return Err(BlockError::ParentExecutionPayloadInvalid {
+                        parent_root: parent_block.root,
+                    });
+                }
+            },
+            // A pre-Gloas block cannot have a Gloas parent.
+            ExecutionStatusCrossFork::Gloas(_) => false,
         };
 
         if parent_has_execution || !execution_payload.is_default_with_empty_roots() {

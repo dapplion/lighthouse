@@ -9,7 +9,7 @@
 //! values it stores are very small, so this should not be an issue.
 
 use crate::{BeaconChain, BeaconChainError, BeaconChainTypes};
-use fork_choice::ExecutionStatus;
+use fork_choice::ExecutionStatusCrossFork;
 use hashlink::lru_cache::LruCache;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
@@ -251,7 +251,7 @@ where
 pub fn compute_proposer_duties_from_head<T: BeaconChainTypes>(
     request_epoch: Epoch,
     chain: &BeaconChain<T>,
-) -> Result<(Vec<usize>, Hash256, Hash256, ExecutionStatus, Fork), BeaconChainError> {
+) -> Result<(Vec<usize>, Hash256, Hash256, ExecutionStatusCrossFork, Fork), BeaconChainError> {
     // Atomically collect information about the head whilst holding the canonical head `Arc` as
     // short as possible.
     let (mut state, head_state_root, head_block_root) = {

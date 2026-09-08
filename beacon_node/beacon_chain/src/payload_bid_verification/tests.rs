@@ -18,7 +18,7 @@ use types::{
     consts::gloas::PAYLOAD_BUILDER_VERSION,
 };
 
-use proto_array::{Block as ProtoBlock, ExecutionStatus};
+use proto_array::{Block as ProtoBlock, ExecutionStatusCrossFork, PayloadExecutionStatus};
 use types::AttestationShufflingId;
 
 use crate::{
@@ -268,7 +268,9 @@ impl TestContext {
                         epoch: Epoch::new(0),
                         root: self.genesis_block_root,
                     },
-                    execution_status: ExecutionStatus::pre_merge(),
+                    execution_status: ExecutionStatusCrossFork::Gloas(
+                        PayloadExecutionStatus::NotYetRevealed,
+                    ),
                     unrealized_justified_checkpoint: None,
                     unrealized_finalized_checkpoint: None,
                     execution_payload_parent_hash: Some(ExecutionBlockHash::zero()),

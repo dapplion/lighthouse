@@ -18,7 +18,9 @@ use fast_confirmation::{
 };
 use fixed_bytes::FixedBytesExtended;
 use proto_array::core::{ProtoArray, VoteTracker};
-use proto_array::{Block, ExecutionStatus, JustifiedBalances, ProtoArrayForkChoice};
+use proto_array::{
+    Block, ExecutionStatus, ExecutionStatusCrossFork, JustifiedBalances, ProtoArrayForkChoice,
+};
 use types::*;
 
 type E = MainnetEthSpec;
@@ -161,7 +163,7 @@ fn build_chain_inner(
         finalized_checkpoint,
         shuffling_id.clone(),
         shuffling_id.clone(),
-        ExecutionStatus::pre_merge(),
+        ExecutionStatusCrossFork::PreGloas(ExecutionStatus::pre_merge()),
         None, // execution_payload_parent_hash
         None, // execution_payload_block_hash
         0,    // proposer_index
@@ -200,7 +202,7 @@ fn build_chain_inner(
             next_epoch_shuffling_id: shuffling_id.clone(),
             justified_checkpoint,
             finalized_checkpoint,
-            execution_status: ExecutionStatus::pre_merge(),
+            execution_status: ExecutionStatusCrossFork::PreGloas(ExecutionStatus::pre_merge()),
             unrealized_justified_checkpoint: Some(unrealized_justified_checkpoint),
             unrealized_finalized_checkpoint: Some(finalized_checkpoint),
             execution_payload_parent_hash: None,

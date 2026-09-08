@@ -239,11 +239,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // Update the block's payload to received in fork choice, which creates the `Full` virtual
         // node which can be eligible for head.
         fork_choice
-            .on_payload_envelope_received(
-                block_root,
-                payload_verification_status,
-                signed_envelope.message().payload.block_hash,
-            )
+            .on_payload_envelope_received(block_root, payload_verification_status)
             .map_err(|e| EnvelopeError::InternalError(format!("{e:?}")))?;
 
         // It is important NOT to return errors here before the database commit, because the envelope

@@ -5,7 +5,10 @@ mod no_votes;
 mod votes;
 
 use crate::error::Error;
-use crate::proto_array_fork_choice::{Block, ExecutionStatus, PayloadStatus, ProtoArrayForkChoice};
+use crate::proto_array_fork_choice::{
+    Block, ExecutionStatus, ExecutionStatusCrossFork, PayloadExecutionStatus, PayloadStatus,
+    ProtoArrayForkChoice,
+};
 use crate::{InvalidationOperation, JustifiedBalances};
 use fixed_bytes::FixedBytesExtended;
 use serde::{Deserialize, Serialize};
@@ -169,7 +172,9 @@ impl ForkChoiceTestDefinition {
             self.finalized_checkpoint,
             junk_shuffling_id.clone(),
             junk_shuffling_id,
-            ExecutionStatus::Optimistic(ExecutionBlockHash::zero()),
+            ExecutionStatusCrossFork::PreGloas(ExecutionStatus::Optimistic(
+                ExecutionBlockHash::zero(),
+            )),
             self.execution_payload_parent_hash,
             self.execution_payload_block_hash,
             0,
@@ -322,8 +327,8 @@ impl ForkChoiceTestDefinition {
                         justified_checkpoint,
                         finalized_checkpoint,
                         // All blocks are imported optimistically.
-                        execution_status: ExecutionStatus::Optimistic(
-                            ExecutionBlockHash::from_root(root),
+                        execution_status: ExecutionStatusCrossFork::PreGloas(
+                            ExecutionStatus::Optimistic(ExecutionBlockHash::from_root(root)),
                         ),
                         unrealized_justified_checkpoint: None,
                         unrealized_finalized_checkpoint: None,
@@ -576,10 +581,7 @@ impl ForkChoiceTestDefinition {
                 }
                 Operation::ProcessExecutionPayloadEnvelope { block_root } => {
                     fork_choice
-                        .on_payload_envelope_received(
-                            block_root,
-                            ExecutionStatus::Valid(ExecutionBlockHash::zero()),
-                        )
+                        .on_payload_envelope_received(block_root, PayloadExecutionStatus::Valid)
                         .unwrap_or_else(|e| {
                             panic!(
                                 "on_execution_payload op at index {} returned error: {}",

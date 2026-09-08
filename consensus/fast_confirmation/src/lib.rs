@@ -1237,7 +1237,7 @@ fn parent_node_of<'a>(
 /// confirmation rule applies to the parent block, which adds one slot of delay.
 fn is_optimistic_or_invalid(root: Hash256, proto_array: &ProtoArray) -> Result<bool, Error> {
     if get_block(root, proto_array)?
-        .execution_status()
+        .execution_status_cross_fork()
         .is_optimistic_or_invalid()
     {
         return Ok(true);
