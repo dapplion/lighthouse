@@ -409,6 +409,30 @@ impl<E: EthSpec> MockServer<E> {
         *self.ctx.static_forkchoice_updated_response.lock() = None;
     }
 
+    /// Test helper for payload invalidation. After `delay`, begin returning INVALID (with
+    /// `latest_valid_hash`) from `forkchoiceUpdated`. Because the head has already been imported
+    /// optimistically, this drives the `OPTIMISTIC -> INVALID` fork-choice transition rather than
+    /// rejecting a new payload. When `revert_after` is `Some`, return to SYNCING afterwards so only
+    /// one round of invalidation occurs.
+    pub fn invalidate_on_forkchoice_updated_after(
+        &self,
+        handle: &runtime::Handle,
+        delay: std::time::Duration,
+        latest_valid_hash: ExecutionBlockHash,
+        revert_after: Option<std::time::Duration>,
+    ) {
+        let ctx = self.ctx.clone();
+        handle.spawn(async move {
+            tokio::time::sleep(delay).await;
+            *ctx.static_forkchoice_updated_response.lock() =
+                Some(Self::invalid_status(latest_valid_hash));
+            if let Some(revert) = revert_after {
+                tokio::time::sleep(revert).await;
+                *ctx.static_forkchoice_updated_response.lock() = Some(Self::syncing_status());
+            }
+        });
+    }
+
     pub fn insert_pow_block(
         &self,
         block_number: u64,
