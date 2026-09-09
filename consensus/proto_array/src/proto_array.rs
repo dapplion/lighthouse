@@ -1,6 +1,7 @@
 use crate::proto_array_fork_choice::IndexedForkChoiceNode;
 use crate::{
-    Block, ExecutionStatus, JustifiedBalances, LatestMessage, PayloadStatus, error::Error,
+    Block, ExecutionStatus, ExecutionVerdict, JustifiedBalances, LatestMessage, PayloadStatus,
+    error::Error,
 };
 use fixed_bytes::FixedBytesExtended;
 use serde::{Deserialize, Serialize};
@@ -896,43 +897,58 @@ impl ProtoArray {
     pub fn empty_node_execution_status(
         &self,
         block_root: Hash256,
-    ) -> Result<ExecutionStatus, Error> {
+    ) -> Result<ExecutionVerdict, Error> {
         let mut index = *self
             .indices
             .get(&block_root)
             .ok_or(Error::NodeUnknown(block_root))?;
 
-        loop {
+        // Walk up to the node whose payload this branch ran, if the array still holds one.
+        let executed_node = loop {
             let node = self
                 .nodes
                 .get(index)
                 .ok_or(Error::InvalidNodeIndex(index))?;
 
-            // Pre-Gloas there is no empty variant to resolve.
+            // Pre-Gloas there is no empty variant to resolve: the block ran its own payload.
             let ProtoNode::V29(gloas_node) = node else {
-                return Ok(node.execution_status());
+                break node;
+            };
+
+            // `block_root` is a descendant of finalized, so the root node is the finalized block or
+            // an ancestor, VALID by definition.
+            let Some(parent_index) = gloas_node.parent else {
+                return Ok(ExecutionVerdict::Valid);
             };
 
             // Reached an ancestor whose payload this branch executed. A pre-Gloas parent
             // carries its payload inside the block, so it counts as executed too.
             match gloas_node.parent_payload_status {
                 ParentPayloadStatus::Full | ParentPayloadStatus::PreGloas => {
-                    let Some(parent_index) = gloas_node.parent else {
-                        return Ok(ExecutionStatus::irrelevant());
-                    };
-                    let parent = self
+                    break self
                         .nodes
                         .get(parent_index)
                         .ok_or(Error::InvalidNodeIndex(parent_index))?;
-                    return Ok(parent.execution_status());
                 }
-                ParentPayloadStatus::Empty => {}
+                // An EMPTY edge is a gap in the execution chain, not the end of it.
+                ParentPayloadStatus::Empty => index = parent_index,
             }
+        };
 
-            match gloas_node.parent {
-                Some(parent_index) => index = parent_index,
-                None => return Ok(ExecutionStatus::irrelevant()),
+        // The branch ran this node's payload, so the node's status is the branch's verdict. An
+        // unrevealed payload cannot appear here: a `FULL` edge is only built once the parent's
+        // envelope has been received (`InvalidBlock::ParentPayloadNotVerified`), and a V17 node
+        // carries its payload inside the block.
+        match executed_node.execution_status() {
+            ExecutionStatus::Valid(_) | ExecutionStatus::Irrelevant(_) => {
+                Ok(ExecutionVerdict::Valid)
             }
+            ExecutionStatus::Invalid(_) => Ok(ExecutionVerdict::Invalid),
+            ExecutionStatus::Optimistic(_) => Ok(ExecutionVerdict::Optimistic),
+            ExecutionStatus::NotYetRevealed(_) => Err(Error::Unexpected(format!(
+                "branch ran an unrevealed payload: {:?}",
+                executed_node.root()
+            ))),
         }
     }
 

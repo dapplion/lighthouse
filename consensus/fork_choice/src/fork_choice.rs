@@ -3,8 +3,8 @@ use crate::{ForkChoiceStore, InvalidationOperation};
 use fixed_bytes::FixedBytesExtended;
 use logging::crit;
 use proto_array::{
-    Block as ProtoBlock, ExecutionStatus, JustifiedBalances, LatestMessage, PayloadStatus,
-    ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice, ReOrgThreshold,
+    Block as ProtoBlock, ExecutionStatus, ExecutionVerdict, JustifiedBalances, LatestMessage,
+    PayloadStatus, ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice, ReOrgThreshold,
 };
 use ssz_derive::{Decode, Encode};
 use state_processing::{
@@ -1685,18 +1685,15 @@ where
             .map_err(Error::ProtoArrayStringError)
     }
 
-    /// Returns an `ExecutionStatus` if the block is known **and** a descendant of the finalized root.
-    pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
+    /// Returns an `ExecutionVerdict` if the block is known **and** a descendant of the finalized
+    /// root.
+    ///
+    /// This asks about the block's own payload, i.e. its `FULL` node. If that payload has not
+    /// arrived, the branch has not run it, and the verdict falls back to the ancestry.
+    pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionVerdict> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
-            match self.proto_array.get_block_execution_status(block_root) {
-                // The block's own payload has not arrived, so a chain ending here runs on an
-                // ancestor's payload. Report the status the chain actually executed, not the
-                // one no EL has judged.
-                Some(ExecutionStatus::NotYetRevealed(_)) => self
-                    .proto_array
-                    .get_node_execution_status(block_root, PayloadStatus::Empty),
-                other => other,
-            }
+            self.proto_array
+                .get_node_execution_status(block_root, PayloadStatus::Full)
         } else {
             None
         }
@@ -1707,7 +1704,7 @@ where
         &self,
         block_root: &Hash256,
         payload_status: PayloadStatus,
-    ) -> Option<ExecutionStatus> {
+    ) -> Option<ExecutionVerdict> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
             self.proto_array
                 .get_node_execution_status(block_root, payload_status)

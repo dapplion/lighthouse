@@ -240,6 +240,64 @@ impl ExecutionStatus {
             | ExecutionStatus::Irrelevant(_) => false,
         }
     }
+
+    // DO NOT IMPLEMENT A BLANKET CONVERSION to `ExecutionVerdict` here.
+    //
+    // A status describes one payload. A verdict describes the execution that a branch ran.
+    // `NotYetRevealed` has no verdict of its own: the payload was never executed, so the branch's
+    // verdict comes from its ancestry, which only the caller can resolve. A conversion on this
+    // type would hand every call site the same wrong answer for it.
+}
+
+/// How far an execution layer has verified the payloads that one fork choice node's branch ran.
+///
+/// Unlike `ExecutionStatus` this carries no payload identity. A node inherits its verdict from
+/// ancestors it never executed a payload for, so any hash here would name some other node's
+/// payload.
+///
+/// There is deliberately no conversion from `ExecutionStatus`. A status describes one payload; a
+/// verdict describes the execution a branch ran. `NotYetRevealed` has no verdict of its own at
+/// all: the payload was never executed, so the branch's verdict is the one it inherits from its
+/// ancestry. Only the caller knows which node is being asked about, so only the caller can map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionVerdict {
+    /// Every payload the branch ran was validated by an EL, or the branch ran no payload at all
+    /// (pre-merge, or a Gloas branch that took the `EMPTY` side of every ancestor).
+    Valid,
+    /// An EL rejected a payload the branch ran.
+    Invalid,
+    /// A payload the branch ran has not been validated by an EL.
+    Optimistic,
+}
+
+impl ExecutionVerdict {
+    /// Whenever this returns `true`, the branch's execution is fully verified.
+    pub fn is_valid(&self) -> bool {
+        matches!(self, ExecutionVerdict::Valid)
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        matches!(self, ExecutionVerdict::Invalid)
+    }
+
+    pub fn is_optimistic(&self) -> bool {
+        matches!(self, ExecutionVerdict::Optimistic)
+    }
+
+    pub fn is_optimistic_or_invalid(&self) -> bool {
+        !self.is_valid()
+    }
+}
+
+impl fmt::Display for ExecutionVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExecutionVerdict::Valid => write!(f, "valid"),
+            ExecutionVerdict::Invalid => write!(f, "invalid"),
+            ExecutionVerdict::Optimistic => write!(f, "optimistic"),
+        }
+    }
 }
 
 impl fmt::Display for ExecutionStatus {
@@ -1131,9 +1189,22 @@ impl ProtoArrayForkChoice {
         &self,
         block_root: &Hash256,
         payload_status: PayloadStatus,
-    ) -> Option<ExecutionStatus> {
+    ) -> Option<ExecutionVerdict> {
         match payload_status {
-            PayloadStatus::Full => self.get_block_execution_status(block_root),
+            PayloadStatus::Full => match self.get_block_execution_status(block_root)? {
+                ExecutionStatus::Valid(_) | ExecutionStatus::Irrelevant(_) => {
+                    Some(ExecutionVerdict::Valid)
+                }
+                ExecutionStatus::Invalid(_) => Some(ExecutionVerdict::Invalid),
+                ExecutionStatus::Optimistic(_) => Some(ExecutionVerdict::Optimistic),
+                // An unrevealed payload was never executed, so it adds nothing to the branch.
+                // The verdict is the one the branch already carried, inherited from the nearest
+                // ancestor whose payload it ran.
+                ExecutionStatus::NotYetRevealed(_) => self
+                    .proto_array
+                    .empty_node_execution_status(*block_root)
+                    .ok(),
+            },
             PayloadStatus::Empty | PayloadStatus::Pending => self
                 .proto_array
                 .empty_node_execution_status(*block_root)

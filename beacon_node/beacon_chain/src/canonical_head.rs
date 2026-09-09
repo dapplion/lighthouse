@@ -53,8 +53,8 @@ use fast_confirmation::{
     Error as FastConfirmationError, FastConfirmationRule, metrics as fcr_metrics,
 };
 use fork_choice::{
-    ExecutionStatus, ForkChoiceStore, ForkChoiceView, ForkchoiceUpdateParameters, PayloadStatus,
-    ProtoBlock, ResetPayloadStatuses,
+    ExecutionStatus, ExecutionVerdict, ForkChoiceStore, ForkChoiceView, ForkchoiceUpdateParameters,
+    PayloadStatus, ProtoBlock, ResetPayloadStatuses,
 };
 use itertools::process_results;
 
@@ -426,6 +426,12 @@ impl<E: EthSpec> CachedHead<E> {
     pub fn head_payload_status(&self) -> proto_array::PayloadStatus {
         self.head_payload_status
     }
+
+    /// Returns the execution block hash of the head, i.e. the execution head that fork choice
+    /// would send to the execution layer. `None` before Bellatrix.
+    pub fn head_hash(&self) -> Option<ExecutionBlockHash> {
+        self.head_hash
+    }
 }
 
 /// Represents the "canonical head" of the beacon chain.
@@ -596,7 +602,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     /// This will only return `Err` in the scenario where `self.fork_choice` has advanced
     /// significantly past the cached `head_snapshot`. In such a scenario it is likely prudent to
     /// run `BeaconChain::recompute_head` to update the cached values.
-    pub fn head_execution_status(&self) -> Result<ExecutionStatus, Error> {
+    pub fn head_execution_status(&self) -> Result<ExecutionVerdict, Error> {
         let head = self.cached_head();
         let head_block_root = head.head_block_root();
         self.fork_choice_read_lock()
@@ -611,7 +617,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     /// run `BeaconChain::recompute_head` to update the cached values.
     pub fn head_and_execution_status(
         &self,
-    ) -> Result<(CachedHead<T::EthSpec>, ExecutionStatus), Error> {
+    ) -> Result<(CachedHead<T::EthSpec>, ExecutionVerdict), Error> {
         let head = self.cached_head();
         let head_block_root = head.head_block_root();
         let execution_status = self

@@ -101,7 +101,7 @@ use execution_layer::{
 };
 use fixed_bytes::FixedBytesExtended;
 use fork_choice::{
-    AttestationFromBlock, ExecutionStatus, ForkChoice, ForkchoiceUpdateParameters,
+    AttestationFromBlock, ExecutionVerdict, ForkChoice, ForkchoiceUpdateParameters,
     InvalidationOperation, PayloadVerificationStatus, ResetPayloadStatuses,
 };
 use futures::channel::mpsc::Sender;
@@ -1696,7 +1696,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         validator_indices: &[u64],
         epoch: Epoch,
         head_block_root: Hash256,
-    ) -> Result<(Vec<Option<AttestationDuty>>, Hash256, ExecutionStatus), Error> {
+    ) -> Result<(Vec<Option<AttestationDuty>>, Hash256, ExecutionVerdict), Error> {
         let execution_status = self
             .canonical_head
             .fork_choice_read_lock()
@@ -1893,7 +1893,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // pre-finalization.
             None => Err(Error::CannotAttestToFinalizedBlock { beacon_block_root }),
             // The attestation references a fully valid `beacon_block_root`.
-            Some(execution_status) if execution_status.is_valid_or_irrelevant() => Ok(attestation),
+            Some(execution_status) if execution_status.is_valid() => Ok(attestation),
             // The attestation references a block that has not been verified by an EL (i.e. it
             // is optimistic or invalid). Don't return the block, return an error instead.
             Some(execution_status) => Err(Error::HeadBlockNotFullyVerified {
@@ -1934,7 +1934,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // pre-finalization.
             None => Err(Error::SyncContributionDataReferencesFinalizedBlock { beacon_block_root }),
             // The contribution references a fully valid `beacon_block_root`.
-            Some(execution_status) if execution_status.is_valid_or_irrelevant() => Ok(contribution),
+            Some(execution_status) if execution_status.is_valid() => Ok(contribution),
             // The contribution references a block that has not been verified by an EL (i.e. it
             // is optimistic or invalid). Don't return the block, return an error instead.
             Some(execution_status) => Err(Error::HeadBlockNotFullyVerified {
@@ -2096,7 +2096,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .fork_choice_read_lock()
             .get_block_execution_status(&beacon_block_root)
         {
-            Some(execution_status) if execution_status.is_valid_or_irrelevant() => (),
+            Some(execution_status) if execution_status.is_valid() => (),
             Some(execution_status) => {
                 return Err(Error::HeadBlockNotFullyVerified {
                     beacon_block_root,
@@ -7509,7 +7509,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .canonical_head
             .fork_choice_read_lock()
             .get_block_execution_status(parent_root)
-            && execution_status.is_strictly_optimistic()
+            && execution_status.is_optimistic()
         {
             return Ok(ChainHealth::Optimistic);
         }
