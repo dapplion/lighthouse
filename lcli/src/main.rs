@@ -535,6 +535,50 @@ fn main() {
                         .display_order(0)
                 )
                 .arg(
+                    Arg::new("all-payloads-invalid")
+                        .long("all-payloads-invalid")
+                        .action(ArgAction::SetTrue)
+                        .help("Return INVALID for every newPayload/forkchoiceUpdated, with the \
+                            latest valid hash from --latest-valid-hash. For testing payload \
+                            invalidation.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("latest-valid-hash")
+                        .long("latest-valid-hash")
+                        .value_name("HASH")
+                        .action(ArgAction::Set)
+                        .help("Latest valid execution block hash returned with INVALID responses. \
+                            Defaults to the zero hash.")
+                        .default_value("0x0000000000000000000000000000000000000000000000000000000000000000")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("all-payloads-syncing")
+                        .long("all-payloads-syncing")
+                        .action(ArgAction::SetTrue)
+                        .help("Return SYNCING for all payloads so blocks import optimistically.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("invalid-after-secs")
+                        .long("invalid-after-secs")
+                        .value_name("SECONDS")
+                        .action(ArgAction::Set)
+                        .help("After this many seconds, return INVALID from forkchoiceUpdated with \
+                            --latest-valid-hash, invalidating the already-optimistic head. Pair \
+                            with --all-payloads-syncing to hit the optimistic->invalid transition.")
+                        .display_order(0)
+                )
+                .arg(
+                    Arg::new("invalid-once")
+                        .long("invalid-once")
+                        .action(ArgAction::SetTrue)
+                        .help("With --invalid-after-secs, revert forkchoiceUpdated to SYNCING shortly \
+                            after going INVALID, so only one invalidation round occurs.")
+                        .display_order(0)
+                )
+                .arg(
                     Arg::new("shanghai-time")
                         .long("shanghai-time")
                         .value_name("UNIX_TIMESTAMP")
