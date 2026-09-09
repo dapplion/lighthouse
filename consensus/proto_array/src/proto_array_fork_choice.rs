@@ -255,10 +255,7 @@ impl ExecutionStatus {
 /// ancestors it never executed a payload for, so any hash here would name some other node's
 /// payload.
 ///
-/// There is deliberately no conversion from `ExecutionStatus`. A status describes one payload; a
-/// verdict describes the execution a branch ran. `NotYetRevealed` has no verdict of its own at
-/// all: the payload was never executed, so the branch's verdict is the one it inherits from its
-/// ancestry. Only the caller knows which node is being asked about, so only the caller can map.
+/// There is deliberately no conversion from `ExecutionStatus`; see the note on `ExecutionStatus`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecutionVerdict {
@@ -274,15 +271,24 @@ pub enum ExecutionVerdict {
 impl ExecutionVerdict {
     /// Whenever this returns `true`, the branch's execution is fully verified.
     pub fn is_valid(&self) -> bool {
-        matches!(self, ExecutionVerdict::Valid)
+        match self {
+            ExecutionVerdict::Valid => true,
+            ExecutionVerdict::Invalid | ExecutionVerdict::Optimistic => false,
+        }
     }
 
     pub fn is_invalid(&self) -> bool {
-        matches!(self, ExecutionVerdict::Invalid)
+        match self {
+            ExecutionVerdict::Invalid => true,
+            ExecutionVerdict::Valid | ExecutionVerdict::Optimistic => false,
+        }
     }
 
     pub fn is_optimistic(&self) -> bool {
-        matches!(self, ExecutionVerdict::Optimistic)
+        match self {
+            ExecutionVerdict::Optimistic => true,
+            ExecutionVerdict::Valid | ExecutionVerdict::Invalid => false,
+        }
     }
 
     pub fn is_optimistic_or_invalid(&self) -> bool {
@@ -1177,10 +1183,11 @@ impl ProtoArrayForkChoice {
         Some(block.execution_status())
     }
 
-    /// Execution status of one fork choice node of a Gloas block.
+    /// Execution verdict of one fork choice node of a Gloas block.
     ///
-    /// A block has two nodes. `(root, FULL)` takes the status of the payload of the block.
-    /// `(root, EMPTY)` inherits the status of the nearest ancestor across a `FULL` edge.
+    /// A block has two nodes. `(root, FULL)` takes the verdict of the block's own payload, or the
+    /// ancestry when that payload is unrevealed. `(root, EMPTY)` inherits the verdict of the
+    /// nearest ancestor across a `FULL` edge.
     ///
     /// The status of the block is the wrong answer for an empty head. That payload can be valid
     /// while the payload that the branch ran is still optimistic. The node then reports the chain

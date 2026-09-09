@@ -15,7 +15,7 @@ use execution_layer::{
     json_structures::{JsonForkchoiceStateV1, JsonPayloadAttributes, JsonPayloadAttributesV1},
 };
 use fork_choice::{Error as ForkChoiceError, InvalidationOperation, PayloadVerificationStatus};
-use proto_array::{Error as ProtoArrayError, ExecutionStatus};
+use proto_array::{Error as ProtoArrayError, ExecutionStatus, ExecutionVerdict};
 use slot_clock::SlotClock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1271,7 +1271,7 @@ async fn attesting_to_optimistic_head() {
                     beacon_block_root,
                     execution_status
                 })
-                if beacon_block_root == root && matches!(execution_status, ExecutionStatus::Optimistic(_))
+                if beacon_block_root == root && matches!(execution_status, ExecutionVerdict::Optimistic)
             ));
         }
     }
@@ -1474,7 +1474,7 @@ async fn recover_from_invalid_head_after_persist_and_reboot() {
             .fork_choice_read_lock()
             .get_block_execution_status(&resumed_head.head_block_root())
             .unwrap()
-            .is_strictly_optimistic(),
+            .is_optimistic(),
         "the invalid block should have become optimistic"
     );
 }

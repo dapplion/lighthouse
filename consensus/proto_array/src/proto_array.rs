@@ -938,17 +938,16 @@ impl ProtoArray {
         // The branch ran this node's payload, so the node's status is the branch's verdict. An
         // unrevealed payload cannot appear here: a `FULL` edge is only built once the parent's
         // envelope has been received (`InvalidBlock::ParentPayloadNotVerified`), and a V17 node
-        // carries its payload inside the block.
+        // carries its payload inside the block. Were that invariant ever broken, an unrevealed
+        // payload is not EL-validated, so `Optimistic` is the safe verdict.
         match executed_node.execution_status() {
             ExecutionStatus::Valid(_) | ExecutionStatus::Irrelevant(_) => {
                 Ok(ExecutionVerdict::Valid)
             }
             ExecutionStatus::Invalid(_) => Ok(ExecutionVerdict::Invalid),
-            ExecutionStatus::Optimistic(_) => Ok(ExecutionVerdict::Optimistic),
-            ExecutionStatus::NotYetRevealed(_) => Err(Error::Unexpected(format!(
-                "branch ran an unrevealed payload: {:?}",
-                executed_node.root()
-            ))),
+            ExecutionStatus::Optimistic(_) | ExecutionStatus::NotYetRevealed(_) => {
+                Ok(ExecutionVerdict::Optimistic)
+            }
         }
     }
 
