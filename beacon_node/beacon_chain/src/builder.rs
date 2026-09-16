@@ -762,13 +762,13 @@ where
             slot_clock.now().ok_or("Unable to read slot")?
         };
 
-        let (initial_head_block_root, head_payload_status) = fork_choice
+        let head_node = fork_choice
             .get_head(current_slot, &self.spec)
             .map_err(|e| format!("Unable to get fork choice head: {:?}", e))?;
 
-        let head_block_root = initial_head_block_root;
+        let head_block_root = head_node.root();
         let head_block = store
-            .get_full_block(&initial_head_block_root)
+            .get_full_block(&head_block_root)
             .map_err(|e| descriptive_db_error("head block", &e))?
             .ok_or("Head block not found in store")?;
 
@@ -780,7 +780,7 @@ where
         let head_shuffling_ids = BlockShufflingIds::try_from_head(head_block_root, &head_state)?;
 
         // Load the execution envelope from the store if the head has a Full payload.
-        let execution_envelope = if head_payload_status == PayloadStatus::Full {
+        let execution_envelope = if head_node.payload_status() == PayloadStatus::Full {
             store
                 .get_payload_envelope(&head_block_root)
                 .map_err(|e| format!("Error loading head execution envelope: {:?}", e))?
@@ -915,7 +915,7 @@ where
         let canonical_head = CanonicalHead::new(
             fork_choice,
             Arc::new(head_snapshot),
-            head_payload_status,
+            head_node,
             self.chain_config.fast_confirmation,
             &store,
             &self.spec,

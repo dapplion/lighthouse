@@ -193,7 +193,7 @@ impl ForkChoiceTestDefinition {
                     let justified_balances =
                         JustifiedBalances::from_effective_balances(justified_state_balances)
                             .unwrap();
-                    let (head, payload_status) = fork_choice
+                    let head_node = fork_choice
                         .find_head::<MainnetEthSpec>(
                             justified_checkpoint,
                             finalized_checkpoint,
@@ -206,6 +206,7 @@ impl ForkChoiceTestDefinition {
                         .unwrap_or_else(|e| {
                             panic!("find_head op at index {} returned error {}", op_index, e)
                         });
+                    let (head, payload_status) = (head_node.root(), head_node.payload_status());
 
                     assert_eq!(
                         head, expected_head,
@@ -241,7 +242,7 @@ impl ForkChoiceTestDefinition {
                     let justified_balances =
                         JustifiedBalances::from_effective_balances(justified_state_balances)
                             .unwrap();
-                    let (head, payload_status) = fork_choice
+                    let head_node = fork_choice
                         .find_head::<MainnetEthSpec>(
                             justified_checkpoint,
                             finalized_checkpoint,
@@ -254,6 +255,7 @@ impl ForkChoiceTestDefinition {
                         .unwrap_or_else(|e| {
                             panic!("find_head op at index {} returned error {}", op_index, e)
                         });
+                    let (head, payload_status) = (head_node.root(), head_node.payload_status());
 
                     assert_eq!(
                         head, expected_head,

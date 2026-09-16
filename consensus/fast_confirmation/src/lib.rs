@@ -74,11 +74,18 @@ pub enum Error {
     IndexOutOfBounds(usize),
     SlotAssignmentsError(BeaconStateError),
     ArithError(ArithError),
+    ProtoArrayError(proto_array::Error),
 }
 
 impl From<ArithError> for Error {
     fn from(e: ArithError) -> Self {
         Error::ArithError(e)
+    }
+}
+
+impl From<proto_array::Error> for Error {
+    fn from(e: proto_array::Error) -> Self {
+        Error::ProtoArrayError(e)
     }
 }
 
@@ -1243,9 +1250,8 @@ fn is_optimistic_or_invalid(root: Hash256, proto_array: &ProtoArray) -> Result<b
     }
 
     Ok(proto_array
-        .empty_node_execution_status(root)
-        .map(|status| status.is_optimistic_or_invalid())
-        .unwrap_or(false))
+        .empty_node_execution_status(root)?
+        .is_optimistic_or_invalid())
 }
 
 /// Spec: `is_ancestor`.

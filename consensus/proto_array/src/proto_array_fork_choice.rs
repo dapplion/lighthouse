@@ -129,6 +129,39 @@ pub enum PayloadStatus {
     Pending = 2,
 }
 
+/// Spec's `ForkChoiceNode`: one of the two fork choice nodes of a block.
+///
+/// Private fields and no public constructor, so the only way to hold one is to receive it from
+/// `find_head`. A node fork choice did not elect cannot reach the queries that take this type,
+/// where the wrong half would answer about a branch the chain never ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForkChoiceNode {
+    root: Hash256,
+    payload_status: PayloadStatus,
+}
+
+impl ForkChoiceNode {
+    /// Deliberately not `pub`. See the note on the type.
+    pub(crate) fn new(root: Hash256, payload_status: PayloadStatus) -> Self {
+        Self {
+            root,
+            payload_status,
+        }
+    }
+
+    pub fn root(&self) -> Hash256 {
+        self.root
+    }
+
+    pub fn payload_status(&self) -> PayloadStatus {
+        self.payload_status
+    }
+
+    pub fn deconstruct(&self) -> (Hash256, PayloadStatus) {
+        (self.root, self.payload_status)
+    }
+}
+
 /// Spec's `ForkChoiceNode` augmented with ProtoNode index.
 pub struct IndexedForkChoiceNode {
     pub root: Hash256,
@@ -745,7 +778,7 @@ impl ProtoArrayForkChoice {
         equivocating_indices: &BTreeSet<u64>,
         current_slot: Slot,
         spec: &ChainSpec,
-    ) -> Result<(Hash256, PayloadStatus), String> {
+    ) -> Result<ForkChoiceNode, String> {
         let old_balances = &mut self.balances;
         let new_balances = justified_state_balances;
         let node_slots = self
@@ -1177,45 +1210,69 @@ impl ProtoArrayForkChoice {
             .map_err(|e| format!("{e:?}"))
     }
 
-    /// Returns the `block.execution_status` field, if the block is present.
-    pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
-        let block = self.get_proto_node(block_root)?;
-        Some(block.execution_status())
+    /// Spec's `get_supported_node`: the node that an attestation's vote supports.
+    ///
+    /// A vote cast in the attested block's own slot has not seen its payload yet and supports
+    /// `PENDING`, not the block's own payload. `None` if the block is unknown to fork choice.
+    pub fn supported_node(
+        &self,
+        block_root: Hash256,
+        vote_slot: Slot,
+        payload_present: bool,
+    ) -> Option<ForkChoiceNode> {
+        let block_slot = self.get_proto_node(&block_root)?.slot();
+        Some(ForkChoiceNode::new(
+            block_root,
+            NodeDelta::payload_status(vote_slot, payload_present, block_slot),
+        ))
     }
 
-    /// Execution verdict of one fork choice node of a Gloas block.
+    /// Execution verdict of the block's `FULL` node, for a caller that has only a root.
     ///
-    /// A block has two nodes. `(root, FULL)` takes the verdict of the block's own payload, or the
-    /// ancestry when that payload is unrevealed. `(root, EMPTY)` inherits the verdict of the
-    /// nearest ancestor across a `FULL` edge.
-    ///
-    /// The status of the block is the wrong answer for an empty head. That payload can be valid
-    /// while the payload that the branch ran is still optimistic. The node then reports the chain
-    /// as validated when no execution layer validated it. `PENDING` counts as empty.
-    pub fn get_node_execution_status(
+    /// The assumption is wrong whenever the branch in question took the block's `EMPTY` node and
+    /// ran an ancestor's payload instead. It is not conservative either way: an unrevealed
+    /// payload falls back to the ancestry and reports `Optimistic`, but a revealed and valid
+    /// payload reports `Valid` even when the branch never ran it. Callers that can name the node
+    /// must use `get_node_execution_status`.
+    pub fn get_block_execution_status_assuming_full(
         &self,
         block_root: &Hash256,
-        payload_status: PayloadStatus,
-    ) -> Option<ExecutionVerdict> {
-        match payload_status {
-            PayloadStatus::Full => match self.get_block_execution_status(block_root)? {
-                ExecutionStatus::Valid(_) | ExecutionStatus::Irrelevant(_) => {
-                    Some(ExecutionVerdict::Valid)
-                }
-                ExecutionStatus::Invalid(_) => Some(ExecutionVerdict::Invalid),
-                ExecutionStatus::Optimistic(_) => Some(ExecutionVerdict::Optimistic),
-                // An unrevealed payload was never executed, so it adds nothing to the branch.
-                // The verdict is the one the branch already carried, inherited from the nearest
-                // ancestor whose payload it ran.
-                ExecutionStatus::NotYetRevealed(_) => self
-                    .proto_array
-                    .empty_node_execution_status(*block_root)
-                    .ok(),
-            },
-            PayloadStatus::Empty | PayloadStatus::Pending => self
-                .proto_array
-                .empty_node_execution_status(*block_root)
-                .ok(),
+    ) -> Result<ExecutionVerdict, Error> {
+        self.full_node_execution_status(*block_root)
+    }
+
+    /// Execution verdict of the fork choice node that `find_head` elected.
+    ///
+    /// `(root, FULL)` takes the verdict of the block's own payload, or the ancestry when that
+    /// payload is unrevealed. `(root, EMPTY)` inherits the verdict of the nearest ancestor across
+    /// a `FULL` edge. `PENDING` counts as empty.
+    pub fn get_node_execution_status(
+        &self,
+        node: ForkChoiceNode,
+    ) -> Result<ExecutionVerdict, Error> {
+        match node.payload_status() {
+            PayloadStatus::Full => self.full_node_execution_status(node.root()),
+            PayloadStatus::Empty | PayloadStatus::Pending => {
+                self.proto_array.empty_node_execution_status(node.root())
+            }
+        }
+    }
+
+    fn full_node_execution_status(&self, block_root: Hash256) -> Result<ExecutionVerdict, Error> {
+        let node = self
+            .get_proto_node(&block_root)
+            .ok_or(Error::NodeUnknown(block_root))?;
+        match node.execution_status() {
+            ExecutionStatus::Valid(_) | ExecutionStatus::Irrelevant(_) => {
+                Ok(ExecutionVerdict::Valid)
+            }
+            ExecutionStatus::Invalid(_) => Ok(ExecutionVerdict::Invalid),
+            ExecutionStatus::Optimistic(_) => Ok(ExecutionVerdict::Optimistic),
+            // An unrevealed payload was never executed, so the branch's verdict comes from the
+            // nearest ancestor whose payload it ran.
+            ExecutionStatus::NotYetRevealed(_) => {
+                self.proto_array.empty_node_execution_status(block_root)
+            }
         }
     }
 

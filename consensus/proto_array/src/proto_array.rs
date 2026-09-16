@@ -1,4 +1,4 @@
-use crate::proto_array_fork_choice::IndexedForkChoiceNode;
+use crate::proto_array_fork_choice::{ForkChoiceNode, IndexedForkChoiceNode};
 use crate::{
     Block, ExecutionStatus, ExecutionVerdict, JustifiedBalances, LatestMessage, PayloadStatus,
     error::Error,
@@ -1234,7 +1234,7 @@ impl ProtoArray {
         proposer_boost_root: Hash256,
         justified_balances: &JustifiedBalances,
         spec: &ChainSpec,
-    ) -> Result<(Hash256, PayloadStatus), Error> {
+    ) -> Result<ForkChoiceNode, Error> {
         let justified_index = self
             .indices
             .get(justified_root)
@@ -1267,7 +1267,10 @@ impl ProtoArray {
             spec,
         )?;
 
-        Ok((best_fc_node.root, best_fc_node.payload_status))
+        Ok(ForkChoiceNode::new(
+            best_fc_node.root,
+            best_fc_node.payload_status,
+        ))
     }
 
     /// Rebuild the cached `self.children` index from `self.nodes`. Called once after

@@ -367,10 +367,8 @@ pub fn spawn_notifier<T: BeaconChainTypes>(
                     head_root.short().to_string()
                 };
 
-                // The verdict describes the execution the head's branch ran, so the hash shown
-                // beside it is the execution head fork choice would send to the EL, not the head
-                // block's own payload. A pre-merge head runs no payload at all: default to the
-                // zero hash, which is for display purposes only.
+                // The cached_head.head_hash should only be None for pre-merge. Default to zero as
+                // it's for display only.
                 let head_hash = cached_head
                     .head_hash()
                     .unwrap_or_else(ExecutionBlockHash::zero);

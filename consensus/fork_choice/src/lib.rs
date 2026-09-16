@@ -10,6 +10,6 @@ pub use crate::fork_choice::{
 };
 pub use fork_choice_store::ForkChoiceStore;
 pub use proto_array::{
-    Block as ProtoBlock, ExecutionStatus, ExecutionVerdict, InvalidationOperation, PayloadStatus,
-    ProposerHeadError,
+    Block as ProtoBlock, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, InvalidationOperation,
+    PayloadStatus, ProposerHeadError,
 };

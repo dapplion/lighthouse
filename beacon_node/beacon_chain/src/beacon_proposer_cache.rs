@@ -254,19 +254,22 @@ pub fn compute_proposer_duties_from_head<T: BeaconChainTypes>(
 ) -> Result<(Vec<usize>, Hash256, Hash256, ExecutionVerdict, Fork), BeaconChainError> {
     // Atomically collect information about the head whilst holding the canonical head `Arc` as
     // short as possible.
-    let (mut state, head_state_root, head_block_root) = {
+    let (mut state, head_state_root, head_node) = {
         let head = chain.canonical_head.cached_head();
         // Take a copy of the head state.
         let head_state = head.snapshot.beacon_state.clone();
         let head_state_root = head.head_state_root();
-        let head_block_root = head.head_block_root();
-        (head_state, head_state_root, head_block_root)
+        let head_node = head.head_node();
+        (head_state, head_state_root, head_node)
     };
+    let head_block_root = head_node.root();
 
+    // Block production is barred while the head's branch is unverified, so the verdict must
+    // describe the execution that branch ran rather than the head block's own payload.
     let execution_status = chain
         .canonical_head
         .fork_choice_read_lock()
-        .get_block_execution_status(&head_block_root)
+        .get_node_execution_status(head_node)?
         .ok_or(BeaconChainError::HeadMissingFromForkChoice(head_block_root))?;
 
     // Advance the state into the requested epoch.

@@ -148,14 +148,14 @@ impl TestContext {
             ForkChoice::from_anchor(fc_store, block_root, &signed_block, &state, None, &spec)
                 .expect("should create fork choice");
 
-        let (_, head_payload_status) = fork_choice
+        let head_node = fork_choice
             .get_head(Slot::new(0), &spec)
             .expect("should run get_head");
 
         let canonical_head = CanonicalHead::new(
             fork_choice,
             Arc::new(snapshot),
-            head_payload_status,
+            head_node,
             FastConfirmationMode::Disabled,
             &store,
             &spec,
