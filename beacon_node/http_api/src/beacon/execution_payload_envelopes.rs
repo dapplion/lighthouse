@@ -16,6 +16,8 @@ use beacon_chain::{
     AvailabilityProcessingStatus, BeaconChain, BeaconChainError, BeaconChainTypes, BlockError,
     NotifyExecutionLayer,
 };
+use beacon_processor::work_reprocessing_queue::ReprocessQueueMessage;
+use beacon_processor::{Work, WorkEvent};
 use bytes::Bytes;
 use eth2::{
     BLOB_DATA_INCLUDED_HEADER, CONSENSUS_VERSION_HEADER,
@@ -115,6 +117,7 @@ pub(crate) fn post_beacon_execution_payload_envelopes_ssz<T: BeaconChainTypes>(
              task_spawner: TaskSpawner<T::EthSpec>,
              chain: Arc<BeaconChain<T>>,
              network_tx: UnboundedSender<NetworkMessage<T::EthSpec>>| {
+                let reprocess_task_spawner = task_spawner.clone();
                 task_spawner.spawn_async_with_rejection(Priority::P0, async move {
                     not_synced_filter?;
                     ensure_gloas_consensus_version(fork_name)?;
@@ -125,6 +128,7 @@ pub(crate) fn post_beacon_execution_payload_envelopes_ssz<T: BeaconChainTypes>(
                         validation_level.broadcast_validation,
                         chain,
                         &network_tx,
+                        &reprocess_task_spawner,
                     )
                     .await
                 })
@@ -162,6 +166,7 @@ pub(crate) fn post_beacon_execution_payload_envelopes<T: BeaconChainTypes>(
              task_spawner: TaskSpawner<T::EthSpec>,
              chain: Arc<BeaconChain<T>>,
              network_tx: UnboundedSender<NetworkMessage<T::EthSpec>>| {
+                let reprocess_task_spawner = task_spawner.clone();
                 task_spawner.spawn_async_with_rejection(Priority::P0, async move {
                     not_synced_filter?;
                     ensure_gloas_consensus_version(fork_name)?;
@@ -172,6 +177,7 @@ pub(crate) fn post_beacon_execution_payload_envelopes<T: BeaconChainTypes>(
                         validation_level.broadcast_validation,
                         chain,
                         &network_tx,
+                        &reprocess_task_spawner,
                     )
                     .await
                 })
@@ -189,6 +195,7 @@ pub async fn publish_execution_payload_envelope<T: BeaconChainTypes>(
     validation_level: BroadcastValidation,
     chain: Arc<BeaconChain<T>>,
     network_tx: &UnboundedSender<NetworkMessage<T::EthSpec>>,
+    task_spawner: &TaskSpawner<T::EthSpec>,
 ) -> Result<Response, Rejection> {
     if !chain.spec.is_gloas_scheduled() {
         return Err(warp_utils::reject::custom_bad_request(
@@ -399,6 +406,22 @@ pub async fn publish_execution_payload_envelope<T: BeaconChainTypes>(
     // rather than request-supplied blobs, so incomplete import is not the submitter's fault.
     if envelope_imported {
         chain.recompute_head_at_current_slot().await;
+        // Release any attestations awaiting this block's payload, as gossip and RPC do.
+        if task_spawner
+            .try_send(WorkEvent {
+                drop_during_sync: false,
+                work: Work::Reprocess(ReprocessQueueMessage::PayloadEnvelopeImported {
+                    block_root: beacon_block_root,
+                }),
+            })
+            .is_err()
+        {
+            error!(
+                source = EnvelopeSource::Http.as_ref(),
+                %beacon_block_root,
+                "Failed to inform payload envelope import"
+            );
+        }
         Ok(warp::reply().into_response())
     } else {
         Err(warp_utils::reject::broadcast_without_import(format!(
