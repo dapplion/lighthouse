@@ -270,8 +270,7 @@ pub fn compute_proposer_duties_from_head<T: BeaconChainTypes>(
     let execution_status = chain
         .canonical_head
         .fork_choice_read_lock()
-        .get_node_execution_status(head_node)?
-        .ok_or(BeaconChainError::HeadMissingFromForkChoice(head_block_root))?;
+        .get_node_execution_status(head_node)?;
 
     // Advance the state into the requested epoch.
     ensure_state_can_determine_proposers_for_epoch(

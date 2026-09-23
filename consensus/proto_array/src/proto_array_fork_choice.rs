@@ -294,8 +294,18 @@ impl ExecutionVerdict {
         }
     }
 
+    pub fn is_invalid(&self) -> bool {
+        match self {
+            ExecutionVerdict::Invalid => true,
+            ExecutionVerdict::Valid | ExecutionVerdict::Optimistic => false,
+        }
+    }
+
     pub fn is_optimistic_or_invalid(&self) -> bool {
-        !self.is_valid()
+        match self {
+            ExecutionVerdict::Optimistic | ExecutionVerdict::Invalid => true,
+            ExecutionVerdict::Valid => false,
+        }
     }
 }
 
@@ -338,6 +348,32 @@ pub struct Block {
 }
 
 impl Block {
+    /// The execution block hash to report for this block as the head, given the payload status
+    /// fork choice elected for it.
+    ///
+    /// Pre-Gloas the payload is embedded, so the hash comes from `execution_status` whatever the
+    /// payload status. Post-Gloas a `Full` node ran the bid's payload and an `Empty` or `Pending`
+    /// node ran its parent's.
+    pub fn head_payload_block_hash(
+        &self,
+        payload_status: PayloadStatus,
+    ) -> Option<ExecutionBlockHash> {
+        self.execution_status.block_hash().or(match payload_status {
+            PayloadStatus::Full => self.execution_payload_block_hash,
+            PayloadStatus::Pending | PayloadStatus::Empty => self.execution_payload_parent_hash,
+        })
+    }
+
+    /// The execution block hash that is justified, finalized or confirmed once this block is.
+    ///
+    /// Post-Gloas this is the bid's parent hash: the block's own payload is applied immediately
+    /// prior to the next block, so it is not itself justified or finalized.
+    pub fn settled_payload_block_hash(&self) -> Option<ExecutionBlockHash> {
+        self.execution_status
+            .block_hash()
+            .or(self.execution_payload_parent_hash)
+    }
+
     /// Compute the proposer shuffling decision root of a child block in `child_block_epoch`.
     ///
     /// This function assumes that `child_block_epoch >= self.epoch`. It is the responsibility of

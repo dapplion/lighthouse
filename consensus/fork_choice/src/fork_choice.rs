@@ -601,34 +601,17 @@ where
         let (head_root, head_payload_status) = head_node.as_pair();
 
         // Cache some values for the next forkchoiceUpdate call to the execution layer.
-        // For Gloas blocks, `execution_status` is Irrelevant (no embedded payload).
-        // If the payload envelope was received (Full), use the bid's block_hash as the
-        // execution chain head. Otherwise fall back to the parent hash (Pending) or None.
-        // For justified/finalized hashes we always use the bid's parent_block_hash, since the
-        // payload from the justified/finalized block is not itself justified/finalized due to
-        // being applied immediately prior to the next block.
-        let head_hash = self.get_block(&head_root).and_then(|b| {
-            b.execution_status
-                .block_hash()
-                .or(match head_payload_status {
-                    PayloadStatus::Full => b.execution_payload_block_hash,
-                    PayloadStatus::Pending | PayloadStatus::Empty => {
-                        b.execution_payload_parent_hash
-                    }
-                })
-        });
+        let head_hash = self
+            .get_block(&head_root)
+            .and_then(|b| b.head_payload_block_hash(head_payload_status));
         let justified_root = self.justified_checkpoint().root;
         let finalized_root = self.finalized_checkpoint().root;
-        let justified_hash = self.get_block(&justified_root).and_then(|b| {
-            b.execution_status
-                .block_hash()
-                .or(b.execution_payload_parent_hash)
-        });
-        let finalized_hash = self.get_block(&finalized_root).and_then(|b| {
-            b.execution_status
-                .block_hash()
-                .or(b.execution_payload_parent_hash)
-        });
+        let justified_hash = self
+            .get_block(&justified_root)
+            .and_then(|b| b.settled_payload_block_hash());
+        let finalized_hash = self
+            .get_block(&finalized_root)
+            .and_then(|b| b.settled_payload_block_hash());
         self.forkchoice_update_parameters = ForkchoiceUpdateParameters {
             head_root,
             head_hash,
@@ -1685,18 +1668,14 @@ where
 
     /// Execution verdict of a specific fork choice node, if it descends from finalized.
     ///
-    /// `Ok(None)` means the node is not a descendant of the finalized checkpoint. Proto array
-    /// failures propagate rather than being flattened to a permissive answer.
+    /// A `ForkChoiceNode` is only produced by fork choice, so its root is known here unless it has
+    /// since been pruned by finalization, which is an error rather than a permissive answer.
     pub fn get_node_execution_status(
         &self,
         node: ForkChoiceNode,
-    ) -> Result<Option<ExecutionVerdict>, Error<T::Error>> {
-        if !self.is_finalized_checkpoint_or_descendant(node.root()) {
-            return Ok(None);
-        }
+    ) -> Result<ExecutionVerdict, Error<T::Error>> {
         self.proto_array
             .get_node_execution_status(node)
-            .map(Some)
             .map_err(Error::ProtoArrayError)
     }
 
@@ -1817,9 +1796,11 @@ where
         if let Some(verdict) = self.get_block_execution_status_assuming_full(block_root)? {
             Ok(verdict.is_optimistic_or_invalid())
         } else {
+            let finalized_root = self.finalized_checkpoint().root;
             Ok(self
-                .get_finalized_block()?
-                .execution_status
+                .proto_array
+                .get_block_execution_status_assuming_full(&finalized_root)
+                .map_err(Error::ProtoArrayError)?
                 .is_optimistic_or_invalid())
         }
     }
