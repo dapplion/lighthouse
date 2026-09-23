@@ -1946,7 +1946,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         contribution: SyncCommitteeContribution<T::EthSpec>,
     ) -> Result<SyncCommitteeContribution<T::EthSpec>, Error> {
         let beacon_block_root = contribution.beacon_block_root;
-        // worst case on wrong assumption: a sync contribution used for an optimistic block.
+        // A sync contribution carries no payload status, so there is no node to query. Assuming
+        // `FULL` can only refuse a contribution whose branch is really valid; it cannot pass one
+        // whose branch is optimistic. See `is_optimistic_or_invalid_block_assuming_full`.
         match self
             .canonical_head
             .fork_choice_read_lock()
@@ -7090,7 +7092,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         } else {
             self.canonical_head
                 .fork_choice_read_lock()
-                .is_optimistic_or_invalid_block(&block.canonical_root())
+                .is_optimistic_or_invalid_block_assuming_full(&block.canonical_root())
                 .map_err(BeaconChainError::ForkChoiceError)
         }
     }
@@ -7116,7 +7118,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         } else {
             self.canonical_head
                 .fork_choice_read_lock()
-                .is_optimistic_or_invalid_block_no_fallback(&head_block.canonical_root())
+                .is_optimistic_or_invalid_block_assuming_full_no_fallback(
+                    &head_block.canonical_root(),
+                )
                 .map_err(BeaconChainError::ForkChoiceError)
         }
     }
@@ -7146,7 +7150,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         } else {
             self.canonical_head
                 .fork_choice_read_lock()
-                .is_optimistic_or_invalid_block_no_fallback(block_root)
+                .is_optimistic_or_invalid_block_assuming_full_no_fallback(block_root)
                 .map_err(BeaconChainError::ForkChoiceError)
         }
     }
@@ -7603,8 +7607,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(ChainHealth::PreMerge);
         };
 
-        // Check that the parent is NOT optimistic.
-        // worst case on wrong assumption: chain reads healthy while optimistic.
+        // Check that the parent is NOT optimistic. Assuming `FULL` can only report optimistic for
+        // a parent whose branch is really valid, so this errs towards reporting the chain unhealthy
+        // and never the reverse. See `is_optimistic_or_invalid_block_assuming_full`.
         if let Some(execution_status) = self
             .canonical_head
             .fork_choice_read_lock()
