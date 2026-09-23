@@ -1255,13 +1255,8 @@ fn parent_node_of<'a>(
 }
 
 /// Return `true` if the most recently applied payload on `root`'s branch is `Optimistic` or
-/// `Invalid`.
-///
-/// The rule asks whether the branch being confirmed has been executed, not whether this particular
-/// block carries a payload of its own — under Gloas it need not. So the answer comes from the
-/// nearest ancestor whose payload the branch ran, which for a block that ran its own payload is
-/// the block itself. Pre-bellatrix `Irrelevant` payloads count as not optimistic (the spec MUST
-/// applies post-merge). A missing node is an error, as it is for every other node lookup here.
+/// `Invalid`. Pre-bellatrix `Irrelevant` payloads are treated as not optimistic (the spec MUST
+/// applies post-merge).
 fn is_optimistic_or_invalid(root: Hash256, proto_array: &ProtoArray) -> Result<bool, Error> {
     Ok(proto_array
         .inherited_execution_status(root)?

@@ -1946,9 +1946,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         contribution: SyncCommitteeContribution<T::EthSpec>,
     ) -> Result<SyncCommitteeContribution<T::EthSpec>, Error> {
         let beacon_block_root = contribution.beacon_block_root;
-        // A sync contribution carries no payload status, so there is no node to query. Assuming
-        // `FULL` can only refuse a contribution whose branch is really valid; it cannot pass one
-        // whose branch is optimistic. See `is_optimistic_or_invalid_block_assuming_full`.
+        // worst case on wrong assumption: a sync contribution used for an optimistic block.
         match self
             .canonical_head
             .fork_choice_read_lock()
@@ -7607,9 +7605,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(ChainHealth::PreMerge);
         };
 
-        // Check that the parent is NOT optimistic. Assuming `FULL` can only report optimistic for
-        // a parent whose branch is really valid, so this errs towards reporting the chain unhealthy
-        // and never the reverse. See `is_optimistic_or_invalid_block_assuming_full`.
+        // Check that the parent is NOT optimistic.
+        // worst case on wrong assumption: chain reads healthy while optimistic.
         if let Some(execution_status) = self
             .canonical_head
             .fork_choice_read_lock()

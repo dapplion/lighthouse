@@ -1811,26 +1811,18 @@ where
     /// Returns `Ok(true)` if `block_root`'s `FULL` node has been imported optimistically or deemed
     /// invalid.
     ///
-    /// Returns `Ok(false)` if that payload has been elected as fully VALID, if it is a pre-Bellatrix
-    /// block or if it is before the PoW terminal block.
+    /// Returns `Ok(false)` if `block_root`'s execution payload has been elected as fully VALID, if
+    /// it is a pre-Bellatrix block or if it is before the PoW terminal block.
     ///
     /// In the case where the block could not be found in fork-choice, it returns the
     /// `execution_status` of the current finalized block.
     ///
     /// This function assumes the `block_root` exists.
-    ///
-    /// # Why assuming `FULL` is safe
-    ///
-    /// Callers that hold only a root cannot say which node of the block they mean, so this answers
-    /// about the `FULL` node. The assumption can only err towards caution: a payload is validated
-    /// against its ancestors, so a `VALID` `FULL` node implies the `EMPTY` node's payload is
-    /// `VALID` too. This can therefore report optimistic for a branch that is really valid, never
-    /// valid for a branch that is really optimistic or invalid. Use
-    /// `get_node_execution_status` wherever the caller does hold a node.
     pub fn is_optimistic_or_invalid_block_assuming_full(
         &self,
         block_root: &Hash256,
     ) -> Result<bool, Error<T::Error>> {
+        // worst case on wrong assumption: a stale `execution_optimistic` in an API response.
         if let Some(verdict) = self.get_block_execution_status_assuming_full(block_root)? {
             Ok(verdict.is_optimistic_or_invalid())
         } else {
@@ -1850,6 +1842,7 @@ where
         &self,
         block_root: &Hash256,
     ) -> Result<bool, Error<T::Error>> {
+        // worst case on wrong assumption: a stale `execution_optimistic` in an API response.
         if let Some(verdict) = self.get_block_execution_status_assuming_full(block_root)? {
             Ok(verdict.is_optimistic_or_invalid())
         } else {

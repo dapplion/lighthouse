@@ -1394,11 +1394,8 @@ impl ProtoArray {
         }
     }
 
-    /// The verdict a node inherits when it ran no payload of its own.
-    ///
-    /// An `EMPTY` node and a same-slot `PENDING` node are two payload-less views of the same block,
-    /// so both ask one question: what is the most recently applied payload on this branch? Walk up
-    /// to the nearest ancestor whose payload the branch ran and report that ancestor's verdict.
+    /// Walk up from an `EMPTY` node to the nearest ancestor whose payload the branch ran, and
+    /// report that ancestor's verdict.
     pub fn inherited_execution_status(
         &self,
         block_root: Hash256,
@@ -1426,7 +1423,7 @@ impl ProtoArray {
             };
 
             match gloas_node.parent_payload_status {
-                // The parent payload this node extended from is the payload the branch ran.
+                // The parent payload this node extended from is the payload the empty branch ran.
                 PayloadStatus::Full => {
                     break self
                         .nodes
