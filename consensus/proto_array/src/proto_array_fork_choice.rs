@@ -214,26 +214,11 @@ impl ExecutionStatus {
 
     /// Returns `true` if the block:
     ///
-    /// - Has a valid payload, OR
-    /// - Does not have execution enabled.
-    ///
-    /// Whenever this function returns `true`, the block is *fully valid*.
-    pub fn is_valid_or_irrelevant(&self) -> bool {
-        matches!(
-            self,
-            ExecutionStatus::Valid(_) | ExecutionStatus::Irrelevant(_)
-        )
-    }
-
-    /// Returns `true` if the block:
-    ///
     /// - Has execution enabled, AND
     /// - Has a valid payload
     ///
     /// This function will return `false` for any block from a slot prior to the Bellatrix fork.
     /// This means that some blocks that are perfectly valid will still receive a `false` response.
-    /// See `Self::is_valid_or_irrelevant` for a function that will always return `true` given any
-    /// perfectly valid block.
     pub fn is_valid_and_post_bellatrix(&self) -> bool {
         matches!(self, ExecutionStatus::Valid(_))
     }
@@ -1151,16 +1136,6 @@ impl ProtoArrayForkChoice {
         self.proto_array
             .should_extend_payload::<E>(&fc_node, proto_node, current_slot, proposer_boost_root)
             .map_err(|e| format!("{e:?}"))
-    }
-
-    /// Returns the `block.execution_status` field, if the block is present.
-    pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
-        let block = self.get_proto_node(block_root)?;
-        Some(
-            block
-                .execution_status()
-                .unwrap_or_else(|_| ExecutionStatus::irrelevant()),
-        )
     }
 
     /// Execution verdict of a specific fork choice node (root + payload status).

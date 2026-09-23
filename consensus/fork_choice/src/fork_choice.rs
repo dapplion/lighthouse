@@ -1683,15 +1683,6 @@ where
             .map_err(Error::ProtoArrayStringError)
     }
 
-    /// Returns an `ExecutionStatus` if the block is known **and** a descendant of the finalized root.
-    pub fn get_block_execution_status(&self, block_root: &Hash256) -> Option<ExecutionStatus> {
-        if self.is_finalized_checkpoint_or_descendant(*block_root) {
-            self.proto_array.get_block_execution_status(block_root)
-        } else {
-            None
-        }
-    }
-
     /// Execution verdict of a specific fork choice node, if it descends from finalized.
     ///
     /// `Ok(None)` means the node is not a descendant of the finalized checkpoint. Proto array
