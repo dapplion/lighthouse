@@ -1303,7 +1303,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         // Resolve the confirmed block's execution payload hash for the EL `safe_block_hash`.
         // This MUST be the parent block hash for Gloas, per the spec.
-        let confirmed_block_hash = confirmed_node.settled_payload_block_hash().ok_or(
+        let confirmed_block_hash = confirmed_node.parent_payload_block_hash().ok_or(
             FastConfirmationError::NodeHasNoBlockHash(fcr.confirmed_root),
         )?;
 

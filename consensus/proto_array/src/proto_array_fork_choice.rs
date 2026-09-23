@@ -364,11 +364,12 @@ impl Block {
         })
     }
 
-    /// The execution block hash that is justified, finalized or confirmed once this block is.
+    /// Spec's parent payload: the hash to send as `finalized_block_hash` and `safe_block_hash`.
     ///
-    /// Post-Gloas this is the bid's parent hash: the block's own payload is applied immediately
-    /// prior to the next block, so it is not itself justified or finalized.
-    pub fn settled_payload_block_hash(&self) -> Option<ExecutionBlockHash> {
+    /// Post-Gloas this is the bid's `parent_block_hash`, since the block's own payload is applied
+    /// immediately prior to the next block and so is not itself justified or finalized. Pre-Gloas
+    /// the payload is embedded in the block, so it resolves to the block's own hash.
+    pub fn parent_payload_block_hash(&self) -> Option<ExecutionBlockHash> {
         self.execution_status
             .block_hash()
             .or(self.execution_payload_parent_hash)
