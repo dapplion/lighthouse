@@ -1668,14 +1668,18 @@ where
 
     /// Execution verdict of a specific fork choice node, if it descends from finalized.
     ///
-    /// A `ForkChoiceNode` is only produced by fork choice, so its root is known here unless it has
-    /// since been pruned by finalization, which is an error rather than a permissive answer.
+    /// `Ok(None)` means the node is not a descendant of the finalized checkpoint. Proto array
+    /// failures propagate rather than being flattened to a permissive answer.
     pub fn get_node_execution_status(
         &self,
         node: ForkChoiceNode,
-    ) -> Result<ExecutionVerdict, Error<T::Error>> {
+    ) -> Result<Option<ExecutionVerdict>, Error<T::Error>> {
+        if !self.is_finalized_checkpoint_or_descendant(node.root()) {
+            return Ok(None);
+        }
         self.proto_array
             .get_node_execution_status(node)
+            .map(Some)
             .map_err(Error::ProtoArrayError)
     }
 

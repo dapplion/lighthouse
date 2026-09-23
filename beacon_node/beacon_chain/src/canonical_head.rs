@@ -535,9 +535,9 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
     /// run `BeaconChain::recompute_head` to update the cached values.
     pub fn head_execution_status(&self) -> Result<ExecutionVerdict, Error> {
         let head = self.cached_head();
-        Ok(self
-            .fork_choice_read_lock()
-            .get_node_execution_status(head.head_node())?)
+        self.fork_choice_read_lock()
+            .get_node_execution_status(head.head_node())?
+            .ok_or(Error::HeadMissingFromForkChoice(head.head_block_root()))
     }
 
     /// Returns a clone of the `CachedHead` and the execution status of the contained head block.
@@ -551,7 +551,8 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let head = self.cached_head();
         let execution_status = self
             .fork_choice_read_lock()
-            .get_node_execution_status(head.head_node())?;
+            .get_node_execution_status(head.head_node())?
+            .ok_or(Error::HeadMissingFromForkChoice(head.head_block_root()))?;
         Ok((head, execution_status))
     }
 
@@ -864,7 +865,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         //
         // In theory, fork choice should never select an invalid head (i.e., step #3 is impossible).
         // However, this check is cheap.
-        let new_head_verdict = fork_choice_read_lock.get_node_execution_status(new_head_node)?;
+        let new_head_verdict = fork_choice_read_lock
+            .get_node_execution_status(new_head_node)?
+            .ok_or(Error::HeadMissingFromForkChoice(new_head_node.root()))?;
         if new_head_verdict.is_invalid() {
             return Err(Error::HeadHasInvalidPayload {
                 block_root: new_head_proto_block.root,
