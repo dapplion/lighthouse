@@ -1457,13 +1457,14 @@ impl<T: BeaconChainTypes> ExecutionPendingBlock<T> {
             .observe_proposal(block_root, block.message())
             .map_err(|e| BlockError::BeaconChainError(Box::new(e.into())))?;
 
-        match chain
-            .canonical_head
-            .fork_choice_read_lock()
-            .get_parent_import_status(block.as_block())
-        {
+        let fork_choice = chain.canonical_head.fork_choice_read_lock();
+        match fork_choice.get_parent_import_status(block.as_block()) {
             ParentImportStatus::Imported(parent) => {
-                if parent.execution_status.is_invalid() {
+                if fork_choice
+                    .get_block_execution_status_assuming_full(&parent.root)
+                    .map_err(|e| BlockError::BeaconChainError(Box::new(e.into())))?
+                    .is_some_and(|verdict| verdict.is_invalid())
+                {
                     return Err(BlockError::ParentExecutionPayloadInvalid {
                         parent_root: block.parent_root(),
                     });

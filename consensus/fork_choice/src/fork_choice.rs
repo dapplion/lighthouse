@@ -1069,7 +1069,7 @@ where
                 state_root: block.state_root(),
                 justified_checkpoint: state.current_justified_checkpoint(),
                 finalized_checkpoint: state.finalized_checkpoint(),
-                execution_status,
+                block_hash: execution_status.block_hash(),
                 unrealized_justified_checkpoint: Some(unrealized_justified_checkpoint),
                 unrealized_finalized_checkpoint: Some(unrealized_finalized_checkpoint),
                 execution_payload_parent_hash,
@@ -1078,6 +1078,7 @@ where
                 // Set on payload-envelope import, not block import.
                 payload_received: false,
             },
+            execution_status,
             current_slot,
             spec,
             block_delay,

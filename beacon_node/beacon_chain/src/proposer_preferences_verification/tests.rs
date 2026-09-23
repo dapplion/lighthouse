@@ -5,6 +5,7 @@ use bls::Signature;
 use fork_choice::ForkChoice;
 use genesis::{generate_deterministic_keypairs, interop_genesis_state};
 use parking_lot::{Mutex, RwLock};
+use proto_array::ExecutionStatus;
 use slot_clock::{SlotClock, TestingSlotClock};
 use state_processing::AllCaches;
 use store::{HotColdDB, MemoryStore, StoreConfig};
@@ -180,7 +181,13 @@ impl TestContext {
         block.slot = slot;
         fork_choice
             .proto_array_mut()
-            .process_block::<E>(block, slot, &self.spec, Duration::ZERO)
+            .process_block::<E>(
+                block,
+                ExecutionStatus::irrelevant(),
+                slot,
+                &self.spec,
+                Duration::ZERO,
+            )
             .expect("should insert block into fork choice");
     }
 }

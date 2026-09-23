@@ -333,9 +333,9 @@ pub struct Block {
     pub next_epoch_shuffling_id: AttestationShufflingId,
     pub justified_checkpoint: Checkpoint,
     pub finalized_checkpoint: Checkpoint,
-    /// Indicates if an execution node has marked this block as valid. Also contains the execution
-    /// block hash.
-    pub execution_status: ExecutionStatus,
+    /// Execution block hash. `None` pre-merge and post-Gloas. Validity is not recorded here —
+    /// query the verdict from fork choice.
+    pub block_hash: Option<ExecutionBlockHash>,
     pub unrealized_justified_checkpoint: Option<Checkpoint>,
     pub unrealized_finalized_checkpoint: Option<Checkpoint>,
 
@@ -348,12 +348,12 @@ pub struct Block {
 }
 
 impl Block {
-    /// Spec: `head_block_hash` for `notify_forkchoice_updated`. Pre-Gloas the payload is embedded.
+    /// Spec: `head_block_hash` for `notify_forkchoice_updated`.
     pub fn head_payload_block_hash(
         &self,
         payload_status: PayloadStatus,
     ) -> Option<ExecutionBlockHash> {
-        self.execution_status.block_hash().or(match payload_status {
+        self.block_hash.or(match payload_status {
             PayloadStatus::Full => self.execution_payload_block_hash,
             PayloadStatus::Pending | PayloadStatus::Empty => self.execution_payload_parent_hash,
         })
@@ -361,9 +361,7 @@ impl Block {
 
     /// Spec: `finalized_block_hash` and `get_safe_execution_block_hash`, the bid's parent payload.
     pub fn checkpoint_payload_block_hash(&self) -> Option<ExecutionBlockHash> {
-        self.execution_status
-            .block_hash()
-            .or(self.execution_payload_parent_hash)
+        self.block_hash.or(self.execution_payload_parent_hash)
     }
 
     /// Compute the proposer shuffling decision root of a child block in `child_block_epoch`.
@@ -617,7 +615,7 @@ impl ProtoArrayForkChoice {
             next_epoch_shuffling_id,
             justified_checkpoint,
             finalized_checkpoint,
-            execution_status,
+            block_hash: execution_status.block_hash(),
             unrealized_justified_checkpoint: Some(justified_checkpoint),
             unrealized_finalized_checkpoint: Some(finalized_checkpoint),
             execution_payload_parent_hash,
@@ -629,6 +627,7 @@ impl ProtoArrayForkChoice {
         proto_array
             .on_block::<E>(
                 block,
+                execution_status,
                 current_slot,
                 spec,
                 // Anchor block is always timely (delay=0 ensures both timeliness
@@ -740,6 +739,7 @@ impl ProtoArrayForkChoice {
     pub fn process_block<E: EthSpec>(
         &mut self,
         block: Block,
+        execution_status: ExecutionStatus,
         current_slot: Slot,
         spec: &ChainSpec,
         time_into_slot: Duration,
@@ -749,7 +749,7 @@ impl ProtoArrayForkChoice {
         }
 
         self.proto_array
-            .on_block::<E>(block, current_slot, spec, time_into_slot)
+            .on_block::<E>(block, execution_status, current_slot, spec, time_into_slot)
             .map_err(|e| format!("process_block_error: {:?}", e))
     }
 
@@ -1097,9 +1097,10 @@ impl ProtoArrayForkChoice {
             next_epoch_shuffling_id: block.next_epoch_shuffling_id().clone(),
             justified_checkpoint: *block.justified_checkpoint(),
             finalized_checkpoint: *block.finalized_checkpoint(),
-            execution_status: block
+            block_hash: block
                 .execution_status()
-                .unwrap_or_else(|_| ExecutionStatus::irrelevant()),
+                .ok()
+                .and_then(|status| status.block_hash()),
             unrealized_justified_checkpoint: block.unrealized_justified_checkpoint(),
             unrealized_finalized_checkpoint: block.unrealized_finalized_checkpoint(),
             execution_payload_parent_hash: block.execution_payload_parent_hash().ok(),
@@ -1561,13 +1562,14 @@ mod test_compute_deltas {
                     justified_checkpoint: genesis_checkpoint,
                     finalized_checkpoint: genesis_checkpoint,
                     unrealized_justified_checkpoint: Some(genesis_checkpoint),
-                    execution_status,
+                    block_hash: execution_status.block_hash(),
                     unrealized_finalized_checkpoint: Some(genesis_checkpoint),
                     execution_payload_parent_hash: None,
                     execution_payload_block_hash: None,
                     proposer_index: Some(0),
                     payload_received: false,
                 },
+                execution_status,
                 genesis_slot + 1,
                 &spec,
                 Duration::ZERO,
@@ -1589,7 +1591,7 @@ mod test_compute_deltas {
                     // the loop-shortcutting mechanism from triggering.
                     justified_checkpoint: junk_checkpoint,
                     finalized_checkpoint: junk_checkpoint,
-                    execution_status,
+                    block_hash: execution_status.block_hash(),
                     unrealized_justified_checkpoint: None,
                     unrealized_finalized_checkpoint: None,
                     execution_payload_parent_hash: None,
@@ -1597,6 +1599,7 @@ mod test_compute_deltas {
                     proposer_index: Some(0),
                     payload_received: false,
                 },
+                execution_status,
                 genesis_slot + 1,
                 &spec,
                 Duration::ZERO,
@@ -1726,7 +1729,7 @@ mod test_compute_deltas {
                             root: get_block_root(0),
                         },
                         finalized_checkpoint: genesis_checkpoint,
-                        execution_status,
+                        block_hash: execution_status.block_hash(),
                         unrealized_justified_checkpoint: Some(genesis_checkpoint),
                         unrealized_finalized_checkpoint: Some(genesis_checkpoint),
                         execution_payload_parent_hash: None,
@@ -1734,6 +1737,7 @@ mod test_compute_deltas {
                         proposer_index: Some(0),
                         payload_received: false,
                     },
+                    execution_status,
                     Slot::from(block.slot),
                     &spec,
                     Duration::ZERO,

@@ -95,9 +95,12 @@ impl InvalidPayloadRig {
             .chain
             .canonical_head
             .fork_choice_read_lock()
-            .get_block(&block_root)
+            .proto_array()
+            .core_proto_array()
+            .get_block(block_root)
             .unwrap()
-            .execution_status
+            .execution_status()
+            .unwrap()
     }
 
     async fn recompute_head(&self) {
@@ -334,7 +337,10 @@ impl InvalidPayloadRig {
                     );
                 } else {
                     // A block imported and then found invalid should have an invalid status.
-                    assert!(block_in_forkchoice.unwrap().execution_status.is_invalid());
+                    assert!(
+                        self.execution_status(block_in_forkchoice.unwrap().root)
+                            .is_invalid()
+                    );
                 }
             }
         }

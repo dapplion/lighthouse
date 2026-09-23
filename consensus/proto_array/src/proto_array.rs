@@ -531,6 +531,7 @@ impl ProtoArray {
     pub fn on_block<E: EthSpec>(
         &mut self,
         block: Block,
+        execution_status: ExecutionStatus,
         current_slot: Slot,
         spec: &ChainSpec,
         time_into_slot: Duration,
@@ -566,7 +567,7 @@ impl ProtoArray {
                 weight: 0,
                 best_child: None,
                 best_descendant: None,
-                execution_status: block.execution_status,
+                execution_status,
                 unrealized_justified_checkpoint: block.unrealized_justified_checkpoint,
                 unrealized_finalized_checkpoint: block.unrealized_finalized_checkpoint,
             })
@@ -685,7 +686,7 @@ impl ProtoArray {
         }
 
         if let Some(parent_index) = node.parent()
-            && matches!(block.execution_status, ExecutionStatus::Valid(_))
+            && matches!(execution_status, ExecutionStatus::Valid(_))
         {
             self.propagate_execution_payload_validation_by_index(parent_index)?;
         }

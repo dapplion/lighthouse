@@ -1556,9 +1556,7 @@ impl<E: EthSpec> Tester<E> {
             ))
         })?;
         let actual = block
-            .execution_status
-            .block_hash()
-            .or(block.execution_payload_parent_hash)
+            .checkpoint_payload_block_hash()
             .unwrap_or_else(ExecutionBlockHash::zero);
         check_equal("safe_execution_block_hash", actual, expected)
     }

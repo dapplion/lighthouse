@@ -16,7 +16,7 @@ use execution_layer::{
     PayloadParameters, PayloadStatus,
 };
 use fork_choice::{InvalidationOperation, PayloadVerificationStatus};
-use proto_array::{Block as ProtoBlock, ExecutionStatus};
+use proto_array::Block as ProtoBlock;
 use slot_clock::SlotClock;
 use state_processing::per_block_processing::{
     compute_timestamp_at_slot, get_expected_withdrawals, is_execution_enabled,
@@ -234,19 +234,21 @@ pub fn validate_execution_payload_for_gossip<T: BeaconChainTypes>(
         // We use only the execution status of the parent here to avoid loading the parent state
         // during gossip verification.
 
-        let parent_has_execution = match parent_block.execution_status {
-            // Parent has valid or optimistic execution status.
-            ExecutionStatus::Valid(_) | ExecutionStatus::Optimistic(_) => true,
-            // Pre-merge blocks have irrelevant execution status.
-            ExecutionStatus::Irrelevant(_) => false,
-            // If the parent has an invalid payload then it's impossible to build a valid block upon
-            // it. Reject the block.
-            ExecutionStatus::Invalid(_) => {
-                return Err(BlockError::ParentExecutionPayloadInvalid {
-                    parent_root: parent_block.root,
-                });
-            }
-        };
+        // If the parent has an invalid payload then it's impossible to build a valid block upon
+        // it. Reject the block.
+        if chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .get_block_execution_status_assuming_full(&parent_block.root)
+            .map_err(|e| BlockError::BeaconChainError(Box::new(e.into())))?
+            .is_some_and(|verdict| verdict.is_invalid())
+        {
+            return Err(BlockError::ParentExecutionPayloadInvalid {
+                parent_root: parent_block.root,
+            });
+        }
+        // Pre-merge blocks have no execution block hash.
+        let parent_has_execution = parent_block.block_hash.is_some();
 
         if parent_has_execution || !execution_payload.is_default_with_empty_roots() {
             let expected_timestamp = chain

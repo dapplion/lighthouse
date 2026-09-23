@@ -297,7 +297,7 @@ impl TestContext {
                 epoch: Epoch::new(0),
                 root: self.genesis_block_root,
             },
-            execution_status: ExecutionStatus::irrelevant(),
+            block_hash: None,
             unrealized_justified_checkpoint: None,
             unrealized_finalized_checkpoint: None,
             execution_payload_parent_hash: Some(ExecutionBlockHash::zero()),
@@ -314,6 +314,7 @@ impl TestContext {
             .proto_array_mut()
             .process_block::<E>(
                 self.slot_1_proto_block(fork_block_root, ExecutionBlockHash::repeat_byte(0xab)),
+                ExecutionStatus::irrelevant(),
                 Slot::new(1),
                 &self.spec,
                 Duration::from_secs(0),

@@ -324,10 +324,7 @@ impl ForkChoiceTestDefinition {
                         ),
                         justified_checkpoint,
                         finalized_checkpoint,
-                        // All blocks are imported optimistically.
-                        execution_status: ExecutionStatus::Optimistic(
-                            ExecutionBlockHash::from_root(root),
-                        ),
+                        block_hash: Some(ExecutionBlockHash::from_root(root)),
                         unrealized_justified_checkpoint: None,
                         unrealized_finalized_checkpoint: None,
                         execution_payload_parent_hash,
@@ -336,7 +333,14 @@ impl ForkChoiceTestDefinition {
                         payload_received: false,
                     };
                     fork_choice
-                        .process_block::<MainnetEthSpec>(block, slot, &spec, Duration::ZERO)
+                        .process_block::<MainnetEthSpec>(
+                            block,
+                            // All blocks are imported optimistically.
+                            ExecutionStatus::Optimistic(ExecutionBlockHash::from_root(root)),
+                            slot,
+                            &spec,
+                            Duration::ZERO,
+                        )
                         .unwrap_or_else(|e| {
                             panic!(
                                 "process_block op at index {} returned error: {:?}",

@@ -200,7 +200,7 @@ fn build_chain_inner(
             next_epoch_shuffling_id: shuffling_id.clone(),
             justified_checkpoint,
             finalized_checkpoint,
-            execution_status: ExecutionStatus::irrelevant(),
+            block_hash: None,
             unrealized_justified_checkpoint: Some(unrealized_justified_checkpoint),
             unrealized_finalized_checkpoint: Some(finalized_checkpoint),
             execution_payload_parent_hash: None,
@@ -209,8 +209,14 @@ fn build_chain_inner(
             payload_received: false,
         };
 
-        fc.process_block::<E>(block, slot, &spec, Duration::from_secs(0))
-            .expect("process block");
+        fc.process_block::<E>(
+            block,
+            ExecutionStatus::irrelevant(),
+            slot,
+            &spec,
+            Duration::from_secs(0),
+        )
+        .expect("process block");
 
         block_roots.push(root);
     }
