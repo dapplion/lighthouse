@@ -608,10 +608,10 @@ where
         let finalized_root = self.finalized_checkpoint().root;
         let justified_hash = self
             .get_block(&justified_root)
-            .and_then(|b| b.parent_payload_block_hash());
+            .and_then(|b| b.checkpoint_payload_block_hash());
         let finalized_hash = self
             .get_block(&finalized_root)
-            .and_then(|b| b.parent_payload_block_hash());
+            .and_then(|b| b.checkpoint_payload_block_hash());
         self.forkchoice_update_parameters = ForkchoiceUpdateParameters {
             head_root,
             head_hash,

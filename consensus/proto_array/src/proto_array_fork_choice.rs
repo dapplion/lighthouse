@@ -348,12 +348,7 @@ pub struct Block {
 }
 
 impl Block {
-    /// The execution block hash to report for this block as the head, given the payload status
-    /// fork choice elected for it.
-    ///
-    /// Pre-Gloas the payload is embedded, so the hash comes from `execution_status` whatever the
-    /// payload status. Post-Gloas a `Full` node ran the bid's payload and an `Empty` or `Pending`
-    /// node ran its parent's.
+    /// Spec: `head_block_hash` for `notify_forkchoice_updated`. Pre-Gloas the payload is embedded.
     pub fn head_payload_block_hash(
         &self,
         payload_status: PayloadStatus,
@@ -364,12 +359,8 @@ impl Block {
         })
     }
 
-    /// Spec's parent payload: the hash to send as `finalized_block_hash` and `safe_block_hash`.
-    ///
-    /// Post-Gloas this is the bid's `parent_block_hash`, since the block's own payload is applied
-    /// immediately prior to the next block and so is not itself justified or finalized. Pre-Gloas
-    /// the payload is embedded in the block, so it resolves to the block's own hash.
-    pub fn parent_payload_block_hash(&self) -> Option<ExecutionBlockHash> {
+    /// Spec: `finalized_block_hash` and `get_safe_execution_block_hash`, the bid's parent payload.
+    pub fn checkpoint_payload_block_hash(&self) -> Option<ExecutionBlockHash> {
         self.execution_status
             .block_hash()
             .or(self.execution_payload_parent_hash)
