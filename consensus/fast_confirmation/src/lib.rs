@@ -1258,6 +1258,7 @@ fn parent_node_of<'a>(
 /// `Invalid`. Pre-bellatrix `Irrelevant` payloads are treated as not optimistic (the spec MUST
 /// applies post-merge).
 fn is_optimistic_or_invalid(root: Hash256, proto_array: &ProtoArray) -> Result<bool, Error> {
+    // EMPTY view only; revisit when V29 nodes track their own execution status.
     Ok(proto_array
         .inherited_execution_status(root)?
         .is_optimistic_or_invalid())
