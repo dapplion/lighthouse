@@ -124,7 +124,7 @@ pub enum PayloadStatus {
 }
 
 impl PayloadStatus {
-    /// Classify a vote for a block at `block_slot` into the payload interpretation it supports.
+    /// Classify a vote into the payload bucket it contributes to for `block_slot`.
     ///
     /// Per the gloas model:
     ///
