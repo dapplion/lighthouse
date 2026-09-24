@@ -185,13 +185,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         seen_timestamp: Duration,
     ) -> Result<(), Error<T::EthSpec>> {
         let processor = self.clone();
+        let process_peer_id = peer_id;
         let process_fn = async move {
             let invalid_block_storage = processor.invalid_block_storage.clone();
             let duplicate_cache = processor.duplicate_cache.clone();
             processor
                 .process_gossip_block(
                     message_id,
-                    peer_id,
+                    process_peer_id,
                     peer_client,
                     block,
                     duplicate_cache,
@@ -203,7 +204,10 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
 
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
-            work: Work::GossipBlock(Box::pin(process_fn)),
+            work: Work::GossipBlock {
+                peer_id,
+                process_fn: Box::pin(process_fn),
+            },
         })
     }
 

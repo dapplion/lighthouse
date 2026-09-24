@@ -406,7 +406,10 @@ pub enum Work<E: EthSpec> {
         aggregates: Vec<GossipAggregatePackage<E>>,
         process_batch: Box<dyn FnOnce(Vec<GossipAggregatePackage<E>>) + Send + Sync>,
     },
-    GossipBlock(AsyncFn),
+    GossipBlock {
+        peer_id: PeerId,
+        process_fn: AsyncFn,
+    },
     GossipDataColumnSidecar(AsyncFn),
     GossipPartialDataColumnSidecar(AsyncFn),
     DelayedImportBlock {
@@ -545,7 +548,7 @@ impl<E: EthSpec> Work<E> {
             Work::GossipAttestationBatch { .. } => WorkType::GossipAttestationBatch,
             Work::GossipAggregate { .. } => WorkType::GossipAggregate,
             Work::GossipAggregateBatch { .. } => WorkType::GossipAggregateBatch,
-            Work::GossipBlock(_) => WorkType::GossipBlock,
+            Work::GossipBlock { .. } => WorkType::GossipBlock,
             Work::GossipDataColumnSidecar(_) => WorkType::GossipDataColumnSidecar,
             Work::GossipPartialDataColumnSidecar(_) => WorkType::GossipPartialDataColumnSidecar,
             Work::DelayedImportBlock { .. } => WorkType::DelayedImportBlock,
@@ -603,10 +606,25 @@ impl<E: EthSpec> Work<E> {
     }
 }
 
+#[derive(Clone)]
+struct WorkerCompletion {
+    work_type: WorkType,
+    peer_id: Option<PeerId>,
+}
+
+fn is_connected_or_unknown<E: EthSpec>(
+    network_globals: &NetworkGlobals<E>,
+    peer_id: &PeerId,
+) -> bool {
+    let peers = network_globals.peers.read();
+    peers.peer_info(peer_id).is_none() || peers.is_connected(peer_id)
+}
+
 /// Unifies all the messages processed by the `BeaconProcessor`.
 enum InboundEvent<E: EthSpec> {
     /// A worker has completed a task and is free.
-    WorkerIdle,
+    /// Returns the `WorkType` that completed and an optional peer id associated with that work.
+    WorkerFinished(WorkerCompletion),
     /// There is new work to be done.
     WorkEvent((WorkEvent<E>, Instant)),
     /// A work event that was queued for re-processing has become ready.
@@ -619,7 +637,7 @@ enum InboundEvent<E: EthSpec> {
 /// control (specifically in the ordering of event processing).
 struct InboundEvents<E: EthSpec> {
     /// Used by workers when they finish a task.
-    idle_rx: mpsc::Receiver<WorkType>,
+    idle_rx: mpsc::Receiver<WorkerCompletion>,
     /// Used by upstream processes to send new work to the `BeaconProcessor`.
     event_rx: mpsc::Receiver<WorkEvent<E>>,
     /// Used internally for queuing work ready to be re-processed.
@@ -633,8 +651,8 @@ impl<E: EthSpec> Stream for InboundEvents<E> {
         // Always check for idle workers before anything else. This allows us to ensure that a big
         // stream of new events doesn't suppress the processing of existing events.
         match self.idle_rx.poll_recv(cx) {
-            Poll::Ready(Some(_)) => {
-                return Poll::Ready(Some(InboundEvent::WorkerIdle));
+            Poll::Ready(Some(completion)) => {
+                return Poll::Ready(Some(InboundEvent::WorkerFinished(completion)));
             }
             Poll::Ready(None) => {
                 return Poll::Ready(None);
@@ -704,7 +722,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
         queue_lengths: BeaconProcessorQueueLengths,
     ) -> Result<(), String> {
         // Used by workers to communicate that they are finished a task.
-        let (idle_tx, idle_rx) = mpsc::channel::<WorkType>(MAX_IDLE_QUEUE_LEN);
+        let (idle_tx, idle_rx) = mpsc::channel::<WorkerCompletion>(MAX_IDLE_QUEUE_LEN);
 
         // Initialize the worker queues.
         let mut work_queues: WorkQueues<E> = WorkQueues::new(queue_lengths);
@@ -740,8 +758,16 @@ impl<E: EthSpec> BeaconProcessor<E> {
 
             loop {
                 let (work_event, created_timestamp) = match inbound_events.next().await {
-                    Some(InboundEvent::WorkerIdle) => {
+                    Some(InboundEvent::WorkerFinished(completion)) => {
                         self.current_workers = self.current_workers.saturating_sub(1);
+                        if let Some(peer_id) = completion.peer_id {
+                            match completion.work_type {
+                                WorkType::GossipBlock => {
+                                    work_queues.gossip_block_queue.worker_finished(&peer_id)
+                                }
+                                _ => {}
+                            }
+                        }
                         (None, Instant::now())
                     }
                     Some(InboundEvent::WorkEvent((event, created_timestamp)))
@@ -858,7 +884,10 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             Some(item)
                         // Check gossip blocks and payloads before gossip attestations, since a block might be
                         // required to verify some attestations.
-                        } else if let Some(item) = work_queues.gossip_block_queue.pop() {
+                        } else if let Some(item) = work_queues
+                            .gossip_block_queue
+                            .pop(|peer_id| is_connected_or_unknown(&self.network_globals, peer_id))
+                        {
                             Some(item)
                         } else if let Some(item) = work_queues.gossip_execution_payload_queue.pop()
                         {
@@ -1159,6 +1188,17 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                     )
                                 }
                             }
+                            Work::GossipBlock { peer_id, .. } if can_spawn => {
+                                if let Some(work) = work_queues
+                                    .gossip_block_queue
+                                    .push_and_pop(peer_id, work, work_id)
+                                {
+                                    self.spawn_worker(work, created_timestamp, idle_tx);
+                                }
+                            }
+                            Work::GossipBlock { peer_id, .. } => {
+                                work_queues.gossip_block_queue.push(peer_id, work, work_id)
+                            }
                             _ if can_spawn => self.spawn_worker(work, created_timestamp, idle_tx),
                             Work::GossipAttestation { .. } => {
                                 work_queues.attestation_queue.push(work)
@@ -1179,9 +1219,6 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                     work_type = "GossipAggregateBatch",
                                     "Unsupported inbound event"
                                 );
-                            }
-                            Work::GossipBlock { .. } => {
-                                work_queues.gossip_block_queue.push(work, work_id)
                             }
                             Work::GossipDataColumnSidecar { .. } => {
                                 work_queues.gossip_data_column_queue.push(work, work_id)
@@ -1467,15 +1504,19 @@ impl<E: EthSpec> BeaconProcessor<E> {
         &mut self,
         work: Work<E>,
         created_timestamp: Instant,
-        idle_tx: mpsc::Sender<WorkType>,
+        idle_tx: mpsc::Sender<WorkerCompletion>,
     ) {
         let work_id = work.str_id();
         let work_type = work.to_type();
+        let peer_id = match &work {
+            Work::GossipBlock { peer_id, .. } => Some(*peer_id),
+            _ => None,
+        };
 
         // This metric tracks how long a work event has been in the queue
         metrics::observe_timer_vec(
             &metrics::BEACON_PROCESSOR_QUEUE_TIME,
-            &[work_type.into()],
+            &[work_type.clone().into()],
             Instant::now() - created_timestamp,
         );
 
@@ -1498,7 +1539,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
         // As such, this instantiation should happen as early in the function as possible.
         let send_idle_on_drop = SendOnDrop {
             tx: idle_tx,
-            work_type: work.to_type(),
+            completion: WorkerCompletion { work_type, peer_id },
             _worker_timer: worker_timer,
         };
 
@@ -1574,7 +1615,10 @@ impl<E: EthSpec> BeaconProcessor<E> {
             | Work::RpcEnvelope(process_fn)
             | Work::ColumnReconstruction(process_fn) => task_spawner.spawn_async(process_fn),
             Work::IgnoredRpcBlock { process_fn } => task_spawner.spawn_blocking(process_fn),
-            Work::GossipBlock(work)
+            Work::GossipBlock {
+                peer_id: _,
+                process_fn: work,
+            }
             | Work::GossipDataColumnSidecar(work)
             | Work::GossipPartialDataColumnSidecar(work)
             | Work::GossipExecutionPayload(work)
@@ -1692,8 +1736,8 @@ impl TaskSpawner {
 ///
 /// https://doc.rust-lang.org/std/ops/trait.Drop.html#panics
 pub struct SendOnDrop {
-    tx: mpsc::Sender<WorkType>,
-    work_type: WorkType,
+    tx: mpsc::Sender<WorkerCompletion>,
+    completion: WorkerCompletion,
     // The field is unused, but it's here to ensure the timer is dropped once the task has finished.
     _worker_timer: Option<metrics::HistogramTimer>,
 }
@@ -1702,10 +1746,10 @@ impl Drop for SendOnDrop {
     fn drop(&mut self) {
         metrics::dec_gauge_vec(
             &metrics::BEACON_PROCESSOR_WORKERS_ACTIVE_GAUGE_BY_TYPE,
-            &[self.work_type.clone().into()],
+            &[self.completion.work_type.clone().into()],
         );
 
-        if let Err(e) = self.tx.try_send(self.work_type.clone()) {
+        if let Err(e) = self.tx.try_send(self.completion.clone()) {
             warn!(
                 msg = "did not free worker, shutdown may be underway",
                 error = %e,
