@@ -119,8 +119,17 @@ const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
 #[derive(Debug)]
 pub struct FastConfirmationRule {
     // === Output ===
-    /// Fed into `safe_block_hash` for the EL.
+    /// The raw output of `get_latest_confirmed`.
     pub confirmed_root: Hash256,
+    /// Spec `get_restart_resilient_confirmed_root`, recomputed on every run: the root this node
+    /// announces, fed into `safe_block_hash` for the EL and into the `fast_confirmation` event.
+    pub restart_resilient_confirmed_root: Hash256,
+
+    // === Restart resilience ===
+    /// Spec `get_root_confirmed_before_restart`: the root this node announced before it was
+    /// restarted, loaded from disk by the caller. `None` when nothing was persisted, i.e. on a
+    /// fresh database or the first run with FCR enabled.
+    root_confirmed_before_restart: Option<Hash256>,
 
     // === Tracking state (spec's 6 new store fields) ===
     /// Spec `previous_epoch_observed_justified_checkpoint` with its `get_previous_balance_source`
@@ -176,11 +185,13 @@ impl FastConfirmationRule {
     /// `checkpoint_state` (spec: `store.checkpoint_states[finalized_checkpoint]`); the
     /// head-derived caches come from `head_state`, whose block root is `head_root`.
     /// `byzantine_threshold` is clamped to [0, 25].
+    #[allow(clippy::too_many_arguments)]
     pub fn new<E: EthSpec>(
         head_root: Hash256,
         head_state: &BeaconState<E>,
         finalized_checkpoint: Checkpoint,
         checkpoint_state: &BeaconState<E>,
+        root_confirmed_before_restart: Option<Hash256>,
         byzantine_threshold: u64,
         proposer_score_boost: u64,
         spec: &ChainSpec,
@@ -195,6 +206,9 @@ impl FastConfirmationRule {
             BalanceSourceData::new(checkpoint_state, finalized_checkpoint.root)?;
         Ok(Self {
             confirmed_root: finalized_checkpoint.root,
+            restart_resilient_confirmed_root: root_confirmed_before_restart
+                .unwrap_or(finalized_checkpoint.root),
+            root_confirmed_before_restart,
             previous_epoch_observed_justified: CheckpointAndBalance::new(
                 finalized_checkpoint,
                 checkpoint_balance.clone(),
@@ -273,6 +287,15 @@ impl FastConfirmationRule {
                 equivocating_indices,
             )?;
         }
+
+        // Outside the `spec_test_mode` guard: with nothing loaded from disk this is just
+        // `confirmed_root`, which the spec test runner sets itself.
+        self.restart_resilient_confirmed_root = self.get_restart_resilient_confirmed_root::<E>(
+            head_root,
+            finalized_checkpoint,
+            current_slot,
+            proto_array,
+        )?;
 
         Ok(())
     }
@@ -503,6 +526,65 @@ impl FastConfirmationRule {
         }
 
         Ok(confirmed_root)
+    }
+
+    /// Spec: `get_restart_resilient_confirmed_root`.
+    ///
+    /// Announces the root confirmed before the restart until the freshly seeded rule re-confirms a
+    /// block at least as recent, or until that root is old enough that it should have been
+    /// finalized by now.
+    fn get_restart_resilient_confirmed_root<E: EthSpec>(
+        &self,
+        head_root: Hash256,
+        finalized_checkpoint: &Checkpoint,
+        current_slot: Slot,
+        proto_array: &ProtoArray,
+    ) -> Result<Hash256, Error> {
+        let Some(root_before_restart) = self.root_confirmed_before_restart else {
+            return Ok(self.confirmed_root);
+        };
+
+        let root_before_restart_slot = match get_block_slot(root_before_restart, proto_array) {
+            Ok(slot) => slot,
+            // Not in fork choice: either finality has moved past it, or this database was rebuilt
+            // since it was written. Either way the fresh root is the best we have.
+            Err(Error::NodeNotFound(_)) => return Ok(self.confirmed_root),
+            Err(e) => return Err(e),
+        };
+
+        // Recent confirmed block has advanced beyond the block that was confirmed before the
+        // node restart.
+        if root_before_restart_slot <= get_block_slot(self.confirmed_root, proto_array)? {
+            return Ok(self.confirmed_root);
+        }
+
+        // If the block is old enough it either has been finalized already or finality has been
+        // delayed, which makes the block confirmed before the restart unreliable.
+        if block_should_be_finalized::<E>(root_before_restart_slot, current_slot) {
+            return Ok(finalized_checkpoint.root);
+        }
+
+        // DIVERGENCE: the spec does not check this. A `safe_block_hash` outside the head's chain
+        // makes the execution layer reject the whole `forkchoiceUpdated` call with
+        // `-38002: Invalid forkchoice state`, so a root that has been reorged out since the restart
+        // cannot be announced. `get_latest_confirmed` applies the same rule to `confirmed_root`.
+        if !is_ancestor(head_root, root_before_restart, proto_array)? {
+            return Ok(self.confirmed_root);
+        }
+
+        // The field still holds the previous run's value, so this fires on the run that starts
+        // announcing the pre-restart root, not on every run until it is left behind.
+        if self.restart_resilient_confirmed_root != root_before_restart {
+            debug!(
+                root_before_restart = %root_before_restart,
+                slot_before_restart = %root_before_restart_slot,
+                confirmed = %self.confirmed_root,
+                slot = %current_slot,
+                "FCR announcing the root confirmed before the restart"
+            );
+        }
+
+        Ok(root_before_restart)
     }
 
     /// Spec: find_latest_confirmed_descendant
@@ -1406,6 +1488,19 @@ fn compute_start_slot_at_epoch<E: EthSpec>(epoch: Epoch) -> Slot {
     epoch.start_slot(E::slots_per_epoch())
 }
 
+/// Spec: `block_should_be_finalized`. A block at the first slot of its epoch is finalized one epoch
+/// earlier than the rest of its epoch, because it is itself the checkpoint that gets justified.
+fn block_should_be_finalized<E: EthSpec>(block_slot: Slot, current_slot: Slot) -> bool {
+    let block_epoch = block_slot.epoch(E::slots_per_epoch());
+    let current_epoch = current_slot.epoch(E::slots_per_epoch());
+
+    if block_slot == compute_start_slot_at_epoch::<E>(block_epoch) {
+        block_epoch.saturating_add(2u64) <= current_epoch
+    } else {
+        block_epoch.saturating_add(3u64) <= current_epoch
+    }
+}
+
 /// Spec: `is_full_validator_set_covered`.
 fn is_full_validator_set_covered<E: EthSpec>(
     start_slot: Slot,
@@ -1497,6 +1592,21 @@ mod tests {
         assert!(is_start_slot_at_epoch::<E>(Slot::new(32)));
         assert!(!is_start_slot_at_epoch::<E>(Slot::new(1)));
         assert!(!is_start_slot_at_epoch::<E>(Slot::new(31)));
+    }
+
+    #[test]
+    fn test_block_should_be_finalized() {
+        // A block at the first slot of epoch 1 is the checkpoint justified in epoch 2 and
+        // finalized in epoch 3.
+        let epoch_start = Slot::new(32);
+        assert!(!block_should_be_finalized::<E>(epoch_start, Slot::new(95)));
+        assert!(block_should_be_finalized::<E>(epoch_start, Slot::new(96)));
+
+        // Any later block in epoch 1 is only covered by the checkpoint at the start of epoch 2,
+        // so it takes one epoch longer.
+        let mid_epoch = Slot::new(33);
+        assert!(!block_should_be_finalized::<E>(mid_epoch, Slot::new(127)));
+        assert!(block_should_be_finalized::<E>(mid_epoch, Slot::new(128)));
     }
 
     #[test]
@@ -1613,9 +1723,17 @@ mod tests {
             root: Hash256::repeat_byte(1),
         };
         let head_root_a = Hash256::repeat_byte(2);
-        let mut fcr =
-            FastConfirmationRule::new::<E>(head_root_a, &state, checkpoint, &state, 25, 40, &spec)
-                .expect("fcr initialization");
+        let mut fcr = FastConfirmationRule::new::<E>(
+            head_root_a,
+            &state,
+            checkpoint,
+            &state,
+            None,
+            25,
+            40,
+            &spec,
+        )
+        .expect("fcr initialization");
 
         assert!(matches!(
             fcr.head_balance_source.key,

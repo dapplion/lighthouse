@@ -13,9 +13,10 @@
 //! 1. `RwLock<BeaconForkChoice>`: Contains `proto_array` fork choice.
 //! 2. `RwLock<CachedHead>`: Contains a cached block/state from the last run of `proto_array`.
 //! 3. `Mutex<()>`: Is used to prevent concurrent execution of `BeaconChain::recompute_head`.
-//! 4. `Option<Mutex<FastConfirmationRule>>`: FCR state (None when disabled), only locked inside
+//! 4. `Option<Mutex<FastConfirmationRule>>`: FCR state (None when disabled), locked inside
 //!    `recompute_head_at_slot_internal` while the fork choice read lock (1) is held and
-//!    `recompute_head_lock` (3) serializes access.
+//!    `recompute_head_lock` (3) serializes access, and inside `persist_fork_choice` once the fork
+//!    choice operation has been built and lock (1) released.
 //!
 //! This module has to take great efforts to avoid causing a deadlock with these three methods. Any
 //! developers working in this module should tread carefully and seek a detailed review.
@@ -35,6 +36,9 @@
 //! stack.
 
 use crate::chain_config::FastConfirmationMode;
+use crate::persisted_fast_confirmation::{
+    load_root_confirmed_before_restart, persist_confirmed_root_in_batch,
+};
 use crate::persisted_fork_choice::PersistedForkChoice;
 use crate::shuffling_cache::BlockShufflingIds;
 use crate::state_advance_timer::MAX_ADVANCE_DISTANCE;
@@ -263,6 +267,8 @@ impl<T: BeaconChainTypes> Deref for ForkChoiceUpgradableReadGuard<'_, T> {
     }
 }
 
+/// The outcome of one FCR run. Its roots are the restart-resilient confirmed root (spec:
+/// `get_restart_resilient_confirmed_root`), the one this node announces.
 struct FcrOutcome {
     confirmed_root: Hash256,
     confirmed_slot: Slot,
@@ -486,10 +492,13 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
 
         let fcr = if fast_confirmation.is_enabled() {
+            let root_confirmed_before_restart = load_root_confirmed_before_restart(store)
+                .map_err(|e| format!("Unable to load the root confirmed before restart: {e:?}"))?;
             Some(Mutex::new(
                 <BeaconChain<T>>::new_fast_confirmation_rule(
                     fork_choice_view.finalized_checkpoint,
                     &snapshot,
+                    root_confirmed_before_restart,
                     store,
                     spec,
                 )
@@ -1229,7 +1238,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         head_state_root: Hash256,
     ) -> Result<FcrOutcome, FastConfirmationError> {
         let _fcr_timer = metrics::start_timer(&fcr_metrics::FAST_CONFIRMATION_TIMES);
-        let old_confirmed_root = fcr.confirmed_root;
+        let old_confirmed_root = fcr.restart_resilient_confirmed_root;
 
         let finalized_cp = fork_choice.finalized_checkpoint();
         let unrealized_justified_cp = fork_choice.unrealized_justified_checkpoint();
@@ -1300,18 +1309,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             &store.spec,
         )?;
 
+        let confirmed_root = fcr.restart_resilient_confirmed_root;
         let confirmed_node = fork_choice
-            .get_block(&fcr.confirmed_root)
-            .ok_or(FastConfirmationError::NodeNotFound(fcr.confirmed_root))?;
+            .get_block(&confirmed_root)
+            .ok_or(FastConfirmationError::NodeNotFound(confirmed_root))?;
 
         // Resolve the confirmed block's execution payload hash for the EL `safe_block_hash`.
         // This MUST be the parent block hash for Gloas, per the spec.
-        let confirmed_block_hash = confirmed_node.checkpoint_payload_block_hash().ok_or(
-            FastConfirmationError::NodeHasNoBlockHash(fcr.confirmed_root),
-        )?;
+        let confirmed_block_hash = confirmed_node
+            .checkpoint_payload_block_hash()
+            .ok_or(FastConfirmationError::NodeHasNoBlockHash(confirmed_root))?;
 
         Ok(FcrOutcome {
-            confirmed_root: fcr.confirmed_root,
+            confirmed_root,
             confirmed_slot: confirmed_node.slot,
             confirmed_block_hash,
             old_confirmed_root,
@@ -1329,6 +1339,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     fn new_fast_confirmation_rule(
         finalized_checkpoint: Checkpoint,
         snapshot: &BeaconSnapshot<T::EthSpec>,
+        root_confirmed_before_restart: Option<Hash256>,
         store: &BeaconStore<T>,
         spec: &ChainSpec,
     ) -> Result<FastConfirmationRule, FastConfirmationError> {
@@ -1353,6 +1364,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             loaded_checkpoint_state
                 .as_ref()
                 .unwrap_or(&snapshot.beacon_state),
+            root_confirmed_before_restart,
             spec.confirmation_byzantine_threshold,
             spec.proposer_score_boost,
             spec,
@@ -1657,7 +1669,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(Error::ForkChoicePoisoned);
         }
 
-        let batch = vec![self.persist_fork_choice_in_batch()?];
+        let mut batch = vec![self.persist_fork_choice_in_batch()?];
+        // The announced root is written in the same batch as the fork choice that contains it.
+        if let Some(fcr_mutex) = self.canonical_head.fast_confirmation.as_ref() {
+            batch.push(persist_confirmed_root_in_batch(
+                fcr_mutex.lock().restart_resilient_confirmed_root,
+            ));
+        }
         self.store.hot_db.do_atomically(batch)?;
         Ok(())
     }
