@@ -1697,6 +1697,21 @@ where
             .map_err(Error::ProtoArrayError)
     }
 
+    /// Like `get_block_execution_status_assuming_full`, but reads the block's `PENDING` node: the
+    /// payload its branch settled on rather than the block's own payload.
+    pub fn get_block_execution_status_assuming_pending(
+        &self,
+        block_root: &Hash256,
+    ) -> Result<Option<ExecutionVerdict>, Error<T::Error>> {
+        if !self.is_finalized_checkpoint_or_descendant(*block_root) {
+            return Ok(None);
+        }
+        self.proto_array
+            .get_block_execution_status_assuming_pending(block_root)
+            .map(Some)
+            .map_err(Error::ProtoArrayError)
+    }
+
     /// Spec: `get_supported_node`. `None` if the attested block is unknown to fork choice or sits
     /// at or below finalization.
     pub fn supported_node(
@@ -1800,10 +1815,12 @@ where
         if let Some(verdict) = self.get_block_execution_status_assuming_full(block_root)? {
             Ok(verdict.is_optimistic_or_invalid())
         } else {
+            // The finalized block's own payload may be invalid while finalization stays valid;
+            // read its settled (PENDING) payload, not the full node.
             let finalized_root = self.finalized_checkpoint().root;
             Ok(self
                 .proto_array
-                .get_block_execution_status_assuming_full(&finalized_root)
+                .get_block_execution_status_assuming_pending(&finalized_root)
                 .map_err(Error::ProtoArrayError)?
                 .is_optimistic_or_invalid())
         }

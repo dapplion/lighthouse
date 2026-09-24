@@ -834,8 +834,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // Check to ensure that the finalized block hasn't been marked as invalid. If it has,
         // shut down Lighthouse.
         let finalized_proto_block = fork_choice_read_lock.get_finalized_block()?;
+        // Assume the finalized block's PENDING node: its own payload may be invalid while
+        // finalization stays valid, and a false positive here would wrongly shut the node down.
         let finalized_verdict = fork_choice_read_lock
-            .get_block_execution_status_assuming_full(&finalized_proto_block.root)?
+            .get_block_execution_status_assuming_pending(&finalized_proto_block.root)?
             .ok_or(Error::FinalizedBlockMissingFromForkChoice(
                 finalized_proto_block.root,
             ))?;
@@ -1699,7 +1701,7 @@ fn check_finalized_payload_validity<T: BeaconChainTypes>(
 ) -> Result<(), Error> {
     if finalized_verdict.is_invalid() {
         let block_hash = finalized_proto_block
-            .head_payload_block_hash(PayloadStatus::Full)
+            .head_payload_block_hash(PayloadStatus::Pending)
             .unwrap_or_else(ExecutionBlockHash::zero);
         crit!(
             ?block_hash,

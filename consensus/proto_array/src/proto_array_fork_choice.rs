@@ -1190,6 +1190,16 @@ impl ProtoArrayForkChoice {
             .node_execution_status(*block_root, PayloadStatus::Full)
     }
 
+    /// Like `get_block_execution_status_assuming_full`, but reads the block's `PENDING` node: the
+    /// payload the block's branch settled on rather than the block's own payload.
+    pub fn get_block_execution_status_assuming_pending(
+        &self,
+        block_root: &Hash256,
+    ) -> Result<ExecutionVerdict, Error> {
+        self.proto_array
+            .node_execution_status(*block_root, PayloadStatus::Pending)
+    }
+
     /// Spec's `get_supported_node`.
     pub fn supported_node(
         &self,
