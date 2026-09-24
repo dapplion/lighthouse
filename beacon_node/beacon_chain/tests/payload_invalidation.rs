@@ -1127,8 +1127,8 @@ async fn payload_preparation() {
 
 #[tokio::test]
 async fn invalid_parent() {
-    // Pre-Gloas only. In Gloas a rejected payload leaves the parent `Irrelevant`, not
-    // `Invalid`, and a child can build on the `EMPTY` node of the parent.
+    // Pre-Gloas only: in Gloas an invalid parent payload doesn't invalidate a child built on the
+    // parent's `EMPTY` node, so this assertion no longer holds.
     if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }

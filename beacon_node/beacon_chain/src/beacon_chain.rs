@@ -5602,11 +5602,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         }
 
         // This only works pre-Gloas, so a Gloas node reports no head hash here.
-        let parent_head_hash = info
-            .parent_node
-            .as_v17()
-            .ok()
-            .and_then(|node| node.execution_status.block_hash());
+        let parent_head_hash = info.parent_node.execution_status().block_hash();
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: info.parent_node.root(),
             head_hash: parent_head_hash,

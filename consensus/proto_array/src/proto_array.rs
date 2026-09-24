@@ -115,7 +115,7 @@ pub struct ProtoNode {
     #[superstruct(only(V17), partial_getter(copy))]
     #[ssz(with = "four_byte_option_usize")]
     pub best_descendant: Option<usize>,
-    /// Validity of the payload that this block reveals, and its execution block hash. The status
+    /// Validity of the payload that this block commits to, and its execution block hash. The status
     /// is `Irrelevant` until a Gloas envelope reveals the payload.
     ///
     /// This is the status of one payload, not of the block. A head on `(root, EMPTY)` ran the

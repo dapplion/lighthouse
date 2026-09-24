@@ -1332,4 +1332,136 @@ mod tests {
         }
         .run();
     }
+
+    /// A child built on the EMPTY side of a parent skips that parent's payload, so invalidating
+    /// the parent's payload must spare the child (Michael's review #4).
+    #[test]
+    fn empty_child_survives_invalid_parent_payload() {
+        let ops = vec![
+            // A extends genesis's payload; B builds on A's EMPTY side (parent-hash mismatch).
+            Operation::ProcessBlock {
+                slot: Slot::new(1),
+                root: get_root(1),
+                parent_root: get_root(0),
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                execution_payload_parent_hash: Some(get_hash(98)),
+                execution_payload_block_hash: Some(get_hash(1)),
+            },
+            Operation::ProcessBlock {
+                slot: Slot::new(2),
+                root: get_root(2),
+                parent_root: get_root(1),
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                execution_payload_parent_hash: Some(get_hash(99)),
+                execution_payload_block_hash: Some(get_hash(2)),
+            },
+            Operation::AssertParentPayloadStatus {
+                block_root: get_root(2),
+                expected_status: ParentPayloadStatus::Empty,
+            },
+            Operation::ProcessGloasAttestation {
+                validator_index: 0,
+                block_root: get_root(2),
+                attestation_slot: Slot::new(3),
+                payload_present: false,
+            },
+            Operation::FindHead {
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                justified_state_balances: vec![1],
+                expected_head: get_root(2),
+                current_slot: Slot::new(3),
+                expected_payload_status: None,
+            },
+            Operation::InvalidatePayload {
+                head_block_root: get_root(1),
+                latest_valid_ancestor_root: None,
+            },
+            Operation::FindHead {
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                justified_state_balances: vec![1],
+                expected_head: get_root(2),
+                current_slot: Slot::new(3),
+                expected_payload_status: None,
+            },
+        ];
+        ForkChoiceTestDefinition {
+            finalized_block_slot: Slot::new(0),
+            justified_checkpoint: get_checkpoint(0),
+            finalized_checkpoint: get_checkpoint(0),
+            operations: ops,
+            execution_payload_parent_hash: Some(get_hash(42)),
+            execution_payload_block_hash: Some(get_hash(0)),
+            spec: Some(gloas_spec()),
+        }
+        .run();
+    }
+
+    /// The first Gloas block after the fork (a V29 child of a V17 parent, PreGloas edge) has an
+    /// invalid payload: it is condemned and the head falls back to the V17 parent (review #10).
+    #[test]
+    fn first_gloas_payload_invalid() {
+        let ops = vec![
+            Operation::ProcessBlock {
+                slot: Slot::new(31),
+                root: get_root(1),
+                parent_root: get_root(0),
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                execution_payload_parent_hash: None,
+                execution_payload_block_hash: None,
+            },
+            Operation::ProcessBlock {
+                slot: Slot::new(32),
+                root: get_root(2),
+                parent_root: get_root(1),
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                execution_payload_parent_hash: Some(get_hash(1)),
+                execution_payload_block_hash: Some(get_hash(2)),
+            },
+            Operation::AssertParentPayloadStatus {
+                block_root: get_root(2),
+                expected_status: ParentPayloadStatus::PreGloas,
+            },
+            Operation::ProcessAttestation {
+                validator_index: 0,
+                block_root: get_root(2),
+                attestation_slot: Slot::new(32),
+            },
+            Operation::FindHead {
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                justified_state_balances: vec![1],
+                expected_head: get_root(2),
+                current_slot: Slot::new(32),
+                expected_payload_status: None,
+            },
+            Operation::InvalidatePayload {
+                head_block_root: get_root(2),
+                latest_valid_ancestor_root: None,
+            },
+            Operation::FindHead {
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                justified_state_balances: vec![1],
+                expected_head: get_root(1),
+                current_slot: Slot::new(32),
+                expected_payload_status: None,
+            },
+        ];
+        ForkChoiceTestDefinition {
+            finalized_block_slot: Slot::new(0),
+            justified_checkpoint: get_checkpoint(0),
+            finalized_checkpoint: get_checkpoint(0),
+            operations: ops,
+            execution_payload_parent_hash: None,
+            execution_payload_block_hash: None,
+            spec: Some(gloas_fork_boundary_spec()),
+        }
+        .run();
+    }
 }

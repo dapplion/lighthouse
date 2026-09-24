@@ -1567,12 +1567,10 @@ impl<E: EthSpec> Tester<E> {
                 "confirmed block {confirmed_root:?} not found in fork choice"
             ))
         })?;
-        // In Gloas the confirmation rule applies to the parent block, so the safe hash is the
-        // payload that the confirmed block builds on, not the payload it reveals. Pre-Gloas nodes
-        // have no `execution_payload_parent_hash` and keep the hash of their own payload.
         let actual = block
-            .execution_payload_parent_hash
-            .or_else(|| block.execution_status.block_hash())
+            .execution_status
+            .block_hash()
+            .or(block.execution_payload_parent_hash)
             .unwrap_or_else(ExecutionBlockHash::zero);
         check_equal("safe_execution_block_hash", actual, expected)
     }
