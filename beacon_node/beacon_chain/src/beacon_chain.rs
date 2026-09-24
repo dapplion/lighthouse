@@ -5601,12 +5601,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(Box::new(DoNotReOrg::NotProposing.into()));
         }
 
-        // This only works pre-Gloas, but we don't run this code for Gloas anyway.
-        let parent_head_hash = info
-            .parent_node
-            .execution_status()
-            .ok()
-            .and_then(|execution_status| execution_status.block_hash());
+        let parent_head_hash = self
+            .canonical_head
+            .fork_choice_read_lock()
+            .payload_block_hash(&info.parent_node.root());
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: info.parent_node.root(),
             head_hash: parent_head_hash,
