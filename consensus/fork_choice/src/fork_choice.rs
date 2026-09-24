@@ -1683,6 +1683,38 @@ where
             .map_err(Error::ProtoArrayError)
     }
 
+    /// Execution verdict of the node fork choice would elect for this block.
+    ///
+    /// `Ok(None)` means the block is not a descendant of the finalized checkpoint.
+    pub fn get_canonical_execution_status(
+        &self,
+        block_root: &Hash256,
+        spec: &ChainSpec,
+    ) -> Result<Option<ExecutionVerdict>, Error<T::Error>> {
+        if !self.is_finalized_checkpoint_or_descendant(*block_root) {
+            return Ok(None);
+        }
+        self.proto_array
+            .get_canonical_execution_status::<E>(
+                block_root,
+                self.fc_store.get_current_slot(),
+                self.fc_store.proposer_boost_root(),
+                spec,
+            )
+            .map(Some)
+            .map_err(Error::ProtoArrayError)
+    }
+
+    /// Hash of the payload this block ran. See `ProtoArrayForkChoice::payload_block_hash`.
+    pub fn payload_block_hash(&self, block_root: &Hash256) -> Option<ExecutionBlockHash> {
+        self.proto_array.payload_block_hash(block_root)
+    }
+
+    /// Hash of the payload this block's payload was built on.
+    pub fn payload_parent_hash(&self, block_root: &Hash256) -> Option<ExecutionBlockHash> {
+        self.proto_array.payload_parent_hash(block_root)
+    }
+
     /// Execution verdict of a block assuming its `FULL` node. For callers that hold only a root.
     pub fn get_block_execution_status_assuming_full(
         &self,

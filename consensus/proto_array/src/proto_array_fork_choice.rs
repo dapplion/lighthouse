@@ -1195,6 +1195,56 @@ impl ProtoArrayForkChoice {
             .node_execution_status(*block_root, PayloadStatus::Full)
     }
 
+    /// Execution verdict of the node fork choice would elect for this block.
+    pub fn get_canonical_execution_status<E: EthSpec>(
+        &self,
+        block_root: &Hash256,
+        current_slot: Slot,
+        proposer_boost_root: Hash256,
+        spec: &ChainSpec,
+    ) -> Result<ExecutionVerdict, Error> {
+        let node = self
+            .get_proto_node(block_root)
+            .ok_or(Error::NodeUnknown(*block_root))?;
+        let payload_status = match node {
+            // Pre-Gloas a block has one node, so both views resolve to the same verdict.
+            ProtoNode::V17(_) => PayloadStatus::Full,
+            ProtoNode::V29(_) => self.get_canonical_payload_status::<E>(
+                block_root,
+                current_slot,
+                proposer_boost_root,
+                spec,
+            )?,
+        };
+        self.proto_array
+            .node_execution_status(*block_root, payload_status)
+    }
+
+    /// Hash of the payload this block ran, whether embedded (pre-Gloas) or bid (post-Gloas).
+    pub fn payload_block_hash(&self, block_root: &Hash256) -> Option<ExecutionBlockHash> {
+        let node = self.get_proto_node(block_root)?;
+        match node {
+            ProtoNode::V17(v17) => v17.execution_status.block_hash(),
+            ProtoNode::V29(v29) => Some(v29.execution_payload_block_hash),
+        }
+    }
+
+    /// Hash of the payload this block's payload was built on.
+    pub fn payload_parent_hash(&self, block_root: &Hash256) -> Option<ExecutionBlockHash> {
+        let node = self.get_proto_node(block_root)?;
+        match node {
+            // Pre-Gloas the payload is embedded, so the parent payload is the parent block's.
+            ProtoNode::V17(_) => {
+                let parent = self.proto_array.get_parent(node)?;
+                match parent {
+                    ProtoNode::V17(parent) => parent.execution_status.block_hash(),
+                    ProtoNode::V29(parent) => Some(parent.execution_payload_block_hash),
+                }
+            }
+            ProtoNode::V29(v29) => Some(v29.execution_payload_parent_hash),
+        }
+    }
+
     /// Spec's `get_supported_node`.
     pub fn supported_node(
         &self,

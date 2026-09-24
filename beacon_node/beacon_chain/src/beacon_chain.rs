@@ -6589,7 +6589,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             )
             .await??;
 
-        if justified_block.execution_status.is_invalid() {
+        let justified_verdict = self
+            .canonical_head
+            .fork_choice_read_lock()
+            .get_canonical_execution_status(&justified_block.root, &self.spec)?;
+
+        if justified_verdict.is_some_and(|verdict| verdict.is_invalid()) {
             crit!(
                 msg = "ensure you are not connected to a malicious network. This error is not \
                 recoverable, please reach out to the lighthouse developers for assistance.",
@@ -6610,7 +6615,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // Return an error here to try and prevent progression by upstream functions.
             return Err(Error::JustifiedPayloadInvalid {
                 justified_root: justified_block.root,
-                execution_block_hash: justified_block.execution_status.block_hash(),
+                execution_block_hash: self
+                    .canonical_head
+                    .fork_choice_read_lock()
+                    .payload_block_hash(&justified_block.root),
             });
         }
 
