@@ -211,26 +211,13 @@ pub(crate) fn is_bid_compatible_with_head<T: BeaconChainTypes>(
             ))
         })?;
 
+    let head_bid_parent_block_hash = fork_choice_read.payload_parent_hash(&head_block.root);
+    let head_bid_block_hash = fork_choice_read.payload_block_hash(&head_block.root);
+
     // TODO(post-gloas) this can be removed after the gloas fork
     let head_is_pre_gloas = !spec
         .fork_name_at_slot::<T::EthSpec>(head_block.slot)
         .gloas_enabled();
-
-    let (head_bid_parent_block_hash, head_bid_block_hash) = if head_is_pre_gloas {
-        let parent_payload_hash = head_block
-            .parent_root
-            .and_then(|parent_root| fork_choice_read.get_block(&parent_root))
-            .and_then(|parent| parent.execution_status.block_hash());
-        (
-            parent_payload_hash,
-            head_block.execution_status.block_hash(),
-        )
-    } else {
-        (
-            head_block.execution_payload_parent_hash,
-            head_block.execution_payload_block_hash,
-        )
-    };
 
     let builds_on_parent_block = Some(bid.parent_block_root) == head_block.parent_root;
     let builds_on_parent_payload = Some(bid.parent_block_hash) == head_bid_parent_block_hash;
