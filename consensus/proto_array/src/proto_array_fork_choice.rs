@@ -984,7 +984,15 @@ impl ProtoArrayForkChoice {
             .any(|node| node.execution_status().is_invalid())
     }
 
+    /// For all nodes, regardless of their relationship to the finalized block, set their execution
+    /// status to be optimistic.
+    ///
+    /// In practice this means forgetting any `VALID` or `INVALID` statuses.
     pub fn set_all_blocks_to_optimistic<E: EthSpec>(&mut self) -> Result<(), String> {
+        // This function will touch all blocks, even those that do not descend from the finalized
+        // block. Since this function is expected to run at start-up during very rare
+        // circumstances we prefer simplicity over efficiency.
+
         // Clear every `VALID`/`INVALID` verdict. `Irrelevant` and `NotYetRevealed` have no verdict
         // to reset.
         for node in self.proto_array.nodes.iter_mut() {
@@ -1016,7 +1024,8 @@ impl ProtoArrayForkChoice {
             let Some(&node_index) = self.proto_array.indices.get(&vote.current_root) else {
                 continue;
             };
-            // A voting validator without a balance is ignored, consistent with `compute_deltas`.
+            // Any voting validator that does not have a balance should be ignored. This is
+            // consistent with `compute_deltas`.
             let Some(&balance) = self.balances.effective_balances.get(validator_index) else {
                 continue;
             };
