@@ -110,6 +110,8 @@ pub enum ExecutionStatus {
     Invalid(ExecutionBlockHash),
     /// An EL has not yet verified the execution payload.
     Optimistic(ExecutionBlockHash),
+    /// The payload for this block is revealed in a later envelope that has not yet arrived.
+    NotYetRevealed(ExecutionBlockHash),
     /// The block is either prior to the merge fork, or after the merge fork but before the terminal
     /// PoW block has been found.
     ///
@@ -216,7 +218,10 @@ impl ExecutionStatus {
             ExecutionStatus::Valid(hash)
             | ExecutionStatus::Invalid(hash)
             | ExecutionStatus::Optimistic(hash) => Some(*hash),
-            ExecutionStatus::Irrelevant(_) => None,
+            // The bid hash of a `NotYetRevealed` payload is known, but callers of this method
+            // treat `Some` as "a payload an EL was told about" (e.g. the latest valid ancestor
+            // lookup), which an unrevealed payload never was.
+            ExecutionStatus::Irrelevant(_) | ExecutionStatus::NotYetRevealed(_) => None,
         }
     }
 
@@ -274,6 +279,7 @@ impl fmt::Display for ExecutionStatus {
             ExecutionStatus::Invalid(_) => write!(f, "invalid"),
             ExecutionStatus::Optimistic(_) => write!(f, "optimistic"),
             ExecutionStatus::Irrelevant(_) => write!(f, "irrelevant"),
+            ExecutionStatus::NotYetRevealed(_) => write!(f, "not_yet_revealed"),
         }
     }
 }
@@ -954,10 +960,10 @@ impl ProtoArrayForkChoice {
     /// This will operate on *all* blocks, even those that do not descend from the finalized
     /// ancestor.
     pub fn contains_invalid_payloads(&mut self) -> bool {
-        self.proto_array.nodes.iter().any(|node| {
-            node.execution_status()
-                .is_ok_and(|status| status.is_invalid())
-        })
+        self.proto_array
+            .nodes
+            .iter()
+            .any(|node| node.execution_status().is_invalid())
     }
 
     /// For all nodes, regardless of their relationship to the finalized block, set their execution
@@ -980,7 +986,7 @@ impl ProtoArrayForkChoice {
                 .ok_or("unreachable index out of bounds in proto_array nodes")?;
 
             match node.execution_status() {
-                Ok(ExecutionStatus::Invalid(block_hash)) => {
+                ExecutionStatus::Invalid(block_hash) => {
                     if let ProtoNode::V17(node) = node {
                         node.execution_status = ExecutionStatus::Optimistic(block_hash);
                     }
@@ -1028,14 +1034,13 @@ impl ProtoArrayForkChoice {
                 }
                 // There are no balance changes required if the node was either valid or
                 // optimistic.
-                Ok(ExecutionStatus::Valid(block_hash))
-                | Ok(ExecutionStatus::Optimistic(block_hash)) => {
+                ExecutionStatus::Valid(block_hash) | ExecutionStatus::Optimistic(block_hash) => {
                     if let ProtoNode::V17(node) = node {
                         node.execution_status = ExecutionStatus::Optimistic(block_hash)
                     }
                 }
                 // An irrelevant node cannot become optimistic, this is a no-op.
-                Ok(ExecutionStatus::Irrelevant(_)) | Err(_) => (),
+                ExecutionStatus::Irrelevant(_) | ExecutionStatus::NotYetRevealed(_) => (),
             }
         }
 
@@ -1108,9 +1113,7 @@ impl ProtoArrayForkChoice {
             next_epoch_shuffling_id: block.next_epoch_shuffling_id().clone(),
             justified_checkpoint: *block.justified_checkpoint(),
             finalized_checkpoint: *block.finalized_checkpoint(),
-            execution_status: block
-                .execution_status()
-                .unwrap_or_else(|_| ExecutionStatus::irrelevant()),
+            execution_status: block.execution_status(),
             unrealized_justified_checkpoint: block.unrealized_justified_checkpoint(),
             unrealized_finalized_checkpoint: block.unrealized_finalized_checkpoint(),
             execution_payload_parent_hash: block.execution_payload_parent_hash().ok(),

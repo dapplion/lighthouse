@@ -117,7 +117,7 @@ pub struct ProtoNode {
     pub best_descendant: Option<usize>,
     /// Indicates if an execution node has marked this block as valid. Also contains the execution
     /// block hash. This is only used pre-Gloas.
-    #[superstruct(only(V17), partial_getter(copy))]
+    #[superstruct(getter(copy))]
     pub execution_status: ExecutionStatus,
     #[superstruct(getter(copy))]
     #[ssz(with = "four_byte_option_checkpoint")]
@@ -197,7 +197,9 @@ impl ProtoNode {
                     ExecutionVerdict::Valid
                 }
                 ExecutionStatus::Invalid(_) => ExecutionVerdict::Invalid,
-                ExecutionStatus::Optimistic(_) => ExecutionVerdict::Optimistic,
+                ExecutionStatus::Optimistic(_) | ExecutionStatus::NotYetRevealed(_) => {
+                    ExecutionVerdict::Optimistic
+                }
             },
             // TODO(gloas): V29 nodes don't track execution status yet; hardcode `Valid` until the
             // optimistic-payload work adds it.
@@ -636,6 +638,7 @@ impl ProtoArray {
                 full_payload_weight: 0,
                 execution_payload_block_hash,
                 execution_payload_parent_hash,
+                execution_status: ExecutionStatus::NotYetRevealed(execution_payload_block_hash),
                 payload_timeliness_votes: BitVector::default(),
                 payload_data_availability_votes: BitVector::default(),
                 ptc_participation: BitVector::default(),
@@ -853,7 +856,8 @@ impl ProtoArray {
                     ExecutionStatus::Irrelevant(_) => return Ok(()),
                     // The block has an unknown status, set it to valid since any ancestor of a valid
                     // payload can be considered valid.
-                    ExecutionStatus::Optimistic(payload_block_hash) => {
+                    ExecutionStatus::Optimistic(payload_block_hash)
+                    | ExecutionStatus::NotYetRevealed(payload_block_hash) => {
                         node.execution_status = ExecutionStatus::Valid(payload_block_hash);
                         if let Some(parent_index) = node.parent {
                             parent_index
@@ -933,9 +937,9 @@ impl ProtoArray {
 
             let node_execution_status = node.execution_status();
             match node_execution_status {
-                Ok(ExecutionStatus::Valid(hash))
-                | Ok(ExecutionStatus::Invalid(hash))
-                | Ok(ExecutionStatus::Optimistic(hash)) => {
+                ExecutionStatus::Valid(hash)
+                | ExecutionStatus::Invalid(hash)
+                | ExecutionStatus::Optimistic(hash) => {
                     // If we're no longer processing the `head_block_root` and the last valid
                     // ancestor is unknown, exit this loop and proceed to invalidate and
                     // descendants of `head_block_root`/`latest_valid_ancestor_root`.
@@ -951,8 +955,7 @@ impl ProtoArray {
                         break;
                     }
                 }
-                Ok(ExecutionStatus::Irrelevant(_)) => break,
-                Err(_) => break,
+                ExecutionStatus::Irrelevant(_) | ExecutionStatus::NotYetRevealed(_) => break,
             }
 
             // Only invalidate the head block if either:
@@ -966,13 +969,13 @@ impl ProtoArray {
                 match node.execution_status() {
                     // It's illegal for an execution client to declare that some previously-valid block
                     // is now invalid. This is a consensus failure on their behalf.
-                    Ok(ExecutionStatus::Valid(hash)) => {
+                    ExecutionStatus::Valid(hash) => {
                         return Err(Error::ValidExecutionStatusBecameInvalid {
                             block_root: node.root(),
                             payload_block_hash: hash,
                         });
                     }
-                    Ok(ExecutionStatus::Optimistic(hash)) => {
+                    ExecutionStatus::Optimistic(hash) => {
                         invalidated_indices.insert(index);
                         if let ProtoNode::V17(node) = node {
                             node.execution_status = ExecutionStatus::Invalid(hash);
@@ -980,11 +983,10 @@ impl ProtoArray {
                     }
                     // The block is already invalid, but keep going backwards to ensure all ancestors
                     // are updated.
-                    Ok(ExecutionStatus::Invalid(_)) => (),
+                    ExecutionStatus::Invalid(_) => (),
                     // This block is pre-merge, therefore it has no execution status. Nor do its
                     // ancestors.
-                    Ok(ExecutionStatus::Irrelevant(_)) => break,
-                    Err(_) => break,
+                    ExecutionStatus::Irrelevant(_) | ExecutionStatus::NotYetRevealed(_) => break,
                 }
             }
 
@@ -1026,23 +1028,23 @@ impl ProtoArray {
                 && invalidated_indices.contains(&parent_index)
             {
                 match node.execution_status() {
-                    Ok(ExecutionStatus::Valid(hash)) => {
+                    ExecutionStatus::Valid(hash) => {
                         return Err(Error::ValidExecutionStatusBecameInvalid {
                             block_root: node.root(),
                             payload_block_hash: hash,
                         });
                     }
-                    Ok(ExecutionStatus::Optimistic(hash)) | Ok(ExecutionStatus::Invalid(hash)) => {
+                    ExecutionStatus::Optimistic(hash) | ExecutionStatus::Invalid(hash) => {
                         if let ProtoNode::V17(node) = node {
                             node.execution_status = ExecutionStatus::Invalid(hash)
                         }
                     }
-                    Ok(ExecutionStatus::Irrelevant(_)) => {
+                    ExecutionStatus::Irrelevant(_) => {
                         return Err(Error::IrrelevantDescendant {
                             block_root: node.root(),
                         });
                     }
-                    Err(_) => (),
+                    ExecutionStatus::NotYetRevealed(_) => (),
                 }
 
                 invalidated_indices.insert(index);
@@ -1173,7 +1175,7 @@ impl ProtoArray {
                 Some(p) => *excluded.get(p).ok_or(Error::InvalidNodeIndex(p))?,
                 None => false,
             };
-            let self_invalid = node.execution_status().is_ok_and(|s| s.is_invalid());
+            let self_invalid = node.execution_status().is_invalid();
             excluded[i] = parent_excluded || self_invalid;
         }
 
@@ -2066,8 +2068,7 @@ impl ProtoArray {
             .rev()
             .find(|node| {
                 node.execution_status()
-                    .ok()
-                    .and_then(|execution_status| execution_status.block_hash())
+                    .block_hash()
                     .is_some_and(|node_block_hash| node_block_hash == *block_hash)
             })
             .map(|node| node.root())
