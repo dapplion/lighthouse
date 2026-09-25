@@ -97,6 +97,7 @@ use std::fmt::Debug;
 use std::fs;
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Instant;
 use store::{Error as DBError, KeyValueStore};
 use strum::{AsRefStr, IntoStaticStr};
 use task_executor::JoinHandle;
@@ -2206,6 +2207,137 @@ fn get_signature_verifier<'a, T: BeaconChainTypes>(
     };
 
     BlockSignatureVerifier::new(state, get_pubkey, decompressor, spec)
+}
+
+#[derive(Debug)]
+pub enum LookupProposerError {
+    SlotOutOfRange,
+    InvalidSignature,
+    ProposerMismatch,
+    OutsideLookahead,
+    Internal(Box<BeaconChainError>),
+}
+
+impl<T: BeaconChainTypes> BeaconChain<T> {
+    /// Check a lookup block against the head's cached proposer schedule before following its parent.
+    /// Normal block validation must still verify the proposer against the block's own branch.
+    ///
+    /// Caller must ensure that `block_root == block.canonical_root()`.
+    pub async fn verify_lookup_block_proposer(
+        self: &Arc<Self>,
+        block_root: Hash256,
+        block: Arc<SignedBeaconBlock<T::EthSpec>>,
+        max_slot_distance: u64,
+    ) -> Result<(), LookupProposerError> {
+        let chain = self.clone();
+        self.spawn_blocking_handle(
+            move || {
+                let start = Instant::now();
+                let result =
+                    chain.check_lookup_block_proposer(block_root, &block, max_slot_distance);
+                let outcome = match &result {
+                    Ok(()) => "valid",
+                    Err(LookupProposerError::SlotOutOfRange) => "slot_out_of_range",
+                    Err(LookupProposerError::InvalidSignature) => "invalid_signature",
+                    Err(LookupProposerError::ProposerMismatch) => "proposer_mismatch",
+                    Err(LookupProposerError::OutsideLookahead) => "outside_lookahead",
+                    Err(LookupProposerError::Internal(_)) => "internal_error",
+                };
+                metrics::observe_vec(
+                    &metrics::LOOKUP_BLOCK_PROPOSER_CHECK_TIMES,
+                    &[outcome],
+                    start.elapsed().as_secs_f64(),
+                );
+                result
+            },
+            "lookup_block_proposer_check",
+        )
+        .await
+        .map_err(|error| LookupProposerError::Internal(Box::new(error)))?
+    }
+
+    fn check_lookup_block_proposer(
+        &self,
+        block_root: Hash256,
+        block: &SignedBeaconBlock<T::EthSpec>,
+        max_slot_distance: u64,
+    ) -> Result<(), LookupProposerError> {
+        let head = self.canonical_head.cached_head();
+        let state = &head.snapshot.beacon_state;
+        let slot = block.slot();
+        let current_slot = self
+            .slot()
+            .map_err(|error| LookupProposerError::Internal(Box::new(error)))?;
+        let finalized_slot = head
+            .finalized_checkpoint()
+            .epoch
+            .start_slot(T::EthSpec::slots_per_epoch());
+        if slot <= finalized_slot
+            || slot < head.head_slot().saturating_sub(max_slot_distance)
+            || slot > head.head_slot().saturating_add(max_slot_distance)
+            || slot > current_slot
+        {
+            return Err(LookupProposerError::SlotOutOfRange);
+        }
+        let epoch = slot.epoch(T::EthSpec::slots_per_epoch());
+        let decision_root = state
+            .proposer_shuffling_decision_root_at_epoch(epoch, head.head_block_root(), &self.spec)
+            .map_err(|error| match error {
+                BeaconStateError::SlotOutOfBounds => LookupProposerError::OutsideLookahead,
+                error => LookupProposerError::Internal(Box::new(error.into())),
+            })?;
+        let proposer = self
+            .with_proposer_cache::<_, BeaconChainError>(
+                decision_root,
+                epoch,
+                |proposers| proposers.get_slot::<T::EthSpec>(slot),
+                || {
+                    // Older schedules may be cached; on a miss, only use the head's lookahead.
+                    if epoch < state.current_epoch()
+                        || epoch > state.next_epoch()?
+                        || state.proposer_lookahead().is_err()
+                    {
+                        return Err(BeaconStateError::SlotOutOfBounds.into());
+                    }
+                    Ok((head.head_state_root(), state.clone()))
+                },
+            )
+            .map_err(|error| match error {
+                BeaconChainError::BeaconStateError(BeaconStateError::SlotOutOfBounds) => {
+                    LookupProposerError::OutsideLookahead
+                }
+                error => LookupProposerError::Internal(Box::new(error)),
+            })?;
+        if block.message().proposer_index() != proposer.index as u64 {
+            return Err(LookupProposerError::ProposerMismatch);
+        }
+        let pubkey = self
+            .validator_pubkey_cache
+            .read()
+            .get(proposer.index)
+            .cloned()
+            .ok_or(LookupProposerError::OutsideLookahead)?;
+        drop(head);
+
+        let start = Instant::now();
+        let valid = block.verify_signature(
+            Some(block_root),
+            &pubkey,
+            &proposer.fork,
+            self.genesis_validators_root,
+            &self.spec,
+        );
+        metrics::observe_vec(
+            &metrics::LOOKUP_BLOCK_PROPOSER_SIGNATURE_TIMES,
+            &[if valid { "valid" } else { "invalid" }],
+            start.elapsed().as_secs_f64(),
+        );
+        if valid {
+            Ok(())
+        } else {
+            Err(LookupProposerError::InvalidSignature)
+        }
+    }
 }
 
 /// Verify that `header` was signed with a valid signature from its proposer.

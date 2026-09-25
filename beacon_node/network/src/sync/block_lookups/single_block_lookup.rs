@@ -535,6 +535,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             BlockProcessingResult::Imported(_fully_imported, _info) => {
                 self.block_request.state.on_processing_success()?;
             }
+            BlockProcessingResult::Ignored(reason) => {
+                return Err(LookupRequestError::Failed(reason.to_owned()));
+            }
             BlockProcessingResult::ParentUnknown {
                 parent_root,
                 parent_block_hash,
@@ -579,6 +582,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             BlockProcessingResult::Imported(_fully_imported, _info) => {
                 state.on_processing_success()?;
             }
+            BlockProcessingResult::Ignored(reason) => {
+                return Err(LookupRequestError::Failed(reason.to_owned()));
+            }
             BlockProcessingResult::ParentUnknown { .. } => {
                 return Err(LookupRequestError::BadState(
                     "data processing returned ParentUnknown".to_owned(),
@@ -609,6 +615,9 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         match result {
             BlockProcessingResult::Imported(_fully_imported, _info) => {
                 state.on_processing_success()?;
+            }
+            BlockProcessingResult::Ignored(reason) => {
+                return Err(LookupRequestError::Failed(reason.to_owned()));
             }
             BlockProcessingResult::ParentUnknown { .. } => {
                 return Err(LookupRequestError::BadState(

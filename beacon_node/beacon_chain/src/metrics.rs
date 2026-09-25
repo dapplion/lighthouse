@@ -77,6 +77,24 @@ pub static BLOCK_PROCESSING_TIMES: LazyLock<Result<Histogram>> = LazyLock::new(|
         "Full runtime of block processing",
     )
 });
+pub static LOOKUP_BLOCK_PROPOSER_CHECK_TIMES: LazyLock<Result<HistogramVec>> =
+    LazyLock::new(|| {
+        try_create_histogram_vec_with_buckets(
+            "beacon_lookup_block_proposer_check_seconds",
+            "Lookup block proposer check duration excluding task scheduling",
+            decimal_buckets(-6, -1),
+            &["outcome"],
+        )
+    });
+pub static LOOKUP_BLOCK_PROPOSER_SIGNATURE_TIMES: LazyLock<Result<HistogramVec>> =
+    LazyLock::new(|| {
+        try_create_histogram_vec_with_buckets(
+            "beacon_lookup_block_proposer_signature_seconds",
+            "Lookup block proposer signature verification duration using the validated block root",
+            decimal_buckets(-6, -1),
+            &["outcome"],
+        )
+    });
 pub static BLOCK_PROCESSING_BLOCK_ROOT: LazyLock<Result<Histogram>> = LazyLock::new(|| {
     try_create_histogram(
         "beacon_block_processing_block_root_seconds",

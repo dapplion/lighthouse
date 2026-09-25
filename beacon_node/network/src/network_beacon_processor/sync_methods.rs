@@ -1,7 +1,7 @@
 use crate::metrics::{self, register_process_result_metrics};
 use crate::network_beacon_processor::{FUTURE_SLOT_TOLERANCE, NetworkBeaconProcessor};
 use crate::sync::BatchProcessResult;
-use crate::sync::manager::CustodyBatchProcessResult;
+use crate::sync::manager::{CustodyBatchProcessResult, SLOT_IMPORT_TOLERANCE};
 use crate::sync::{
     ChainId, PeerGroup, SyncNetworkContext,
     manager::{BlockProcessType, SyncMessage},
@@ -16,7 +16,7 @@ use beacon_chain::historical_data_columns::HistoricalDataColumnError;
 use beacon_chain::payload_envelope_verification::EnvelopeSource;
 use beacon_chain::{
     AvailabilityProcessingStatus, BeaconChainTypes, BlockError, ChainSegmentResult,
-    HistoricalBlockError, NotifyExecutionLayer,
+    HistoricalBlockError, LookupProposerError, NotifyExecutionLayer,
 };
 use beacon_processor::{
     AsyncFn, BlockingFn, DuplicateCache,
@@ -145,6 +145,46 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             };
             return;
         };
+
+        if let Err(error) = self
+            .chain
+            .verify_lookup_block_proposer(
+                block_root,
+                block.block_cloned(),
+                SLOT_IMPORT_TOLERANCE as u64,
+            )
+            .await
+        {
+            debug!(%block_root, ?error, "Lookup block failed early proposer check");
+            let result = match error {
+                LookupProposerError::SlotOutOfRange => {
+                    BlockProcessingResult::Ignored("slot_out_of_range")
+                }
+                LookupProposerError::InvalidSignature => BlockProcessingResult::Error {
+                    penalty: Some((
+                        PeerAction::LowToleranceError,
+                        WhichPeerToPenalize::BlockPeer,
+                        "lookup_proposer_signature_invalid",
+                    )),
+                    reason: "lookup_proposer_signature_invalid".to_string(),
+                },
+                LookupProposerError::ProposerMismatch => {
+                    BlockProcessingResult::Ignored("proposer_mismatch")
+                }
+                LookupProposerError::OutsideLookahead => {
+                    BlockProcessingResult::Ignored("outside_lookahead")
+                }
+                LookupProposerError::Internal(error) => BlockProcessingResult::Error {
+                    penalty: None,
+                    reason: format!("{error:?}"),
+                },
+            };
+            self.send_sync_message(SyncMessage::BlockComponentProcessed {
+                process_type,
+                result,
+            });
+            return;
+        }
 
         let commitments_formatted = block.as_block().commitments_formatted();
 
@@ -965,6 +1005,8 @@ pub enum BlockProcessingResult {
     /// `fully_imported` is true if the lookup is complete; false if `MissingComponents` (the
     /// lookup must keep fetching). `info` is a stable label for logs / metrics.
     Imported(bool, &'static str),
+    /// Local admission policy declined the lookup. Do not retry or penalize its peers.
+    Ignored(&'static str),
     ParentUnknown {
         parent_root: Hash256,
         parent_block_hash: Option<ExecutionBlockHash>,
