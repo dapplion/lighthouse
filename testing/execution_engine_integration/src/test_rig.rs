@@ -13,7 +13,7 @@ use execution_layer::{
     LATEST_TAG, PayloadAttributes, PayloadParameters, PayloadStatus,
 };
 use fixed_bytes::FixedBytesExtended;
-use fork_choice::ForkchoiceUpdateParameters;
+use fork_choice::{ForkchoiceUpdateParameters, PayloadBlockHash};
 use reqwest::{Client, header::CONTENT_TYPE};
 use sensitive_url::SensitiveUrl;
 use serde_json::{Value, json};
@@ -297,9 +297,9 @@ impl<Engine: GenericExecutionEngine> TestRig<Engine> {
         let finalized_block_hash = ExecutionBlockHash::zero();
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root,
-            head_hash: Some(parent_hash),
-            justified_hash: Some(justified_block_hash),
-            finalized_hash: Some(finalized_block_hash),
+            head_hash: PayloadBlockHash::Hash(parent_hash),
+            justified_hash: PayloadBlockHash::Hash(justified_block_hash),
+            finalized_hash: PayloadBlockHash::Hash(finalized_block_hash),
         };
         let proposer_index = 0;
 

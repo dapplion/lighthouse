@@ -22,7 +22,7 @@ pub use engines::{EngineState, ForkchoiceState};
 use eth2::types::{BlobsBundle, FullPayloadContents};
 use eth2::types::{ForkVersionedResponse, builder::SignedBuilderBid};
 use fixed_bytes::UintExtended;
-use fork_choice::ForkchoiceUpdateParameters;
+use fork_choice::{ForkchoiceUpdateParameters, PayloadBlockHash};
 use logging::crit;
 pub use payload_status::PayloadStatus;
 use payload_status::process_payload_status;
@@ -1350,12 +1350,14 @@ impl<E: EthSpec> ExecutionLayer<E> {
                     );
                     let fork_choice_state = ForkchoiceState {
                         head_block_hash: parent_hash,
-                        safe_block_hash: forkchoice_update_params
-                            .justified_hash
-                            .unwrap_or_else(ExecutionBlockHash::zero),
-                        finalized_block_hash: forkchoice_update_params
-                            .finalized_hash
-                            .unwrap_or_else(ExecutionBlockHash::zero),
+                        safe_block_hash: match forkchoice_update_params.justified_hash {
+                            PayloadBlockHash::Hash(hash) => hash,
+                            PayloadBlockHash::PreMerge => ExecutionBlockHash::zero(),
+                        },
+                        finalized_block_hash: match forkchoice_update_params.finalized_hash {
+                            PayloadBlockHash::Hash(hash) => hash,
+                            PayloadBlockHash::PreMerge => ExecutionBlockHash::zero(),
+                        },
                     };
 
                     let response = engine

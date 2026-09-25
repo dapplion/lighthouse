@@ -4,6 +4,7 @@ use crate::compute_light_client_updates::{
 };
 use crate::config::{ClientGenesis, Config as ClientConfig};
 use crate::notifier::spawn_notifier;
+use beacon_chain::PayloadBlockHash;
 use beacon_chain::attestation_simulator::start_attestation_simulator_service;
 use beacon_chain::data_availability_checker::start_availability_cache_maintenance_service;
 use beacon_chain::graffiti_calculator::start_engine_version_cache_refresh_service;
@@ -765,10 +766,11 @@ where
                     let cached_head = beacon_chain.canonical_head.cached_head();
                     let head_payload_status = cached_head.head_payload_status();
                     let params = cached_head.forkchoice_update_parameters();
-                    if params
-                        .head_hash
-                        .is_some_and(|hash| hash != ExecutionBlockHash::zero())
-                    {
+                    let head_is_post_merge = match params.head_hash {
+                        PayloadBlockHash::Hash(hash) => hash != ExecutionBlockHash::zero(),
+                        PayloadBlockHash::PreMerge => false,
+                    };
+                    if head_is_post_merge {
                         // Spawn a new task to update the EE without waiting for it to complete.
                         let inner_chain = beacon_chain.clone();
                         runtime_context.executor.spawn(

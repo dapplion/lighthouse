@@ -350,9 +350,9 @@ pub enum AttestationFromBlock {
 pub struct ForkchoiceUpdateParameters {
     /// The most recent result of running `ForkChoice::get_head`.
     pub head_root: Hash256,
-    pub head_hash: Option<ExecutionBlockHash>,
-    pub justified_hash: Option<ExecutionBlockHash>,
-    pub finalized_hash: Option<ExecutionBlockHash>,
+    pub head_hash: PayloadBlockHash,
+    pub justified_hash: PayloadBlockHash,
+    pub finalized_hash: PayloadBlockHash,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -483,9 +483,9 @@ where
             spec_test_mode: false,
             // This will be updated during the next call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
-                head_hash: None,
-                justified_hash: None,
-                finalized_hash: None,
+                head_hash: PayloadBlockHash::PreMerge,
+                justified_hash: PayloadBlockHash::PreMerge,
+                finalized_hash: PayloadBlockHash::PreMerge,
                 // This will be updated during the next call to `Self::get_head`.
                 head_root: Hash256::zero(),
             },
@@ -601,26 +601,23 @@ where
         let (head_root, head_payload_status) = head_node.as_pair();
 
         // Cache some values for the next forkchoiceUpdate call to the execution layer.
-        let head_hash = self.get_block(&head_root).and_then(|b| {
-            match b.head_payload_block_hash(head_payload_status) {
-                PayloadBlockHash::Hash(hash) => Some(hash),
-                PayloadBlockHash::PreMerge => None,
-            }
-        });
+        let head_hash = self
+            .get_block(&head_root)
+            .map_or(PayloadBlockHash::PreMerge, |b| {
+                b.head_payload_block_hash(head_payload_status)
+            });
         let justified_root = self.justified_checkpoint().root;
         let finalized_root = self.finalized_checkpoint().root;
-        let justified_hash =
-            self.get_block(&justified_root)
-                .and_then(|b| match b.checkpoint_payload_block_hash() {
-                    PayloadBlockHash::Hash(hash) => Some(hash),
-                    PayloadBlockHash::PreMerge => None,
-                });
-        let finalized_hash =
-            self.get_block(&finalized_root)
-                .and_then(|b| match b.checkpoint_payload_block_hash() {
-                    PayloadBlockHash::Hash(hash) => Some(hash),
-                    PayloadBlockHash::PreMerge => None,
-                });
+        let justified_hash = self
+            .get_block(&justified_root)
+            .map_or(PayloadBlockHash::PreMerge, |b| {
+                b.checkpoint_payload_block_hash()
+            });
+        let finalized_hash = self
+            .get_block(&finalized_root)
+            .map_or(PayloadBlockHash::PreMerge, |b| {
+                b.checkpoint_payload_block_hash()
+            });
         self.forkchoice_update_parameters = ForkchoiceUpdateParameters {
             head_root,
             head_hash,
@@ -2001,9 +1998,9 @@ where
             spec_test_mode: false,
             // Will be updated in the following call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
-                head_hash: None,
-                justified_hash: None,
-                finalized_hash: None,
+                head_hash: PayloadBlockHash::PreMerge,
+                justified_hash: PayloadBlockHash::PreMerge,
+                finalized_hash: PayloadBlockHash::PreMerge,
                 // Will be updated in the following call to `Self::get_head`.
                 head_root: Hash256::zero(),
             },

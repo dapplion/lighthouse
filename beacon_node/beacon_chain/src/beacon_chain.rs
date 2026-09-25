@@ -581,10 +581,12 @@ impl<E: EthSpec> BeaconBlockResponseWrapper<E> {
 
 fn gloas_parent_payload_status(
     parent_bid_block_hash: Option<ExecutionBlockHash>,
-    head_hash: Option<ExecutionBlockHash>,
+    head_hash: PayloadBlockHash,
 ) -> Option<fork_choice::PayloadStatus> {
     parent_bid_block_hash.map(|block_hash| {
-        if block_hash != ExecutionBlockHash::default() && head_hash == Some(block_hash) {
+        if block_hash != ExecutionBlockHash::default()
+            && head_hash == PayloadBlockHash::Hash(block_hash)
+        {
             fork_choice::PayloadStatus::Full
         } else {
             fork_choice::PayloadStatus::Empty
@@ -5601,14 +5603,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Err(Box::new(DoNotReOrg::NotProposing.into()));
         }
 
-        // This only works pre-Gloas, but we don't run this code for Gloas anyway.
-        let parent_head_hash = match info.parent_node.block_hash() {
-            PayloadBlockHash::Hash(hash) => Some(hash),
-            PayloadBlockHash::PreMerge => None,
-        };
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: info.parent_node.root(),
-            head_hash: parent_head_hash,
+            // This only works pre-Gloas, but we don't run this code for Gloas anyway.
+            head_hash: info.parent_node.block_hash(),
             justified_hash: canonical_forkchoice_params.justified_hash,
             finalized_hash: canonical_forkchoice_params.finalized_hash,
         };
@@ -6839,7 +6837,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     parent_block_number: pre_payload_attributes
                         .parent_block_number
                         .map(|value| Quoted { value }),
-                    parent_block_hash: forkchoice_update_params.head_hash.unwrap_or_default(),
+                    parent_block_hash: match forkchoice_update_params.head_hash {
+                        PayloadBlockHash::Hash(hash) => hash,
+                        PayloadBlockHash::PreMerge => ExecutionBlockHash::zero(),
+                    },
                     payload_attributes: payload_attributes.into(),
                 },
                 metadata: Default::default(),
@@ -6931,22 +6932,22 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // `execution_engine_forkchoice_lock` apart from the one here.
         let forkchoice_lock = execution_layer.execution_engine_forkchoice_lock().await;
 
-        let (head_block_root, head_hash, justified_hash, finalized_hash) =
-            if let Some(head_hash) = params.head_hash {
-                (
-                    params.head_root,
-                    head_hash,
-                    params
-                        .justified_hash
-                        .unwrap_or_else(ExecutionBlockHash::zero),
-                    params
-                        .finalized_hash
-                        .unwrap_or_else(ExecutionBlockHash::zero),
-                )
-            } else {
-                // Proposing the block for the merge is no longer supported.
-                return Ok(());
-            };
+        let (head_block_root, head_hash, justified_hash, finalized_hash) = match params.head_hash {
+            PayloadBlockHash::Hash(head_hash) => (
+                params.head_root,
+                head_hash,
+                match params.justified_hash {
+                    PayloadBlockHash::Hash(hash) => hash,
+                    PayloadBlockHash::PreMerge => ExecutionBlockHash::zero(),
+                },
+                match params.finalized_hash {
+                    PayloadBlockHash::Hash(hash) => hash,
+                    PayloadBlockHash::PreMerge => ExecutionBlockHash::zero(),
+                },
+            ),
+            // Proposing the block for the merge is no longer supported.
+            PayloadBlockHash::PreMerge => return Ok(()),
+        };
 
         let forkchoice_updated_response = execution_layer
             .notify_forkchoice_updated(
@@ -7686,13 +7687,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// account the current slot when accounting for skips.
     pub fn is_healthy(&self, parent_root: &Hash256) -> Result<ChainHealth, Error> {
         let cached_head = self.canonical_head.cached_head();
-        if let Some(head_hash) = cached_head.forkchoice_update_parameters().head_hash {
-            if ExecutionBlockHash::zero() == head_hash {
-                return Ok(ChainHealth::PreMerge);
+        match cached_head.forkchoice_update_parameters().head_hash {
+            PayloadBlockHash::Hash(head_hash) => {
+                if ExecutionBlockHash::zero() == head_hash {
+                    return Ok(ChainHealth::PreMerge);
+                }
             }
-        } else {
-            return Ok(ChainHealth::PreMerge);
-        };
+            PayloadBlockHash::PreMerge => return Ok(ChainHealth::PreMerge),
+        }
 
         // Check that the parent is NOT optimistic.
         // worst case on wrong assumption: reports Optimistic for a healthy parent, never the reverse.
@@ -8026,9 +8028,15 @@ mod tests {
     #[test]
     fn zero_hash_gloas_bid_is_an_empty_parent() {
         assert_eq!(
-            gloas_parent_payload_status(Some(ExecutionBlockHash::default()), None),
+            gloas_parent_payload_status(
+                Some(ExecutionBlockHash::default()),
+                PayloadBlockHash::PreMerge
+            ),
             Some(fork_choice::PayloadStatus::Empty)
         );
-        assert_eq!(gloas_parent_payload_status(None, None), None);
+        assert_eq!(
+            gloas_parent_payload_status(None, PayloadBlockHash::PreMerge),
+            None
+        );
     }
 }
