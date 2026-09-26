@@ -6276,6 +6276,7 @@ dependencies = [
  "anyhow",
  "arbitrary",
  "async-channel 1.9.0",
+ "backfill_core",
  "beacon_chain",
  "beacon_processor",
  "bls",

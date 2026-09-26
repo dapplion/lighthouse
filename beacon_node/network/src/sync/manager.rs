@@ -534,7 +534,8 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     fn peer_disconnect(&mut self, peer_id: &PeerId) {
         // Remove peer from all data structures
         self.range_sync.peer_disconnect(&mut self.network, peer_id);
-        let _ = self.backfill_sync.peer_disconnected(peer_id);
+        // Backfill needs nothing here: a disconnect that kills its outstanding request comes
+        // back as an RPC error on that request, which is the event its core is waiting for.
         self.block_lookups.peer_disconnected(peer_id);
 
         // Inject a Disconnected error on all requests associated with the disconnected peer
@@ -659,19 +660,17 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     if matches!(sync_state, SyncState::Synced) {
                         // Determine if we need to start/resume/restart a backfill sync.
                         match self.backfill_sync.start(&mut self.network) {
-                            Ok(SyncStart::Syncing {
+                            SyncStart::Syncing {
                                 completed,
                                 remaining,
-                            }) => {
+                            } => {
                                 sync_state = SyncState::BackFillSyncing {
                                     completed,
                                     remaining,
                                 };
                             }
-                            Ok(SyncStart::NotSyncing) => {} // Ignore updating the state if the backfill sync state didn't start.
-                            Err(e) => {
-                                error!(error = ?e, "Backfill sync failed to start");
-                            }
+                            // Ignore updating the state if the backfill sync state didn't start.
+                            SyncStart::NotSyncing => {}
                         }
 
                         // If backfill is complete, check if we have a pending custody backfill to complete
@@ -939,19 +938,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                     );
                     self.update_sync_state();
                 }
-                ChainSegmentProcessId::BackSyncBatchId(epoch) => {
-                    match self.backfill_sync.on_batch_process_result(
-                        &mut self.network,
-                        epoch,
-                        &result,
-                    ) {
-                        Ok(ProcessResult::Successful) => {}
-                        Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
-                        Err(error) => {
-                            error!(error = ?error, "Backfill sync failed");
-                            // Update the global status
-                            self.update_sync_state();
-                        }
+                ChainSegmentProcessId::BackSyncBatchId(_epoch) => {
+                    match self
+                        .backfill_sync
+                        .on_batch_process_result(&mut self.network, &result)
+                    {
+                        ProcessResult::Successful => {}
+                        ProcessResult::SyncCompleted => self.update_sync_state(),
                     }
                 }
             },
@@ -1200,8 +1193,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         peer_id: PeerId,
         block: RpcEvent<Arc<SignedBeaconBlock<T::EthSpec>>>,
     ) {
-        // The response is not consumed yet: a follow-up will inject the blocks into lookup sync.
-        self.network.on_blocks_by_head_response(id, peer_id, block);
+        // Backfill is the only consumer of this route today, and it ignores a request id it
+        // did not issue. Lookup sync will need its own dispatch when it starts using it.
+        if let Some(resp) = self.network.on_blocks_by_head_response(id, peer_id, block) {
+            self.backfill_sync
+                .on_blocks_by_head_response(&mut self.network, id, peer_id, resp);
+            self.update_sync_state();
+        }
     }
 
     fn rpc_blob_received(
@@ -1385,6 +1383,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.block_lookups
                     .on_custody_download_response(id, response, &mut self.network);
             }
+            CustodyRequester::Backfill(epoch) => {
+                self.backfill_sync
+                    .on_custody_by_root_result(&mut self.network, epoch, response);
+                self.update_sync_state();
+            }
             CustodyRequester::RangeSync(components_by_range_id) => {
                 // Route custody-by-root results through the standard range components
                 // response path, reusing the same dispatch to range_sync / backfill.
@@ -1417,38 +1420,19 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         {
             match resp {
                 // On success the batch is attributed to the peer that provided its blocks.
-                Ok((peer_id, blocks)) => {
-                    match range_request_id.requester {
-                        RangeRequestId::RangeSync { chain_id, batch_id } => {
-                            self.range_sync.blocks_by_range_response(
-                                &mut self.network,
-                                peer_id,
-                                chain_id,
-                                batch_id,
-                                range_request_id.id,
-                                blocks,
-                            );
-                            self.update_sync_state();
-                        }
-                        RangeRequestId::BackfillSync { batch_id } => {
-                            match self.backfill_sync.on_block_response(
-                                &mut self.network,
-                                batch_id,
-                                &peer_id,
-                                range_request_id.id,
-                                blocks,
-                            ) {
-                                Ok(ProcessResult::SyncCompleted) => self.update_sync_state(),
-                                Ok(ProcessResult::Successful) => {}
-                                Err(_error) => {
-                                    // The backfill sync has failed, errors are reported
-                                    // within.
-                                    self.update_sync_state();
-                                }
-                            }
-                        }
+                Ok((peer_id, blocks)) => match range_request_id.requester {
+                    RangeRequestId::RangeSync { chain_id, batch_id } => {
+                        self.range_sync.blocks_by_range_response(
+                            &mut self.network,
+                            peer_id,
+                            chain_id,
+                            batch_id,
+                            range_request_id.id,
+                            blocks,
+                        );
+                        self.update_sync_state();
                     }
-                }
+                },
                 Err(e) => match range_request_id.requester {
                     RangeRequestId::RangeSync { chain_id, batch_id } => {
                         self.range_sync.inject_error(
@@ -1460,18 +1444,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                             e,
                         );
                         self.update_sync_state();
-                    }
-                    RangeRequestId::BackfillSync { batch_id } => {
-                        match self.backfill_sync.inject_error(
-                            &mut self.network,
-                            batch_id,
-                            &peer_id,
-                            range_request_id.id,
-                            e,
-                        ) {
-                            Ok(_) => {}
-                            Err(_) => self.update_sync_state(),
-                        }
                     }
                 },
             }

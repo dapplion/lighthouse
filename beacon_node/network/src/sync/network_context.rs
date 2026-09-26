@@ -1082,6 +1082,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let caller_req_id = match &requester {
             CustodyRequester::SingleLookup(id) => id.req_id,
             CustodyRequester::RangeSync(id) => id.id,
+            // Backfill routes a result by the epoch in the requester, not by request id.
+            CustodyRequester::Backfill(_) => 0,
         };
 
         let mut request = ActiveCustodyRequest::new(
@@ -1367,8 +1369,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         // Induces a compile time panic if this doesn't hold true.
         #[allow(clippy::assertions_on_constants)]
         const _: () = assert!(
-            super::backfill_sync::BACKFILL_EPOCHS_PER_BATCH == 1
-                && super::range_sync::EPOCHS_PER_BATCH == 1,
+            super::range_sync::EPOCHS_PER_BATCH == 1,
             "To deal with alignment with deneb boundaries, batches need to be of just one epoch"
         );
 

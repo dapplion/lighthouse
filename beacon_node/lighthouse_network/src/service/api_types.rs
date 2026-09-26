@@ -118,7 +118,6 @@ pub struct CustodyBackfillBatchId {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum RangeRequestId {
     RangeSync { chain_id: Id, batch_id: Epoch },
-    BackfillSync { batch_id: Epoch },
 }
 
 // TODO(das) refactor in a separate PR. We might be able to remove this and replace
@@ -145,6 +144,9 @@ pub struct CustodyId {
 pub enum CustodyRequester {
     SingleLookup(SingleLookupReqId),
     RangeSync(ComponentsByRangeRequestId),
+    /// Backfill fetches the custody columns of one epoch of a verified run at a time, since
+    /// the sampling columns are chosen per epoch.
+    Backfill(Epoch),
 }
 
 /// Application level requests sent to the network.
@@ -297,6 +299,7 @@ impl Display for CustodyRequester {
         match self {
             Self::SingleLookup(id) => write!(f, "{id}"),
             Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
+            Self::Backfill(epoch) => write!(f, "Backfill/{epoch}"),
         }
     }
 }
@@ -305,7 +308,6 @@ impl Display for RangeRequestId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RangeSync { chain_id, batch_id } => write!(f, "RangeSync/{batch_id}/{chain_id}"),
-            Self::BackfillSync { batch_id } => write!(f, "BackfillSync/{batch_id}"),
         }
     }
 }

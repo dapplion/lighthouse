@@ -492,6 +492,18 @@ pub static SYNCING_CHAIN_BATCH_AWAITING_PROCESSING: LazyLock<Result<Histogram>> 
             ]),
         )
     });
+pub static SYNC_BACKFILL_FRONTIER_SLOT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "sync_backfill_frontier_slot",
+        "Slot of the oldest block backfill has verified",
+    )
+});
+pub static SYNC_BACKFILL_ATTEMPTS_LEFT: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "sync_backfill_attempts_left",
+        "Backfill retries left before it parks and waits for a new peer",
+    )
+});
 pub static SYNCING_CHAIN_BATCHES: LazyLock<Result<IntGaugeVec>> = LazyLock::new(|| {
     try_create_int_gauge_vec(
         "sync_batches",

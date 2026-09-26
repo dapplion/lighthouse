@@ -144,6 +144,9 @@ pub enum Action {
 /// This is the entire verification story of a response: `expected` is a root the store has
 /// already committed to, so a run that starts there and links internally is proved by the
 /// response alone, against no external state and no other peer's work.
+// `&Vec` rather than `&[Header]` on purpose: the extraction models a `Vec` directly, and a
+// slice would change the model this file's proofs are written against for no gain here.
+#[allow(clippy::ptr_arg)]
 pub fn check_run(expected: Root, bound: Slot, headers: &Vec<Header>) -> Option<Header> {
     let mut linked = true;
     let mut want = expected;
