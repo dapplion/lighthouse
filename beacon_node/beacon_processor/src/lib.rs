@@ -761,11 +761,8 @@ impl<E: EthSpec> BeaconProcessor<E> {
                     Some(InboundEvent::WorkerFinished(completion)) => {
                         self.current_workers = self.current_workers.saturating_sub(1);
                         if let Some(peer_id) = completion.peer_id {
-                            match completion.work_type {
-                                WorkType::GossipBlock => {
-                                    work_queues.gossip_block_queue.worker_finished(&peer_id)
-                                }
-                                _ => {}
+                            if completion.work_type == WorkType::GossipBlock {
+                                work_queues.gossip_block_queue.worker_finished(&peer_id)
                             }
                         }
                         (None, Instant::now())
