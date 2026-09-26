@@ -17,69 +17,149 @@ set_option maxRecDepth 2048
 
 namespace backfill_core
 
+/-- [backfill_core::Root]
+    Source: 'common/backfill_core/src/lib.rs', lines 45:0-50:1
+    Visibility: public -/
+structure Root where
+  a : Std.U64
+  b : Std.U64
+  c : Std.U64
+  d : Std.U64
+
+/-- [backfill_core::{impl core::clone::Clone for backfill_core::Root}::clone]:
+    Source: 'common/backfill_core/src/lib.rs', lines 44:9-44:14
+    Visibility: public -/
+def Root.Insts.CoreCloneClone.clone (self : Root) : Result Root := do
+  ok self
+
+/-- Trait implementation: [backfill_core::{impl core::clone::Clone for backfill_core::Root}]
+    Source: 'common/backfill_core/src/lib.rs', lines 44:9-44:14 -/
+@[reducible]
+def Root.Insts.CoreCloneClone : core.clone.Clone Root := {
+  clone := Root.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [backfill_core::{impl core::marker::Copy for backfill_core::Root}]
+    Source: 'common/backfill_core/src/lib.rs', lines 44:16-44:20 -/
+@[reducible]
+def Root.Insts.CoreMarkerCopy : core.marker.Copy Root := {
+  cloneInst := Root.Insts.CoreCloneClone
+}
+
+/-- Trait implementation: [backfill_core::{impl core::marker::StructuralPartialEq for backfill_core::Root}]
+    Source: 'common/backfill_core/src/lib.rs', lines 44:22-44:31 -/
+@[reducible]
+def Root.Insts.CoreMarkerStructuralPartialEq : core.marker.StructuralPartialEq
+  Root := {
+}
+
+/-- [backfill_core::{impl core::cmp::PartialEq<backfill_core::Root> for backfill_core::Root}::eq]:
+    Source: 'common/backfill_core/src/lib.rs', lines 44:22-44:31
+    Visibility: public -/
+def Root.Insts.CoreCmpPartialEqRoot.eq
+  (self : Root) (other : Root) : Result Bool := do
+  if self.a = other.a
+  then
+    if self.b = other.b
+    then if self.c = other.c
+         then ok (self.d = other.d)
+         else ok false
+    else ok false
+  else ok false
+
+/-- Trait implementation: [backfill_core::{impl core::cmp::PartialEq<backfill_core::Root> for backfill_core::Root}]
+    Source: 'common/backfill_core/src/lib.rs', lines 44:22-44:31 -/
+@[reducible]
+def Root.Insts.CoreCmpPartialEqRoot : core.cmp.PartialEq Root Root := {
+  eq := Root.Insts.CoreCmpPartialEqRoot.eq
+}
+
+/-- [backfill_core::{impl core::cmp::Eq for backfill_core::Root}::assert_fields_are_eq]:
+    Source: 'common/backfill_core/src/lib.rs', lines 44:33-44:35
+    Visibility: public -/
+def Root.Insts.CoreCmpEq.assert_fields_are_eq (self : Root) : Result Unit := do
+  ok ()
+
+/-- Trait implementation: [backfill_core::{impl core::cmp::Eq for backfill_core::Root}]
+    Source: 'common/backfill_core/src/lib.rs', lines 44:33-44:35 -/
+@[reducible]
+def Root.Insts.CoreCmpEq : core.cmp.Eq Root := {
+  partialEqInst := Root.Insts.CoreCmpPartialEqRoot
+  assert_fields_are_eq := Root.Insts.CoreCmpEq.assert_fields_are_eq
+}
+
+/-- [backfill_core::root_eq]:
+    Source: 'common/backfill_core/src/lib.rs', lines 53:0-55:1
+    Visibility: public -/
+def root_eq (x : Root) (y : Root) : Result Bool := do
+  ok (((x.a = y.a) && (x.b = y.b)) && ((x.c = y.c) && (x.d = y.d)))
+
 /-- [backfill_core::Header]
-    Source: 'common/backfill_core/src/lib.rs', lines 43:0-47:1
+    Source: 'common/backfill_core/src/lib.rs', lines 58:0-62:1
     Visibility: public -/
 structure Header where
-  root : Std.U64
-  parent_root : Std.U64
+  root : Root
+  parent_root : Root
   slot : Std.U64
 
 /-- [backfill_core::{impl core::clone::Clone for backfill_core::Header}::clone]:
-    Source: 'common/backfill_core/src/lib.rs', lines 42:9-42:14
+    Source: 'common/backfill_core/src/lib.rs', lines 57:9-57:14
     Visibility: public -/
 def Header.Insts.CoreCloneClone.clone (self : Header) : Result Header := do
   ok self
 
 /-- Trait implementation: [backfill_core::{impl core::clone::Clone for backfill_core::Header}]
-    Source: 'common/backfill_core/src/lib.rs', lines 42:9-42:14 -/
+    Source: 'common/backfill_core/src/lib.rs', lines 57:9-57:14 -/
 @[reducible]
 def Header.Insts.CoreCloneClone : core.clone.Clone Header := {
   clone := Header.Insts.CoreCloneClone.clone
 }
 
 /-- Trait implementation: [backfill_core::{impl core::marker::Copy for backfill_core::Header}]
-    Source: 'common/backfill_core/src/lib.rs', lines 42:16-42:20 -/
+    Source: 'common/backfill_core/src/lib.rs', lines 57:16-57:20 -/
 @[reducible]
 def Header.Insts.CoreMarkerCopy : core.marker.Copy Header := {
   cloneInst := Header.Insts.CoreCloneClone
 }
 
 /-- Trait implementation: [backfill_core::{impl core::marker::StructuralPartialEq for backfill_core::Header}]
-    Source: 'common/backfill_core/src/lib.rs', lines 42:22-42:31 -/
+    Source: 'common/backfill_core/src/lib.rs', lines 57:22-57:31 -/
 @[reducible]
 def Header.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq Header := {
 }
 
 /-- [backfill_core::{impl core::cmp::PartialEq<backfill_core::Header> for backfill_core::Header}::eq]:
-    Source: 'common/backfill_core/src/lib.rs', lines 42:22-42:31
+    Source: 'common/backfill_core/src/lib.rs', lines 57:22-57:31
     Visibility: public -/
 def Header.Insts.CoreCmpPartialEqHeader.eq
   (self : Header) (other : Header) : Result Bool := do
-  if self.root = other.root
+  let b ← Root.Insts.CoreCmpPartialEqRoot.eq self.root other.root
+  if b
   then
-    if self.parent_root = other.parent_root
+    let b1 ←
+      Root.Insts.CoreCmpPartialEqRoot.eq self.parent_root other.parent_root
+    if b1
     then ok (self.slot = other.slot)
     else ok false
   else ok false
 
 /-- Trait implementation: [backfill_core::{impl core::cmp::PartialEq<backfill_core::Header> for backfill_core::Header}]
-    Source: 'common/backfill_core/src/lib.rs', lines 42:22-42:31 -/
+    Source: 'common/backfill_core/src/lib.rs', lines 57:22-57:31 -/
 @[reducible]
 def Header.Insts.CoreCmpPartialEqHeader : core.cmp.PartialEq Header Header := {
   eq := Header.Insts.CoreCmpPartialEqHeader.eq
 }
 
 /-- [backfill_core::{impl core::cmp::Eq for backfill_core::Header}::assert_fields_are_eq]:
-    Source: 'common/backfill_core/src/lib.rs', lines 42:33-42:35
+    Source: 'common/backfill_core/src/lib.rs', lines 57:33-57:35
     Visibility: public -/
 def Header.Insts.CoreCmpEq.assert_fields_are_eq
   (self : Header) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [backfill_core::{impl core::cmp::Eq for backfill_core::Header}]
-    Source: 'common/backfill_core/src/lib.rs', lines 42:33-42:35 -/
+    Source: 'common/backfill_core/src/lib.rs', lines 57:33-57:35 -/
 @[reducible]
 def Header.Insts.CoreCmpEq : core.cmp.Eq Header := {
   partialEqInst := Header.Insts.CoreCmpPartialEqHeader
@@ -87,34 +167,34 @@ def Header.Insts.CoreCmpEq : core.cmp.Eq Header := {
 }
 
 /-- [backfill_core::Config]
-    Source: 'common/backfill_core/src/lib.rs', lines 50:0-56:1
+    Source: 'common/backfill_core/src/lib.rs', lines 65:0-71:1
     Visibility: public -/
 structure Config where
   run_len : Std.U64
   max_attempts : Std.U8
 
 /-- [backfill_core::{impl core::clone::Clone for backfill_core::Config}::clone]:
-    Source: 'common/backfill_core/src/lib.rs', lines 49:9-49:14
+    Source: 'common/backfill_core/src/lib.rs', lines 64:9-64:14
     Visibility: public -/
 def Config.Insts.CoreCloneClone.clone (self : Config) : Result Config := do
   ok self
 
 /-- Trait implementation: [backfill_core::{impl core::clone::Clone for backfill_core::Config}]
-    Source: 'common/backfill_core/src/lib.rs', lines 49:9-49:14 -/
+    Source: 'common/backfill_core/src/lib.rs', lines 64:9-64:14 -/
 @[reducible]
 def Config.Insts.CoreCloneClone : core.clone.Clone Config := {
   clone := Config.Insts.CoreCloneClone.clone
 }
 
 /-- Trait implementation: [backfill_core::{impl core::marker::Copy for backfill_core::Config}]
-    Source: 'common/backfill_core/src/lib.rs', lines 49:16-49:20 -/
+    Source: 'common/backfill_core/src/lib.rs', lines 64:16-64:20 -/
 @[reducible]
 def Config.Insts.CoreMarkerCopy : core.marker.Copy Config := {
   cloneInst := Config.Insts.CoreCloneClone
 }
 
 /-- [backfill_core::Wait]
-    Source: 'common/backfill_core/src/lib.rs', lines 62:0-72:1
+    Source: 'common/backfill_core/src/lib.rs', lines 77:0-87:1
     Visibility: public -/
 @[discriminant isize]
 inductive Wait where
@@ -124,27 +204,27 @@ inductive Wait where
 | Parked : Wait
 
 /-- [backfill_core::{impl core::clone::Clone for backfill_core::Wait}::clone]:
-    Source: 'common/backfill_core/src/lib.rs', lines 61:9-61:14
+    Source: 'common/backfill_core/src/lib.rs', lines 76:9-76:14
     Visibility: public -/
 def Wait.Insts.CoreCloneClone.clone (self : Wait) : Result Wait := do
   ok self
 
 /-- Trait implementation: [backfill_core::{impl core::clone::Clone for backfill_core::Wait}]
-    Source: 'common/backfill_core/src/lib.rs', lines 61:9-61:14 -/
+    Source: 'common/backfill_core/src/lib.rs', lines 76:9-76:14 -/
 @[reducible]
 def Wait.Insts.CoreCloneClone : core.clone.Clone Wait := {
   clone := Wait.Insts.CoreCloneClone.clone
 }
 
 /-- Trait implementation: [backfill_core::{impl core::marker::Copy for backfill_core::Wait}]
-    Source: 'common/backfill_core/src/lib.rs', lines 61:16-61:20 -/
+    Source: 'common/backfill_core/src/lib.rs', lines 76:16-76:20 -/
 @[reducible]
 def Wait.Insts.CoreMarkerCopy : core.marker.Copy Wait := {
   cloneInst := Wait.Insts.CoreCloneClone
 }
 
 /-- [backfill_core::Backfill]
-    Source: 'common/backfill_core/src/lib.rs', lines 74:0-85:1
+    Source: 'common/backfill_core/src/lib.rs', lines 89:0-100:1
     Visibility: public -/
 structure Backfill where
   cfg : Config
@@ -156,7 +236,7 @@ structure Backfill where
   done : Bool
 
 /-- [backfill_core::Event]
-    Source: 'common/backfill_core/src/lib.rs', lines 90:0-97:1
+    Source: 'common/backfill_core/src/lib.rs', lines 105:0-112:1
     Visibility: public -/
 @[discriminant isize]
 inductive Event where
@@ -168,21 +248,21 @@ inductive Event where
 | PeerJoined : Event
 
 /-- [backfill_core::Action]
-    Source: 'common/backfill_core/src/lib.rs', lines 99:0-112:1
+    Source: 'common/backfill_core/src/lib.rs', lines 114:0-127:1
     Visibility: public -/
 @[discriminant isize]
 inductive Action where
-| Request : Std.U64 → Std.U64 → Option Std.U32 → Action
+| Request : Root → Std.U64 → Option Std.U32 → Action
 | Store : alloc.vec.Vec Header → Action
 | Penalize : Std.U32 → Action
 | Complete : Action
 
 /-- [backfill_core::check_run]: loop 0:
-    Source: 'common/backfill_core/src/lib.rs', lines 126:4-135:5
+    Source: 'common/backfill_core/src/lib.rs', lines 141:4-150:5
     Visibility: public -/
 @[rust_loop]
 def check_run_loop
-  (headers : alloc.vec.Vec Header) (linked : Bool) (want : Std.U64)
+  (headers : alloc.vec.Vec Header) (linked : Bool) (want : Root)
   (limit : Std.U64) (last : Option Header) (i : Std.Usize) :
   Result (Bool × (Option Header))
   := do
@@ -192,17 +272,18 @@ def check_run_loop
     let header ←
       alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice Header)
         headers i
+    let b ← root_eq header.root want
     let i2 ← i + 1#usize
-    check_run_loop headers ((linked && (header.root = want)) && (header.slot <
-      limit)) header.parent_root header.slot (some header) i2
+    check_run_loop headers ((linked && b) && (header.slot < limit))
+      header.parent_root header.slot (some header) i2
   else ok (linked, last)
 partial_fixpoint
 
 /-- [backfill_core::check_run]:
-    Source: 'common/backfill_core/src/lib.rs', lines 120:0-137:1
+    Source: 'common/backfill_core/src/lib.rs', lines 135:0-152:1
     Visibility: public -/
 def check_run
-  (expected : Std.U64) (bound : Std.U64) (headers : alloc.vec.Vec Header) :
+  (expected : Root) (bound : Std.U64) (headers : alloc.vec.Vec Header) :
   Result (Option Header)
   := do
   let (linked, last) ←
@@ -212,7 +293,7 @@ def check_run
   else ok none
 
 /-- [backfill_core::retry]:
-    Source: 'common/backfill_core/src/lib.rs', lines 142:0-150:1
+    Source: 'common/backfill_core/src/lib.rs', lines 157:0-165:1
     Visibility: public -/
 def retry (bf : Backfill) : Result Backfill := do
   if bf.attempts > 1#u8
@@ -222,7 +303,7 @@ def retry (bf : Backfill) : Result Backfill := do
   else ok { bf with attempts := 0#u8, wait := Wait.Parked }
 
 /-- [backfill_core::on_tick]:
-    Source: 'common/backfill_core/src/lib.rs', lines 152:0-171:1
+    Source: 'common/backfill_core/src/lib.rs', lines 167:0-186:1
     Visibility: public -/
 def on_tick (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
   match bf.wait with
@@ -239,7 +320,7 @@ def on_tick (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
 /-- [backfill_core::on_run]:
-    Source: 'common/backfill_core/src/lib.rs', lines 173:0-198:1
+    Source: 'common/backfill_core/src/lib.rs', lines 188:0-213:1
     Visibility: public -/
 def on_run
   (bf : Backfill) (peer : Std.U32) (headers : alloc.vec.Vec Header) :
@@ -263,7 +344,7 @@ def on_run
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
 /-- [backfill_core::on_imported]:
-    Source: 'common/backfill_core/src/lib.rs', lines 203:0-221:1
+    Source: 'common/backfill_core/src/lib.rs', lines 218:0-236:1
     Visibility: public -/
 def on_imported
   (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
@@ -297,7 +378,7 @@ def on_imported
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
 /-- [backfill_core::on_rejected]:
-    Source: 'common/backfill_core/src/lib.rs', lines 226:0-239:1
+    Source: 'common/backfill_core/src/lib.rs', lines 241:0-254:1
     Visibility: public -/
 def on_rejected
   (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
@@ -312,7 +393,7 @@ def on_rejected
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
 /-- [backfill_core::on_fail]:
-    Source: 'common/backfill_core/src/lib.rs', lines 241:0-253:1
+    Source: 'common/backfill_core/src/lib.rs', lines 256:0-268:1
     Visibility: public -/
 def on_fail
   (bf : Backfill) (peer : Std.U32) :
@@ -327,7 +408,7 @@ def on_fail
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
 /-- [backfill_core::on_peer_joined]:
-    Source: 'common/backfill_core/src/lib.rs', lines 255:0-268:1
+    Source: 'common/backfill_core/src/lib.rs', lines 270:0-283:1
     Visibility: public -/
 def on_peer_joined
   (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
@@ -344,7 +425,7 @@ def on_peer_joined
       })
 
 /-- [backfill_core::step]:
-    Source: 'common/backfill_core/src/lib.rs', lines 270:0-279:1
+    Source: 'common/backfill_core/src/lib.rs', lines 285:0-294:1
     Visibility: public -/
 def step
   (bf : Backfill) (ev : Event) :
@@ -359,7 +440,7 @@ def step
   | Event.PeerJoined => on_peer_joined bf
 
 /-- [backfill_core::from_anchor]:
-    Source: 'common/backfill_core/src/lib.rs', lines 284:0-294:1
+    Source: 'common/backfill_core/src/lib.rs', lines 299:0-309:1
     Visibility: public -/
 def from_anchor
   (cfg : Config) (oldest : Header) (target_slot : Std.U64) :

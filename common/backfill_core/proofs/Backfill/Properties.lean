@@ -9,9 +9,21 @@ namespace backfill_core
 
 /-- What a response must be to be accepted: newest first, starting at the root we asked for,
     each header the parent of the one before it, slots strictly decreasing below `bound`. -/
-def Chained (expected bound : Std.U64) : List Header → Prop
+def Chained (expected : Root) (bound : Std.U64) : List Header → Prop
   | [] => True
   | h :: t => h.root = expected ∧ h.slot.val < bound.val ∧ Chained h.parent_root h.slot t
+
+/-- The extracted `Root` is a plain record of four words, so equality on it is decidable;
+    Aeneas does not derive the instance. -/
+instance : DecidableEq Root := fun x y =>
+  decidable_of_iff (x.a = y.a ∧ x.b = y.b ∧ x.c = y.c ∧ x.d = y.d) (by cases x; cases y; simp)
+
+/-- Root equality is all 256 bits, so the checker's test is exactly equality of roots. -/
+@[simp]
+theorem root_eq_spec (x y : Root) : root_eq x y = ok (decide (x = y)) := by
+  unfold root_eq
+  cases x; cases y
+  simp [Bool.and_assoc]
 
 /-- The loop's `last` accumulator holds the last header it has seen, so prepending a header
     to the remaining run is absorbed by it. -/
@@ -26,7 +38,7 @@ theorem getLast?_or_cons (x : Header) (l : List Header) (d : Option Header) :
     | some v => simp
 
 theorem check_run_loop_spec (headers : alloc.vec.Vec Header) (linked : Bool)
-    (want limit : Std.U64) (last : Option Header) (i : Std.Usize)
+    (want : Root) (limit : Std.U64) (last : Option Header) (i : Std.Usize)
     (_hi : i.val ≤ headers.length) :
     check_run_loop headers linked want limit last i ⦃ lk lst =>
       (lk = true → linked = true ∧ Chained want limit (headers.val.drop i.val)) ∧
@@ -59,7 +71,7 @@ termination_by headers.length - i.val
 decreasing_by scalar_decr_tac
 
 /-- Slots strictly decrease along a run, so its oldest header is below the bound. -/
-theorem chained_getLast_slot (expected bound : Std.U64) (l : List Header) (oldest : Header)
+theorem chained_getLast_slot (expected : Root) (bound : Std.U64) (l : List Header) (oldest : Header)
     (hc : Chained expected bound l) (hl : l.getLast? = some oldest) :
     oldest.slot.val < bound.val := by
   induction l generalizing expected bound with
@@ -74,7 +86,7 @@ theorem chained_getLast_slot (expected bound : Std.U64) (l : List Header) (oldes
 
 /-- **S**, at the level of the checker: what `check_run` accepts is a hash-linked descent
     from the root that was asked for, and what it returns is that run's oldest header. -/
-theorem check_run_spec (expected bound : Std.U64) (headers : alloc.vec.Vec Header) :
+theorem check_run_spec (expected : Root) (bound : Std.U64) (headers : alloc.vec.Vec Header) :
     check_run expected bound headers ⦃ r => ∀ oldest, r = some oldest →
       Chained expected bound headers.val ∧ headers.val.getLast? = some oldest ⦄ := by
   unfold check_run

@@ -35,9 +35,24 @@
 //! clock, no maps. `Hash256` is a `u64` because only equality is ever used on roots, and
 //! `PeerId` is an index into a table the adapter owns, so the core cannot do peer policy.
 
-pub type Root = u64;
 pub type Slot = u64;
 pub type PeerIdx = u32;
+
+/// A `Hash256` as four words. Only equality is ever used on a root, but it has to be
+/// equality of all 256 bits: a 64-bit stand-in would be a collision away from accepting a
+/// fabricated ancestor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Root {
+    pub a: u64,
+    pub b: u64,
+    pub c: u64,
+    pub d: u64,
+}
+
+/// Non-short-circuiting `&` again, so this is one expression rather than a branch tree.
+pub fn root_eq(x: Root, y: Root) -> bool {
+    ((x.a == y.a) & (x.b == y.b)) & ((x.c == y.c) & (x.d == y.d))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -125,9 +140,9 @@ pub fn check_run(expected: Root, bound: Slot, headers: &Vec<Header>) -> Option<H
     let mut i: usize = 0;
     while i < headers.len() {
         let header = headers[i];
-        // Non-short-circuiting `&`, so the body is one branch-free expression rather than a
-        // pair of conditional assignments: that is what the run has to satisfy, said once.
-        linked = linked & (header.root == want) & (header.slot < limit);
+        // Branch-free, so the body is one expression rather than a pair of conditional
+        // assignments: that is what the run has to satisfy, said once.
+        linked = linked & root_eq(header.root, want) & (header.slot < limit);
         want = header.parent_root;
         limit = header.slot;
         last = Some(header);
