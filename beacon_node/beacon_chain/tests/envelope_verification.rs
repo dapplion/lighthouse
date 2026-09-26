@@ -708,7 +708,7 @@ async fn syncing_execution_layer_imports_payload_optimistically() {
     let block_root = import_block_and_envelope(&harness, Slot::new(2)).await;
 
     assert!(
-        execution_status(&harness, block_root).is_strictly_optimistic(),
+        is_strictly_optimistic(execution_status(&harness, block_root)),
         "a payload the execution layer could not validate must be held as optimistic",
     );
 }
@@ -734,23 +734,47 @@ async fn a_later_valid_payload_promotes_its_optimistic_ancestors() {
     let first_root = import_block_and_envelope(&harness, Slot::new(2)).await;
     let second_root = import_block_and_envelope(&harness, Slot::new(3)).await;
 
-    assert!(execution_status(&harness, first_root).is_strictly_optimistic());
-    assert!(execution_status(&harness, second_root).is_strictly_optimistic());
+    let first_status = execution_status(&harness, first_root);
+    let second_status = execution_status(&harness, second_root);
+    assert!(is_strictly_optimistic(first_status));
+    assert!(is_strictly_optimistic(second_status));
 
     // The execution layer catches up and validates the next payload.
     mock.server.all_payloads_valid();
     let third_root = import_block_and_envelope(&harness, Slot::new(4)).await;
 
     assert!(
-        execution_status(&harness, third_root).is_valid_and_post_bellatrix(),
+        is_valid_and_post_bellatrix(execution_status(&harness, third_root)),
         "the payload the execution layer validated must be valid",
     );
     assert!(
-        execution_status(&harness, second_root).is_valid_and_post_bellatrix(),
+        is_valid_and_post_bellatrix(execution_status(&harness, second_root)),
         "its parent's payload is vouched for by the valid descendant",
     );
     assert!(
-        execution_status(&harness, first_root).is_valid_and_post_bellatrix(),
+        is_valid_and_post_bellatrix(execution_status(&harness, first_root)),
         "promotion must walk the whole ancestry, not just one step",
     );
+}
+
+/// The node's own payload was ruled valid by an EL.
+fn is_valid_and_post_bellatrix(status: ExecutionStatus) -> bool {
+    match status {
+        ExecutionStatus::Valid(_) => true,
+        ExecutionStatus::Invalid(_)
+        | ExecutionStatus::Optimistic(_)
+        | ExecutionStatus::Irrelevant(_)
+        | ExecutionStatus::NotYetRevealed(_) => false,
+    }
+}
+
+/// The node's own payload was sent to an EL which has not ruled on it yet.
+fn is_strictly_optimistic(status: ExecutionStatus) -> bool {
+    match status {
+        ExecutionStatus::Optimistic(_) => true,
+        ExecutionStatus::Valid(_)
+        | ExecutionStatus::Invalid(_)
+        | ExecutionStatus::Irrelevant(_)
+        | ExecutionStatus::NotYetRevealed(_) => false,
+    }
 }
