@@ -236,19 +236,20 @@ structure Backfill where
   done : Bool
 
 /-- [backfill_core::Event]
-    Source: 'common/backfill_core/src/lib.rs', lines 105:0-112:1
+    Source: 'common/backfill_core/src/lib.rs', lines 105:0-124:1
     Visibility: public -/
 @[discriminant isize]
 inductive Event where
 | Tick : Event
 | Run : Std.U32 → alloc.vec.Vec Header → Event
-| Fail : Std.U32 → Event
+| Fail : Option Std.U32 → Event
 | Imported : Event
 | Rejected : Event
+| Abandoned : Event
 | PeerJoined : Event
 
 /-- [backfill_core::Action]
-    Source: 'common/backfill_core/src/lib.rs', lines 114:0-127:1
+    Source: 'common/backfill_core/src/lib.rs', lines 126:0-139:1
     Visibility: public -/
 @[discriminant isize]
 inductive Action where
@@ -258,7 +259,7 @@ inductive Action where
 | Complete : Action
 
 /-- [backfill_core::check_run]: loop 0:
-    Source: 'common/backfill_core/src/lib.rs', lines 141:4-150:5
+    Source: 'common/backfill_core/src/lib.rs', lines 153:4-162:5
     Visibility: public -/
 @[rust_loop]
 def check_run_loop
@@ -280,7 +281,7 @@ def check_run_loop
 partial_fixpoint
 
 /-- [backfill_core::check_run]:
-    Source: 'common/backfill_core/src/lib.rs', lines 135:0-152:1
+    Source: 'common/backfill_core/src/lib.rs', lines 147:0-164:1
     Visibility: public -/
 def check_run
   (expected : Root) (bound : Std.U64) (headers : alloc.vec.Vec Header) :
@@ -293,7 +294,7 @@ def check_run
   else ok none
 
 /-- [backfill_core::retry]:
-    Source: 'common/backfill_core/src/lib.rs', lines 157:0-165:1
+    Source: 'common/backfill_core/src/lib.rs', lines 169:0-177:1
     Visibility: public -/
 def retry (bf : Backfill) : Result Backfill := do
   if bf.attempts > 1#u8
@@ -303,7 +304,7 @@ def retry (bf : Backfill) : Result Backfill := do
   else ok { bf with attempts := 0#u8, wait := Wait.Parked }
 
 /-- [backfill_core::on_tick]:
-    Source: 'common/backfill_core/src/lib.rs', lines 167:0-186:1
+    Source: 'common/backfill_core/src/lib.rs', lines 179:0-198:1
     Visibility: public -/
 def on_tick (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
   match bf.wait with
@@ -320,7 +321,7 @@ def on_tick (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
 /-- [backfill_core::on_run]:
-    Source: 'common/backfill_core/src/lib.rs', lines 188:0-213:1
+    Source: 'common/backfill_core/src/lib.rs', lines 200:0-225:1
     Visibility: public -/
 def on_run
   (bf : Backfill) (peer : Std.U32) (headers : alloc.vec.Vec Header) :
@@ -344,7 +345,7 @@ def on_run
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
 /-- [backfill_core::on_imported]:
-    Source: 'common/backfill_core/src/lib.rs', lines 218:0-236:1
+    Source: 'common/backfill_core/src/lib.rs', lines 230:0-248:1
     Visibility: public -/
 def on_imported
   (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
@@ -378,7 +379,7 @@ def on_imported
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
 /-- [backfill_core::on_rejected]:
-    Source: 'common/backfill_core/src/lib.rs', lines 241:0-254:1
+    Source: 'common/backfill_core/src/lib.rs', lines 253:0-266:1
     Visibility: public -/
 def on_rejected
   (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
@@ -392,23 +393,36 @@ def on_rejected
     ok (out, bf1)
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
+/-- [backfill_core::on_abandoned]:
+    Source: 'common/backfill_core/src/lib.rs', lines 270:0-282:1
+    Visibility: public -/
+def on_abandoned
+  (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
+  match bf.wait with
+  | Wait.Idle => ok (alloc.vec.Vec.new Action, bf)
+  | Wait.Pending => ok (alloc.vec.Vec.new Action, bf)
+  | Wait.Importing _ peer =>
+    let bf1 ← retry { bf with last_bad := (some peer) }
+    ok (alloc.vec.Vec.new Action, bf1)
+  | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
+
 /-- [backfill_core::on_fail]:
-    Source: 'common/backfill_core/src/lib.rs', lines 256:0-268:1
+    Source: 'common/backfill_core/src/lib.rs', lines 284:0-296:1
     Visibility: public -/
 def on_fail
-  (bf : Backfill) (peer : Std.U32) :
+  (bf : Backfill) (peer : Option Std.U32) :
   Result ((alloc.vec.Vec Action) × Backfill)
   := do
   match bf.wait with
   | Wait.Idle => ok (alloc.vec.Vec.new Action, bf)
   | Wait.Pending =>
-    let bf1 ← retry { bf with last_bad := (some peer) }
+    let bf1 ← retry { bf with last_bad := peer }
     ok (alloc.vec.Vec.new Action, bf1)
   | Wait.Importing _ _ => ok (alloc.vec.Vec.new Action, bf)
   | Wait.Parked => ok (alloc.vec.Vec.new Action, bf)
 
 /-- [backfill_core::on_peer_joined]:
-    Source: 'common/backfill_core/src/lib.rs', lines 270:0-283:1
+    Source: 'common/backfill_core/src/lib.rs', lines 298:0-311:1
     Visibility: public -/
 def on_peer_joined
   (bf : Backfill) : Result ((alloc.vec.Vec Action) × Backfill) := do
@@ -425,7 +439,7 @@ def on_peer_joined
       })
 
 /-- [backfill_core::step]:
-    Source: 'common/backfill_core/src/lib.rs', lines 285:0-294:1
+    Source: 'common/backfill_core/src/lib.rs', lines 313:0-323:1
     Visibility: public -/
 def step
   (bf : Backfill) (ev : Event) :
@@ -437,10 +451,11 @@ def step
   | Event.Fail peer => on_fail bf peer
   | Event.Imported => on_imported bf
   | Event.Rejected => on_rejected bf
+  | Event.Abandoned => on_abandoned bf
   | Event.PeerJoined => on_peer_joined bf
 
 /-- [backfill_core::from_anchor]:
-    Source: 'common/backfill_core/src/lib.rs', lines 299:0-309:1
+    Source: 'common/backfill_core/src/lib.rs', lines 328:0-338:1
     Visibility: public -/
 def from_anchor
   (cfg : Config) (oldest : Header) (target_slot : Std.U64) :

@@ -101,13 +101,25 @@ pub struct Backfill {
 
 /// The adapter owns the RPC, the clock and the peer table, so a timeout, an RPC error and a
 /// disconnect all arrive here as `Fail`. Every `Request` produces exactly one `Run` or
-/// `Fail`, and every `Store` exactly one `Imported` or `Rejected`.
+/// `Fail`, and every `Store` exactly one `Imported`, `Rejected` or `Abandoned`.
 pub enum Event {
     Tick,
-    Run { peer: PeerIdx, headers: Vec<Header> },
-    Fail { peer: PeerIdx },
+    Run {
+        peer: PeerIdx,
+        headers: Vec<Header>,
+    },
+    /// The request produced nothing. `None` when it could not be sent at all, so there is no
+    /// peer to avoid next time.
+    Fail {
+        peer: Option<PeerIdx>,
+    },
     Imported,
+    /// The store refused the run, so the peer that served it is at fault.
     Rejected,
+    /// The run could not be made durable for a reason that is not its server's fault — the
+    /// sidecars it needs could not be fetched, the processor could not take it. Retry, but
+    /// do not blame the peer that served the blocks for what a different peer owed us.
+    Abandoned,
     PeerJoined,
 }
 
@@ -253,14 +265,30 @@ pub fn on_rejected(bf: &mut Backfill) -> Vec<Action> {
     out
 }
 
-pub fn on_fail(bf: &mut Backfill, peer: PeerIdx) -> Vec<Action> {
+/// The run is gone for a reason nobody is provably to blame for, so retry it elsewhere and
+/// spend an attempt, but penalise no one.
+pub fn on_abandoned(bf: &mut Backfill) -> Vec<Action> {
+    let out: Vec<Action> = Vec::new();
+    match bf.wait {
+        Wait::Idle => {}
+        Wait::Pending => {}
+        Wait::Parked => {}
+        Wait::Importing { staged: _, peer } => {
+            bf.last_bad = Some(peer);
+            retry(bf);
+        }
+    }
+    out
+}
+
+pub fn on_fail(bf: &mut Backfill, peer: Option<PeerIdx>) -> Vec<Action> {
     let out: Vec<Action> = Vec::new();
     match bf.wait {
         Wait::Idle => {}
         Wait::Importing { staged: _, peer: _ } => {}
         Wait::Parked => {}
         Wait::Pending => {
-            bf.last_bad = Some(peer);
+            bf.last_bad = peer;
             retry(bf);
         }
     }
@@ -289,6 +317,7 @@ pub fn step(bf: &mut Backfill, ev: Event) -> Vec<Action> {
         Event::Fail { peer } => on_fail(bf, peer),
         Event::Imported => on_imported(bf),
         Event::Rejected => on_rejected(bf),
+        Event::Abandoned => on_abandoned(bf),
         Event::PeerJoined => on_peer_joined(bf),
     }
 }

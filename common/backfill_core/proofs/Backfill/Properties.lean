@@ -190,6 +190,15 @@ theorem store_is_verified_descent (bf : Backfill) (ev : Event) :
       step as ⟨bf1⟩
       simp [hout]
     · simp
+  | Event.Abandoned =>
+    simp only [step]
+    unfold on_abandoned
+    split
+    · simp
+    · simp
+    · step as ⟨bf1⟩
+      simp
+    · simp
   | Event.PeerJoined =>
     simp only [step]
     unfold on_peer_joined
@@ -274,6 +283,15 @@ theorem penalize_names_the_server (bf : Backfill) (ev : Event) :
       simp at hmem
       subst hmem
       exact Or.inr ⟨staged, heq⟩
+    · simp
+  | Event.Abandoned =>
+    simp only [step]
+    unfold on_abandoned
+    split
+    · simp
+    · simp
+    · step as ⟨bf1⟩
+      simp
     · simp
   | Event.PeerJoined =>
     simp only [step]
@@ -382,6 +400,15 @@ theorem inv_step (bf : Backfill) (ev : Event) (hinv : Inv bf) :
       step as ⟨bf1, hbf1⟩
       rcases hbf1 with ⟨a, rfl, _⟩ | rfl <;> exact ⟨by simp, hdone⟩
     · exact ⟨hstaged, hdone⟩
+  | Event.Abandoned =>
+    simp only [step]
+    unfold on_abandoned
+    split
+    · exact ⟨hstaged, hdone⟩
+    · exact ⟨hstaged, hdone⟩
+    · step as ⟨bf1, hbf1⟩
+      rcases hbf1 with ⟨a, rfl, _⟩ | rfl <;> exact ⟨by simp, hdone⟩
+    · exact ⟨hstaged, hdone⟩
   | Event.PeerJoined =>
     simp only [step]
     unfold on_peer_joined
@@ -465,6 +492,17 @@ theorem progress (bf : Backfill) (ev : Event) (hinv : Inv bf) (hev : ev ≠ Even
     · exact Or.inl ⟨rfl, by simp⟩
     · rename_i staged peer hwait
       step as ⟨out, _⟩
+      step as ⟨bf1, hbf1⟩
+      rcases hbf1 with ⟨a, rfl, ha⟩ | rfl <;>
+        exact Or.inr (by simp [mu, phase, hwait] <;> scalar_tac)
+    · exact Or.inl ⟨rfl, by simp⟩
+  | Event.Abandoned =>
+    simp only [step]
+    unfold on_abandoned
+    split
+    · exact Or.inl ⟨rfl, by simp⟩
+    · exact Or.inl ⟨rfl, by simp⟩
+    · rename_i staged peer hwait
       step as ⟨bf1, hbf1⟩
       rcases hbf1 with ⟨a, rfl, ha⟩ | rfl <;>
         exact Or.inr (by simp [mu, phase, hwait] <;> scalar_tac)
