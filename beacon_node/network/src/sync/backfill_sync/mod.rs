@@ -421,6 +421,20 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             headers.len(),
             "the staged run is the one the core verified"
         );
+
+        // TODO(gloas): fetch payload envelopes by root, as the columns are fetched below.
+        // Until then, stop rather than hand the store a run it will reject for a missing
+        // envelope: the store's rejection names the peer that served the blocks, and that
+        // peer did not owe us an envelope.
+        if blocks
+            .iter()
+            .any(|block| block.fork_name_unchecked().gloas_enabled())
+        {
+            warn!("Backfill cannot yet fetch payload envelopes for a Gloas run");
+            self.abandon(network);
+            return;
+        }
+
         // One custody request per epoch the run touches: the sampling columns are chosen per
         // epoch, so a run that straddles a boundary needs one request on each side.
         let mut by_epoch: HashMap<Epoch, Vec<Hash256>> = HashMap::new();
@@ -503,19 +517,15 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 Some(columns) => AvailableBlockData::new_with_data_columns(columns),
                 None => AvailableBlockData::NoData,
             };
-            let range_block = if block.fork_name_unchecked().gloas_enabled() {
-                RangeSyncBlock::new_gloas(block.clone(), None)
-                    .map_err(|e| format!("gloas block: {e}"))
-            } else {
-                RangeSyncBlock::new::<T>(block.clone(), data, &self.beacon_chain.custody_context)
-                    .map_err(|e| format!("{e:?}"))
-            };
-            match range_block {
+            // Gloas runs are turned away in `make_durable`, so this is the pre-Gloas path.
+            match RangeSyncBlock::new::<T>(block.clone(), data, &self.beacon_chain.custody_context)
+            {
                 Ok(range_block) => run.push(range_block),
-                Err(reason) => {
+                Err(error) => {
                     debug!(
                         ?block_root,
-                        reason, "Backfill run is not available to store"
+                        ?error,
+                        "Backfill run is not available to store"
                     );
                     self.abandon(network);
                     return;
