@@ -650,3 +650,206 @@ fn to_header<E: EthSpec>(block: &Arc<SignedBeaconBlock<E>>) -> Header {
         slot: block.slot().as_u64(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use backfill_core::{Wait, check_run, root_eq, step};
+
+    fn root_of(byte: u8) -> Root {
+        to_root(Hash256::repeat_byte(byte))
+    }
+
+    /// `Header` has no `Debug` (the core carries no derives it does not need), so runs are
+    /// compared by the fields that matter.
+    fn oldest(checked: Option<Header>) -> Option<(u64, u64)> {
+        checked.map(|header| (header.slot, header.root.a))
+    }
+
+    fn header(root: u8, parent: u8, slot: u64) -> Header {
+        Header {
+            root: root_of(root),
+            parent_root: root_of(parent),
+            slot,
+        }
+    }
+
+    /// The core compares roots for equality, so the conversion has to be injective. A byte
+    /// order bug here would make every run fail to link and every honest peer be penalised.
+    #[test]
+    fn root_conversion_round_trips_and_separates() {
+        for byte in 0..=255u8 {
+            let hash = Hash256::repeat_byte(byte);
+            assert_eq!(from_root(to_root(hash)), hash);
+        }
+
+        // Two roots differing in one bit of each word must stay distinct.
+        let mut bytes = [0u8; 32];
+        for index in [0, 8, 16, 24, 31] {
+            let mut other = bytes;
+            other[index] = 1;
+            assert!(!root_eq(
+                to_root(Hash256::from(bytes)),
+                to_root(Hash256::from(other))
+            ));
+            bytes[index] = 1;
+        }
+    }
+
+    /// What the adapter hands the store is a run that starts at the root it asked for and
+    /// links down from it. This is the Rust-level statement of `store_is_verified_descent`.
+    #[test]
+    fn a_run_is_only_accepted_when_it_links_to_the_frontier() {
+        let run = vec![header(9, 8, 30), header(8, 7, 29), header(7, 6, 27)];
+
+        assert_eq!(
+            oldest(check_run(root_of(9), 31, &run)),
+            oldest(Some(header(7, 6, 27)))
+        );
+        // Wrong anchor.
+        assert_eq!(oldest(check_run(root_of(5), 31, &run)), None);
+        // Not older than the frontier.
+        assert_eq!(oldest(check_run(root_of(9), 30, &run)), None);
+        // Empty runs carry no progress, so they are not a link.
+        assert_eq!(oldest(check_run(root_of(9), 31, &vec![])), None);
+        // A break in the middle.
+        let broken = vec![header(9, 8, 30), header(4, 3, 29)];
+        assert_eq!(oldest(check_run(root_of(9), 31, &broken)), None);
+        // Slots that do not descend.
+        let flat = vec![header(9, 8, 30), header(8, 7, 30)];
+        assert_eq!(oldest(check_run(root_of(9), 31, &flat)), None);
+    }
+
+    /// The sequence the adapter has to implement, end to end: ask, verify, stage, import.
+    #[test]
+    fn a_landed_run_advances_the_frontier_and_refills_the_budget() {
+        let cfg = Config {
+            run_len: 64,
+            max_attempts: 3,
+        };
+        let mut machine = backfill_core::from_anchor(cfg, header(9, 8, 30), 0);
+
+        let actions = step(&mut machine, Event::Tick);
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::Request { anchor, count, .. } => {
+                assert!(root_eq(*anchor, root_of(8)));
+                assert_eq!(*count, 64);
+            }
+            other => panic!("expected a request, got {:?}", ActionKind::of(other)),
+        }
+
+        // A run that does not link is the sender's fault, and costs an attempt.
+        let actions = step(
+            &mut machine,
+            Event::Run {
+                peer: 1,
+                headers: vec![header(4, 3, 29)],
+            },
+        );
+        assert!(matches!(
+            ActionKind::of(&actions[0]),
+            ActionKind::Penalize(1)
+        ));
+        assert_eq!(machine.attempts, 2);
+        assert_eq!(machine.frontier.slot, 30);
+
+        // A run that links is staged, and the frontier only moves once the store confirms.
+        let _ = step(&mut machine, Event::Tick);
+        let run = vec![header(8, 7, 29), header(7, 6, 27)];
+        let actions = step(
+            &mut machine,
+            Event::Run {
+                peer: 2,
+                headers: run,
+            },
+        );
+        assert!(matches!(ActionKind::of(&actions[0]), ActionKind::Store));
+        assert_eq!(machine.frontier.slot, 30);
+
+        let actions = step(&mut machine, Event::Imported);
+        assert!(actions.is_empty());
+        assert_eq!(machine.frontier.slot, 27);
+        assert_eq!(machine.attempts, 3);
+    }
+
+    /// A store rejection names the peer that served the run, not whoever is around.
+    #[test]
+    fn a_rejected_run_is_charged_to_the_peer_that_served_it() {
+        let cfg = Config {
+            run_len: 64,
+            max_attempts: 3,
+        };
+        let mut machine = backfill_core::from_anchor(cfg, header(9, 8, 30), 0);
+        let _ = step(&mut machine, Event::Tick);
+        let _ = step(
+            &mut machine,
+            Event::Run {
+                peer: 7,
+                headers: vec![header(8, 7, 29)],
+            },
+        );
+
+        let actions = step(&mut machine, Event::Rejected);
+        assert!(matches!(
+            ActionKind::of(&actions[0]),
+            ActionKind::Penalize(7)
+        ));
+
+        // Whereas a run that could not be made durable blames no one.
+        let _ = step(&mut machine, Event::Tick);
+        let _ = step(
+            &mut machine,
+            Event::Run {
+                peer: 7,
+                headers: vec![header(8, 7, 29)],
+            },
+        );
+        assert!(step(&mut machine, Event::Abandoned).is_empty());
+    }
+
+    /// Out of attempts, the machine parks and waits rather than spinning or dying.
+    #[test]
+    fn exhausted_attempts_park_until_a_peer_joins() {
+        let cfg = Config {
+            run_len: 64,
+            max_attempts: 2,
+        };
+        let mut machine = backfill_core::from_anchor(cfg, header(9, 8, 30), 0);
+
+        for _ in 0..2 {
+            let _ = step(&mut machine, Event::Tick);
+            let _ = step(&mut machine, Event::Fail { peer: Some(1) });
+        }
+        assert_eq!(machine.attempts, 0);
+        match machine.wait {
+            Wait::Parked => {}
+            _ => panic!("expected the machine to park"),
+        }
+        assert!(step(&mut machine, Event::Tick).is_empty());
+
+        let _ = step(&mut machine, Event::PeerJoined);
+        assert_eq!(machine.attempts, 2);
+        assert_eq!(step(&mut machine, Event::Tick).len(), 1);
+    }
+
+    /// Only for readable assertions: `Action` is plain data with no `Debug`.
+    #[derive(Debug, PartialEq)]
+    enum ActionKind {
+        Request,
+        Store,
+        Penalize(PeerIdx),
+        Complete,
+    }
+
+    impl ActionKind {
+        fn of(action: &Action) -> Self {
+            match action {
+                Action::Request { .. } => ActionKind::Request,
+                Action::Store { .. } => ActionKind::Store,
+                Action::Penalize { peer } => ActionKind::Penalize(*peer),
+                Action::Complete => ActionKind::Complete,
+            }
+        }
+    }
+}
