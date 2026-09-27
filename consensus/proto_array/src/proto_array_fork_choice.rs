@@ -952,6 +952,10 @@ impl ProtoArrayForkChoice {
             .any(|node| node.execution_status().is_invalid())
     }
 
+    /// For all nodes, regardless of their relationship to the finalized block, set their execution
+    /// status to be optimistic.
+    ///
+    /// In practice this means forgetting any `VALID` or `INVALID` statuses.
     pub fn set_all_blocks_to_optimistic<E: EthSpec>(&mut self) -> Result<(), String> {
         // Clear every `VALID`/`INVALID` verdict. `Irrelevant` and `NotYetRevealed` have no verdict
         // to reset.
