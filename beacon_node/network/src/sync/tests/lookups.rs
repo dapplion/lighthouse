@@ -435,6 +435,7 @@ impl TestRig {
                     Work::RpcBlock {
                         process_fn,
                         beacon_block_root,
+                        ..
                     } => {
                         // Import block before processing if configured (for simulating race conditions)
                         if self
@@ -2375,9 +2376,97 @@ async fn test_single_block_lookup_ignored_response() {
     // The block was not actually imported
     r.assert_head_slot(0);
     r.assert_no_penalties();
+    assert!(
+        r.requests
+            .iter()
+            .all(|(request, _)| matches!(request, RequestType::BlocksByRoot(_))),
+        "ignored block processing must not start component downloads"
+    );
     assert_eq!(r.created_lookups(), 1, "no created lookups");
     assert_eq!(r.dropped_lookups(), 1, "no dropped lookups");
     assert_eq!(r.completed_lookups(), 0, "some completed lookups");
+}
+
+/// Hold the downloaded block in the processor queue, where its root and validity have not yet
+/// been checked. Neither a matching block nor an unrequested block may trigger component requests.
+async fn assert_component_downloads_wait_for_block_processing(wrong_root: bool) {
+    let Some(mut r) = TestRig::new_after_fulu() else {
+        return;
+    };
+    r.build_chain_and_trigger_last_block(1).await;
+    let block_root = r.block_root_at_slot(1);
+    let (peer_id, sync_request_id) = r
+        .pop_received_network_event(|event| match event {
+            NetworkMessage::SendRequest {
+                peer_id,
+                request: RequestType::BlocksByRoot(_),
+                app_request_id: AppRequestId::Sync(id),
+            } => Some((*peer_id, *id)),
+            _ => None,
+        })
+        .expect("block request");
+    r.assert_empty_network();
+
+    let mut block = (*r.block_at_slot(1)).clone();
+    if wrong_root {
+        // Keep the known parent and component commitments, but change the requested root.
+        *block.message_mut().state_root_mut() = Hash256::zero();
+        assert_ne!(block.canonical_root(), block_root);
+    }
+    r.send_sync_message(SyncMessage::RpcBlock {
+        sync_request_id,
+        peer_id,
+        beacon_block: Some(Arc::new(block)),
+    });
+    r.send_sync_message(SyncMessage::RpcBlock {
+        sync_request_id,
+        peer_id,
+        beacon_block: None,
+    });
+    r.assert_empty_network();
+    r.drain_processor_rx();
+    assert_eq!(r.beacon_processor_rx_queue.len(), 1);
+    let event = r.beacon_processor_rx_queue.remove(0);
+    let Work::RpcBlock {
+        beacon_block_root,
+        process_fn,
+        ..
+    } = event.work
+    else {
+        panic!("expected block processing work");
+    };
+    assert_eq!(beacon_block_root, block_root);
+
+    if !wrong_root {
+        process_fn.await;
+        while let Ok(message) = r.sync_rx.try_recv() {
+            r.send_sync_message(message);
+        }
+        r.drain_network_rx();
+        assert!(
+            r.network_rx_queue.iter().any(|event| matches!(
+                event,
+                NetworkMessage::SendRequest {
+                    request: RequestType::DataColumnsByRoot(_)
+                        | RequestType::PayloadEnvelopesByRoot(_),
+                    ..
+                }
+            )),
+            "processed block with missing components must start component downloads"
+        );
+        r.simulate(SimulateConfig::happy_path()).await;
+        r.assert_successful_lookup_sync();
+    }
+}
+
+#[tokio::test]
+async fn downloaded_block_waits_for_processing_before_component_requests() {
+    assert_component_downloads_wait_for_block_processing(false).await;
+}
+
+#[tokio::test]
+async fn wrong_downloaded_block_cannot_start_component_requests() {
+    assert_component_downloads_wait_for_block_processing(true).await;
 }
 
 #[tokio::test]
