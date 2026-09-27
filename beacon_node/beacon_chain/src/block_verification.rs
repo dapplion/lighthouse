@@ -75,7 +75,7 @@ use execution_layer::PayloadStatus;
 pub use fork_choice::{AttestationFromBlock, ParentImportStatus, PayloadVerificationStatus};
 use metrics::TryExt;
 use parking_lot::RwLockReadGuard;
-use proto_array::Block as ProtoBlock;
+use proto_array::{Block as ProtoBlock, PayloadBlockHash};
 use safe_arith::ArithError;
 use slot_clock::SlotClock;
 use ssz::Encode;
@@ -1460,11 +1460,15 @@ impl<T: BeaconChainTypes> ExecutionPendingBlock<T> {
         let fork_choice = chain.canonical_head.fork_choice_read_lock();
         match fork_choice.get_parent_import_status(block.as_block()) {
             ParentImportStatus::Imported(parent) => {
-                // Post-Gloas the bid names the payload this block builds on. A child of the
-                // parent's `EMPTY` node builds on an older payload, not the parent's own.
                 let payload_invalid = match block.as_block().payload_bid_parent_block_hash() {
-                    Ok(block_hash) => fork_choice.is_execution_payload_invalid(block_hash),
-                    Err(_) => parent.execution_status.is_invalid(),
+                    // Post-Gloas the bid names the payload this block builds on. A child of the
+                    // parent's `EMPTY` node builds on an older payload, not the parent's own.
+                    Ok(block_hash) => fork_choice.is_invalid(block_hash),
+                    // Pre-Gloas a block builds on its parent's payload.
+                    Err(_) => match parent.block_hash() {
+                        PayloadBlockHash::Hash(block_hash) => fork_choice.is_invalid(block_hash),
+                        PayloadBlockHash::PreMerge => false,
+                    },
                 };
                 if payload_invalid {
                     return Err(BlockError::ParentExecutionPayloadInvalid {
