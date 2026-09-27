@@ -26,8 +26,16 @@ four_byte_option_impl!(four_byte_option_checkpoint, Checkpoint);
 /// Defines an operation which may invalidate the `execution_status` of some nodes.
 #[derive(Clone, Debug)]
 pub enum InvalidationOperation {
-    /// Invalidate only `block_root` and it's descendants. Don't invalidate any ancestors.
-    InvalidateOne { block_root: Hash256 },
+    /// Invalidate only the judged node and its descendants, with no latest-valid-ancestor range.
+    ///
+    /// `payload_status` names the fork choice node of `block_root` the EL judged. Only a `Full`
+    /// node runs the block's own payload: on `Empty`/`Pending` the verdict names the nearest
+    /// executed ancestor's payload, and that ancestor is the one condemned. Ignored for a
+    /// pre-Gloas block, which always carries its own payload.
+    InvalidateOne {
+        block_root: Hash256,
+        payload_status: PayloadStatus,
+    },
     /// Invalidate blocks between `head_block_root` and `latest_valid_ancestor`.
     ///
     /// If the `latest_valid_ancestor` is known to fork choice, invalidate all blocks between
@@ -36,8 +44,14 @@ pub enum InvalidationOperation {
     ///
     /// If `latest_valid_ancestor` is *not* known to fork choice, only invalidate the
     /// `head_block_root` if `always_invalidate_head == true`.
+    ///
+    /// `payload_status` names the fork choice node of `head_block_root` the EL judged: the
+    /// condemned chain of EL hashes starts at the head's own payload only on `Full`; on
+    /// `Empty`/`Pending` it starts at the nearest executed ancestor's payload. Ignored for a
+    /// pre-Gloas head, which always carries its own payload.
     InvalidateMany {
         head_block_root: Hash256,
+        payload_status: PayloadStatus,
         always_invalidate_head: bool,
         latest_valid_ancestor: ExecutionBlockHash,
     },
@@ -46,7 +60,7 @@ pub enum InvalidationOperation {
 impl InvalidationOperation {
     pub fn block_root(&self) -> Hash256 {
         match self {
-            InvalidationOperation::InvalidateOne { block_root } => *block_root,
+            InvalidationOperation::InvalidateOne { block_root, .. } => *block_root,
             InvalidationOperation::InvalidateMany {
                 head_block_root, ..
             } => *head_block_root,
@@ -70,6 +84,13 @@ impl InvalidationOperation {
                 always_invalidate_head,
                 ..
             } => *always_invalidate_head,
+        }
+    }
+
+    pub fn payload_status(&self) -> PayloadStatus {
+        match self {
+            InvalidationOperation::InvalidateOne { payload_status, .. } => *payload_status,
+            InvalidationOperation::InvalidateMany { payload_status, .. } => *payload_status,
         }
     }
 }
@@ -878,6 +899,11 @@ impl ProtoArray {
 
     /// Updates the `block_root` and all ancestors to have validated execution payloads.
     ///
+    /// `head_payload_status` names the fork choice node of `block_root` the EL vouched for.
+    /// Only a `Full` node runs the block's own payload: on `Empty`/`Pending` the verified chain
+    /// ends at an ancestor's payload, so the walk steps over this block and promotes only the
+    /// executed ancestors.
+    ///
     /// Returns an error if:
     ///
     /// - The `block-root` is unknown.
@@ -885,13 +911,25 @@ impl ProtoArray {
     pub fn propagate_execution_payload_validation(
         &mut self,
         block_root: Hash256,
+        head_payload_status: PayloadStatus,
     ) -> Result<(), Error> {
         let index = *self
             .indices
             .get(&block_root)
             .ok_or(Error::NodeUnknown(block_root))?;
-        // Pre-Gloas only entry: the verified node carries its payload inside itself.
-        self.propagate_execution_payload_validation_from(index, ParentPayloadStatus::PreGloas)
+        let start_status = match self
+            .nodes
+            .get(index)
+            .ok_or(Error::InvalidNodeIndex(index))?
+        {
+            // A pre-Gloas block carries its payload inside itself.
+            ProtoNode::V17(_) => ParentPayloadStatus::PreGloas,
+            ProtoNode::V29(_) => match head_payload_status {
+                PayloadStatus::Full => ParentPayloadStatus::Full,
+                PayloadStatus::Empty | PayloadStatus::Pending => ParentPayloadStatus::Empty,
+            },
+        };
+        self.propagate_execution_payload_validation_from(index, start_status)
     }
 
     /// Promotes `start_index` and every payload that its branch executed to `Valid`.
@@ -972,39 +1010,78 @@ impl ProtoArray {
     /// `Pn` is a `FULL`-edge child of `Pn` (that is what makes `Pn` the deepest executed
     /// node), so only `Pn` needs returning.
     ///
-    /// The range always starts at the head; the latest-valid-ancestor rules only decide where
-    /// it ends (exclusive): at the vouched latest valid block, right after the head when only
-    /// the head itself was judged, or nowhere.
+    /// The range always starts at `H0`'s node — the fcU'd head itself only when its `FULL`
+    /// node was judged; on an `EMPTY`/`PENDING` head, `H0` is the nearest executed ancestor's
+    /// payload. The latest-valid-ancestor rules only decide where the range ends (exclusive):
+    /// at the vouched latest valid block, right after `H0`'s node when only it was judged, or
+    /// nowhere.
     fn find_deepest_node_to_invalidate<E: EthSpec>(
         &self,
         op: &InvalidationOperation,
         best_finalized_checkpoint: Checkpoint,
     ) -> Result<Option<usize>, Error> {
         let head_block_root = op.block_root();
-        let head_index = *self
+        let fcu_head_index = *self
             .indices
             .get(&head_block_root)
             .ok_or(Error::NodeUnknown(head_block_root))?;
 
+        // Hop from the fcU'd node to the node whose payload the EL judged (`H0`). A hop that
+        // reaches the array root names a payload outside the tree: condemn nothing.
+        let mut head_index = fcu_head_index;
+        let mut judged = match self
+            .nodes
+            .get(head_index)
+            .ok_or(Error::InvalidNodeIndex(head_index))?
+        {
+            // A pre-Gloas head always carries its own payload.
+            ProtoNode::V17(_) => true,
+            ProtoNode::V29(_) => match op.payload_status() {
+                PayloadStatus::Full => true,
+                PayloadStatus::Empty | PayloadStatus::Pending => false,
+            },
+        };
+        while !judged {
+            let node = self
+                .nodes
+                .get(head_index)
+                .ok_or(Error::InvalidNodeIndex(head_index))?;
+            let Some(parent_index) = node.parent() else {
+                return Ok(None);
+            };
+            judged = match node.get_parent_payload_status() {
+                ParentPayloadStatus::Full | ParentPayloadStatus::PreGloas => true,
+                ParentPayloadStatus::Empty => false,
+            };
+            head_index = parent_index;
+        }
+        let judged_root = self
+            .nodes
+            .get(head_index)
+            .ok_or(Error::InvalidNodeIndex(head_index))?
+            .root();
+
         // Map the latest valid ancestor *hash* to a beacon block *root*, keeping it only if it
-        // is an ancestor of the head, at or above finalization.
+        // is an ancestor of `H0`'s node, at or above finalization. Anchoring on the fcU'd head
+        // instead would admit a root the walk below never meets, such as an unrevealed bid hash
+        // on the empty chain between the head and `H0`.
         let latest_valid_ancestor_root = op
             .latest_valid_ancestor()
             .and_then(|hash| self.execution_block_hash_to_beacon_block_root(&hash))
             .filter(|&root| {
-                self.is_descendant(root, head_block_root)
+                self.is_descendant(root, judged_root)
                     && self
                         .is_finalized_checkpoint_or_descendant::<E>(root, best_finalized_checkpoint)
             });
 
-        // The range starts at the head; the rules only decide where it ends (exclusive).
+        // The range starts at `H0`'s node; the rules only decide where it ends (exclusive).
         let range_end = if let Some(root) = latest_valid_ancestor_root {
             // The chain down to the latest valid block is condemned.
             Some(*self.indices.get(&root).ok_or(Error::NodeUnknown(root))?)
         } else if op.invalidate_block_root() {
-            // The head was judged directly but the latest valid hash is unusable (junk or
-            // pre-finalization): condemn the head alone. Guessing at ancestors could reach the
-            // justified checkpoint and shut the client down.
+            // `H0` was judged directly but the latest valid hash is unusable (junk or
+            // pre-finalization): condemn `H0`'s node alone. Guessing at deeper ancestors could
+            // reach the justified checkpoint and shut the client down.
             self.nodes
                 .get(head_index)
                 .ok_or(Error::InvalidNodeIndex(head_index))?
@@ -1015,8 +1092,8 @@ impl ProtoArray {
         };
 
         // Collect every node in the range, recording whether this branch executed its
-        // payload. The head is executed by definition; every other node takes it from its
-        // child's edge.
+        // payload. The head of the walk is `H0`'s node, executed by construction; every other
+        // node takes it from its child's edge.
         let mut path: Vec<(usize, bool)> = Vec::new();
         let mut payload_executed = true;
         let mut index = head_index;

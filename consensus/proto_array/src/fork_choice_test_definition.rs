@@ -430,12 +430,14 @@ impl ForkChoiceTestDefinition {
                     let op = if let Some(latest_valid_ancestor) = latest_valid_ancestor_root {
                         InvalidationOperation::InvalidateMany {
                             head_block_root,
+                            payload_status: PayloadStatus::Full,
                             always_invalidate_head: true,
                             latest_valid_ancestor,
                         }
                     } else {
                         InvalidationOperation::InvalidateOne {
                             block_root: head_block_root,
+                            payload_status: PayloadStatus::Full,
                         }
                     };
                     fork_choice

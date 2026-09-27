@@ -1,5 +1,6 @@
 use beacon_chain::AvailabilityProcessingStatus::{Imported, MissingComponents};
 use beacon_chain::NotifyExecutionLayer;
+use beacon_chain::OverrideForkchoiceUpdate;
 use beacon_chain::execution_proof_verification::GossipVerifiedExecutionProof;
 use beacon_chain::payload_envelope_verification::{EnvelopeError, EnvelopeSource};
 use beacon_chain::test_utils::{
@@ -11,8 +12,8 @@ use proto_array::ExecutionStatus;
 use std::sync::Arc;
 use types::execution::{ExecutionProof, ProofData, PublicInput, SignedExecutionProof};
 use types::{
-    Address, BlockImportSource, Epoch, ExecPayload, ForkName, Hash256, MinimalEthSpec, Slot,
-    WithdrawalRequest,
+    Address, BlockImportSource, Epoch, ExecPayload, ExecutionBlockHash, ForkName, Hash256,
+    MinimalEthSpec, Slot, WithdrawalRequest,
 };
 
 type E = MinimalEthSpec;
@@ -737,8 +738,9 @@ async fn a_later_valid_payload_promotes_its_optimistic_ancestors() {
     assert!(execution_status(&harness, first_root).is_strictly_optimistic());
     assert!(execution_status(&harness, second_root).is_strictly_optimistic());
 
-    // The execution layer catches up and validates the next payload.
-    mock.server.all_payloads_valid();
+    // The execution layer catches up and validates the next payload. fcU keeps answering
+    // SYNCING: promotion must come from the envelope path alone.
+    mock.server.all_payloads_valid_on_new_payload();
     let third_root = import_block_and_envelope(&harness, Slot::new(4)).await;
 
     assert!(
@@ -752,5 +754,221 @@ async fn a_later_valid_payload_promotes_its_optimistic_ancestors() {
     assert!(
         execution_status(&harness, first_root).is_valid_and_post_bellatrix(),
         "promotion must walk the whole ancestry, not just one step",
+    );
+}
+
+/// Helper: import the block for `slot` alone; its envelope never arrives.
+async fn import_block_without_envelope(
+    harness: &BeaconChainHarness<beacon_chain::test_utils::EphemeralHarnessType<E>>,
+    slot: Slot,
+) -> Hash256 {
+    let state = harness.get_current_state();
+    harness.advance_slot();
+    let (block_contents, _envelope, _) = harness.make_block_with_envelope(state, slot).await;
+    let block_root = block_contents.0.canonical_root();
+    harness
+        .process_block(slot, block_root, block_contents)
+        .await
+        .expect("block should be processed");
+    harness.chain.recompute_head_at_current_slot().await;
+    block_root
+}
+
+/// A VALID `forkchoiceUpdated` response vouches for the chain of the fcU'd `head_hash`. On a
+/// head whose own payload is not revealed, that chain ends at an ancestor's payload: the head's
+/// own payload must stay `NotYetRevealed`.
+#[tokio::test]
+async fn fcu_valid_response_does_not_verify_an_unrevealed_payload() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+
+    let harness = gloas_harness();
+    harness.extend_to_slot(Slot::new(1)).await;
+    let ancestor_root = harness.chain.canonical_head.cached_head().head_block_root();
+    let block_root = import_block_without_envelope(&harness, Slot::new(2)).await;
+
+    let cached_head = harness.chain.canonical_head.cached_head();
+    assert_eq!(cached_head.head_block_root(), block_root);
+    let params = cached_head.forkchoice_update_parameters();
+    assert!(
+        params.head_hash.is_some(),
+        "the head must resolve to an executed ancestor's payload hash",
+    );
+    assert!(execution_status(&harness, block_root).is_not_yet_revealed());
+
+    // A synced execution layer answers VALID for that ancestor chain.
+    harness
+        .mock_execution_layer
+        .as_ref()
+        .expect("mock execution layer")
+        .server
+        .all_payloads_valid_on_forkchoice_updated();
+    harness
+        .chain
+        .update_execution_engine_forkchoice(
+            harness.chain.slot().unwrap(),
+            params,
+            cached_head.head_payload_status(),
+            OverrideForkchoiceUpdate::AlreadyApplied,
+        )
+        .await
+        .expect("the fcU round trip should succeed");
+
+    assert!(
+        execution_status(&harness, block_root).is_not_yet_revealed(),
+        "a VALID verdict for an ancestor's payload must not verify this block's own payload",
+    );
+    assert!(
+        execution_status(&harness, ancestor_root).is_valid_and_post_bellatrix(),
+        "the vouched-for ancestor stays valid",
+    );
+}
+
+/// A VALID `forkchoiceUpdated` response vouches for the chain of `head_hash`. On a head with an
+/// unrevealed payload that chain ends at the nearest executed ancestor: an optimistic ancestor
+/// is promoted, while the head's own payload stays unrevealed.
+#[tokio::test]
+async fn fcu_valid_response_promotes_the_judged_optimistic_ancestor() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+
+    let harness = gloas_harness();
+    harness.extend_to_slot(Slot::new(1)).await;
+
+    let mock = harness
+        .mock_execution_layer
+        .as_ref()
+        .expect("mock execution layer");
+
+    // The ancestor's payload imports optimistically; the head's envelope never arrives.
+    mock.server.all_payloads_syncing(true);
+    let ancestor_root = import_block_and_envelope(&harness, Slot::new(2)).await;
+    let block_root = import_block_without_envelope(&harness, Slot::new(3)).await;
+    assert!(execution_status(&harness, ancestor_root).is_strictly_optimistic());
+
+    let cached_head = harness.chain.canonical_head.cached_head();
+    assert_eq!(cached_head.head_block_root(), block_root);
+
+    // The execution layer catches up and vouches for the ancestor chain.
+    mock.server.all_payloads_valid_on_forkchoice_updated();
+    harness
+        .chain
+        .update_execution_engine_forkchoice(
+            harness.chain.slot().unwrap(),
+            cached_head.forkchoice_update_parameters(),
+            cached_head.head_payload_status(),
+            OverrideForkchoiceUpdate::AlreadyApplied,
+        )
+        .await
+        .expect("the fcU round trip should succeed");
+
+    assert!(
+        execution_status(&harness, ancestor_root).is_valid_and_post_bellatrix(),
+        "the judged optimistic payload must be promoted",
+    );
+    assert!(
+        execution_status(&harness, block_root).is_not_yet_revealed(),
+        "the head's own payload was not judged",
+    );
+}
+
+/// An INVALID `forkchoiceUpdated` response judges the chain of `head_hash`, which on a head
+/// with an unrevealed payload ends at an executed ancestor. Here that ancestor is already
+/// `Valid`: the contradiction is refused and no payload is condemned.
+#[tokio::test]
+async fn fcu_invalid_response_does_not_condemn_an_unrevealed_payload() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+
+    let harness = gloas_harness();
+    harness.extend_to_slot(Slot::new(1)).await;
+    let ancestor_root = harness.chain.canonical_head.cached_head().head_block_root();
+    let block_root = import_block_without_envelope(&harness, Slot::new(2)).await;
+
+    let cached_head = harness.chain.canonical_head.cached_head();
+    assert_eq!(cached_head.head_block_root(), block_root);
+    let params = cached_head.forkchoice_update_parameters();
+    assert!(
+        params.head_hash.is_some(),
+        "the head must resolve to an executed ancestor's payload hash",
+    );
+
+    // The all-zeros hash means the execution layer named no valid ancestor.
+    harness
+        .mock_execution_layer
+        .as_ref()
+        .expect("mock execution layer")
+        .server
+        .all_payloads_invalid_on_forkchoice_updated(ExecutionBlockHash::zero());
+    harness
+        .chain
+        .update_execution_engine_forkchoice(
+            harness.chain.slot().unwrap(),
+            params,
+            cached_head.head_payload_status(),
+            OverrideForkchoiceUpdate::AlreadyApplied,
+        )
+        .await
+        .expect_err("an INVALID fcU response surfaces as an error");
+
+    assert!(
+        execution_status(&harness, block_root).is_not_yet_revealed(),
+        "an INVALID verdict about an ancestor chain must not condemn this block's own payload",
+    );
+    assert!(
+        execution_status(&harness, ancestor_root).is_valid_and_post_bellatrix(),
+        "the EL contradiction about a valid payload is refused",
+    );
+}
+
+/// An INVALID `forkchoiceUpdated` response judges the chain of `head_hash`. On a head with an
+/// unrevealed payload that chain ends at the nearest executed ancestor: an optimistic ancestor
+/// is condemned, together with the head that committed to it.
+#[tokio::test]
+async fn fcu_invalid_response_condemns_the_judged_optimistic_ancestor() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+
+    let harness = gloas_harness();
+    harness.extend_to_slot(Slot::new(1)).await;
+
+    let mock = harness
+        .mock_execution_layer
+        .as_ref()
+        .expect("mock execution layer");
+
+    // The ancestor's payload imports optimistically; the head's envelope never arrives.
+    mock.server.all_payloads_syncing(true);
+    let ancestor_root = import_block_and_envelope(&harness, Slot::new(2)).await;
+    let block_root = import_block_without_envelope(&harness, Slot::new(3)).await;
+    assert!(execution_status(&harness, ancestor_root).is_strictly_optimistic());
+
+    let cached_head = harness.chain.canonical_head.cached_head();
+    assert_eq!(cached_head.head_block_root(), block_root);
+
+    mock.server
+        .all_payloads_invalid_on_forkchoice_updated(ExecutionBlockHash::zero());
+    harness
+        .chain
+        .update_execution_engine_forkchoice(
+            harness.chain.slot().unwrap(),
+            cached_head.forkchoice_update_parameters(),
+            cached_head.head_payload_status(),
+            OverrideForkchoiceUpdate::AlreadyApplied,
+        )
+        .await
+        .expect_err("an INVALID fcU response surfaces as an error");
+
+    assert!(
+        execution_status(&harness, ancestor_root).is_invalid(),
+        "the judged optimistic payload must be condemned",
+    );
+    assert!(
+        execution_status(&harness, block_root).is_invalid(),
+        "the head committed to the condemned payload",
     );
 }

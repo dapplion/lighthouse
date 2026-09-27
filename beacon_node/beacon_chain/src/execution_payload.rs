@@ -184,6 +184,10 @@ pub async fn notify_new_payload<T: BeaconChainTypes>(
                     chain
                         .process_invalid_execution_payload(&InvalidationOperation::InvalidateMany {
                             head_block_root: invalidation_head_block_root,
+                            // The judged chain ends at the target's own payload: a Gloas
+                            // envelope is the block's own. The pre-Gloas block path targets
+                            // the parent, whose V17 node ignores the status.
+                            payload_status: fork_choice::PayloadStatus::Full,
                             always_invalidate_head: false,
                             latest_valid_ancestor: latest_valid_hash,
                         })

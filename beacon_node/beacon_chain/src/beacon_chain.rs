@@ -6903,6 +6903,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         Ok(Some(head_root))
     }
 
+    /// `head_payload_status` must come from the same cached-head snapshot as `input_params`:
+    /// the EL's verdict is applied to the fork choice node the fcU message named.
     pub async fn update_execution_engine_forkchoice(
         self: &Arc<Self>,
         current_slot: Slot,
@@ -6987,7 +6989,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         match forkchoice_updated_response {
             Ok(status) => match status {
                 PayloadStatus::Valid => {
-                    // Ensure that fork choice knows that the block is no longer optimistic.
+                    // Ensure that fork choice knows that the block is no longer optimistic. The
+                    // EL vouched for `head_hash`, which on an `EMPTY`/`PENDING` head is an
+                    // ancestor's payload, not the head's own.
                     let chain = self.clone();
                     let fork_choice_update_result = self
                         .spawn_blocking_handle(
@@ -6995,7 +6999,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                                 chain
                                     .canonical_head
                                     .fork_choice_write_lock()
-                                    .on_valid_execution_payload(head_block_root)
+                                    .on_valid_execution_payload(
+                                        head_block_root,
+                                        head_payload_status,
+                                    )
                             },
                             "update_execution_engine_valid_payload",
                         )
@@ -7046,6 +7053,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             self.process_invalid_execution_payload(
                                 &InvalidationOperation::InvalidateOne {
                                     block_root: head_block_root,
+                                    payload_status: head_payload_status,
                                 },
                             )
                             .await?;
@@ -7058,6 +7066,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             self.process_invalid_execution_payload(
                                 &InvalidationOperation::InvalidateOne {
                                     block_root: head_block_root,
+                                    payload_status: head_payload_status,
                                 },
                             )
                             .await?;
@@ -7068,6 +7077,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                             self.process_invalid_execution_payload(
                                 &InvalidationOperation::InvalidateMany {
                                     head_block_root,
+                                    payload_status: head_payload_status,
                                     always_invalidate_head: true,
                                     latest_valid_ancestor: latest_valid_hash,
                                 },
@@ -7095,6 +7105,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     // being invalidated (no ancestors).
                     self.process_invalid_execution_payload(&InvalidationOperation::InvalidateOne {
                         block_root: head_block_root,
+                        payload_status: head_payload_status,
                     })
                     .await?;
 

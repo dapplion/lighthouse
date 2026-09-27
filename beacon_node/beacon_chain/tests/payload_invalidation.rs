@@ -14,7 +14,9 @@ use execution_layer::{
     ExecutionLayer, ForkchoiceState, PayloadAttributes,
     json_structures::{JsonForkchoiceStateV1, JsonPayloadAttributes, JsonPayloadAttributesV1},
 };
-use fork_choice::{Error as ForkChoiceError, InvalidationOperation, PayloadVerificationStatus};
+use fork_choice::{
+    Error as ForkChoiceError, InvalidationOperation, PayloadStatus, PayloadVerificationStatus,
+};
 use proto_array::{Error as ProtoArrayError, ExecutionStatus, ExecutionVerdict};
 use slot_clock::SlotClock;
 use std::collections::HashMap;
@@ -186,7 +188,7 @@ impl InvalidPayloadRig {
             .chain
             .canonical_head
             .fork_choice_write_lock()
-            .on_valid_execution_payload(block_root)
+            .on_valid_execution_payload(block_root, PayloadStatus::Full)
             .unwrap();
     }
 
@@ -433,7 +435,10 @@ impl InvalidPayloadRig {
     async fn invalidate_manually(&self, block_root: Hash256) {
         self.harness
             .chain
-            .process_invalid_execution_payload(&InvalidationOperation::InvalidateOne { block_root })
+            .process_invalid_execution_payload(&InvalidationOperation::InvalidateOne {
+                block_root,
+                payload_status: PayloadStatus::Full,
+            })
             .await
             .unwrap();
     }

@@ -751,20 +751,18 @@ where
         Ok(())
     }
 
-    /// Pre-Gloas only.
-    ///
-    /// See `ProtoArrayForkChoice::process_execution_payload_validation` for documentation.
+    /// `head_payload_status` names the fork choice node of `block_root` the EL vouched for; see
+    /// `ProtoArray::propagate_execution_payload_validation` for documentation.
     pub fn on_valid_execution_payload(
         &mut self,
         block_root: Hash256,
+        head_payload_status: PayloadStatus,
     ) -> Result<(), Error<T::Error>> {
         self.proto_array
-            .process_execution_payload_validation(block_root)
+            .process_execution_payload_validation(block_root, head_payload_status)
             .map_err(Error::FailedToProcessValidExecutionPayload)
     }
 
-    /// Pre-Gloas only.
-    ///
     /// See `ProtoArrayForkChoice::process_execution_payload_invalidation` for documentation.
     pub fn on_invalid_execution_payload(
         &mut self,

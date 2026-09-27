@@ -652,7 +652,10 @@ impl<E: EthSpec> GossipTester<E> {
                     // The block has been imported optimistically. Mark it invalid in fork choice so
                     // descendants observe an invalid execution parent.
                     self.block_on_dangerous(self.harness.chain.process_invalid_execution_payload(
-                        &InvalidationOperation::InvalidateOne { block_root },
+                        &InvalidationOperation::InvalidateOne {
+                            block_root,
+                            payload_status: ::fork_choice::PayloadStatus::Full,
+                        },
                     ))?
                     .map_err(|e| {
                         Error::InternalError(format!(
