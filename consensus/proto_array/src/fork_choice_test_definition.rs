@@ -5,9 +5,7 @@ mod no_votes;
 mod votes;
 
 use crate::error::Error;
-use crate::proto_array_fork_choice::{
-    Block, ExecutionStatus, PayloadBlockHash, PayloadStatus, ProtoArrayForkChoice,
-};
+use crate::proto_array_fork_choice::{Block, ExecutionStatus, PayloadStatus, ProtoArrayForkChoice};
 use crate::{InvalidationOperation, JustifiedBalances, ParentPayloadStatus};
 use fixed_bytes::FixedBytesExtended;
 use serde::{Deserialize, Serialize};
@@ -429,17 +427,9 @@ impl ForkChoiceTestDefinition {
                     head_block_root,
                     latest_valid_ancestor_root,
                 } => {
-                    // Operations name payloads: invalidate the one the head block commits to.
-                    let head_block_hash = match fork_choice
-                        .get_block(&head_block_root)
-                        .map(|block| block.block_hash())
-                    {
-                        Some(PayloadBlockHash::Hash(hash)) => hash,
-                        Some(PayloadBlockHash::PreMerge) | None => panic!(
-                            "InvalidatePayload op at index {} names a block without a payload: {:?}",
-                            op_index, head_block_root
-                        ),
-                    };
+                    // Operations name payloads. Test blocks commit to `from_root(root)`, as
+                    // `get_hash` spells it.
+                    let head_block_hash = ExecutionBlockHash::from_root(head_block_root);
                     let op = if let Some(latest_valid_ancestor) = latest_valid_ancestor_root {
                         InvalidationOperation::InvalidateMany {
                             head_block_hash,
