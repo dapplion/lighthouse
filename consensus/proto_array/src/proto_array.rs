@@ -29,31 +29,29 @@ four_byte_option_impl!(four_byte_option_checkpoint, Checkpoint);
 /// choice applies it to every block that commits to the named payload.
 #[derive(Clone, Debug)]
 pub enum InvalidationOperation {
-    /// Invalidate only the payload `block_hash` and its descendants. Don't invalidate any
+    /// Invalidate only the payload `head_hash` and its descendants. Don't invalidate any
     /// ancestors.
-    InvalidateOne { block_hash: ExecutionBlockHash },
-    /// Invalidate payloads between `head_block_hash` and `latest_valid_ancestor`.
+    InvalidateOne { head_hash: ExecutionBlockHash },
+    /// Invalidate payloads between `head_hash` and `latest_valid_ancestor`.
     ///
     /// If the `latest_valid_ancestor` is known to fork choice, invalidate all payloads between
-    /// `head_block_hash` and `latest_valid_ancestor`. The `head_block_hash` will be invalidated,
-    /// whilst the `latest_valid_ancestor` will not.
+    /// `head_hash` and `latest_valid_ancestor`. The `head_hash` will be invalidated, whilst the
+    /// `latest_valid_ancestor` will not.
     ///
-    /// If `latest_valid_ancestor` is *not* known to fork choice, only invalidate the
-    /// `head_block_hash` if `always_invalidate_head == true`.
+    /// If `latest_valid_ancestor` is *not* known to fork choice, only invalidate the `head_hash`
+    /// if `always_invalidate_head == true`.
     InvalidateMany {
-        head_block_hash: ExecutionBlockHash,
+        head_hash: ExecutionBlockHash,
         always_invalidate_head: bool,
         latest_valid_ancestor: ExecutionBlockHash,
     },
 }
 
 impl InvalidationOperation {
-    pub fn head_block_hash(&self) -> ExecutionBlockHash {
+    pub fn head_hash(&self) -> ExecutionBlockHash {
         match self {
-            InvalidationOperation::InvalidateOne { block_hash } => *block_hash,
-            InvalidationOperation::InvalidateMany {
-                head_block_hash, ..
-            } => *head_block_hash,
+            InvalidationOperation::InvalidateOne { head_hash } => *head_hash,
+            InvalidationOperation::InvalidateMany { head_hash, .. } => *head_hash,
         }
     }
 
@@ -1079,14 +1077,9 @@ impl ProtoArray {
         op: &InvalidationOperation,
         best_finalized_checkpoint: Checkpoint,
     ) -> Result<(), Error> {
-        /*
-         * Step 1:
-         *
-         * Find `Pn`, the deepest node to invalidate, from every block that commits to the head
-         * payload.
-         */
-
-        for head_index in self.execution_block_hash_to_node_indices(&op.head_block_hash()) {
+        // Find `Pn`, the deepest node to invalidate, from every block that commits to the head
+        // payload.
+        for head_index in self.execution_block_hash_to_node_indices(&op.head_hash()) {
             if let Some(deepest_executed_index) = self.find_deepest_node_to_invalidate::<E>(
                 head_index,
                 op,
@@ -1099,15 +1092,11 @@ impl ProtoArray {
         Ok(())
     }
 
-    /*
-     * Step 2:
-     *
-     * Invalidate `Pn` and all its descendants, walking the children index. The only
-     * exception: descendants on `Pn`'s `EMPTY` edge stay viable — `Pn` is the one node
-     * invalid without an invalid payload in its own state lineage. Every deeper parent
-     * poisons its descendants whichever edge they took, and a `PreGloas` edge never
-     * escapes: that parent carries its payload inside the block.
-     */
+    /// Invalidate `Pn` and all its descendants, walking the children index. The only exception:
+    /// descendants on `Pn`'s `EMPTY` edge stay viable — `Pn` is the one node invalid without an
+    /// invalid payload in its own state lineage. Every deeper parent poisons its descendants
+    /// whichever edge they took, and a `PreGloas` edge never escapes: that parent carries its
+    /// payload inside the block.
     fn invalidate_node_and_descendants(
         &mut self,
         deepest_executed_index: usize,

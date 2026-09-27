@@ -6562,7 +6562,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             crit!(
                 error = ?e,
                 latest_valid_ancestor = ?op.latest_valid_ancestor(),
-                head_block_hash = ?op.head_block_hash(),
+                head_hash = ?op.head_hash(),
                 "Failed to process invalid payload"
             );
         }
@@ -7048,9 +7048,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         // invalidate the head payload and nothing else.
                         None => {
                             self.process_invalid_execution_payload(
-                                &InvalidationOperation::InvalidateOne {
-                                    block_hash: head_hash,
-                                },
+                                &InvalidationOperation::InvalidateOne { head_hash },
                             )
                             .await?;
                         }
@@ -7060,9 +7058,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         // this case.
                         Some(hash) if hash == ExecutionBlockHash::zero() => {
                             self.process_invalid_execution_payload(
-                                &InvalidationOperation::InvalidateOne {
-                                    block_hash: head_hash,
-                                },
+                                &InvalidationOperation::InvalidateOne { head_hash },
                             )
                             .await?;
                         }
@@ -7071,7 +7067,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         Some(latest_valid_hash) => {
                             self.process_invalid_execution_payload(
                                 &InvalidationOperation::InvalidateMany {
-                                    head_block_hash: head_hash,
+                                    head_hash,
                                     always_invalidate_head: true,
                                     latest_valid_ancestor: latest_valid_hash,
                                 },
@@ -7098,7 +7094,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     // Using a `None` latest valid ancestor will result in only the head payload
                     // being invalidated (no ancestors).
                     self.process_invalid_execution_payload(&InvalidationOperation::InvalidateOne {
-                        block_hash: head_hash,
+                        head_hash,
                     })
                     .await?;
 

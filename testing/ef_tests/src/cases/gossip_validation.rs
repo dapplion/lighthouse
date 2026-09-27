@@ -651,9 +651,9 @@ impl<E: EthSpec> GossipTester<E> {
                 if payload_status == Some(PayloadStatus::Invalidated) {
                     // The block has been imported optimistically. Mark its payload invalid in fork
                     // choice so descendants observe an invalid execution parent.
-                    let block_hash = self.harness.execution_block_hash(block_root);
+                    let head_hash = self.harness.execution_block_hash(block_root);
                     self.block_on_dangerous(self.harness.chain.process_invalid_execution_payload(
-                        &InvalidationOperation::InvalidateOne { block_hash },
+                        &InvalidationOperation::InvalidateOne { head_hash },
                     ))?
                     .map_err(|e| {
                         Error::InternalError(format!(

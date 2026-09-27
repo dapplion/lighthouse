@@ -184,7 +184,7 @@ pub async fn notify_new_payload<T: BeaconChainTypes>(
                 {
                     chain
                         .process_invalid_execution_payload(&InvalidationOperation::InvalidateMany {
-                            head_block_hash: parent_block_hash,
+                            head_hash: parent_block_hash,
                             always_invalidate_head: false,
                             latest_valid_ancestor: latest_valid_hash,
                         })
