@@ -909,13 +909,23 @@ async fn switches_heads() {
     // `fork_block_root`'s payload to switch from `Optimistic` to `Invalid`. This means it *won't*
     // be set as head, it's parent block will instead. This is an issue with the mock EL and/or
     // the payload invalidation rig.
-    assert_eq!(rig.harness.head_block_root(), fork_parent_root);
+    //
+    // Not in Gloas: the fork block extends the fork parent's `FULL` node and its envelope never
+    // arrives, so the forkchoiceUpdated for its `EMPTY` node names the fork parent's payload. The
+    // mock also returns that hash as the latest valid one, which condemns nothing, so the fork
+    // block stays head.
+    if fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        assert_eq!(rig.harness.head_block_root(), fork_block_root);
+        assert!(is_not_yet_revealed(rig.execution_status(fork_block_root)));
+    } else {
+        assert_eq!(rig.harness.head_block_root(), fork_parent_root);
 
-    // The fork block has not yet been validated.
-    assert!(matches!(
-        rig.execution_status(fork_block_root),
-        ExecutionStatus::Optimistic(_) | ExecutionStatus::Invalid(_)
-    ));
+        // The fork block has not yet been validated.
+        assert!(matches!(
+            rig.execution_status(fork_block_root),
+            ExecutionStatus::Optimistic(_) | ExecutionStatus::Invalid(_)
+        ));
+    }
 
     for root in blocks {
         let slot = rig
