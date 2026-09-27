@@ -760,9 +760,13 @@ mod tests {
             "precondition: cached data columns must be non-empty"
         );
 
+        // In Gloas the payload arrives separately via its envelope, so a block whose envelope has
+        // not been imported yet reads `execution_optimistic: true` by root — its payload is
+        // unverified — even though the block itself is verified. Pre-Gloas it reads `false`.
+        let expected_optimistic = fork_name.gloas_enabled();
         assert_eq!(
             BlockId(CoreBlockId::Root(block_root)).root(chain).unwrap(),
-            (block_root, false, false)
+            (block_root, expected_optimistic, false)
         );
 
         let (blinded_block, execution_optimistic, finalized) =
@@ -771,7 +775,7 @@ mod tests {
                 .unwrap();
         assert_eq!(blinded_block.canonical_root(), block_root);
         assert_eq!(blinded_block.slot(), block.slot());
-        assert!(!execution_optimistic);
+        assert_eq!(execution_optimistic, expected_optimistic);
         assert!(!finalized);
 
         let (data_columns, data_columns_fork_name, execution_optimistic, finalized) =
@@ -780,7 +784,7 @@ mod tests {
                 .unwrap();
         assert_eq!(data_columns, cached_data_columns);
         assert_eq!(data_columns_fork_name, fork_name);
-        assert!(!execution_optimistic);
+        assert_eq!(execution_optimistic, expected_optimistic);
         assert!(!finalized);
 
         chain.early_attester_cache.clear();
