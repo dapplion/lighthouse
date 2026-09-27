@@ -16,6 +16,7 @@ alloy-primitives = { workspace = true }
 alloy-rlp = { workspace = true }
 anyhow = { workspace = true }
 async-channel = { workspace = true }
+backfill_core = { workspace = true }
 beacon_chain = { workspace = true }
 beacon_processor = { workspace = true }
 delay_map = { workspace = true }

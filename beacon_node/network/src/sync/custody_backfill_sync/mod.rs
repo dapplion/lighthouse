@@ -18,7 +18,7 @@ use types::{DataColumnSidecarList, Epoch, EthSpec};
 
 use crate::metrics;
 use crate::sync::{
-    backfill_sync::{BACKFILL_EPOCHS_PER_BATCH, ProcessResult, SyncStart},
+    backfill_sync::{ProcessResult, SyncStart},
     batch::{
         BatchConfig, BatchId, BatchInfo, BatchMetricsState, BatchOperationOutcome,
         BatchProcessingResult, BatchState, ByRangeRequestType,
@@ -852,7 +852,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                 );
                 self.restart_sync();
             };
-            self.processing_target -= BACKFILL_EPOCHS_PER_BATCH;
+            self.processing_target -= CUSTODY_BACKFILL_EPOCHS_PER_BATCH;
         }
 
         // Find the id of the batch we are going to process.
@@ -913,7 +913,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
 
         // We can now validate higher batches than the current batch. Here we remove all
         // batches that are higher than the current batch. We add on an extra
-        // `BACKFILL_EPOCHS_PER_BATCH` as `split_off` is inclusive.
+        // `CUSTODY_BACKFILL_EPOCHS_PER_BATCH` as `split_off` is inclusive.
         let removed_batches = self
             .batches
             .split_off(&(validating_epoch + CUSTODY_BACKFILL_EPOCHS_PER_BATCH));

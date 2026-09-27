@@ -1,0 +1,9 @@
+[package]
+name = "backfill_core"
+version = "0.1.0"
+authors = ["Sigma Prime <contact@sigmaprime.io>"]
+edition = { workspace = true }
+
+# No dependencies, on purpose: this crate is extracted to Lean by Charon and Aeneas. See
+# `proofs/README.md`.
+[dependencies]
