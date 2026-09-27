@@ -657,13 +657,12 @@ async fn import_block_and_envelope(
         .await
         .expect("envelope import should succeed even when the execution layer is syncing");
 
-    assert!(
-        matches!(
-            status,
-            beacon_chain::AvailabilityProcessingStatus::Imported(..)
-        ),
-        "envelope for slot {slot} should import, got {status:?}",
-    );
+    match status {
+        beacon_chain::AvailabilityProcessingStatus::Imported(..) => {}
+        beacon_chain::AvailabilityProcessingStatus::MissingComponents(..) => {
+            panic!("envelope for slot {slot} should import, got {status:?}")
+        }
+    }
 
     // The next block builds on the payload status of the head. If the head does not catch up
     // here, every block extends the `EMPTY` variant of its parent.
