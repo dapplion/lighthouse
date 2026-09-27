@@ -1195,7 +1195,9 @@ async fn invalid_parent() {
 
 #[tokio::test]
 async fn attesting_to_optimistic_head() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only. In Gloas the head sits on its EMPTY node and inherits its parent's valid
+    // payload, so an optimistic head is still attestable; the pre-Gloas expectation doesn't hold.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     let mut rig = InvalidPayloadRig::new();
