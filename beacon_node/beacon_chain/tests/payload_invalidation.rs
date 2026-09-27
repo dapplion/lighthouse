@@ -1196,7 +1196,10 @@ async fn invalid_parent() {
 
 #[tokio::test]
 async fn attesting_to_optimistic_head() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only. In Gloas a block is split from its payload, so an optimistic
+    // (payload-unrevealed) head is still attestable via its parent's executed payload; a two-node
+    // variant belongs with the Gloas coverage.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     let mut rig = InvalidPayloadRig::new();
