@@ -905,17 +905,29 @@ async fn switches_heads() {
     })
     .await;
 
-    // NOTE: The `import_block` method above will cause the `ExecutionStatus` of the
-    // `fork_block_root`'s payload to switch from `Optimistic` to `Invalid`. This means it *won't*
-    // be set as head, it's parent block will instead. This is an issue with the mock EL and/or
-    // the payload invalidation rig.
-    assert_eq!(rig.harness.head_block_root(), fork_parent_root);
+    if fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        // The canonical branch above the latest valid hash is condemned, so the head switches
+        // to the fork block's `EMPTY` node, which inherits the parent's payload — the latest
+        // valid hash. The fork block's envelope was never imported, and the invalidating fcU
+        // for the `EMPTY` node names that same parent payload, so nothing further is condemned
+        // and the head sticks.
+        assert_eq!(rig.harness.head_block_root(), fork_block_root);
 
-    // The fork block has not yet been validated.
-    assert!(matches!(
-        rig.execution_status(fork_block_root),
-        ExecutionStatus::Optimistic(_) | ExecutionStatus::Invalid(_)
-    ));
+        // The fork block's own payload was never revealed.
+        assert!(is_not_yet_revealed(rig.execution_status(fork_block_root)));
+    } else {
+        // NOTE: The `import_block` method above will cause the `ExecutionStatus` of the
+        // `fork_block_root`'s payload to switch from `Optimistic` to `Invalid`. This means it
+        // *won't* be set as head, it's parent block will instead. This is an issue with the mock
+        // EL and/or the payload invalidation rig.
+        assert_eq!(rig.harness.head_block_root(), fork_parent_root);
+
+        // The fork block has not yet been validated.
+        assert!(matches!(
+            rig.execution_status(fork_block_root),
+            ExecutionStatus::Optimistic(_) | ExecutionStatus::Invalid(_)
+        ));
+    }
 
     for root in blocks {
         let slot = rig
