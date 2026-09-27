@@ -218,6 +218,19 @@ impl ProtoNode {
         }
     }
 
+    /// Whether the execution payload this node commits to was found invalid.
+    ///
+    /// Do not use outside of this crate: callers ask `ForkChoice::is_invalid` by payload hash.
+    pub(crate) fn is_invalid(&self) -> bool {
+        match self.execution_status() {
+            ExecutionStatus::Invalid(_) => true,
+            ExecutionStatus::Valid(_)
+            | ExecutionStatus::Optimistic(_)
+            | ExecutionStatus::Irrelevant(_)
+            | ExecutionStatus::NotYetRevealed(_) => false,
+        }
+    }
+
     /// The execution block this node commits to.
     pub fn block_hash(&self) -> PayloadBlockHash {
         match self {
@@ -1297,17 +1310,7 @@ impl ProtoArray {
                     ParentPayloadStatus::Empty | ParentPayloadStatus::PreGloas => None,
                 },
             };
-            let executes_invalid_payload =
-                match executed_node.map(|executed_node| executed_node.execution_status()) {
-                    Some(ExecutionStatus::Invalid(_)) => true,
-                    Some(
-                        ExecutionStatus::Valid(_)
-                        | ExecutionStatus::Optimistic(_)
-                        | ExecutionStatus::Irrelevant(_)
-                        | ExecutionStatus::NotYetRevealed(_),
-                    )
-                    | None => false,
-                };
+            let executes_invalid_payload = executed_node.is_some_and(ProtoNode::is_invalid);
             excluded[i] = parent_excluded || executes_invalid_payload;
         }
 
@@ -1603,18 +1606,12 @@ impl ProtoArray {
             .get(proto_node_index)
             .ok_or(Error::InvalidNodeIndex(proto_node_index))?;
 
-        let payload_received = proto_node
-            .payload_received()
-            .map_err(|_| Error::InvalidNodeVariant { block_root: root })?;
         // As in `get_node_children`, an invalid payload has no FULL node.
-        let full_node_exists = match proto_node.execution_status() {
-            ExecutionStatus::Invalid(_) => false,
-            ExecutionStatus::Valid(_)
-            | ExecutionStatus::Optimistic(_)
-            | ExecutionStatus::Irrelevant(_)
-            | ExecutionStatus::NotYetRevealed(_) => payload_received,
-        };
-        if !full_node_exists {
+        if !proto_node
+            .payload_received()
+            .map_err(|_| Error::InvalidNodeVariant { block_root: root })?
+            || proto_node.is_invalid()
+        {
             return Ok(PayloadStatus::Empty);
         }
 
@@ -1814,16 +1811,9 @@ impl ProtoArray {
             let mut children = vec![(node.with_status(PayloadStatus::Empty), proto_node.clone())];
             // The FULL virtual child only exists if the payload has been received and not found
             // invalid.
-            let full_node_exists = match proto_node.execution_status() {
-                ExecutionStatus::Invalid(_) => false,
-                ExecutionStatus::Valid(_)
-                | ExecutionStatus::Optimistic(_)
-                | ExecutionStatus::Irrelevant(_)
-                | ExecutionStatus::NotYetRevealed(_) => {
-                    proto_node.payload_received().is_ok_and(|received| received)
-                }
-            };
-            if full_node_exists {
+            if proto_node.payload_received().is_ok_and(|received| received)
+                && !proto_node.is_invalid()
+            {
                 children.push((node.with_status(PayloadStatus::Full), proto_node.clone()));
             }
             Ok(children)
