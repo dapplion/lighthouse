@@ -1,39 +1,35 @@
 //! The decision core of backfill sync, addressed by root instead of by slot range.
 //!
-//! Backfill walks backwards from the anchor one run of ancestors at a time, over
-//! `BlocksByHead` (consensus-specs #5181): a request names a block root, and the response is
-//! that block's parent chain in descending slot order. Verifying it needs nothing but the
-//! response and the frontier we already hold — the run must start at the root we asked for
-//! and hash-link down from it — so a response is accepted or rejected the instant it
-//! arrives, and the peer that sent it is the only suspect.
-//!
-//! That is the whole reason this module is small. Addressing history by slot range makes a
-//! response unverifiable on arrival: a batch can only be checked once the batch above it has
-//! been imported, so faults surface late, with several suspects, and the machine grows a
-//! window, a per-batch state machine, seam reconciliation and a retro-scoring pass to work
-//! out who lied. None of that has anything to answer here.
+//! Backfill walks backwards from the anchor one run of ancestors at a time over `BlocksByHead`
+//! (consensus-specs #5181): a request names a block root, and the response is that block's
+//! parent chain in descending slot order. Verifying it needs only the response and the frontier
+//! we already hold, so a run is accepted or rejected on arrival and the peer that sent it is
+//! the only suspect. By slot range a response cannot be checked until the range above it has
+//! been imported, which is where the window, the per-batch state machine, the seam
+//! reconciliation and the retro-scoring pass all come from. None of that applies here.
 //!
 //! # Properties
 //!
-//! This file is extracted to Lean by Charon and Aeneas — `proofs/` next to it, `extract.sh`
-//! to regenerate — and these are proved about it, not about a model of it:
+//! Charon and Aeneas extract this file to Lean (`proofs/`, regenerate with `extract.sh`), and
+//! these are proved about it rather than about a model of it:
 //!
-//! - **S** every `Store` carries a run hash-linked from the frontier, with strictly
-//!   decreasing slots, and the staged frontier is its oldest header.
+//! - **S** every `Store` carries a run hash-linked from the frontier, slots strictly
+//!   decreasing, sent by the peer the state then records, and the staged frontier is its
+//!   oldest header. Its converse holds too: every honest run is accepted, so the core cannot
+//!   satisfy the rest by rejecting everything.
 //! - **A** every `Penalize` names the peer that served the run being judged.
-//! - **P** a measure strictly decreases on every event but `PeerJoined`, or the state is
-//!   unchanged and no action is emitted.
+//! - **P** every event but `PeerJoined` strictly decreases a measure, or changes nothing and
+//!   emits nothing.
 //! - **R** `from_anchor` re-establishes the invariant from `AnchorInfo` alone.
 //!
-//! Totality is part of every proof, which is what covers the bare indexing in `check_run`:
-//! the extracted model is shown never to reach `fail`, so the index cannot go out of bounds.
+//! Each is a total-correctness statement, so `step` is also proved never to fail — which is
+//! what licenses the bare indexing in `check_run`.
 //!
 //! # Subset
 //!
-//! Kept to what Charon and Aeneas accept, which costs nothing here and is worth stating as
-//! style: no generics, no traits, no borrows held across returns, no `Arc`, no async, no
-//! clock, no maps. `Hash256` is a `u64` because only equality is ever used on roots, and
-//! `PeerId` is an index into a table the adapter owns, so the core cannot do peer policy.
+//! Only what Charon and Aeneas accept: no generics, traits, iterators, borrows held across
+//! returns, `Arc`, async, clock or maps. A `PeerId` is an index into a table the adapter owns,
+//! so the core cannot do peer policy.
 
 pub type Slot = u64;
 pub type PeerIdx = u32;
@@ -337,5 +333,193 @@ pub fn from_anchor(cfg: Config, oldest: Header, target_slot: Slot) -> Backfill {
         wait: Wait::Idle,
         last_bad: None,
         done: oldest.slot <= target_slot,
+    }
+}
+
+/// The properties above are proved in Lean, which CI does not run. These are the same claims in
+/// Rust, so an edit here that breaks one fails the test suite too.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root_of(n: u64) -> Root {
+        Root {
+            a: n,
+            b: 0,
+            c: 0,
+            d: 0,
+        }
+    }
+
+    fn header(root: u64, parent: u64, slot: u64) -> Header {
+        Header {
+            root: root_of(root),
+            parent_root: root_of(parent),
+            slot,
+        }
+    }
+
+    /// `Header` carries no derives it does not need, so runs are compared by their fields.
+    fn oldest(checked: Option<Header>) -> Option<(u64, u64)> {
+        checked.map(|header| (header.slot, header.root.a))
+    }
+
+    fn penalized(actions: &[Action]) -> Vec<PeerIdx> {
+        let mut peers = vec![];
+        for action in actions {
+            match action {
+                Action::Penalize { peer } => peers.push(*peer),
+                Action::Request { .. } | Action::Store { .. } | Action::Complete => {}
+            }
+        }
+        peers
+    }
+
+    fn machine(max_attempts: u8) -> Backfill {
+        from_anchor(
+            Config {
+                run_len: 64,
+                max_attempts,
+            },
+            header(9, 8, 30),
+            0,
+        )
+    }
+
+    /// `store_is_verified_descent`: what reaches the store starts at the root we asked for and
+    /// links down from it.
+    #[test]
+    fn a_run_is_only_accepted_when_it_links_to_the_frontier() {
+        let run = vec![header(9, 8, 30), header(8, 7, 29), header(7, 6, 27)];
+
+        assert_eq!(
+            oldest(check_run(root_of(9), 31, &run)),
+            Some((27, 7)),
+            "a linked run is accepted and its oldest header becomes the frontier"
+        );
+        assert_eq!(
+            oldest(check_run(root_of(5), 31, &run)),
+            None,
+            "wrong anchor"
+        );
+        assert_eq!(
+            oldest(check_run(root_of(9), 30, &run)),
+            None,
+            "not older than the frontier"
+        );
+        assert_eq!(
+            oldest(check_run(root_of(9), 31, &vec![])),
+            None,
+            "an empty run is no progress, so it is not a link"
+        );
+        assert_eq!(
+            oldest(check_run(
+                root_of(9),
+                31,
+                &vec![header(9, 8, 30), header(4, 3, 29)]
+            )),
+            None,
+            "a break in the middle"
+        );
+        assert_eq!(
+            oldest(check_run(
+                root_of(9),
+                31,
+                &vec![header(9, 8, 30), header(8, 7, 30)]
+            )),
+            None,
+            "slots that do not descend"
+        );
+    }
+
+    /// The sequence the adapter implements: ask, verify, stage, import.
+    #[test]
+    fn a_landed_run_advances_the_frontier_and_refills_the_budget() {
+        let mut bf = machine(3);
+
+        let actions = step(&mut bf, Event::Tick);
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            Action::Request { anchor, .. } => assert!(root_eq(*anchor, root_of(8))),
+            _ => panic!("a tick on an idle machine asks for the frontier's parent"),
+        }
+
+        // A run that does not link is the sender's fault, and costs an attempt.
+        let actions = step(
+            &mut bf,
+            Event::Run {
+                peer: 1,
+                headers: vec![header(4, 3, 29)],
+            },
+        );
+        assert_eq!(penalized(&actions), vec![1]);
+        assert_eq!(bf.attempts, 2);
+        assert_eq!(bf.frontier.slot, 30);
+
+        // A run that links is staged, and the frontier moves only once the store confirms.
+        let _ = step(&mut bf, Event::Tick);
+        let actions = step(
+            &mut bf,
+            Event::Run {
+                peer: 2,
+                headers: vec![header(8, 7, 29), header(7, 6, 27)],
+            },
+        );
+        match &actions[0] {
+            Action::Store { .. } => {}
+            _ => panic!("a linked run is handed to the store"),
+        }
+        assert_eq!(bf.frontier.slot, 30);
+
+        assert!(step(&mut bf, Event::Imported).is_empty());
+        assert_eq!(bf.frontier.slot, 27);
+        assert_eq!(bf.attempts, 3);
+    }
+
+    /// `penalize_names_the_server`: a store rejection names the peer that served the run.
+    #[test]
+    fn a_rejected_run_is_charged_to_the_peer_that_served_it() {
+        let mut bf = machine(3);
+        let _ = step(&mut bf, Event::Tick);
+        let _ = step(
+            &mut bf,
+            Event::Run {
+                peer: 7,
+                headers: vec![header(8, 7, 29)],
+            },
+        );
+        assert_eq!(penalized(&step(&mut bf, Event::Rejected)), vec![7]);
+
+        // Whereas a run that could not be made durable blames no one.
+        let _ = step(&mut bf, Event::Tick);
+        let _ = step(
+            &mut bf,
+            Event::Run {
+                peer: 7,
+                headers: vec![header(8, 7, 29)],
+            },
+        );
+        assert!(step(&mut bf, Event::Abandoned).is_empty());
+    }
+
+    /// `progress`: out of attempts the machine parks and waits, rather than spinning or dying.
+    #[test]
+    fn exhausted_attempts_park_until_a_peer_joins() {
+        let mut bf = machine(2);
+
+        for _ in 0..2 {
+            let _ = step(&mut bf, Event::Tick);
+            let _ = step(&mut bf, Event::Fail { peer: Some(1) });
+        }
+        assert_eq!(bf.attempts, 0);
+        match bf.wait {
+            Wait::Parked => {}
+            Wait::Idle | Wait::Pending | Wait::Importing { .. } => panic!("expected to park"),
+        }
+        assert!(step(&mut bf, Event::Tick).is_empty());
+
+        let _ = step(&mut bf, Event::PeerJoined);
+        assert_eq!(bf.attempts, 2);
+        assert_eq!(step(&mut bf, Event::Tick).len(), 1);
     }
 }

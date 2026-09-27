@@ -34,7 +34,7 @@ aeneas checkout four directories up; point it elsewhere if yours lives somewhere
 
 | | claim |
 |---|---|
-| **S** | `store_is_verified_descent` — every `Store` action carries a run hash-linked from the frontier, and the header staged to replace the frontier is that run's oldest. |
+| **S** | `store_is_verified_descent` — every `Store` action carries a run hash-linked from the frontier, sent by the peer the state then records; the header staged to replace the frontier is that run's oldest. `check_run_complete` is the converse: every honest run is accepted, so the core cannot satisfy S by rejecting everything. |
 | **A** | `penalize_names_the_server` — every `Penalize` names either the sender of the run that failed the check, or the peer the state remembers as having served the run the store rejected. |
 | **P** | `progress` — every event but `PeerJoined` either leaves the state untouched and emits nothing, or strictly decreases `mu`. No internal loop. |
 | **R** | `inv_from_anchor`, `inv_step` — the invariant holds of a state rebuilt from the anchor, and every step preserves it. |

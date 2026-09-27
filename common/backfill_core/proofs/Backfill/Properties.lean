@@ -103,6 +103,47 @@ theorem check_run_spec (expected : Root) (bound : Std.U64) (headers : alloc.vec.
     rw [h2] at hr
     simpa using hr
 
+/-- The other direction of the loop: an honest run leaves `linked` exactly as it found it. -/
+theorem check_run_loop_complete (headers : alloc.vec.Vec Header) (linked : Bool) (want : Root)
+    (limit : Std.U64) (last : Option Header) (i : Std.Usize) (_hi : i.val ≤ headers.length)
+    (hc : Chained want limit (headers.val.drop i.val)) :
+    check_run_loop headers linked want limit last i ⦃ lk lst =>
+      lk = linked ∧ lst = (headers.val.drop i.val).getLast?.or last ⦄ := by
+  unfold check_run_loop
+  simp
+  split
+  · step as ⟨header, hheader⟩
+    step as ⟨i2⟩
+    have hdrop : headers.val.drop i.val = header :: headers.val.drop (i.val + 1) := by
+      rw [hheader]
+      exact (List.getElem_cons_drop (by scalar_tac)).symm
+    have hi2 : i2.val = i.val + 1 := by scalar_tac
+    rw [hdrop] at hc
+    obtain ⟨hroot, hslot, htail⟩ := hc
+    apply spec_mono (check_run_loop_complete headers _ header.parent_root header.slot
+      (some header) i2 (by scalar_tac) (by rw [hi2]; exact htail))
+    rintro ⟨lk, lst⟩ ⟨h1, h2⟩
+    rw [hi2] at h2
+    refine ⟨?_, ?_⟩
+    · simpa [hroot, hslot] using h1
+    · rw [hdrop, h2, getLast?_or_cons]
+  · simp [List.drop_eq_nil_of_le (by scalar_tac : headers.val.length ≤ i.val)]
+termination_by headers.length - i.val
+decreasing_by scalar_decr_tac
+
+/-- **The other half of S**: the checker accepts every honest run. Without this, a `check_run`
+    that returned `none` for everything would satisfy S, A, P and R, and "the core never
+    penalises an honest peer" would be an empty claim. -/
+theorem check_run_complete (expected : Root) (bound : Std.U64) (headers : alloc.vec.Vec Header)
+    (hc : Chained expected bound headers.val) :
+    check_run expected bound headers ⦃ r => r = headers.val.getLast? ⦄ := by
+  unfold check_run
+  apply spec_bind (check_run_loop_complete headers true expected bound none 0#usize (by simp)
+    (by simpa using hc))
+  rintro ⟨lk, lst⟩ ⟨h1, h2⟩
+  simp at h1 h2
+  simp [h1, h2]
+
 /-- `retry` spends one attempt, or parks with none left. Nothing else about the state moves,
     which is what makes it usable in both the safety and the progress argument. -/
 @[step]
@@ -124,6 +165,7 @@ theorem retry_spec (bf : Backfill) :
 theorem store_is_verified_descent (bf : Backfill) (ev : Event) :
     step bf ev ⦃ acts bf' => ∀ hs, Action.Store hs ∈ acts.val →
       ∃ oldest peer,
+        ev = Event.Run peer hs ∧
         Chained bf.frontier.parent_root bf.frontier.slot hs.val ∧
         hs.val.getLast? = some oldest ∧
         bf'.wait = Wait.Importing oldest peer ⦄ := by
@@ -157,7 +199,7 @@ theorem store_is_verified_descent (bf : Backfill) (ev : Event) :
         rw [hout] at hmem
         simp at hmem
         subst hmem
-        exact ⟨oldest, peer, (hr oldest rfl).1, (hr oldest rfl).2, rfl⟩
+        exact ⟨oldest, peer, rfl, (hr oldest rfl).1, (hr oldest rfl).2, rfl⟩
     · simp
     · simp
   | Event.Fail peer =>
@@ -510,6 +552,7 @@ theorem progress (bf : Backfill) (ev : Event) (hinv : Inv bf) (hev : ev ≠ Even
   | Event.PeerJoined => exact absurd rfl hev
 
 #print axioms check_run_spec
+#print axioms check_run_complete
 #print axioms store_is_verified_descent
 #print axioms penalize_names_the_server
 #print axioms inv_from_anchor
