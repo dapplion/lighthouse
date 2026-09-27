@@ -6584,13 +6584,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     // A Gloas justified block whose own payload is invalid is dead only on its
                     // `FULL` node; the checkpoint is invalid only when the payload its branch
                     // actually executed is. `inherited_execution_status` resolves that payload.
-                    let is_invalid =
-                        match fork_choice.inherited_execution_status(&justified_block.root)? {
-                            Some(ExecutionVerdict::Invalid) => true,
-                            Some(ExecutionVerdict::Valid | ExecutionVerdict::Optimistic) | None => {
-                                false
-                            }
-                        };
+                    let is_invalid = fork_choice
+                        .inherited_execution_status(&justified_block.root)?
+                        .is_some_and(|verdict| verdict.is_invalid());
                     Ok::<_, ForkChoiceError>((justified_block, is_invalid))
                 },
                 "invalid_payload_fork_choice_get_justified",
