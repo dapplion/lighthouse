@@ -735,8 +735,13 @@ where
             }
             // A revealed Gloas payload always has execution enabled, so this is a logic error.
             PayloadVerificationStatus::Irrelevant => {
+                let block_slot = self
+                    .proto_array
+                    .get_block(&block_root)
+                    .ok_or(Error::MissingProtoArrayBlock(block_root))?
+                    .slot;
                 return Err(Error::InvalidPayloadStatus {
-                    block_slot: Slot::new(0),
+                    block_slot,
                     block_root,
                     payload_verification_status,
                 });
