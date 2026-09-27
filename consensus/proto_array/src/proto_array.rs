@@ -821,9 +821,9 @@ impl ProtoArray {
         Ok(!has_equivocation)
     }
 
-    /// Process a valid execution payload envelope for a Gloas block.
+    /// Record the execution layer's verdict for a Gloas block's payload envelope.
     ///
-    /// Sets `payload_received` to true.
+    /// Sets `payload_received` to true whatever the verdict.
     pub fn on_payload_envelope_received(
         &mut self,
         block_root: Hash256,

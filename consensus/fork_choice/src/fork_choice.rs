@@ -433,8 +433,7 @@ where
 
         let (execution_status, execution_payload_parent_hash, execution_payload_block_hash) =
             if let Ok(signed_bid) = anchor_block.message().body().signed_execution_payload_bid() {
-                // Gloas: the anchor is trusted, so fork choice records no payload verdict
-                // for it.
+                // Gloas: `on_block` ignores this and starts a V29 node as `NotYetRevealed`.
                 (
                     ExecutionStatus::irrelevant(),
                     Some(signed_bid.message.parent_block_hash),
