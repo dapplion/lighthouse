@@ -1225,6 +1225,22 @@ impl ProtoArrayForkChoice {
             .node_execution_status(*block_root, PayloadStatus::Full)
     }
 
+    /// The root of the block on `head_root`'s chain whose own execution payload is `block_hash`.
+    ///
+    /// A forkchoiceUpdated judges a payload, not a block. Pre-Gloas that is the head block's own
+    /// payload. For a Gloas head on its `EMPTY` node it is an ancestor's. `None` when no block
+    /// still in fork choice carries it.
+    pub fn payload_owner_root(
+        &self,
+        head_root: &Hash256,
+        block_hash: ExecutionBlockHash,
+    ) -> Option<Hash256> {
+        self.proto_array
+            .iter_nodes(head_root)
+            .find(|node| node.block_hash() == PayloadBlockHash::Hash(block_hash))
+            .map(|node| node.root())
+    }
+
     /// Spec's `get_supported_node`.
     pub fn supported_node(
         &self,

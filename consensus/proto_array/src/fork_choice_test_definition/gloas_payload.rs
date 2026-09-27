@@ -1332,4 +1332,91 @@ mod tests {
         }
         .run();
     }
+
+    /// Invalidating block 2's payload kills `(2, FULL)` only. Block 3 extends `(2, EMPTY)`, so
+    /// its execution parent is block 1's payload, which is valid.
+    ///
+    ///   genesis -EMPTY-> 1 -FULL-> 2 -EMPTY-> 3
+    #[test]
+    fn empty_child_of_invalid_payload_stays_viable() {
+        let balances = vec![1];
+        let ops = vec![
+            Operation::ProcessBlock {
+                slot: Slot::new(1),
+                root: get_root(1),
+                parent_root: get_root(0),
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                execution_payload_parent_hash: Some(get_hash(99)),
+                execution_payload_block_hash: Some(get_hash(1)),
+            },
+            Operation::ProcessExecutionPayloadEnvelope {
+                block_root: get_root(1),
+            },
+            Operation::ProcessBlock {
+                slot: Slot::new(2),
+                root: get_root(2),
+                parent_root: get_root(1),
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                execution_payload_parent_hash: Some(get_hash(1)),
+                execution_payload_block_hash: Some(get_hash(2)),
+            },
+            Operation::ProcessBlock {
+                slot: Slot::new(3),
+                root: get_root(3),
+                parent_root: get_root(2),
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                execution_payload_parent_hash: Some(get_hash(1)),
+                execution_payload_block_hash: Some(get_hash(3)),
+            },
+            Operation::AssertParentPayloadStatus {
+                block_root: get_root(2),
+                expected_status: ParentPayloadStatus::Full,
+            },
+            Operation::AssertParentPayloadStatus {
+                block_root: get_root(3),
+                expected_status: ParentPayloadStatus::Empty,
+            },
+            Operation::ProcessGloasAttestation {
+                validator_index: 0,
+                block_root: get_root(3),
+                attestation_slot: Slot::new(4),
+                payload_present: false,
+            },
+            Operation::FindHead {
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                justified_state_balances: balances.clone(),
+                expected_head: get_root(3),
+                current_slot: Slot::new(4),
+                expected_payload_status: None,
+            },
+            // The EL declares block 2's payload INVALID; block 1's payload is the latest valid.
+            Operation::InvalidatePayload {
+                head_block_root: get_root(2),
+                latest_valid_ancestor_root: Some(get_hash(1)),
+            },
+            Operation::FindHead {
+                justified_checkpoint: get_checkpoint(0),
+                finalized_checkpoint: get_checkpoint(0),
+                justified_state_balances: balances,
+                expected_head: get_root(3),
+                current_slot: Slot::new(4),
+                expected_payload_status: None,
+            },
+        ];
+
+        ForkChoiceTestDefinition {
+            finalized_block_slot: Slot::new(0),
+            justified_checkpoint: get_checkpoint(0),
+            finalized_checkpoint: get_checkpoint(0),
+            operations: ops,
+            execution_payload_parent_hash: Some(get_hash(42)),
+            execution_payload_block_hash: Some(get_hash(0)),
+            spec: Some(gloas_spec()),
+        }
+        .run();
+    }
 }

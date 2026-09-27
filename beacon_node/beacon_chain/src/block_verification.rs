@@ -64,7 +64,7 @@ use crate::payload_envelope_verification::EnvelopeError;
 use crate::validator_monitor::HISTORIC_EPOCHS as VALIDATOR_MONITOR_HISTORIC_EPOCHS;
 use crate::validator_pubkey_cache::ValidatorPubkeyCache;
 use crate::{
-    BeaconChain, BeaconChainError, BeaconChainTypes,
+    BeaconChain, BeaconChainError, BeaconChainTypes, ExecutionVerdict,
     beacon_chain::{BeaconForkChoice, ForkChoiceError},
     metrics,
 };
@@ -1457,16 +1457,22 @@ impl<T: BeaconChainTypes> ExecutionPendingBlock<T> {
             .observe_proposal(block_root, block.message())
             .map_err(|e| BlockError::BeaconChainError(Box::new(e.into())))?;
 
-        match chain
-            .canonical_head
-            .fork_choice_read_lock()
-            .get_parent_import_status(block.as_block())
-        {
+        let fork_choice = chain.canonical_head.fork_choice_read_lock();
+        match fork_choice.get_parent_import_status(block.as_block()) {
             ParentImportStatus::Imported(parent) => {
-                if parent.execution_status.is_invalid() {
-                    return Err(BlockError::ParentExecutionPayloadInvalid {
-                        parent_root: block.parent_root(),
-                    });
+                // Only the payload this block builds on matters. A Gloas block on its parent's
+                // `EMPTY` node skips the parent's own payload.
+                match fork_choice
+                    .get_parent_payload_execution_status(block.as_block(), &parent)
+                    .map_err(|e| {
+                        BlockError::BeaconChainError(Box::new(BeaconChainError::ForkChoiceError(e)))
+                    })? {
+                    ExecutionVerdict::Invalid => {
+                        return Err(BlockError::ParentExecutionPayloadInvalid {
+                            parent_root: block.parent_root(),
+                        });
+                    }
+                    ExecutionVerdict::Valid | ExecutionVerdict::Optimistic => {}
                 }
             }
             ParentImportStatus::UnknownBlock | ParentImportStatus::UnknownPayload => {
@@ -1476,6 +1482,7 @@ impl<T: BeaconChainTypes> ExecutionPendingBlock<T> {
                 });
             }
         }
+        drop(fork_choice);
 
         /*
          *  Perform cursory checks to see if the block is even worth processing.

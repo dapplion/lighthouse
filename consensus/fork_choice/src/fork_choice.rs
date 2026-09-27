@@ -750,7 +750,10 @@ where
         Ok(())
     }
 
-    /// Pre-Gloas only.
+    /// Mark `block_root`'s own payload, and every payload its chain executed, as valid.
+    ///
+    /// For a forkchoiceUpdated, pass the block that `payload_owner_root` finds for the head hash:
+    /// a Gloas head on its `EMPTY` node did not run its own payload.
     ///
     /// See `ProtoArrayForkChoice::process_execution_payload_validation` for documentation.
     pub fn on_valid_execution_payload(
@@ -760,6 +763,15 @@ where
         self.proto_array
             .process_execution_payload_validation(block_root)
             .map_err(Error::FailedToProcessValidExecutionPayload)
+    }
+
+    /// See `ProtoArrayForkChoice::payload_owner_root`.
+    pub fn payload_owner_root(
+        &self,
+        head_root: &Hash256,
+        block_hash: ExecutionBlockHash,
+    ) -> Option<Hash256> {
+        self.proto_array.payload_owner_root(head_root, block_hash)
     }
 
     /// See `ProtoArrayForkChoice::process_execution_payload_invalidation` for documentation.
@@ -1669,6 +1681,34 @@ where
         } else {
             ParentImportStatus::UnknownBlock
         }
+    }
+
+    /// Execution verdict of the payload that `block` builds on.
+    ///
+    /// Pre-Gloas that is `parent`'s own payload, carried inside the parent block. A Gloas block
+    /// builds on the payload its bid's `parent_block_hash` names: `parent`'s own payload when the
+    /// block extends `parent`'s `FULL` node, else the one `parent`'s `EMPTY` node carries.
+    pub fn get_parent_payload_execution_status(
+        &self,
+        block: &SignedBeaconBlock<E>,
+        parent: &ProtoBlock,
+    ) -> Result<ExecutionVerdict, Error<T::Error>> {
+        let verdict = match parent.execution_payload_block_hash {
+            None => self
+                .proto_array
+                .get_block_execution_status_assuming_full(&parent.root),
+            Some(parent_block_hash) => {
+                if block.is_parent_block_full(parent_block_hash) {
+                    self.proto_array
+                        .get_block_execution_status_assuming_full(&parent.root)
+                } else {
+                    self.proto_array
+                        .core_proto_array()
+                        .inherited_execution_status(parent.root)
+                }
+            }
+        };
+        verdict.map_err(Error::ProtoArrayError)
     }
 
     /// Called by the proposer to decide whether to build on the full or empty parent.

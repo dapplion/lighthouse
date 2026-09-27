@@ -1556,6 +1556,162 @@ async fn weights_after_resetting_optimistic_status() {
     }
 }
 
+/// A VALID forkchoiceUpdated for a head on `(X, EMPTY)` vouches for the head hash, which is the
+/// parent's payload. X's own payload stays unrevealed until its envelope is judged.
+#[tokio::test]
+async fn gloas_fcu_valid_on_empty_head_leaves_its_payload_unrevealed() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+    let mut rig = InvalidPayloadRig::new();
+    rig.import_block(Payload::Valid).await;
+    rig.import_block(Payload::Valid).await;
+
+    let head = rig.harness.chain.head_snapshot();
+    let slot = head.beacon_state.slot() + 1;
+    let ((block, blobs), _envelope, _) = rig
+        .harness
+        .make_block_with_envelope(head.beacon_state.clone(), slot)
+        .await;
+    let block_root = block.canonical_root();
+    rig.harness
+        .process_block(slot, block_root, (block, blobs))
+        .await
+        .unwrap();
+    rig.recompute_head().await;
+
+    let cached_head = rig.cached_head();
+    assert_eq!(cached_head.head_block_root(), block_root);
+    assert_eq!(
+        cached_head.head_payload_status(),
+        proto_array::PayloadStatus::Empty
+    );
+
+    rig.harness
+        .chain
+        .update_execution_engine_forkchoice(
+            slot,
+            cached_head.forkchoice_update_parameters(),
+            cached_head.head_payload_status(),
+            beacon_chain::OverrideForkchoiceUpdate::AlreadyApplied,
+        )
+        .await
+        .unwrap();
+
+    assert!(is_not_yet_revealed(rig.execution_status(block_root)));
+}
+
+/// An envelope the EL rejects kills only the block's `FULL` node. The block stays head on its
+/// `EMPTY` node, and a child that extends that node imports: its execution parent, named by the
+/// bid's `parent_block_hash`, is the grandparent's payload.
+#[tokio::test]
+async fn gloas_invalid_envelope_keeps_block_viable_on_empty() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+    let mut rig = InvalidPayloadRig::new();
+    rig.import_block(Payload::Valid).await;
+    let parent_root = rig.import_block(Payload::Valid).await;
+
+    let head = rig.harness.chain.head_snapshot();
+    let slot = head.beacon_state.slot() + 1;
+    let ((block, blobs), opt_envelope, block_post_state) = rig
+        .harness
+        .make_block_with_envelope(head.beacon_state.clone(), slot)
+        .await;
+    let block_root = block.canonical_root();
+    rig.harness
+        .process_block(slot, block_root, (block.clone(), blobs))
+        .await
+        .unwrap();
+
+    // The EL rejects the payload and names the parent's payload as the latest valid one.
+    let mock = rig.harness.mock_execution_layer.as_ref().unwrap();
+    mock.server
+        .all_payloads_invalid_on_new_payload(rig.block_hash(parent_root));
+    assert!(rig.import_envelope(&block, opt_envelope).await.is_err());
+    mock.server.full_payload_verification();
+    rig.recompute_head().await;
+
+    assert!(rig.execution_status(block_root).is_invalid());
+    assert_eq!(rig.harness.head_block_root(), block_root);
+
+    let child_slot = slot + 1;
+    let ((child, child_blobs), _, _) = rig
+        .harness
+        .make_block_with_envelope_on(
+            block_post_state,
+            child_slot,
+            proto_array::PayloadStatus::Empty,
+        )
+        .await;
+    rig.harness
+        .process_block(child_slot, child.canonical_root(), (child, child_blobs))
+        .await
+        .expect("a child on the EMPTY node builds on a valid payload");
+}
+
+/// An INVALID forkchoiceUpdated for a head on `(X, EMPTY)` condemns the payload it names, the
+/// parent's. Blaming X would leave the parent's invalid payload in the head chain.
+#[tokio::test]
+async fn gloas_fcu_invalid_on_empty_head_condemns_the_payload_owner() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+    let mut rig = InvalidPayloadRig::new();
+    rig.import_block(Payload::Valid).await;
+    let parent_root = rig.import_block(Payload::Syncing).await;
+    assert!(is_optimistic(rig.execution_status(parent_root)));
+
+    let head = rig.harness.chain.head_snapshot();
+    let slot = head.beacon_state.slot() + 1;
+    let ((block, blobs), _envelope, _) = rig
+        .harness
+        .make_block_with_envelope(head.beacon_state.clone(), slot)
+        .await;
+    let block_root = block.canonical_root();
+    rig.harness
+        .process_block(slot, block_root, (block, blobs))
+        .await
+        .unwrap();
+    rig.recompute_head().await;
+
+    let cached_head = rig.cached_head();
+    assert_eq!(cached_head.head_block_root(), block_root);
+    assert_eq!(
+        cached_head.head_payload_status(),
+        proto_array::PayloadStatus::Empty
+    );
+
+    // The EL rejects the head hash without naming a latest valid ancestor.
+    let mock = rig.harness.mock_execution_layer.as_ref().unwrap();
+    mock.server
+        .all_payloads_invalid_block_hash_on_forkchoice_updated();
+    let result = rig
+        .harness
+        .chain
+        .update_execution_engine_forkchoice(
+            slot,
+            cached_head.forkchoice_update_parameters(),
+            cached_head.head_payload_status(),
+            beacon_chain::OverrideForkchoiceUpdate::AlreadyApplied,
+        )
+        .await;
+    assert!(result.is_err());
+    mock.server.full_payload_verification();
+
+    assert!(rig.execution_status(parent_root).is_invalid());
+    assert!(rig.execution_status(block_root).is_invalid());
+
+    // The parent's `FULL` node is dead, so the head settles on its `EMPTY` node.
+    let cached_head = rig.cached_head();
+    assert_eq!(cached_head.head_block_root(), parent_root);
+    assert_eq!(
+        cached_head.head_payload_status(),
+        proto_array::PayloadStatus::Empty
+    );
+}
+
 fn is_valid_and_post_bellatrix(status: ExecutionStatus) -> bool {
     matches!(status, ExecutionStatus::Valid(_))
 }
