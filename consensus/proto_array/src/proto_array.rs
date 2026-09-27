@@ -1289,7 +1289,16 @@ impl ProtoArray {
         viable: &mut HashSet<usize>,
     ) -> Result<(), Error> {
         // Forward pass: a node is "excluded" if it (or any ancestor down to
-        // `start_index`) executes an invalid payload.
+        // `start_index`) builds on an invalid payload.
+        let invalid_payloads: HashSet<ExecutionBlockHash> = self
+            .nodes
+            .iter()
+            .filter(|node| node.is_invalid())
+            .filter_map(|node| match node.block_hash() {
+                PayloadBlockHash::Hash(block_hash) => Some(block_hash),
+                PayloadBlockHash::PreMerge => None,
+            })
+            .collect();
         let mut excluded = vec![false; self.nodes.len()];
         for i in (start_index + 1)..self.nodes.len() {
             let node = self.nodes.get(i).ok_or(Error::InvalidNodeIndex(i))?;
@@ -1297,21 +1306,15 @@ impl ProtoArray {
                 Some(p) => *excluded.get(p).ok_or(Error::InvalidNodeIndex(p))?,
                 None => false,
             };
-            // A pre-Gloas block executes its own payload. A Gloas block executes its parent's on
-            // a `FULL` edge and none on an `EMPTY` edge. A `PreGloas` parent carries its payload,
-            // so it is excluded with it.
-            let executed_node = match node {
-                ProtoNode::V17(_) => Some(node),
-                ProtoNode::V29(gloas_node) => match gloas_node.parent_payload_status {
-                    ParentPayloadStatus::Full => gloas_node
-                        .parent
-                        .map(|p| self.nodes.get(p).ok_or(Error::InvalidNodeIndex(p)))
-                        .transpose()?,
-                    ParentPayloadStatus::Empty | ParentPayloadStatus::PreGloas => None,
-                },
+            // A pre-Gloas block carries its own payload. A Gloas block builds on the payload its
+            // bid names.
+            let builds_on_invalid_payload = match node {
+                ProtoNode::V17(_) => node.is_invalid(),
+                ProtoNode::V29(gloas_node) => {
+                    invalid_payloads.contains(&gloas_node.execution_payload_parent_hash)
+                }
             };
-            let executes_invalid_payload = executed_node.is_some_and(ProtoNode::is_invalid);
-            excluded[i] = parent_excluded || executes_invalid_payload;
+            excluded[i] = parent_excluded || builds_on_invalid_payload;
         }
 
         for node_index in (start_index..self.nodes.len()).rev() {
