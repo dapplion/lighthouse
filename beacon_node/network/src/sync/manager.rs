@@ -1383,9 +1383,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 self.block_lookups
                     .on_custody_download_response(id, response, &mut self.network);
             }
-            CustodyRequester::Backfill(epoch) => {
-                self.backfill_sync
-                    .on_custody_by_root_result(&mut self.network, epoch, response);
+            CustodyRequester::Backfill { run, epoch } => {
+                self.backfill_sync.on_custody_by_root_result(
+                    &mut self.network,
+                    run,
+                    epoch,
+                    response,
+                );
                 self.update_sync_state();
             }
             CustodyRequester::RangeSync(components_by_range_id) => {

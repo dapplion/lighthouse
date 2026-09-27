@@ -1,30 +1,23 @@
 //! Backfill sync: walking the chain backwards from the anchor, addressed by block root.
 //!
-//! A checkpoint-synced client runs a forward range sync to the head so it can do its duties
-//! right away, and then backfills the blocks below the anchor to restore a full history.
+//! A request names a block root and `blocks_by_head` (consensus-specs #5181) answers with that
+//! block's parent chain, newest first. Verifying it needs only the response and the frontier we
+//! already hold, so a run is accepted or rejected the instant it arrives and the peer that sent
+//! it is the only suspect. Nothing has to be reconciled between adjacent responses, which is
+//! why there is no window, no per-batch state machine and no retro-scoring pass here.
 //!
-//! Backfill asks for a run of ancestors with `blocks_by_head` (consensus-specs #5181): the
-//! request names a block root and the response is that block's parent chain, newest first.
-//! Verifying it needs nothing but the response and the frontier we already hold — the run
-//! must start at the root we asked for and hash-link down from it — so a response is
-//! accepted or rejected the instant it arrives, and the peer that sent it is the only
-//! suspect. There are no seams between adjacent slot ranges to reconcile, so there is no
-//! window, no per-batch state machine, and no retro-scoring pass to work out which of
-//! several peers lied.
-//!
-//! The decisions live in [`backfill_core`], which is extracted to Lean by Charon and Aeneas
-//! and proved there; see `common/backfill_core/proofs`. This file is the adapter, and it
-//! holds no decisions: it translates types, dispatches the core's actions, and forwards what
-//! comes back as events. The two things it decides are the two the core deliberately cannot
-//! see — which peer to ask, and what data availability requires of a run before the store
-//! will take it. Anything that decides *what backfill does* belongs in the core.
+//! The decisions live in [`backfill_core`], which is extracted to Lean and proved there; see
+//! `common/backfill_core/proofs`. This file translates types, dispatches the core's actions and
+//! forwards what comes back as events. It decides only the two things the core deliberately
+//! cannot see: which peer to ask, and what data availability requires of a run before the store
+//! will take it.
 
 use crate::metrics;
 use crate::network_beacon_processor::ChainSegmentProcessId;
 use crate::sync::manager::BatchProcessResult;
 use crate::sync::network_context::{
-    CustodyByRootResult, LookupRequestResult, RpcRequestSendError, RpcResponseError,
-    RpcResponseResult, SyncNetworkContext,
+    CustodyByRootResult, LookupRequestResult, RpcRequestSendError, RpcResponseResult,
+    SyncNetworkContext,
 };
 use backfill_core::{Action, Backfill, Config, Event, Header, PeerIdx, Root};
 use beacon_chain::block_verification_types::RangeSyncBlock;
@@ -44,6 +37,10 @@ use types::{DataColumnSidecarList, Epoch, EthSpec, Hash256, SignedBeaconBlock, S
 
 /// Ancestors asked for in one `blocks_by_head` request.
 const RUN_LEN: u64 = 64;
+
+/// `blocks_by_head` is a lookup route. Backfill has one request outstanding at a time and
+/// matches responses by request id, so it needs no lookup of its own.
+const BACKFILL_LOOKUP_ID: Id = 0;
 
 /// Peers the core can name at once. See `peer_index`.
 const PEER_TABLE_SIZE: usize = 16;
@@ -66,19 +63,22 @@ pub enum ProcessResult {
     SyncCompleted,
 }
 
-/// What a run needs beyond its blocks before the store will take it.
-///
-/// The core's `Store` action means "this run is verified, make it durable". What durability
-/// requires is the store's business, exactly like proposer signatures and KZG, so it is
-/// gathered here. A failure to gather it is reported to the core as `Abandoned` rather than
-/// `Rejected`, because the peer that served the blocks did not owe us the columns.
+/// A verified run, while what data availability requires of it is gathered. Failing to gather
+/// it is reported to the core as `Abandoned`, not `Rejected`: the peer that served the blocks
+/// did not owe us the columns.
 struct Staged<E: EthSpec> {
-    /// Newest first, as they arrived.
-    blocks: Vec<Arc<SignedBeaconBlock<E>>>,
+    /// Distinguishes this run from the one it replaced, so a custody request left over from an
+    /// abandoned run cannot resolve this one.
+    run: u32,
+    /// Newest first, as they arrived, each with the root it was verified under.
+    blocks: Vec<(Hash256, Arc<SignedBeaconBlock<E>>)>,
     /// Custody columns by block root, filled in as the by-root requests complete.
     columns: HashMap<Hash256, DataColumnSidecarList<E>>,
     /// Epochs whose custody request is still outstanding.
     awaiting: HashSet<Epoch>,
+    /// Whether any of this run's data came from a peer other than the one that served the
+    /// blocks. If it did, a store rejection has more than one suspect and penalises no one.
+    columns_from_others: bool,
 }
 
 pub struct BackFillSync<T: BeaconChainTypes> {
@@ -92,9 +92,16 @@ pub struct BackFillSync<T: BeaconChainTypes> {
     inflight: Option<InflightRequest>,
     /// Blocks of the response being handled, held only for the length of the `Run` event: if
     /// the core stages them they move into `staged`, and if it rejects them they are dropped.
-    pending: Option<Vec<Arc<SignedBeaconBlock<T::EthSpec>>>>,
+    pending: Option<Vec<(Hash256, Arc<SignedBeaconBlock<T::EthSpec>>)>>,
     /// The run the core has staged, while its columns are gathered and the store works.
     staged: Option<Staged<T::EthSpec>>,
+    /// Counter behind `Staged::run`.
+    run_seq: u32,
+    /// Where to start the next scan of candidate peers.
+    peer_cursor: usize,
+    /// The action to take on the core's next `Penalize`. The store picks it when it rejects a
+    /// run; a run that fails the core's own check gets the default.
+    penalty: PeerAction,
     /// Frontier slot when this backfill started, for the progress report.
     started_at: Slot,
     beacon_chain: Arc<BeaconChain<T>>,
@@ -128,6 +135,9 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             inflight: None,
             pending: None,
             staged: None,
+            run_seq: 0,
+            peer_cursor: 0,
+            penalty: PeerAction::LowToleranceError,
             started_at: anchor_info.oldest_block_slot,
             beacon_chain,
             network_globals,
@@ -210,7 +220,14 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
 
         match response {
             Ok(blocks) => {
-                let headers = blocks.iter().map(to_header).collect::<Vec<_>>();
+                let blocks = blocks
+                    .into_iter()
+                    .map(|block| (block.canonical_root(), block))
+                    .collect::<Vec<_>>();
+                let headers = blocks
+                    .iter()
+                    .map(|(root, block)| to_header(*root, block))
+                    .collect::<Vec<_>>();
                 self.pending = Some(blocks);
                 self.drive(network, Event::Run { peer, headers });
                 // Whatever the core did with the run, these blocks are no longer the ones in
@@ -218,29 +235,59 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 self.pending = None;
             }
             Err(error) => {
+                // No penalty here: the network context has already scored a response that
+                // failed verification, and a peer that times out or honestly reports it does
+                // not have the root has done nothing wrong.
                 debug!(%peer_id, ?error, "Backfill run request failed");
-                self.report_rpc_error(network, peer_id, &error);
                 self.drive(network, Event::Fail { peer: Some(peer) });
             }
         }
+        self.continue_backfill(network);
     }
 
-    /// The custody columns of one epoch of a staged run have arrived, or failed to.
+    /// The custody columns of one epoch of a staged run have arrived, or failed to. Results of
+    /// a run that has since been abandoned are ignored: its requests stay live in the network
+    /// context, and one of them must not take down the run staged in its place.
     pub fn on_custody_by_root_result(
         &mut self,
         network: &mut SyncNetworkContext<T>,
+        run: u32,
         epoch: Epoch,
         result: CustodyByRootResult<T::EthSpec>,
     ) {
+        match self.staged.as_mut() {
+            Some(staged) if staged.run == run => {
+                if !staged.awaiting.remove(&epoch) {
+                    return;
+                }
+            }
+            _ => return,
+        }
+
         match result {
-            Ok(download) => self.columns_arrived(network, epoch, download.value),
+            Ok(download) => self.columns_arrived(network, download.value),
             Err(error) => {
                 debug!(%epoch, ?error, "Backfill custody columns failed");
-                // The columns peer is scored by the custody machinery that served them, so
-                // the run is abandoned rather than charged to the peer that served its blocks.
+                // The custody machinery has already scored whoever served them, and the peer
+                // that served the blocks did not owe us columns, so this blames no one.
                 self.abandon(network);
             }
         }
+        self.continue_backfill(network);
+    }
+
+    /// Whether a block needs data backfill cannot fetch by root yet: blob sidecars, because
+    /// sync has no `blobs_by_root` consumer, and a Gloas payload envelope. Importing without
+    /// either is worse than not importing — the store takes a run with no blobs silently, which
+    /// would strand `oldest_blob_slot` at the checkpoint, and rejects a revealed Gloas payload
+    /// with no envelope, which would charge the blocks peer for what another peer owed us.
+    // TODO(gloas): fetch payload envelopes by root.
+    fn sidecars_are_unfetchable(&self, block: &SignedBeaconBlock<T::EthSpec>) -> bool {
+        block.fork_name_unchecked().gloas_enabled()
+            || self
+                .beacon_chain
+                .custody_context
+                .blobs_required_for_block(block)
     }
 
     /// Fan-in for one epoch's custody columns. The run goes to the store once every epoch it
@@ -248,15 +295,11 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     fn columns_arrived(
         &mut self,
         network: &mut SyncNetworkContext<T>,
-        epoch: Epoch,
         columns: DataColumnSidecarList<T::EthSpec>,
     ) {
         let Some(staged) = self.staged.as_mut() else {
             return;
         };
-        if !staged.awaiting.remove(&epoch) {
-            return;
-        }
         for column in columns.iter() {
             staged
                 .columns
@@ -264,8 +307,19 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 .or_default()
                 .push(column.clone());
         }
+        staged.columns_from_others = true;
         if staged.awaiting.is_empty() {
             self.send_to_processor(network);
+        }
+    }
+
+    /// An event the core has resolved leaves it ready to ask for the next run, and nothing
+    /// else ticks it: the sync manager only revisits backfill when the global state changes.
+    /// A tick while paused is suppressed here rather than in the core, which has no notion of
+    /// pausing — the next `start` ticks it instead.
+    fn continue_backfill(&mut self, network: &mut SyncNetworkContext<T>) {
+        if let BackFillState::Syncing = self.state() {
+            self.drive(network, Event::Tick);
         }
     }
 
@@ -281,14 +335,30 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         network: &mut SyncNetworkContext<T>,
         result: &BatchProcessResult,
     ) -> ProcessResult {
+        // KZG is verified by the store, not by the by-root column request, so a fault in a run
+        // that carried another peer's columns could be either peer's. Two suspects is not a
+        // penalty: retry without blaming anyone rather than charge the blocks peer.
+        let shared = self
+            .staged
+            .as_ref()
+            .is_some_and(|staged| staged.columns_from_others);
+        let penalty = match result {
+            BatchProcessResult::FaultyFailure { penalty, .. } => *penalty,
+            BatchProcessResult::Success { .. } | BatchProcessResult::NonFaultyFailure => {
+                PeerAction::LowToleranceError
+            }
+        };
+        self.penalty = penalty;
         self.staged = None;
         let event = match result {
             BatchProcessResult::Success { .. } => Event::Imported,
+            BatchProcessResult::FaultyFailure { .. } if shared => Event::Abandoned,
             BatchProcessResult::FaultyFailure { .. } => Event::Rejected,
             BatchProcessResult::NonFaultyFailure => Event::Abandoned,
         };
         self.drive(network, event);
         self.resync_frontier();
+        self.continue_backfill(network);
 
         if self.machine.done {
             ProcessResult::SyncCompleted
@@ -309,10 +379,10 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
     }
 
     /// The core's frontier and the store's anchor are two copies of one fact, kept in step by
-    /// the store confirming each import. If they ever disagree the store is right, and the
-    /// machine is rebuilt from it — which is exactly what `inv_from_anchor` says is safe to
-    /// do at any time. Left to drift, the next request would name a root the store does not
-    /// expect and an honest peer would be penalised for the mismatch.
+    /// the store confirming each import. The store is the one that matters, so when they differ
+    /// the machine is rebuilt from the anchor; `inv_from_anchor` is what says the rebuilt state
+    /// is a sound place to carry on from. Left to drift, the next request would name a root the
+    /// store does not expect and an honest peer would be penalised for the mismatch.
     fn resync_frontier(&mut self) {
         let anchor_info = self.beacon_chain.store.get_anchor_info();
         let frontier = self.machine.frontier;
@@ -321,11 +391,18 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         {
             return;
         }
-        warn!(
-            core_slot = frontier.slot,
-            anchor_slot = %anchor_info.oldest_block_slot,
-            "Backfill frontier disagreed with the store; rebuilding from the anchor"
-        );
+        // The store stops at the block whose parent is genesis and sets the anchor to slot 0,
+        // which the core cannot see coming, so this difference is the expected end and not a
+        // fault.
+        if anchor_info.block_backfill_complete(self.beacon_chain.genesis_backfill_slot) {
+            debug!("Backfill reached the target; taking the frontier from the store");
+        } else {
+            warn!(
+                core_slot = frontier.slot,
+                anchor_slot = %anchor_info.oldest_block_slot,
+                "Backfill frontier disagreed with the store; rebuilding from the anchor"
+            );
+        }
         self.machine = backfill_core::from_anchor(
             self.machine.cfg,
             frontier_of(&self.beacon_chain, &anchor_info),
@@ -349,12 +426,9 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
                 Action::Store { headers } => self.make_durable(network, headers),
                 Action::Penalize { peer } => {
                     if let Some(peer_id) = self.peer_table.get(peer as usize) {
-                        network.report_peer(
-                            *peer_id,
-                            PeerAction::LowToleranceError,
-                            "backfill_run_rejected",
-                        );
+                        network.report_peer(*peer_id, self.penalty, "backfill_run_rejected");
                     }
+                    self.penalty = PeerAction::LowToleranceError;
                 }
                 Action::Complete => {
                     info!("Backfill sync completed");
@@ -371,6 +445,23 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         count: u64,
         avoid: Option<PeerIdx>,
     ) {
+        let epoch = Slot::new(self.machine.frontier.slot).epoch(T::EthSpec::slots_per_epoch());
+        if self
+            .beacon_chain
+            .custody_context
+            .blobs_required_for_epoch(epoch)
+            || self
+                .beacon_chain
+                .spec
+                .fork_name_at_epoch(epoch)
+                .gloas_enabled()
+        {
+            // `sidecars_are_unfetchable` would turn the run away after downloading it.
+            warn!(%epoch, "Backfill cannot yet fetch the sidecars this epoch needs");
+            self.drive(network, Event::Fail { peer: None });
+            return;
+        }
+
         let avoid_peer = avoid.and_then(|idx| self.peer_table.get(idx as usize).copied());
         let Some(peer_id) = self.choose_peer(network, avoid_peer) else {
             debug!("No peer to serve a backfill run");
@@ -378,18 +469,18 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             return;
         };
 
+        let fork = self
+            .beacon_chain
+            .spec
+            .fork_name_at_slot::<T::EthSpec>(Slot::new(self.machine.frontier.slot));
         let request = BlocksByHeadRequest {
             beacon_root: from_root(anchor),
-            count: count.min(
-                self.beacon_chain.spec.max_request_blocks(
-                    self.beacon_chain
-                        .spec
-                        .fork_name_at_slot::<T::EthSpec>(Slot::new(self.machine.frontier.slot)),
-                ) as u64,
-            ),
+            // Asking for more than the peer will serve is a protocol violation.
+            count: count.min(self.beacon_chain.spec.max_request_blocks(fork) as u64),
         };
 
-        match network.send_blocks_by_head(peer_id, 0, request) {
+        self.peer_cursor = self.peer_cursor.wrapping_add(1);
+        match network.send_blocks_by_head(peer_id, BACKFILL_LOOKUP_ID, request) {
             Ok(req_id) => {
                 let peer = self.peer_index(peer_id);
                 self.inflight = Some(InflightRequest { req_id, peer });
@@ -422,15 +513,14 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             "the staged run is the one the core verified"
         );
 
-        // TODO(gloas): fetch payload envelopes by root, as the columns are fetched below.
-        // Until then, stop rather than hand the store a run it will reject for a missing
-        // envelope: the store's rejection names the peer that served the blocks, and that
-        // peer did not owe us an envelope.
-        if blocks
+        if let Some((_, block)) = blocks
             .iter()
-            .any(|block| block.fork_name_unchecked().gloas_enabled())
+            .find(|(_, block)| self.sidecars_are_unfetchable(block))
         {
-            warn!("Backfill cannot yet fetch payload envelopes for a Gloas run");
+            warn!(
+                slot = %block.slot(),
+                "Backfill cannot yet fetch the sidecars this run needs"
+            );
             self.abandon(network);
             return;
         }
@@ -438,23 +528,24 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         // One custody request per epoch the run touches: the sampling columns are chosen per
         // epoch, so a run that straddles a boundary needs one request on each side.
         let mut by_epoch: HashMap<Epoch, Vec<Hash256>> = HashMap::new();
-        for block in blocks.iter() {
+        for (root, block) in blocks.iter() {
             if self
                 .beacon_chain
                 .custody_context
                 .data_columns_required_for_block(block)
             {
-                by_epoch
-                    .entry(block.epoch())
-                    .or_default()
-                    .push(block.canonical_root());
+                by_epoch.entry(block.epoch()).or_default().push(*root);
             }
         }
 
+        self.run_seq = self.run_seq.wrapping_add(1);
+        let run = self.run_seq;
         self.staged = Some(Staged {
+            run,
             blocks,
             columns: HashMap::new(),
             awaiting: by_epoch.keys().copied().collect(),
+            columns_from_others: false,
         });
 
         if by_epoch.is_empty() {
@@ -476,7 +567,7 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         let mut ready = vec![];
         for (epoch, block_roots) in by_epoch {
             match network.custody_lookup_request(
-                CustodyRequester::Backfill(epoch),
+                CustodyRequester::Backfill { run, epoch },
                 &block_roots,
                 epoch,
                 true,
@@ -500,7 +591,10 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         }
 
         for (epoch, columns) in ready {
-            self.columns_arrived(network, epoch, columns);
+            if let Some(staged) = self.staged.as_mut() {
+                staged.awaiting.remove(&epoch);
+            }
+            self.columns_arrived(network, columns);
         }
     }
 
@@ -511,9 +605,8 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         };
 
         let mut run = Vec::with_capacity(staged.blocks.len());
-        for block in staged.blocks.iter().rev() {
-            let block_root = block.canonical_root();
-            let data = match staged.columns.remove(&block_root) {
+        for (block_root, block) in staged.blocks.iter().rev() {
+            let data = match staged.columns.remove(block_root) {
                 Some(columns) => AvailableBlockData::new_with_data_columns(columns),
                 None => AvailableBlockData::NoData,
             };
@@ -544,8 +637,8 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
         }
     }
 
-    /// A synced peer that serves `blocks_by_head`, preferring one the core has not just been
-    /// failed by.
+    /// A peer that serves `blocks_by_head` and claims to hold blocks as old as the frontier,
+    /// preferring one the core has not just been failed by.
     fn choose_peer(
         &self,
         network: &SyncNetworkContext<T>,
@@ -555,15 +648,26 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             .network_globals
             .peers
             .read()
-            .synced_peers()
+            .synced_peers_for_epoch(
+                Slot::new(self.machine.frontier.slot).epoch(T::EthSpec::slots_per_epoch()),
+            )
             .copied()
             .filter(|peer_id| network.peer_supports_blocks_by_head(peer_id))
             .collect::<Vec<_>>();
 
+        if candidates.is_empty() {
+            return None;
+        }
+        // Rotate: picking the first peer that is not the one that just failed would alternate
+        // between the same two and never reach a third that can actually serve the run.
+        let start = self.peer_cursor % candidates.len();
         candidates
             .iter()
+            .cycle()
+            .skip(start)
+            .take(candidates.len())
             .find(|peer_id| Some(**peer_id) != avoid)
-            .or_else(|| candidates.first())
+            .or(candidates.first())
             .copied()
     }
 
@@ -583,20 +687,6 @@ impl<T: BeaconChainTypes> BackFillSync<T> {
             self.peer_table.push(peer_id);
         }
         index as PeerIdx
-    }
-
-    fn report_rpc_error(
-        &self,
-        network: &SyncNetworkContext<T>,
-        peer_id: PeerId,
-        error: &RpcResponseError,
-    ) {
-        network.report_peer(
-            peer_id,
-            PeerAction::LowToleranceError,
-            "backfill_run_failed",
-        );
-        let _ = error;
     }
 
     fn set_state(&self, state: BackFillState) {
@@ -653,9 +743,9 @@ fn from_root(root: Root) -> Hash256 {
     Hash256::from(bytes)
 }
 
-fn to_header<E: EthSpec>(block: &Arc<SignedBeaconBlock<E>>) -> Header {
+fn to_header<E: EthSpec>(root: Hash256, block: &SignedBeaconBlock<E>) -> Header {
     Header {
-        root: to_root(block.canonical_root()),
+        root: to_root(root),
         parent_root: to_root(block.parent_root()),
         slot: block.slot().as_u64(),
     }
@@ -664,27 +754,8 @@ fn to_header<E: EthSpec>(block: &Arc<SignedBeaconBlock<E>>) -> Header {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use backfill_core::{Wait, check_run, root_eq, step};
 
-    fn root_of(byte: u8) -> Root {
-        to_root(Hash256::repeat_byte(byte))
-    }
-
-    /// `Header` has no `Debug` (the core carries no derives it does not need), so runs are
-    /// compared by the fields that matter.
-    fn oldest(checked: Option<Header>) -> Option<(u64, u64)> {
-        checked.map(|header| (header.slot, header.root.a))
-    }
-
-    fn header(root: u8, parent: u8, slot: u64) -> Header {
-        Header {
-            root: root_of(root),
-            parent_root: root_of(parent),
-            slot,
-        }
-    }
-
-    /// The core compares roots for equality, so the conversion has to be injective. A byte
+    /// The core compares roots for equality, so this conversion has to be injective. A byte
     /// order bug here would make every run fail to link and every honest peer be penalised.
     #[test]
     fn root_conversion_round_trips_and_separates() {
@@ -693,173 +764,16 @@ mod tests {
             assert_eq!(from_root(to_root(hash)), hash);
         }
 
-        // Two roots differing in one bit of each word must stay distinct.
+        // Roots differing in one bit of each word must stay distinct.
         let mut bytes = [0u8; 32];
         for index in [0, 8, 16, 24, 31] {
             let mut other = bytes;
             other[index] = 1;
-            assert!(!root_eq(
+            assert!(!backfill_core::root_eq(
                 to_root(Hash256::from(bytes)),
                 to_root(Hash256::from(other))
             ));
             bytes[index] = 1;
-        }
-    }
-
-    /// What the adapter hands the store is a run that starts at the root it asked for and
-    /// links down from it. This is the Rust-level statement of `store_is_verified_descent`.
-    #[test]
-    fn a_run_is_only_accepted_when_it_links_to_the_frontier() {
-        let run = vec![header(9, 8, 30), header(8, 7, 29), header(7, 6, 27)];
-
-        assert_eq!(
-            oldest(check_run(root_of(9), 31, &run)),
-            oldest(Some(header(7, 6, 27)))
-        );
-        // Wrong anchor.
-        assert_eq!(oldest(check_run(root_of(5), 31, &run)), None);
-        // Not older than the frontier.
-        assert_eq!(oldest(check_run(root_of(9), 30, &run)), None);
-        // Empty runs carry no progress, so they are not a link.
-        assert_eq!(oldest(check_run(root_of(9), 31, &vec![])), None);
-        // A break in the middle.
-        let broken = vec![header(9, 8, 30), header(4, 3, 29)];
-        assert_eq!(oldest(check_run(root_of(9), 31, &broken)), None);
-        // Slots that do not descend.
-        let flat = vec![header(9, 8, 30), header(8, 7, 30)];
-        assert_eq!(oldest(check_run(root_of(9), 31, &flat)), None);
-    }
-
-    /// The sequence the adapter has to implement, end to end: ask, verify, stage, import.
-    #[test]
-    fn a_landed_run_advances_the_frontier_and_refills_the_budget() {
-        let cfg = Config {
-            run_len: 64,
-            max_attempts: 3,
-        };
-        let mut machine = backfill_core::from_anchor(cfg, header(9, 8, 30), 0);
-
-        let actions = step(&mut machine, Event::Tick);
-        assert_eq!(actions.len(), 1);
-        match &actions[0] {
-            Action::Request { anchor, count, .. } => {
-                assert!(root_eq(*anchor, root_of(8)));
-                assert_eq!(*count, 64);
-            }
-            other => panic!("expected a request, got {:?}", ActionKind::of(other)),
-        }
-
-        // A run that does not link is the sender's fault, and costs an attempt.
-        let actions = step(
-            &mut machine,
-            Event::Run {
-                peer: 1,
-                headers: vec![header(4, 3, 29)],
-            },
-        );
-        assert!(matches!(
-            ActionKind::of(&actions[0]),
-            ActionKind::Penalize(1)
-        ));
-        assert_eq!(machine.attempts, 2);
-        assert_eq!(machine.frontier.slot, 30);
-
-        // A run that links is staged, and the frontier only moves once the store confirms.
-        let _ = step(&mut machine, Event::Tick);
-        let run = vec![header(8, 7, 29), header(7, 6, 27)];
-        let actions = step(
-            &mut machine,
-            Event::Run {
-                peer: 2,
-                headers: run,
-            },
-        );
-        assert!(matches!(ActionKind::of(&actions[0]), ActionKind::Store));
-        assert_eq!(machine.frontier.slot, 30);
-
-        let actions = step(&mut machine, Event::Imported);
-        assert!(actions.is_empty());
-        assert_eq!(machine.frontier.slot, 27);
-        assert_eq!(machine.attempts, 3);
-    }
-
-    /// A store rejection names the peer that served the run, not whoever is around.
-    #[test]
-    fn a_rejected_run_is_charged_to_the_peer_that_served_it() {
-        let cfg = Config {
-            run_len: 64,
-            max_attempts: 3,
-        };
-        let mut machine = backfill_core::from_anchor(cfg, header(9, 8, 30), 0);
-        let _ = step(&mut machine, Event::Tick);
-        let _ = step(
-            &mut machine,
-            Event::Run {
-                peer: 7,
-                headers: vec![header(8, 7, 29)],
-            },
-        );
-
-        let actions = step(&mut machine, Event::Rejected);
-        assert!(matches!(
-            ActionKind::of(&actions[0]),
-            ActionKind::Penalize(7)
-        ));
-
-        // Whereas a run that could not be made durable blames no one.
-        let _ = step(&mut machine, Event::Tick);
-        let _ = step(
-            &mut machine,
-            Event::Run {
-                peer: 7,
-                headers: vec![header(8, 7, 29)],
-            },
-        );
-        assert!(step(&mut machine, Event::Abandoned).is_empty());
-    }
-
-    /// Out of attempts, the machine parks and waits rather than spinning or dying.
-    #[test]
-    fn exhausted_attempts_park_until_a_peer_joins() {
-        let cfg = Config {
-            run_len: 64,
-            max_attempts: 2,
-        };
-        let mut machine = backfill_core::from_anchor(cfg, header(9, 8, 30), 0);
-
-        for _ in 0..2 {
-            let _ = step(&mut machine, Event::Tick);
-            let _ = step(&mut machine, Event::Fail { peer: Some(1) });
-        }
-        assert_eq!(machine.attempts, 0);
-        match machine.wait {
-            Wait::Parked => {}
-            _ => panic!("expected the machine to park"),
-        }
-        assert!(step(&mut machine, Event::Tick).is_empty());
-
-        let _ = step(&mut machine, Event::PeerJoined);
-        assert_eq!(machine.attempts, 2);
-        assert_eq!(step(&mut machine, Event::Tick).len(), 1);
-    }
-
-    /// Only for readable assertions: `Action` is plain data with no `Debug`.
-    #[derive(Debug, PartialEq)]
-    enum ActionKind {
-        Request,
-        Store,
-        Penalize(PeerIdx),
-        Complete,
-    }
-
-    impl ActionKind {
-        fn of(action: &Action) -> Self {
-            match action {
-                Action::Request { .. } => ActionKind::Request,
-                Action::Store { .. } => ActionKind::Store,
-                Action::Penalize { peer } => ActionKind::Penalize(*peer),
-                Action::Complete => ActionKind::Complete,
-            }
         }
     }
 }

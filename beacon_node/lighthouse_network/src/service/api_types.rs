@@ -145,8 +145,12 @@ pub enum CustodyRequester {
     SingleLookup(SingleLookupReqId),
     RangeSync(ComponentsByRangeRequestId),
     /// Backfill fetches the custody columns of one epoch of a verified run at a time, since
-    /// the sampling columns are chosen per epoch.
-    Backfill(Epoch),
+    /// the sampling columns are chosen per epoch. `run` distinguishes one staged run from the
+    /// next, so a request left over from an abandoned run cannot resolve its replacement.
+    Backfill {
+        run: u32,
+        epoch: Epoch,
+    },
 }
 
 /// Application level requests sent to the network.
@@ -299,7 +303,7 @@ impl Display for CustodyRequester {
         match self {
             Self::SingleLookup(id) => write!(f, "{id}"),
             Self::RangeSync(id) => write!(f, "RangeSync/{id}"),
-            Self::Backfill(epoch) => write!(f, "Backfill/{epoch}"),
+            Self::Backfill { run, epoch } => write!(f, "Backfill/{run}/{epoch}"),
         }
     }
 }

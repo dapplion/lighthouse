@@ -1082,8 +1082,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         let caller_req_id = match &requester {
             CustodyRequester::SingleLookup(id) => id.req_id,
             CustodyRequester::RangeSync(id) => id.id,
-            // Backfill routes a result by the epoch in the requester, not by request id.
-            CustodyRequester::Backfill(_) => 0,
+            // Backfill routes a result by the run and epoch in the requester, not by request id.
+            CustodyRequester::Backfill { .. } => 0,
         };
 
         let mut request = ActiveCustodyRequest::new(
