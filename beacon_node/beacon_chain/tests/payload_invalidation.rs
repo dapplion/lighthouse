@@ -460,7 +460,10 @@ async fn valid_invalid_syncing() {
 /// `latest_valid_hash`.
 #[tokio::test]
 async fn invalid_payload_invalidates_parent() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only. In Gloas the block of the first condemned payload builds on the latest
+    // valid one, so it stays head on its `EMPTY` node: see
+    // `gloas_latest_valid_hash_keeps_its_child_on_empty`.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     let mut rig = InvalidPayloadRig::new().enable_attestations();
@@ -517,7 +520,8 @@ async fn immediate_forkchoice_update_invalid_test(
 
 #[tokio::test]
 async fn immediate_forkchoice_update_payload_invalid() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only, for the same reason as `invalid_payload_invalidates_parent`.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     immediate_forkchoice_update_invalid_test(|latest_valid_hash| Payload::Invalid {
@@ -528,7 +532,8 @@ async fn immediate_forkchoice_update_payload_invalid() {
 
 #[tokio::test]
 async fn immediate_forkchoice_update_payload_invalid_block_hash() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only, for the same reason as `invalid_payload_invalidates_parent`.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     immediate_forkchoice_update_invalid_test(|_| Payload::InvalidBlockHash).await
@@ -536,7 +541,8 @@ async fn immediate_forkchoice_update_payload_invalid_block_hash() {
 
 #[tokio::test]
 async fn immediate_forkchoice_update_payload_invalid_terminal_block() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only, for the same reason as `invalid_payload_invalidates_parent`.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     immediate_forkchoice_update_invalid_test(|_| Payload::Invalid {
@@ -649,7 +655,8 @@ async fn pre_finalized_latest_valid_hash() {
 /// - Will not validate `latest_valid_root` and its ancestors.
 #[tokio::test]
 async fn latest_valid_hash_will_not_validate() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only, for the same reason as `invalid_payload_invalidates_parent`.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     const LATEST_VALID_SLOT: u64 = 3;
@@ -748,7 +755,8 @@ async fn latest_valid_hash_is_junk() {
 /// Check that descendants of invalid blocks are also invalidated.
 #[tokio::test]
 async fn invalidates_all_descendants() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only, for the same reason as `invalid_payload_invalidates_parent`.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     let num_blocks = E::slots_per_epoch() * 4 + E::slots_per_epoch() / 2;
@@ -851,7 +859,8 @@ async fn invalidates_all_descendants() {
 /// Check that the head will switch after the canonical branch is invalidated.
 #[tokio::test]
 async fn switches_heads() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only, for the same reason as `invalid_payload_invalidates_parent`.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     let num_blocks = E::slots_per_epoch() * 4 + E::slots_per_epoch() / 2;
@@ -987,7 +996,8 @@ async fn invalid_during_processing() {
 
 #[tokio::test]
 async fn invalid_after_optimistic_sync() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only, for the same reason as `invalid_payload_invalidates_parent`.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     let mut rig = InvalidPayloadRig::new().enable_attestations();
@@ -1405,7 +1415,9 @@ impl InvalidHeadSetup {
 
 #[tokio::test]
 async fn recover_from_invalid_head_by_importing_blocks() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only: in Gloas an invalid payload leaves its block head on `EMPTY`, so
+    // invalidating the head's payload does not strand the chain.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     let InvalidHeadSetup {
@@ -1448,7 +1460,8 @@ async fn recover_from_invalid_head_by_importing_blocks() {
 
 #[tokio::test]
 async fn recover_from_invalid_head_after_persist_and_reboot() {
-    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+    // Pre-Gloas only, for the same reason as `recover_from_invalid_head_by_importing_blocks`.
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled() || f.gloas_enabled()) {
         return;
     }
     let InvalidHeadSetup {
@@ -1815,12 +1828,45 @@ async fn gloas_invalid_payload_keeps_its_block_viable_on_empty() {
     rig.recompute_head().await;
 
     assert_eq!(rig.harness.head_block_root(), child_root);
+
+    // A slot later the child's proposer boost is gone and X's two nodes tie on weight.
+    rig.harness.advance_slot();
+    rig.recompute_head().await;
     assert!(
         !rig.harness
             .chain
             .canonical_head
             .block_has_canonical_payload(&block_root, &rig.harness.chain.spec)
             .unwrap()
+    );
+}
+
+/// A latest valid hash condemns the payloads above it. The block of the first condemned payload
+/// builds on the latest valid one, so it stays head on its `EMPTY` node. The blocks above it built
+/// on condemned payloads and go.
+#[tokio::test]
+async fn gloas_latest_valid_hash_keeps_its_child_on_empty() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+    let mut rig = InvalidPayloadRig::new();
+    rig.import_block(Payload::Valid).await;
+    let roots = rig.build_blocks(3, Payload::Syncing).await;
+
+    rig.import_block(Payload::Invalid {
+        latest_valid_hash: Some(rig.block_hash(roots[0])),
+    })
+    .await;
+
+    assert!(is_optimistic(rig.execution_status(roots[0])));
+    assert!(rig.execution_status(roots[1]).is_invalid());
+    assert!(rig.execution_status(roots[2]).is_invalid());
+
+    let cached_head = rig.cached_head();
+    assert_eq!(cached_head.head_block_root(), roots[1]);
+    assert_eq!(
+        cached_head.head_payload_status(),
+        proto_array::PayloadStatus::Empty
     );
 }
 
