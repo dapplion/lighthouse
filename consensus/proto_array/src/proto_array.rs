@@ -878,23 +878,15 @@ impl ProtoArray {
     /// The EL judged the payload `block_hash` VALID. Promotes every block that commits to it, and
     /// every payload their branches executed.
     ///
-    /// Validity belongs to the payload, so an equivocating twin carrying the same payload is
-    /// promoted too. For a Gloas head on its `EMPTY` node the forkchoiceUpdated head hash is an
-    /// ancestor's payload, so that ancestor is promoted, not the head.
+    /// For a Gloas head on its `EMPTY` node the forkchoiceUpdated head hash is an ancestor's
+    /// payload, so that ancestor is promoted, not the head.
     ///
     /// Returns an error if any of the to-be-validated payloads are already invalid.
     pub fn propagate_execution_payload_validation(
         &mut self,
         block_hash: ExecutionBlockHash,
     ) -> Result<(), Error> {
-        let payload_owners: Vec<usize> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| node.block_hash() == PayloadBlockHash::Hash(block_hash))
-            .map(|(index, _)| index)
-            .collect();
-        for index in payload_owners {
+        for index in self.execution_block_hash_to_node_indices(&block_hash) {
             // The block's own payload is the validated one: a pre-Gloas block carries it inside
             // itself, a Gloas block runs it on its `FULL` node.
             let start_status = match self
@@ -2201,6 +2193,23 @@ impl ProtoArray {
                 return false;
             };
         }
+    }
+
+    /// Returns the indices of all nodes which commit to an execution payload with the given
+    /// `block_hash`. More than one block can commit to the same payload, e.g. an equivocation.
+    pub fn execution_block_hash_to_node_indices(
+        &self,
+        block_hash: &ExecutionBlockHash,
+    ) -> Vec<usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| match node.block_hash() {
+                PayloadBlockHash::Hash(node_block_hash) => node_block_hash == *block_hash,
+                PayloadBlockHash::PreMerge => false,
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 
     /// Returns the first *beacon block root* which contains an execution payload with the given
