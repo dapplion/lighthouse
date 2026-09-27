@@ -647,9 +647,8 @@ impl ProtoArrayForkChoice {
         })
     }
 
-    /// Mark a Gloas payload envelope as valid and received.
-    ///
-    /// This must only be called for valid Gloas payloads.
+    /// Record the execution layer's verdict for a Gloas payload envelope, and mark the envelope
+    /// as received.
     pub fn on_payload_envelope_received(
         &mut self,
         block_root: Hash256,
