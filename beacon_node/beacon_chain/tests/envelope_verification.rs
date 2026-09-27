@@ -708,7 +708,7 @@ async fn syncing_execution_layer_imports_payload_optimistically() {
     let block_root = import_block_and_envelope(&harness, Slot::new(2)).await;
 
     assert!(
-        is_strictly_optimistic(execution_status(&harness, block_root)),
+        is_optimistic(execution_status(&harness, block_root)),
         "a payload the execution layer could not validate must be held as optimistic",
     );
 }
@@ -734,13 +734,8 @@ async fn a_later_valid_payload_promotes_its_optimistic_ancestors() {
     let first_root = import_block_and_envelope(&harness, Slot::new(2)).await;
     let second_root = import_block_and_envelope(&harness, Slot::new(3)).await;
 
-    assert!(is_strictly_optimistic(execution_status(
-        &harness, first_root
-    )));
-    assert!(is_strictly_optimistic(execution_status(
-        &harness,
-        second_root
-    )));
+    assert!(is_optimistic(execution_status(&harness, first_root)));
+    assert!(is_optimistic(execution_status(&harness, second_root)));
 
     // The execution layer catches up and validates the next payload.
     mock.server.all_payloads_valid();
@@ -764,6 +759,6 @@ fn is_valid_and_post_bellatrix(status: ExecutionStatus) -> bool {
     matches!(status, ExecutionStatus::Valid(_))
 }
 
-fn is_strictly_optimistic(status: ExecutionStatus) -> bool {
+fn is_optimistic(status: ExecutionStatus) -> bool {
     matches!(status, ExecutionStatus::Optimistic(_))
 }
