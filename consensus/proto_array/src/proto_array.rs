@@ -1265,9 +1265,8 @@ impl ProtoArray {
     /// `store.blocks` before running. We replicate that here with a forward pass
     /// propagating `excluded` from parent to child.
     ///
-    /// This pass keeps one boolean for each block. It cannot express that only one of the two
-    /// nodes of a Gloas block is dead, so it excludes both. This costs liveness, not safety. A
-    /// correct version needs one result for each `(block, node)` pair.
+    /// This pass keeps one boolean for each block. A Gloas block whose own payload is invalid
+    /// stays: only its `FULL` node is dead, and `get_node_children` drops it.
     fn filter_block_tree<E: EthSpec>(
         &self,
         start_index: usize,
@@ -1277,7 +1276,7 @@ impl ProtoArray {
         viable: &mut HashSet<usize>,
     ) -> Result<(), Error> {
         // Forward pass: a node is "excluded" if it (or any ancestor down to
-        // `start_index`) has an invalid execution status.
+        // `start_index`) executes an invalid payload.
         let mut excluded = vec![false; self.nodes.len()];
         for i in (start_index + 1)..self.nodes.len() {
             let node = self.nodes.get(i).ok_or(Error::InvalidNodeIndex(i))?;
@@ -1285,8 +1284,31 @@ impl ProtoArray {
                 Some(p) => *excluded.get(p).ok_or(Error::InvalidNodeIndex(p))?,
                 None => false,
             };
-            let self_invalid = node.execution_status().is_invalid();
-            excluded[i] = parent_excluded || self_invalid;
+            // A pre-Gloas block executes its own payload. A Gloas block executes its parent's on
+            // a `FULL` edge and none on an `EMPTY` edge. A `PreGloas` parent carries its payload,
+            // so it is excluded with it.
+            let executed_node = match node {
+                ProtoNode::V17(_) => Some(node),
+                ProtoNode::V29(gloas_node) => match gloas_node.parent_payload_status {
+                    ParentPayloadStatus::Full => gloas_node
+                        .parent
+                        .map(|p| self.nodes.get(p).ok_or(Error::InvalidNodeIndex(p)))
+                        .transpose()?,
+                    ParentPayloadStatus::Empty | ParentPayloadStatus::PreGloas => None,
+                },
+            };
+            let executes_invalid_payload =
+                match executed_node.map(|executed_node| executed_node.execution_status()) {
+                    Some(ExecutionStatus::Invalid(_)) => true,
+                    Some(
+                        ExecutionStatus::Valid(_)
+                        | ExecutionStatus::Optimistic(_)
+                        | ExecutionStatus::Irrelevant(_)
+                        | ExecutionStatus::NotYetRevealed(_),
+                    )
+                    | None => false,
+                };
+            excluded[i] = parent_excluded || executes_invalid_payload;
         }
 
         for node_index in (start_index..self.nodes.len()).rev() {
@@ -1581,10 +1603,18 @@ impl ProtoArray {
             .get(proto_node_index)
             .ok_or(Error::InvalidNodeIndex(proto_node_index))?;
 
-        if !proto_node
+        let payload_received = proto_node
             .payload_received()
-            .map_err(|_| Error::InvalidNodeVariant { block_root: root })?
-        {
+            .map_err(|_| Error::InvalidNodeVariant { block_root: root })?;
+        // As in `get_node_children`, an invalid payload has no FULL node.
+        let full_node_exists = match proto_node.execution_status() {
+            ExecutionStatus::Invalid(_) => false,
+            ExecutionStatus::Valid(_)
+            | ExecutionStatus::Optimistic(_)
+            | ExecutionStatus::Irrelevant(_)
+            | ExecutionStatus::NotYetRevealed(_) => payload_received,
+        };
+        if !full_node_exists {
             return Ok(PayloadStatus::Empty);
         }
 
@@ -1782,8 +1812,18 @@ impl ProtoArray {
                 .get(node.proto_node_index)
                 .ok_or(Error::InvalidNodeIndex(node.proto_node_index))?;
             let mut children = vec![(node.with_status(PayloadStatus::Empty), proto_node.clone())];
-            // The FULL virtual child only exists if the payload has been received.
-            if proto_node.payload_received().is_ok_and(|received| received) {
+            // The FULL virtual child only exists if the payload has been received and not found
+            // invalid.
+            let full_node_exists = match proto_node.execution_status() {
+                ExecutionStatus::Invalid(_) => false,
+                ExecutionStatus::Valid(_)
+                | ExecutionStatus::Optimistic(_)
+                | ExecutionStatus::Irrelevant(_)
+                | ExecutionStatus::NotYetRevealed(_) => {
+                    proto_node.payload_received().is_ok_and(|received| received)
+                }
+            };
+            if full_node_exists {
                 children.push((node.with_status(PayloadStatus::Full), proto_node.clone()));
             }
             Ok(children)

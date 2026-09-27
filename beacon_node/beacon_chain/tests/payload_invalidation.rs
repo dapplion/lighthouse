@@ -1773,6 +1773,57 @@ async fn gloas_invalid_payload_rejects_only_full_children() {
         .expect("a child on the EMPTY node builds on a valid payload");
 }
 
+/// An invalid payload removes only its block's `FULL` node. The block stays head on `EMPTY`, and
+/// the chain extends it there.
+#[tokio::test]
+async fn gloas_invalid_payload_keeps_its_block_viable_on_empty() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+    let mut rig = InvalidPayloadRig::new();
+    rig.import_block(Payload::Valid).await;
+    let block_root = rig.import_block(Payload::Syncing).await;
+    rig.invalidate_manually(block_root).await;
+    rig.recompute_head().await;
+
+    let cached_head = rig.cached_head();
+    assert_eq!(cached_head.head_block_root(), block_root);
+    assert_eq!(
+        cached_head.head_payload_status(),
+        proto_array::PayloadStatus::Empty
+    );
+
+    let block = rig.harness.get_block(block_root.into()).unwrap();
+    let block_post_state = rig
+        .harness
+        .get_hot_state(block.state_root().into())
+        .unwrap();
+    let child_slot = block.slot() + 1;
+    let ((child, child_blobs), _, _) = rig
+        .harness
+        .make_block_with_envelope_on(
+            block_post_state,
+            child_slot,
+            proto_array::PayloadStatus::Empty,
+        )
+        .await;
+    let child_root = child.canonical_root();
+    rig.harness
+        .process_block(child_slot, child_root, (child, child_blobs))
+        .await
+        .unwrap();
+    rig.recompute_head().await;
+
+    assert_eq!(rig.harness.head_block_root(), child_root);
+    assert!(
+        !rig.harness
+            .chain
+            .canonical_head
+            .block_has_canonical_payload(&block_root, &rig.harness.chain.spec)
+            .unwrap()
+    );
+}
+
 fn is_valid_and_post_bellatrix(status: ExecutionStatus) -> bool {
     matches!(status, ExecutionStatus::Valid(_))
 }
