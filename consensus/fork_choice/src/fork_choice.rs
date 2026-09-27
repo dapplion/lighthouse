@@ -1671,6 +1671,16 @@ where
         }
     }
 
+    /// Returns `true` if fork choice has marked the execution payload `block_hash` invalid.
+    pub fn is_execution_payload_invalid(&self, block_hash: ExecutionBlockHash) -> bool {
+        let proto_array = self.proto_array.core_proto_array();
+        proto_array
+            .execution_block_hash_to_node_indices(&block_hash)
+            .into_iter()
+            .filter_map(|index| proto_array.nodes.get(index))
+            .any(|node| node.execution_status().is_invalid())
+    }
+
     /// Called by the proposer to decide whether to build on the full or empty parent.
     pub fn should_build_on_full(
         &self,
