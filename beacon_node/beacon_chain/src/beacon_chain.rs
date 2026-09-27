@@ -6576,19 +6576,27 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // Use a blocking task since it interacts with the `canonical_head` lock. Lock contention
         // on the core executor is bad.
         let chain = self.clone();
-        let justified_block = self
+        let (justified_block, justified_block_is_invalid) = self
             .spawn_blocking_handle(
                 move || {
-                    chain
-                        .canonical_head
-                        .fork_choice_read_lock()
-                        .get_justified_block()
+                    let fork_choice = chain.canonical_head.fork_choice_read_lock();
+                    let justified_block = fork_choice.get_justified_block()?;
+                    // The block is dead when the payload its state carries is invalid. A Gloas
+                    // block's own payload only decides its `FULL` node.
+                    let justified_block_is_invalid =
+                        match fork_choice.inherited_execution_status(&justified_block.root)? {
+                            Some(ExecutionVerdict::Invalid) => true,
+                            Some(ExecutionVerdict::Valid | ExecutionVerdict::Optimistic) | None => {
+                                false
+                            }
+                        };
+                    Ok::<_, ForkChoiceError>((justified_block, justified_block_is_invalid))
                 },
                 "invalid_payload_fork_choice_get_justified",
             )
             .await??;
 
-        if justified_block.execution_status.is_invalid() {
+        if justified_block_is_invalid {
             crit!(
                 msg = "ensure you are not connected to a malicious network. This error is not \
                 recoverable, please reach out to the lighthouse developers for assistance.",
@@ -6987,15 +6995,21 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         match forkchoice_updated_response {
             Ok(status) => match status {
                 PayloadStatus::Valid => {
-                    // Ensure that fork choice knows that the block is no longer optimistic.
+                    // Ensure that fork choice knows that the payload is no longer optimistic. The
+                    // EL judged `head_hash`, which for a Gloas head on its `EMPTY` node is an
+                    // ancestor's payload, not the head block's.
                     let chain = self.clone();
                     let fork_choice_update_result = self
                         .spawn_blocking_handle(
                             move || {
-                                chain
-                                    .canonical_head
-                                    .fork_choice_write_lock()
-                                    .on_valid_execution_payload(head_block_root)
+                                let mut fork_choice = chain.canonical_head.fork_choice_write_lock();
+                                match fork_choice.payload_owner_root(&head_block_root, head_hash) {
+                                    Some(payload_root) => {
+                                        fork_choice.on_valid_execution_payload(payload_root)
+                                    }
+                                    // The payload is no longer in fork choice: nothing to promote.
+                                    None => Ok(()),
+                                }
                             },
                             "update_execution_engine_valid_payload",
                         )
@@ -7037,27 +7051,37 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         "Invalid execution payload"
                     );
 
+                    // The EL judged `head_hash`. Invalidate from the block whose own payload it
+                    // is, which for a Gloas head on its `EMPTY` node is an ancestor.
+                    let Some(payload_root) = self
+                        .forkchoice_payload_root(head_block_root, head_hash)
+                        .await?
+                    else {
+                        // The payload is no longer in fork choice: nothing to invalidate.
+                        return Err(BeaconChainError::ExecutionForkChoiceUpdateInvalid { status });
+                    };
+
                     match latest_valid_hash {
                         // The `latest_valid_hash` is set to `None` when the EE
                         // "cannot determine the ancestor of the invalid
                         // payload". In such a scenario we should only
-                        // invalidate the head block and nothing else.
+                        // invalidate the head payload's block and nothing else.
                         None => {
                             self.process_invalid_execution_payload(
                                 &InvalidationOperation::InvalidateOne {
-                                    block_root: head_block_root,
+                                    block_root: payload_root,
                                 },
                             )
                             .await?;
                         }
                         // An all-zeros execution block hash implies that
                         // the terminal block was invalid. We are being
-                        // explicit in invalidating only the head block in
-                        // this case.
+                        // explicit in invalidating only the head payload's
+                        // block in this case.
                         Some(hash) if hash == ExecutionBlockHash::zero() => {
                             self.process_invalid_execution_payload(
                                 &InvalidationOperation::InvalidateOne {
-                                    block_root: head_block_root,
+                                    block_root: payload_root,
                                 },
                             )
                             .await?;
@@ -7067,7 +7091,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         Some(latest_valid_hash) => {
                             self.process_invalid_execution_payload(
                                 &InvalidationOperation::InvalidateMany {
-                                    head_block_root,
+                                    head_block_root: payload_root,
                                     always_invalidate_head: true,
                                     latest_valid_ancestor: latest_valid_hash,
                                 },
@@ -7088,13 +7112,20 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         method = "fcU",
                         "Invalid execution payload block hash"
                     );
-                    // The execution engine has stated that the head block is invalid, however it
+                    // The execution engine has stated that the head payload is invalid, however it
                     // hasn't returned a latest valid ancestor.
                     //
-                    // Using a `None` latest valid ancestor will result in only the head block
-                    // being invalidated (no ancestors).
+                    // Using a `None` latest valid ancestor will result in only the head payload's
+                    // block being invalidated (no ancestors).
+                    let Some(payload_root) = self
+                        .forkchoice_payload_root(head_block_root, head_hash)
+                        .await?
+                    else {
+                        // The payload is no longer in fork choice: nothing to invalidate.
+                        return Err(BeaconChainError::ExecutionForkChoiceUpdateInvalid { status });
+                    };
                     self.process_invalid_execution_payload(&InvalidationOperation::InvalidateOne {
-                        block_root: head_block_root,
+                        block_root: payload_root,
                     })
                     .await?;
 
@@ -7103,6 +7134,27 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             },
             Err(e) => Err(e),
         }
+    }
+
+    /// The root of the block on `head_block_root`'s chain whose own payload is `head_hash`, the
+    /// payload a forkchoiceUpdated judged. For a Gloas head on its `EMPTY` node that block is an
+    /// ancestor. `None` when the payload is no longer in fork choice.
+    async fn forkchoice_payload_root(
+        self: &Arc<Self>,
+        head_block_root: Hash256,
+        head_hash: ExecutionBlockHash,
+    ) -> Result<Option<Hash256>, Error> {
+        let chain = self.clone();
+        self.spawn_blocking_handle(
+            move || {
+                chain
+                    .canonical_head
+                    .fork_choice_read_lock()
+                    .payload_owner_root(&head_block_root, head_hash)
+            },
+            "forkchoice_payload_root",
+        )
+        .await
     }
 
     /// Returns `true` if the given slot is prior to the `bellatrix_fork_epoch`.

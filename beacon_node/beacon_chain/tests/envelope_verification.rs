@@ -735,8 +735,9 @@ async fn a_later_valid_payload_promotes_its_optimistic_ancestors() {
     assert!(is_optimistic(execution_status(&harness, first_root)));
     assert!(is_optimistic(execution_status(&harness, second_root)));
 
-    // The execution layer catches up and validates the next payload.
-    mock.server.all_payloads_valid();
+    // The execution layer catches up and validates the next payload. forkchoiceUpdated stays
+    // `SYNCING`, so only the envelope's verdict can promote the ancestry.
+    mock.server.all_payloads_valid_on_new_payload();
     let third_root = import_block_and_envelope(&harness, Slot::new(4)).await;
 
     assert!(
