@@ -708,10 +708,7 @@ async fn syncing_execution_layer_imports_payload_optimistically() {
     let block_root = import_block_and_envelope(&harness, Slot::new(2)).await;
 
     assert!(
-        matches!(
-            execution_status(&harness, block_root),
-            ExecutionStatus::Optimistic(_)
-        ),
+        is_strictly_optimistic(execution_status(&harness, block_root)),
         "a payload the execution layer could not validate must be held as optimistic",
     );
 }
@@ -737,38 +734,36 @@ async fn a_later_valid_payload_promotes_its_optimistic_ancestors() {
     let first_root = import_block_and_envelope(&harness, Slot::new(2)).await;
     let second_root = import_block_and_envelope(&harness, Slot::new(3)).await;
 
-    assert!(matches!(
-        execution_status(&harness, first_root),
-        ExecutionStatus::Optimistic(_)
-    ));
-    assert!(matches!(
-        execution_status(&harness, second_root),
-        ExecutionStatus::Optimistic(_)
-    ));
+    assert!(is_strictly_optimistic(execution_status(
+        &harness, first_root
+    )));
+    assert!(is_strictly_optimistic(execution_status(
+        &harness,
+        second_root
+    )));
 
     // The execution layer catches up and validates the next payload.
     mock.server.all_payloads_valid();
     let third_root = import_block_and_envelope(&harness, Slot::new(4)).await;
 
     assert!(
-        matches!(
-            execution_status(&harness, third_root),
-            ExecutionStatus::Valid(_)
-        ),
+        is_valid_and_post_bellatrix(execution_status(&harness, third_root)),
         "the payload the execution layer validated must be valid",
     );
     assert!(
-        matches!(
-            execution_status(&harness, second_root),
-            ExecutionStatus::Valid(_)
-        ),
+        is_valid_and_post_bellatrix(execution_status(&harness, second_root)),
         "its parent's payload is vouched for by the valid descendant",
     );
     assert!(
-        matches!(
-            execution_status(&harness, first_root),
-            ExecutionStatus::Valid(_)
-        ),
+        is_valid_and_post_bellatrix(execution_status(&harness, first_root)),
         "promotion must walk the whole ancestry, not just one step",
     );
+}
+
+fn is_valid_and_post_bellatrix(status: ExecutionStatus) -> bool {
+    matches!(status, ExecutionStatus::Valid(_))
+}
+
+fn is_strictly_optimistic(status: ExecutionStatus) -> bool {
+    matches!(status, ExecutionStatus::Optimistic(_))
 }
