@@ -733,10 +733,8 @@ impl ProtoArray {
         if let Some(parent_index) = node.parent()
             && matches!(block.execution_status, ExecutionStatus::Valid(_))
         {
-            self.propagate_execution_payload_validation_from(
-                parent_index,
-                node.get_parent_payload_status(),
-            )?;
+            // Only a pre-Gloas block is imported `Valid`, and it builds on its parent's payload.
+            self.propagate_execution_payload_validation_from(parent_index)?;
         }
 
         Ok(())
@@ -879,7 +877,7 @@ impl ProtoArray {
             ExecutionStatus::Valid(_) => {
                 // The walk validates this node on its own `FULL` side and every payload above it that
                 // its branch executed.
-                self.propagate_execution_payload_validation_from(index, ParentPayloadStatus::Full)
+                self.propagate_execution_payload_validation_from(index)
             }
             // The fork choice wrapper only maps envelope verdicts to `Valid` or `Optimistic`.
             ExecutionStatus::Invalid(_)
@@ -902,25 +900,16 @@ impl ProtoArray {
         block_hash: ExecutionBlockHash,
     ) -> Result<(), Error> {
         for index in self.execution_block_hash_to_node_indices(&block_hash) {
-            // The block's own payload is the validated one: a pre-Gloas block carries it inside
-            // itself, a Gloas block runs it on its `FULL` node.
-            let start_status = match self
-                .nodes
-                .get(index)
-                .ok_or(Error::InvalidNodeIndex(index))?
-            {
-                ProtoNode::V17(_) => ParentPayloadStatus::PreGloas,
-                ProtoNode::V29(_) => ParentPayloadStatus::Full,
-            };
-            self.propagate_execution_payload_validation_from(index, start_status)?;
+            self.propagate_execution_payload_validation_from(index)?;
         }
         Ok(())
     }
 
-    /// Promotes `start_index` and every payload that its branch executed to `Valid`.
+    /// Promotes the payload of `start_index` and every payload that its branch executed to
+    /// `Valid`.
     ///
-    /// `start_status` is the node that the walk starts on. An `EMPTY` edge is a gap in the
-    /// execution chain, not the end of it. The walk steps over that node and continues.
+    /// An `EMPTY` edge is a gap in the execution chain, not the end of it. The walk steps over
+    /// that parent's payload and continues.
     ///
     /// Returns an error if:
     ///
@@ -929,22 +918,15 @@ impl ProtoArray {
     fn propagate_execution_payload_validation_from(
         &mut self,
         start_index: usize,
-        start_status: ParentPayloadStatus,
     ) -> Result<(), Error> {
         let mut index = start_index;
-        let mut status = start_status;
+        let mut executed = true;
         loop {
             let node = self
                 .nodes
                 .get_mut(index)
                 .ok_or(Error::InvalidNodeIndex(index))?;
 
-            // Only a `FULL` node has a payload of its own in the execution ancestry of this
-            // branch. A pre-Gloas block carries its payload inside itself, so it is executed.
-            let executed = match status {
-                ParentPayloadStatus::Full | ParentPayloadStatus::PreGloas => true,
-                ParentPayloadStatus::Empty => false,
-            };
             if executed {
                 match node.execution_status() {
                     // We have reached a node that we already know is valid. No need to iterate further
@@ -974,8 +956,12 @@ impl ProtoArray {
                 // We have reached the root block, iteration complete.
                 return Ok(());
             };
-            // Which of the two nodes of the parent this block extends.
-            status = node.get_parent_payload_status();
+            // Only a `FULL` edge puts the parent's payload in this branch. A pre-Gloas parent
+            // carries its payload inside itself, so that edge is executed too.
+            executed = match node.get_parent_payload_status() {
+                ParentPayloadStatus::Full | ParentPayloadStatus::PreGloas => true,
+                ParentPayloadStatus::Empty => false,
+            };
             index = parent_index;
         }
     }
