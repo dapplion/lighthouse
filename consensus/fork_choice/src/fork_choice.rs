@@ -433,9 +433,9 @@ where
 
         let (execution_status, execution_payload_parent_hash, execution_payload_block_hash) =
             if let Ok(signed_bid) = anchor_block.message().body().signed_execution_payload_bid() {
-                // Gloas: `on_block` ignores this and starts a V29 node as `NotYetRevealed`.
+                // Gloas: checkpoint sync fetches the anchor's payload later.
                 (
-                    ExecutionStatus::irrelevant(),
+                    ExecutionStatus::NotYetRevealed(signed_bid.message.block_hash),
                     Some(signed_bid.message.parent_block_hash),
                     Some(signed_bid.message.block_hash),
                 )
