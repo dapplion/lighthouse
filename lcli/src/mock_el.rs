@@ -15,6 +15,11 @@ pub fn run<E: EthSpec>(mut env: Environment<E>, matches: &ArgMatches) -> Result<
     let listen_addr: Ipv4Addr = parse_required(matches, "listen-address")?;
     let listen_port: u16 = parse_required(matches, "listen-port")?;
     let all_payloads_valid: bool = parse_required(matches, "all-payloads-valid")?;
+    let all_payloads_invalid: bool = matches.get_flag("all-payloads-invalid");
+    let latest_valid_hash: ExecutionBlockHash = parse_required(matches, "latest-valid-hash")?;
+    let all_payloads_syncing: bool = matches.get_flag("all-payloads-syncing");
+    let invalid_after_secs: Option<u64> = parse_optional(matches, "invalid-after-secs")?;
+    let invalid_once: bool = matches.get_flag("invalid-once");
     let shanghai_time = parse_required(matches, "shanghai-time")?;
     let cancun_time = parse_optional(matches, "cancun-time")?;
     let prague_time = parse_optional(matches, "prague-time")?;
@@ -57,13 +62,37 @@ pub fn run<E: EthSpec>(mut env: Environment<E>, matches: &ArgMatches) -> Result<
     let kzg = None;
     let server: MockServer<E> = MockServer::new_with_config(&handle, config, kzg);
 
-    if all_payloads_valid {
+    if all_payloads_invalid {
+        eprintln!(
+            "Returning INVALID for all payloads (latest_valid_hash={:?}). \
+            For testing payload invalidation only.",
+            latest_valid_hash
+        );
+        server.all_payloads_invalid(latest_valid_hash);
+    } else if all_payloads_syncing {
+        eprintln!("Returning SYNCING for all payloads: blocks import optimistically.");
+        server.all_payloads_syncing(true);
+    } else if all_payloads_valid {
         eprintln!(
             "Using --all-payloads-valid=true can be dangerous. \
             Never use this flag when operating validators."
         );
         // Indicate that all payloads are valid.
         server.all_payloads_valid();
+    }
+
+    if let Some(secs) = invalid_after_secs {
+        let revert_after = invalid_once.then(|| std::time::Duration::from_secs(6));
+        eprintln!(
+            "forkchoiceUpdated will return INVALID after {}s (latest_valid_hash={:?}, once={}).",
+            secs, latest_valid_hash, invalid_once
+        );
+        server.invalidate_on_forkchoice_updated_after(
+            &handle,
+            std::time::Duration::from_secs(secs),
+            latest_valid_hash,
+            revert_after,
+        );
     }
 
     eprintln!(
