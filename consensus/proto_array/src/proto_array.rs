@@ -1284,10 +1284,12 @@ impl ProtoArray {
         let invalid_payloads: HashSet<ExecutionBlockHash> = self
             .nodes
             .iter()
-            .filter(|node| node.is_invalid())
-            .filter_map(|node| match node.block_hash() {
-                PayloadBlockHash::Hash(block_hash) => Some(block_hash),
-                PayloadBlockHash::PreMerge => None,
+            .filter_map(|node| match node.execution_status() {
+                ExecutionStatus::Invalid(block_hash) => Some(block_hash),
+                ExecutionStatus::Valid(_)
+                | ExecutionStatus::Optimistic(_)
+                | ExecutionStatus::Irrelevant(_)
+                | ExecutionStatus::NotYetRevealed(_) => None,
             })
             .collect();
         let mut excluded = vec![false; self.nodes.len()];
