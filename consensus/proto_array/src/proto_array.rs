@@ -1207,22 +1207,6 @@ impl ProtoArray {
             .copied()
             .ok_or(Error::JustifiedNodeUnknown(*justified_root))?;
 
-        let justified_node = self
-            .nodes
-            .get(justified_index)
-            .ok_or(Error::InvalidJustifiedIndex(justified_index))?;
-
-        // Since there are no valid descendants of a justified block with an invalid execution
-        // payload, there would be no head to choose from.
-        // Only V17 (pre-Gloas) justified nodes are checked here.
-        if let Ok(v17) = justified_node.as_v17()
-            && v17.execution_status.is_invalid()
-        {
-            return Err(Error::InvalidJustifiedCheckpointExecutionStatus {
-                justified_root: *justified_root,
-            });
-        }
-
         let best_fc_node = self.find_head_walk::<E>(
             justified_index,
             current_slot,
