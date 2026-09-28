@@ -84,16 +84,18 @@ impl StateId {
                         // choice. If it isn't found in fork choice, mark it optimistic to be on the
                         // safe side.
                         fork_choice
-                            .is_optimistic_or_invalid_block_assuming_full_no_fallback(
+                            .is_optimistic_or_invalid_block_no_fallback(
                                 &hot_summary.latest_block_root,
+                                &chain.spec,
                             )
                             .unwrap_or(true)
                     } else {
                         // This block is either old and finalized, or recent and unfinalized, so
                         // it's safe to fallback to the optimistic status of the finalized block.
                         fork_choice
-                            .is_optimistic_or_invalid_block_assuming_full(
+                            .is_optimistic_or_invalid_block(
                                 &hot_summary.latest_block_root,
+                                &chain.spec,
                             )
                             .map_err(BeaconChainError::ForkChoiceError)
                             .map_err(warp_utils::reject::unhandled_error)?
@@ -111,7 +113,7 @@ impl StateId {
                         .finalized_checkpoint
                         .root;
                     let execution_optimistic = fork_choice
-                        .is_optimistic_or_invalid_block_assuming_full_no_fallback(&finalized_root)
+                        .is_optimistic_or_invalid_block_no_fallback(&finalized_root, &chain.spec)
                         .map_err(BeaconChainError::ForkChoiceError)
                         .map_err(warp_utils::reject::unhandled_error)?;
                     return Ok((*root, execution_optimistic, true));
@@ -275,7 +277,7 @@ pub fn checkpoint_slot_and_execution_optimistic<T: BeaconChainTypes>(
     };
 
     let execution_optimistic = fork_choice
-        .is_optimistic_or_invalid_block_assuming_full_no_fallback(root)
+        .is_optimistic_or_invalid_block_no_fallback(root, &chain.spec)
         .map_err(BeaconChainError::ForkChoiceError)
         .map_err(warp_utils::reject::unhandled_error)?;
 
