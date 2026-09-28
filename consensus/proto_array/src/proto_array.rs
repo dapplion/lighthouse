@@ -699,16 +699,27 @@ impl ProtoArray {
             })
         };
 
-        // If the parent has an invalid execution status, return an error before adding the
-        // block to `self`. This check applies only to V17 (pre-Gloas) parents.
+        // If the block builds on an invalid payload, return an error before adding it to `self`.
         if let Some(parent_index) = node.parent() {
             let parent = self
                 .nodes
                 .get(parent_index)
                 .ok_or(Error::InvalidNodeIndex(parent_index))?;
 
+            // A pre-Gloas parent carries its payload inside itself.
             if let Ok(v17) = parent.as_v17()
                 && v17.execution_status.is_invalid()
+            {
+                return Err(Error::ParentExecutionStatusIsInvalid {
+                    block_root: block.root,
+                    parent_root: parent.root(),
+                });
+            }
+
+            // A Gloas block builds on the payload its bid names: its parent's own on a `FULL`
+            // edge, an older one on an `EMPTY` edge.
+            if let Ok(gloas_node) = node.as_v29()
+                && self.is_payload_invalid(&gloas_node.execution_payload_parent_hash)
             {
                 return Err(Error::ParentExecutionStatusIsInvalid {
                     block_root: block.root,
@@ -2243,6 +2254,20 @@ impl ProtoArray {
             })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// Returns `true` if fork choice has marked the execution payload `block_hash` invalid.
+    pub fn is_payload_invalid(&self, block_hash: &ExecutionBlockHash) -> bool {
+        self.execution_block_hash_to_node_indices(block_hash)
+            .into_iter()
+            .filter_map(|index| self.nodes.get(index))
+            .any(|node| match node.execution_status() {
+                ExecutionStatus::Invalid(_) => true,
+                ExecutionStatus::Valid(_)
+                | ExecutionStatus::Optimistic(_)
+                | ExecutionStatus::Irrelevant(_)
+                | ExecutionStatus::NotYetRevealed(_) => false,
+            })
     }
 
     /// Returns the first *beacon block root* which contains an execution payload with the given
