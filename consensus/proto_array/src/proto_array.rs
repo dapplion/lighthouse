@@ -1538,9 +1538,11 @@ impl ProtoArray {
                     }
                     ExecutionStatus::Invalid(_) => Ok(ExecutionVerdict::Invalid),
                     ExecutionStatus::Optimistic(_) => Ok(ExecutionVerdict::Optimistic),
-                    // No payload has been revealed for this node, so it has no verdict of its own.
-                    // Resolve the verdict of the payload its branch actually executed.
-                    ExecutionStatus::NotYetRevealed(_) => self.inherited_execution_status(root),
+                    // Fork choice only offers a `FULL` node once its payload arrives, and ignores
+                    // attestations naming one before that, so no caller can ask for it.
+                    ExecutionStatus::NotYetRevealed(_) => Err(Error::Unexpected(format!(
+                        "execution verdict asked of the FULL node of an unrevealed payload: {root:?}"
+                    ))),
                 }
             }
             PayloadStatus::Empty | PayloadStatus::Pending => self.inherited_execution_status(root),
