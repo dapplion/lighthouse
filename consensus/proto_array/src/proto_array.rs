@@ -1279,8 +1279,8 @@ impl ProtoArray {
         best_finalized_checkpoint: Checkpoint,
         viable: &mut HashSet<usize>,
     ) -> Result<(), Error> {
-        // Forward pass: a node is "excluded" if it (or any ancestor down to
-        // `start_index`) builds on an invalid payload.
+        // Forward pass: a node is "excluded" if its latest payload (or that of any ancestor down
+        // to `start_index`) is invalid.
         let invalid_payloads: HashSet<ExecutionBlockHash> = self
             .nodes
             .iter()
@@ -1299,15 +1299,15 @@ impl ProtoArray {
                 Some(p) => *excluded.get(p).ok_or(Error::InvalidNodeIndex(p))?,
                 None => false,
             };
-            // A pre-Gloas block carries its own payload. A Gloas block builds on the payload its
-            // bid names.
-            let builds_on_invalid_payload = match node {
+            // The payload the block's state ends on (`latest_block_hash`): pre-Gloas its own,
+            // post-Gloas the one its bid names.
+            let latest_payload_invalid = match node {
                 ProtoNode::V17(_) => node.is_invalid(),
                 ProtoNode::V29(gloas_node) => {
                     invalid_payloads.contains(&gloas_node.execution_payload_parent_hash)
                 }
             };
-            excluded[i] = parent_excluded || builds_on_invalid_payload;
+            excluded[i] = parent_excluded || latest_payload_invalid;
         }
 
         for node_index in (start_index..self.nodes.len()).rev() {
