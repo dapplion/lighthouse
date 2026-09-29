@@ -1,7 +1,7 @@
 #![cfg(not(debug_assertions))]
 
 use beacon_chain::{
-    BeaconChain, BeaconChainTypes, ChainConfig,
+    BeaconChain, BeaconChainTypes, ChainConfig, FAST_CONFIRMATION_DB_KEY,
     chain_config::FastConfirmationMode,
     test_utils::{
         AttestationStrategy, BeaconChainHarness, BlockStrategy, DiskHarnessType, test_spec,
@@ -14,7 +14,7 @@ use proto_array::{ExecutionStatus, PayloadBlockHash, ProtoArrayForkChoice};
 use slot_clock::SlotClock;
 use std::sync::{Arc, LazyLock};
 use store::database::interface::BeaconNodeBackend;
-use store::{HotColdDB, StoreConfig};
+use store::{DBColumn, HotColdDB, KeyValueStore, StoreConfig};
 use tempfile::{TempDir, tempdir};
 use types::{
     AttestationShufflingId, BeaconState, Checkpoint, Epoch, EthSpec, ExecutionBlockHash, Hash256,
@@ -97,6 +97,17 @@ fn confirmed<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> Option<(Hash256, Sl
     let fork_choice = chain.canonical_head.fork_choice_read_lock();
     let root = fcr_mutex.lock().1.announced_root;
     Some((root, fork_choice.get_block(&root).unwrap().slot))
+}
+
+fn deepest<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> Hash256 {
+    chain
+        .canonical_head
+        .fast_confirmation
+        .as_ref()
+        .unwrap()
+        .lock()
+        .1
+        .deepest_announced_root
 }
 
 fn finalized<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> Hash256 {
@@ -700,6 +711,57 @@ async fn drops_a_root_that_was_reorged_out() {
         rig.confirmed_before,
         "a root off the head's chain must be dropped"
     );
+}
+
+/// A reorg during the downtime leaves the persisted root off the boot head's chain. Seeding the
+/// deepest root from it would report a reorg this run never made.
+#[tokio::test]
+async fn a_reorg_during_the_downtime_seeds_the_deepest_root_from_finality() {
+    let db = tempdir().unwrap();
+    let store = store(&db);
+    let stopped = harness(store.clone());
+    stopped
+        .extend_chain(
+            WARMUP_SLOTS as usize,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+    let (_, slot_before) = confirmed(&stopped.chain).unwrap();
+
+    // Nobody attests, so the head stays put and this block stands in for the branch a downtime
+    // reorg left behind.
+    let abandoned = stopped
+        .extend_chain(
+            1,
+            BlockStrategy::ForkCanonicalChainAt {
+                previous_slot: slot_before - 1,
+                first_slot: stopped.chain.slot().unwrap() + 1,
+            },
+            AttestationStrategy::SomeValidators(vec![]),
+        )
+        .await;
+    assert!(
+        !stopped
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .is_descendant(abandoned, stopped.head_block_root()),
+        "the fork block must be off the head's chain"
+    );
+    stopped.chain.persist_fork_choice().unwrap();
+    // The root the run before the reorg announced.
+    store
+        .hot_db
+        .put_bytes(
+            DBColumn::ForkChoice,
+            FAST_CONFIRMATION_DB_KEY.as_slice(),
+            abandoned.as_slice(),
+        )
+        .unwrap();
+
+    let node = node(store, &stopped, false, true, false);
+    assert_eq!(deepest(&node.chain), finalized(&node.chain));
 }
 
 /// Three epochs down puts the root outside the window: the revert the oracle above has to forbid.

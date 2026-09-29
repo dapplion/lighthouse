@@ -506,10 +506,15 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 spec,
             )
             .map_err(|e| format!("Unable to initialize fast confirmation rule: {e:?}"))?;
-            // The startup update sends the finalized block. The deepest carries on from disk.
+            // The startup update sends the finalized block. The deepest carries on from disk, but
+            // only while the head still holds it: a root the downtime reorged out is not one this
+            // run can measure a reorg from.
             let roots = FastConfirmationRoots {
                 announced_root: fork_choice_view.finalized_checkpoint.root,
                 deepest_announced_root: root_confirmed_before_restart
+                    .filter(|root| {
+                        fork_choice.is_descendant(*root, fork_choice_view.head_block_root)
+                    })
                     .unwrap_or(fork_choice_view.finalized_checkpoint.root),
             };
             Some(Mutex::new((rule, roots)))
