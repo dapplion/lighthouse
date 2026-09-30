@@ -35,7 +35,7 @@
 
 use crate::chain_config::FastConfirmationMode;
 use crate::persisted_fast_confirmation::{
-    load_root_confirmed_before_restart, persist_confirmed_root_in_batch,
+    load_fast_confirmation_roots, persist_fast_confirmation_roots_in_batch,
 };
 use crate::persisted_fork_choice::PersistedForkChoice;
 use crate::shuffling_cache::BlockShufflingIds;
@@ -64,6 +64,7 @@ use proto_array::PayloadBlockHash;
 use logging::crit;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use slot_clock::SlotClock;
+use ssz_derive::{Decode, Encode};
 use state_processing::AllCaches;
 use state_processing::builder_deposits_cache::OnboardBuildersCache;
 use state_processing::state_advance::complete_state_advance;
@@ -474,9 +475,11 @@ pub struct CanonicalHead<T: BeaconChainTypes> {
     fork_choice_poisoned: AtomicBool,
 }
 
-/// The roots this node has sent its EL as the FCU safe block hash.
+/// The roots this node has sent its EL as the FCU safe block hash. Persisted with fork choice, so
+/// a restart carries on from the pair it left off at.
+#[derive(Clone, Copy, Encode, Decode)]
 pub struct FastConfirmationRoots {
-    /// The root sent last.
+    /// The root sent last. Spec: `get_root_confirmed_before_restart` reads this one.
     pub announced_root: Hash256,
     /// Deepest announced descendant of `announced_root`.
     pub deepest_announced_root: Hash256,
@@ -496,25 +499,39 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let forkchoice_update_params = fork_choice.get_forkchoice_update_parameters();
 
         let fcr = if fast_confirmation.is_enabled() {
-            let root_confirmed_before_restart = load_root_confirmed_before_restart(store)
-                .map_err(|e| format!("Unable to load the root confirmed before restart: {e:?}"))?;
+            let persisted_roots = load_fast_confirmation_roots(store)
+                .map_err(|e| format!("Unable to load the roots sent before the restart: {e:?}"))?;
             let rule = <BeaconChain<T>>::new_fast_confirmation_rule(
                 fork_choice_view.finalized_checkpoint,
                 &snapshot,
-                root_confirmed_before_restart,
+                persisted_roots.map(|roots| roots.announced_root),
                 store,
                 spec,
             )
             .map_err(|e| format!("Unable to initialize fast confirmation rule: {e:?}"))?;
-            // The startup update sends the finalized block. The deepest carries on from disk.
-            let roots = FastConfirmationRoots {
+            // Carry on from the pair on disk, which fork choice was persisted alongside.
+            let roots = persisted_roots.unwrap_or(FastConfirmationRoots {
                 announced_root: fork_choice_view.finalized_checkpoint.root,
-                deepest_announced_root: root_confirmed_before_restart
-                    .unwrap_or(fork_choice_view.finalized_checkpoint.root),
-            };
+                deepest_announced_root: fork_choice_view.finalized_checkpoint.root,
+            });
             Some(Mutex::new((rule, roots)))
         } else {
             None
+        };
+
+        // With FCR on the safe block hash is never the justified one, including at startup: the
+        // startup update sends the root this node last sent, so the EL's does not regress.
+        let justified_hash = if let Some(fcr) = &fcr {
+            let announced_root = fcr.lock().1.announced_root;
+            fork_choice
+                .get_block(&announced_root)
+                .and_then(|node| match node.checkpoint_payload_block_hash() {
+                    PayloadBlockHash::Hash(hash) => Some(hash),
+                    PayloadBlockHash::PreMerge => None,
+                })
+                .or(forkchoice_update_params.finalized_hash)
+        } else {
+            forkchoice_update_params.justified_hash
         };
 
         let cached_head = CachedHead {
@@ -523,12 +540,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             finalized_checkpoint: fork_choice_view.finalized_checkpoint,
             head_node,
             head_hash: forkchoice_update_params.head_hash,
-            // With FCR on the safe block hash is never the justified one, including at startup.
-            justified_hash: if fcr.is_some() {
-                forkchoice_update_params.finalized_hash
-            } else {
-                forkchoice_update_params.justified_hash
-            },
+            justified_hash,
             finalized_hash: forkchoice_update_params.finalized_hash,
         };
 
@@ -1750,22 +1762,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         let mut batch = vec![self.persist_fork_choice_in_batch()?];
         // Written in the same batch as the fork choice that holds the block.
-        batch.extend(self.persist_fast_confirmation_root_in_batch());
+        batch.extend(self.persist_fast_confirmation_roots_in_batch());
         self.store.hot_db.do_atomically(batch)?;
         Ok(())
     }
 
-    /// Write the deepest root sent as the FCU safe block hash, for the next boot to read. It only
-    /// moves along one chain, so a fallback to finality cannot lower what a restart finds.
-    fn persist_fast_confirmation_root_in_batch(&self) -> Option<KeyValueStoreOp> {
-        let deepest_announced_root = self
-            .canonical_head
-            .fast_confirmation
-            .as_ref()?
-            .lock()
-            .1
-            .deepest_announced_root;
-        Some(persist_confirmed_root_in_batch(deepest_announced_root))
+    /// Write the roots sent as the FCU safe block hash, for the next boot to read. Same batch as
+    /// fork choice, so what a restart reads is a pair that fork choice holds.
+    fn persist_fast_confirmation_roots_in_batch(&self) -> Option<KeyValueStoreOp> {
+        let roots = self.canonical_head.fast_confirmation.as_ref()?.lock().1;
+        Some(persist_fast_confirmation_roots_in_batch(&roots))
     }
 
     /// Return a database operation for writing fork choice to disk.
