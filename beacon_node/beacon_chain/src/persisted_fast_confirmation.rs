@@ -11,7 +11,6 @@ pub fn load_fast_confirmation_roots<E: EthSpec, Hot: ItemStore, Cold: ItemStore>
     store.get_item::<FastConfirmationRoots>(&FAST_CONFIRMATION_DB_KEY)
 }
 
-/// Write those roots for the next restart to read.
 pub fn persist_fast_confirmation_roots_in_batch(roots: &FastConfirmationRoots) -> KeyValueStoreOp {
     roots.as_kv_store_op(FAST_CONFIRMATION_DB_KEY)
 }

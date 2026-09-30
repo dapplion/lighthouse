@@ -506,7 +506,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         let fcr = if fast_confirmation.is_enabled() {
             let persisted_roots = load_fast_confirmation_roots(store)
                 .map_err(|e| format!("Unable to load the roots sent before the restart: {e:?}"))?;
-            let rule = <BeaconChain<T>>::new_fast_confirmation_rule(
+            let fcr = <BeaconChain<T>>::new_fast_confirmation_rule(
                 fork_choice_view.finalized_checkpoint,
                 &snapshot,
                 persisted_roots.map(|roots| roots.announced_root),
@@ -514,18 +514,15 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 spec,
             )
             .map_err(|e| format!("Unable to initialize fast confirmation rule: {e:?}"))?;
-            // Carry on from the pair on disk, which fork choice was persisted alongside.
             let roots = persisted_roots.unwrap_or(FastConfirmationRoots {
                 announced_root: fork_choice_view.finalized_checkpoint.root,
                 deepest_announced_root: fork_choice_view.finalized_checkpoint.root,
             });
-            Some(Mutex::new(BeaconFastConfirmationRule { fcr: rule, roots }))
+            Some(Mutex::new(BeaconFastConfirmationRule { fcr, roots }))
         } else {
             None
         };
 
-        // With FCR on the safe block hash is never the justified one, including at startup: the
-        // startup update sends the root this node last sent, so the EL's does not regress.
         let justified_hash = if let Some(fcr) = &fcr {
             let announced_root = fcr.lock().roots.announced_root;
             fork_choice
@@ -1772,8 +1769,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         Ok(())
     }
 
-    /// Write the roots sent as the FCU safe block hash, for the next boot to read. Same batch as
-    /// fork choice, so what a restart reads is a pair that fork choice holds.
+    /// Write the roots sent as the FCU safe block hash.
     fn persist_fast_confirmation_roots_in_batch(&self) -> Option<KeyValueStoreOp> {
         let roots = self.canonical_head.fast_confirmation.as_ref()?.lock().roots;
         Some(persist_fast_confirmation_roots_in_batch(&roots))
