@@ -1,6 +1,6 @@
 use crate::metrics;
 use beacon_chain::{
-    BeaconChain, BeaconChainTypes, ExecutionVerdict,
+    BeaconChain, BeaconChainTypes, ExecutionVerdict, PayloadBlockHash,
     bellatrix_readiness::GenesisExecutionPayloadStatus,
 };
 use execution_layer::{
@@ -367,12 +367,11 @@ pub fn spawn_notifier<T: BeaconChainTypes>(
                     head_root.short().to_string()
                 };
 
-                // `cached_head.head_hash()` is `None` only pre-merge. Default to zero (display only).
-                let head_hash = beacon_chain
-                    .canonical_head
-                    .cached_head()
-                    .head_hash()
-                    .unwrap_or_else(ExecutionBlockHash::zero);
+                // Default to zero pre-merge (display only).
+                let head_hash = match beacon_chain.canonical_head.cached_head().head_hash() {
+                    PayloadBlockHash::Hash(hash) => hash,
+                    PayloadBlockHash::PreMerge => ExecutionBlockHash::zero(),
+                };
                 let block_hash = match beacon_chain.canonical_head.head_execution_status() {
                     Ok(ExecutionVerdict::Valid) => {
                         metrics::set_gauge(&metrics::IS_OPTIMISTIC_SYNC, 0);

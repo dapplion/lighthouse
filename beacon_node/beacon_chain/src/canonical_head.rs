@@ -295,13 +295,12 @@ pub struct CachedHead<E: EthSpec> {
     /// status fork choice picked for it. Kept as one value so the two cannot drift apart and a
     /// caller cannot pair the head root with the other payload status.
     head_node: proto_array::ForkChoiceNode,
-    /// The `execution_payload.block_hash` of the block at the head of the chain. Set to `None`
-    /// before Bellatrix.
-    head_hash: Option<ExecutionBlockHash>,
-    /// The `execution_payload.block_hash` of the justified block. Set to `None` before Bellatrix.
-    justified_hash: Option<ExecutionBlockHash>,
-    /// The `execution_payload.block_hash` of the finalized block. Set to `None` before Bellatrix.
-    finalized_hash: Option<ExecutionBlockHash>,
+    /// The `execution_payload.block_hash` of the block at the head of the chain.
+    head_hash: PayloadBlockHash,
+    /// The `execution_payload.block_hash` of the justified block.
+    justified_hash: PayloadBlockHash,
+    /// The `execution_payload.block_hash` of the finalized block.
+    finalized_hash: PayloadBlockHash,
 }
 
 impl<E: EthSpec> CachedHead<E> {
@@ -436,8 +435,8 @@ impl<E: EthSpec> CachedHead<E> {
         self.head_node
     }
 
-    /// The `execution_payload.block_hash` of the head block, for display. `None` before Bellatrix.
-    pub fn head_hash(&self) -> Option<ExecutionBlockHash> {
+    /// The `execution_payload.block_hash` of the head block, for display.
+    pub fn head_hash(&self) -> PayloadBlockHash {
         self.head_hash
     }
 }
@@ -913,7 +912,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     // FC update params are only updated after successful FCR runs. This is
                     // conservative and will revert the `safe` tag to justified instead of using a
                     // previously confirmed root that may be stale by now if FCR can't reconfirm it.
-                    new_forkchoice_update_parameters.justified_hash = Some(confirmed_block_hash);
+                    new_forkchoice_update_parameters.justified_hash =
+                        PayloadBlockHash::Hash(confirmed_block_hash);
 
                     let delay = current_slot
                         .as_u64()
