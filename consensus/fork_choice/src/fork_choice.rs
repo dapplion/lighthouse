@@ -1716,16 +1716,27 @@ where
             .map_err(Error::ProtoArrayError)
     }
 
-    /// Execution verdict of a block assuming its `FULL` node. For callers that hold only a root.
-    pub fn get_block_execution_status_assuming_full(
+    /// Execution verdict of the node the chain takes at `block_root`, if it descends from
+    /// finalized. For callers that hold only a root.
+    pub fn get_block_execution_status(
         &self,
         block_root: &Hash256,
+        spec: &ChainSpec,
     ) -> Result<Option<ExecutionVerdict>, Error<T::Error>> {
         if !self.is_finalized_checkpoint_or_descendant(*block_root) {
             return Ok(None);
         }
+        let node = self
+            .proto_array
+            .get_canonical_node::<E>(
+                block_root,
+                self.fc_store.get_current_slot(),
+                self.fc_store.proposer_boost_root(),
+                spec,
+            )
+            .map_err(Error::ProtoArrayError)?;
         self.proto_array
-            .get_block_execution_status_assuming_full(block_root)
+            .get_node_execution_status(node)
             .map(Some)
             .map_err(Error::ProtoArrayError)
     }
@@ -1829,22 +1840,22 @@ where
             .is_descendant(ancestor_root, descendant_root)
     }
 
-    /// Returns `Ok(true)` if `block_root`'s `FULL` node has been imported optimistically or deemed
-    /// invalid.
+    /// Returns `Ok(true)` if the node the chain takes at `block_root` has been imported
+    /// optimistically or deemed invalid.
     ///
-    /// Returns `Ok(false)` if `block_root`'s execution payload has been elected as fully VALID, if
+    /// Returns `Ok(false)` if that node's execution payload has been elected as fully VALID, if
     /// it is a pre-Bellatrix block or if it is before the PoW terminal block.
     ///
     /// In the case where the block could not be found in fork-choice, it returns the
     /// `execution_status` of the current finalized block.
     ///
     /// This function assumes the `block_root` exists.
-    pub fn is_optimistic_or_invalid_block_assuming_full(
+    pub fn is_optimistic_or_invalid_block(
         &self,
         block_root: &Hash256,
+        spec: &ChainSpec,
     ) -> Result<bool, Error<T::Error>> {
-        // worst case on wrong assumption: a stale `execution_optimistic` in an API response.
-        if let Some(verdict) = self.get_block_execution_status_assuming_full(block_root)? {
+        if let Some(verdict) = self.get_block_execution_status(block_root, spec)? {
             Ok(verdict.is_optimistic_or_invalid())
         } else {
             // The finalized block's own payload is applied prior to the next block, so it is not
@@ -1859,17 +1870,17 @@ where
         }
     }
 
-    /// The same as `is_optimistic_or_invalid_block_assuming_full` but does not fallback to
+    /// The same as `is_optimistic_or_invalid_block` but does not fallback to
     /// `self.get_finalized_block` when the block cannot be found.
     ///
     /// Intended to be used when checking if the head has been imported optimistically or is
     /// invalid.
-    pub fn is_optimistic_or_invalid_block_assuming_full_no_fallback(
+    pub fn is_optimistic_or_invalid_block_no_fallback(
         &self,
         block_root: &Hash256,
+        spec: &ChainSpec,
     ) -> Result<bool, Error<T::Error>> {
-        // worst case on wrong assumption: a stale `execution_optimistic` in an API response.
-        if let Some(verdict) = self.get_block_execution_status_assuming_full(block_root)? {
+        if let Some(verdict) = self.get_block_execution_status(block_root, spec)? {
             Ok(verdict.is_optimistic_or_invalid())
         } else {
             Err(Error::MissingProtoArrayBlock(*block_root))

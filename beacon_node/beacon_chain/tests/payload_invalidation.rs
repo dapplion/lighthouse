@@ -1490,7 +1490,7 @@ async fn recover_from_invalid_head_after_persist_and_reboot() {
             .chain
             .canonical_head
             .fork_choice_read_lock()
-            .get_block_execution_status_assuming_full(&resumed_head.head_block_root())
+            .get_block_execution_status(&resumed_head.head_block_root(), &resumed.chain.spec)
             .unwrap()
             .unwrap()
             .is_optimistic(),

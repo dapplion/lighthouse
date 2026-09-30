@@ -176,8 +176,8 @@ impl IndexedForkChoiceNode {
 /// Spec's `ForkChoiceNode`: a block root paired with the payload status of the branch it names.
 ///
 /// Fields are private with no public constructor, so a `ForkChoiceNode` can only be produced by
-/// `find_head`, `get_head`, or `get_supported_node` — a node the chain actually elected or that was
-/// voted for. This keeps callers from querying the "wrong half" of a block and getting an answer
+/// `find_head`, `get_head`, `get_supported_node` or `get_canonical_node` — a node the chain
+/// actually elected or that was voted for. This keeps callers from querying the "wrong half" of a block and getting an answer
 /// about a branch the chain never ran.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ForkChoiceNode {
@@ -1183,13 +1183,29 @@ impl ProtoArrayForkChoice {
             .node_execution_status(node.root(), node.payload_status())
     }
 
-    /// Execution verdict of a block, assuming its `FULL` node.
-    pub fn get_block_execution_status_assuming_full(
+    /// The fork choice node the chain takes at `block_root`: its `FULL` node when `get_head` would
+    /// pick it over `EMPTY`.
+    pub fn get_canonical_node<E: EthSpec>(
         &self,
         block_root: &Hash256,
-    ) -> Result<ExecutionVerdict, Error> {
-        self.proto_array
-            .node_execution_status(*block_root, PayloadStatus::Full)
+        current_slot: Slot,
+        proposer_boost_root: Hash256,
+        spec: &ChainSpec,
+    ) -> Result<ForkChoiceNode, Error> {
+        let payload_status = match self
+            .get_proto_node(block_root)
+            .ok_or(Error::NodeUnknown(*block_root))?
+        {
+            // A pre-Gloas block has a single node, which `get_head` walks as `EMPTY`.
+            ProtoNode::V17(_) => PayloadStatus::Empty,
+            ProtoNode::V29(_) => self.get_canonical_payload_status::<E>(
+                block_root,
+                current_slot,
+                proposer_boost_root,
+                spec,
+            )?,
+        };
+        Ok(ForkChoiceNode::new(*block_root, payload_status))
     }
 
     /// Spec's `get_supported_node`.

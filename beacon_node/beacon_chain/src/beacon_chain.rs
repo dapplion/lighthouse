@@ -1953,11 +1953,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         contribution: SyncCommitteeContribution<T::EthSpec>,
     ) -> Result<SyncCommitteeContribution<T::EthSpec>, Error> {
         let beacon_block_root = contribution.beacon_block_root;
-        // worst case on wrong assumption: rejects a contribution to a healthy block, never accepts one to an optimistic block.
         match self
             .canonical_head
             .fork_choice_read_lock()
-            .get_block_execution_status_assuming_full(&beacon_block_root)?
+            .get_block_execution_status(&beacon_block_root, &self.spec)?
         {
             // The contribution references a block that is not in fork choice, it must be
             // pre-finalization.
@@ -7138,8 +7137,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         } else {
             self.canonical_head
                 .fork_choice_read_lock()
-                .is_optimistic_or_invalid_block_assuming_full_no_fallback(
+                .is_optimistic_or_invalid_block_no_fallback(
                     &head_block.canonical_root(),
+                    &self.spec,
                 )
                 .map_err(BeaconChainError::ForkChoiceError)
         }
@@ -7719,11 +7719,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         };
 
         // Check that the parent is NOT optimistic.
-        // worst case on wrong assumption: reports Optimistic for a healthy parent, never the reverse.
         if let Some(execution_status) = self
             .canonical_head
             .fork_choice_read_lock()
-            .get_block_execution_status_assuming_full(parent_root)?
+            .get_block_execution_status(parent_root, &self.spec)?
             && execution_status.is_optimistic()
         {
             return Ok(ChainHealth::Optimistic);
