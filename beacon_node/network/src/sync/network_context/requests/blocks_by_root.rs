@@ -1,30 +1,36 @@
 use beacon_chain::get_block_root;
 use lighthouse_network::rpc::BlocksByRootRequest;
+use std::collections::HashSet;
 use std::sync::Arc;
 use types::{EthSpec, ForkContext, Hash256, SignedBeaconBlock};
 
 use super::{ActiveRequestItems, LookupVerifyError};
 
-#[derive(Debug, Copy, Clone)]
-pub struct BlocksByRootSingleRequest(pub Hash256);
+#[derive(Debug, Clone)]
+pub struct BlockRootsRequest(pub Vec<Hash256>);
 
-impl BlocksByRootSingleRequest {
+impl BlockRootsRequest {
+    pub fn new(block_root: Hash256) -> Self {
+        Self(vec![block_root])
+    }
+
     pub fn into_request(self, fork_context: &ForkContext) -> Result<BlocksByRootRequest, String> {
-        // This should always succeed (single block root), but we return a `Result` for safety.
-        BlocksByRootRequest::new(vec![self.0], fork_context)
+        BlocksByRootRequest::new(self.0, fork_context)
     }
 }
 
 pub struct BlocksByRootRequestItems<E: EthSpec> {
-    request: BlocksByRootSingleRequest,
+    /// Roots still outstanding. Doubles as the check that a response was asked for and
+    /// that no root arrives twice.
+    wanted: HashSet<Hash256>,
     items: Vec<Arc<SignedBeaconBlock<E>>>,
 }
 
 impl<E: EthSpec> BlocksByRootRequestItems<E> {
-    pub fn new(request: BlocksByRootSingleRequest) -> Self {
+    pub fn new(request: &BlockRootsRequest) -> Self {
         Self {
-            request,
-            items: vec![],
+            wanted: request.0.iter().copied().collect(),
+            items: Vec::with_capacity(request.0.len()),
         }
     }
 }
@@ -32,18 +38,16 @@ impl<E: EthSpec> BlocksByRootRequestItems<E> {
 impl<E: EthSpec> ActiveRequestItems for BlocksByRootRequestItems<E> {
     type Item = Arc<SignedBeaconBlock<E>>;
 
-    /// Append a response to the single chunk request. If the chunk is valid, the request is
-    /// resolved immediately.
-    /// The active request SHOULD be dropped after `add_response` returns an error
+    /// Append a response chunk. The request resolves once every requested root has
+    /// arrived; for a single-root request that is the first chunk.
+    /// The active request SHOULD be dropped after `add` returns an error.
     fn add(&mut self, block: Self::Item) -> Result<bool, LookupVerifyError> {
         let block_root = get_block_root(&block);
-        if self.request.0 != block_root {
+        if !self.wanted.remove(&block_root) {
             return Err(LookupVerifyError::UnrequestedBlockRoot(block_root));
         }
-
         self.items.push(block);
-        // Always returns true, blocks by root expects a single response
-        Ok(true)
+        Ok(self.wanted.is_empty())
     }
 
     fn consume(&mut self) -> Vec<Self::Item> {

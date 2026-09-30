@@ -2,9 +2,7 @@
 //! channel and stores a global RPC ID to perform requests.
 
 use self::custody::{ActiveCustodyRequest, Error as CustodyRequestError};
-pub use self::requests::{
-    BlocksByRootSingleRequest, DataColumnsByRootRequestParams, PayloadEnvelopesByRootSingleRequest,
-};
+pub use self::requests::{BlockRootsRequest, DataColumnsByRootRequestParams, PayloadRootsRequest};
 use super::SyncMessage;
 use super::block_sidecar_coupling::RangeBlockComponentsRequest;
 use super::manager::BlockProcessType;
@@ -768,7 +766,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             req_id: self.next_id(),
         };
 
-        let request = BlocksByRootSingleRequest(block_root);
+        let request = BlockRootsRequest::new(block_root);
+        let items = BlocksByRootRequestItems::new(&request);
 
         // Lookup sync event safety: If network_send.send() returns Ok(_) we are guaranteed that
         // eventually at least one this 3 events will be received:
@@ -808,7 +807,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             // true = enforce max_requests as returned for blocks_by_root. We always request a single
             // block and the peer must have it.
             true,
-            BlocksByRootRequestItems::new(request),
+            items,
             request_span,
         );
 
@@ -863,7 +862,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             req_id: self.next_id(),
         };
 
-        let request = PayloadEnvelopesByRootSingleRequest { block_root };
+        let request = PayloadRootsRequest::new(block_root);
+        let items = PayloadEnvelopesByRootRequestItems::new(&request);
 
         let network_request = RequestType::PayloadEnvelopesByRoot(
             request
@@ -893,7 +893,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             // true = enforce that the peer returns a response. We only request a single envelope
             // and the peer must have it.
             true,
-            PayloadEnvelopesByRootRequestItems::new(request),
+            items,
             Span::none(),
         );
 
