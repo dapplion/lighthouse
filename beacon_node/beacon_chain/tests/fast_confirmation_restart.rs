@@ -2,6 +2,7 @@
 
 use beacon_chain::{
     BeaconChain, BeaconChainTypes, ChainConfig, FAST_CONFIRMATION_DB_KEY,
+    canonical_head::FastConfirmationRoots,
     chain_config::FastConfirmationMode,
     test_utils::{
         AttestationStrategy, BeaconChainHarness, BlockStrategy, DiskHarnessType, test_spec,
@@ -12,6 +13,7 @@ use eth2::types::SignedBlockContentsTuple;
 use fast_confirmation::FastConfirmationRule;
 use proto_array::{ExecutionStatus, PayloadBlockHash, ProtoArrayForkChoice};
 use slot_clock::SlotClock;
+use ssz::Encode;
 use std::sync::{Arc, LazyLock};
 use store::database::interface::BeaconNodeBackend;
 use store::{DBColumn, HotColdDB, KeyValueStore, StoreConfig};
@@ -813,13 +815,17 @@ async fn a_pruned_root_is_a_revert_not_an_error_in_the_harness() {
     let _ = all;
 
     stopped.chain.persist_fork_choice().unwrap();
-    // The root that run had announced, now pruned.
+    // The roots that run had sent, both now pruned.
     store
         .hot_db
         .put_bytes(
             DBColumn::ForkChoice,
             FAST_CONFIRMATION_DB_KEY.as_slice(),
-            abandoned.as_slice(),
+            &FastConfirmationRoots {
+                announced_root: abandoned,
+                deepest_announced_root: abandoned,
+            }
+            .as_ssz_bytes(),
         )
         .unwrap();
 
