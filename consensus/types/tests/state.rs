@@ -178,7 +178,9 @@ mod committees {
         let mut ordered_indices = state
             .get_cached_active_validator_indices(relative_epoch)
             .unwrap()
-            .to_vec();
+            .iter()
+            .map(|&i| i as usize)
+            .collect::<Vec<_>>();
         ordered_indices.sort_unstable();
         assert_eq!(
             active_indices, ordered_indices,
@@ -215,14 +217,14 @@ mod committees {
                 for (committee_i, validator_i) in bc.committee.iter().enumerate() {
                     // Assert the validators are assigned contiguously across committees.
                     assert_eq!(
-                        *validator_i,
+                        *validator_i as usize,
                         *expected_indices_iter.next().unwrap(),
                         "Non-sequential validators."
                     );
                     // Assert a call to `get_attestation_duties` is consistent with a call to
                     // `get_beacon_committees_at_slot`
                     let attestation_duty = state
-                        .get_attestation_duties(*validator_i, relative_epoch)
+                        .get_attestation_duties(*validator_i as usize, relative_epoch)
                         .unwrap()
                         .unwrap();
                     assert_eq!(attestation_duty.slot, slot);
