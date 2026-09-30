@@ -1355,7 +1355,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
                     let fork_choice_state = ForkchoiceState {
                         head_block_hash: parent_hash,
                         safe_block_hash: forkchoice_update_params
-                            .justified_hash
+                            .safe_hash
                             .unwrap_or_else(ExecutionBlockHash::zero),
                         finalized_block_hash: forkchoice_update_params
                             .finalized_hash
@@ -1550,7 +1550,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
     pub async fn notify_forkchoice_updated(
         &self,
         head_block_hash: ExecutionBlockHash,
-        justified_block_hash: ExecutionBlockHash,
+        safe_block_hash: ExecutionBlockHash,
         finalized_block_hash: ExecutionBlockHash,
         current_slot: Slot,
         head_block_root: Hash256,
@@ -1564,7 +1564,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
 
         debug!(
             ?finalized_block_hash,
-            ?justified_block_hash,
+            ?safe_block_hash,
             ?head_block_hash,
             ?head_block_root,
             ?current_slot,
@@ -1593,7 +1593,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
 
         let forkchoice_state = ForkchoiceState {
             head_block_hash,
-            safe_block_hash: justified_block_hash,
+            safe_block_hash,
             finalized_block_hash,
         };
 

@@ -293,12 +293,12 @@ impl<Engine: GenericExecutionEngine> TestRig<Engine> {
         let timestamp = timestamp_now();
         let prev_randao = Hash256::zero();
         let head_root = Hash256::zero();
-        let justified_block_hash = ExecutionBlockHash::zero();
+        let safe_block_hash = ExecutionBlockHash::zero();
         let finalized_block_hash = ExecutionBlockHash::zero();
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root,
             head_hash: Some(parent_hash),
-            justified_hash: Some(justified_block_hash),
+            safe_hash: Some(safe_block_hash),
             finalized_hash: Some(finalized_block_hash),
         };
         let proposer_index = 0;
@@ -334,7 +334,7 @@ impl<Engine: GenericExecutionEngine> TestRig<Engine> {
             .execution_layer
             .notify_forkchoice_updated(
                 parent_hash,
-                justified_block_hash,
+                safe_block_hash,
                 finalized_block_hash,
                 Slot::new(0),
                 Hash256::zero(),
@@ -417,7 +417,7 @@ impl<Engine: GenericExecutionEngine> TestRig<Engine> {
             .execution_layer
             .notify_forkchoice_updated(
                 head_block_hash,
-                justified_block_hash,
+                safe_block_hash,
                 finalized_block_hash,
                 slot,
                 head_block_root,
@@ -460,7 +460,7 @@ impl<Engine: GenericExecutionEngine> TestRig<Engine> {
             .execution_layer
             .notify_forkchoice_updated(
                 head_block_hash,
-                justified_block_hash,
+                safe_block_hash,
                 finalized_block_hash,
                 slot,
                 head_block_root,
@@ -618,7 +618,7 @@ impl<Engine: GenericExecutionEngine> TestRig<Engine> {
             .execution_layer
             .notify_forkchoice_updated(
                 head_block_hash,
-                justified_block_hash,
+                safe_block_hash,
                 finalized_block_hash,
                 slot,
                 head_block_root,
@@ -657,7 +657,7 @@ impl<Engine: GenericExecutionEngine> TestRig<Engine> {
             .execution_layer
             .notify_forkchoice_updated(
                 head_block_hash,
-                justified_block_hash,
+                safe_block_hash,
                 finalized_block_hash,
                 slot,
                 head_block_root,
@@ -712,7 +712,7 @@ impl<Engine: GenericExecutionEngine> TestRig<Engine> {
             .execution_layer
             .notify_forkchoice_updated(
                 head_block_hash,
-                justified_block_hash,
+                safe_block_hash,
                 finalized_block_hash,
                 slot,
                 head_block_root,

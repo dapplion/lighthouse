@@ -98,7 +98,7 @@ impl<E: EthSpec> MockExecutionLayer<E> {
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: head_block_root,
             head_hash: Some(parent_hash),
-            justified_hash: None,
+            safe_hash: None,
             finalized_hash: None,
         };
         let payload_attributes = PayloadAttributes::new(
