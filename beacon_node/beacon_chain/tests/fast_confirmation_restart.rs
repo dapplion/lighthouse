@@ -95,7 +95,7 @@ fn validators(n: usize) -> Vec<usize> {
 fn confirmed<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> Option<(Hash256, Slot)> {
     let fcr_mutex = chain.canonical_head.fast_confirmation.as_ref()?;
     let fork_choice = chain.canonical_head.fork_choice_read_lock();
-    let root = fcr_mutex.lock().1.announced_root;
+    let root = fcr_mutex.lock().roots.announced_root;
     Some((root, fork_choice.get_block(&root).unwrap().slot))
 }
 

@@ -13,8 +13,8 @@
 //! 1. `RwLock<BeaconForkChoice>`: Contains `proto_array` fork choice.
 //! 2. `RwLock<CachedHead>`: Contains a cached block/state from the last run of `proto_array`.
 //! 3. `Mutex<()>`: Is used to prevent concurrent execution of `BeaconChain::recompute_head`.
-//! 4. `Option<Mutex<(FastConfirmationRule, FastConfirmationRoots)>>`: FCR state and the roots it
-//!    has sent the EL (None when disabled).
+//! 4. `Option<Mutex<BeaconFastConfirmationRule>>`: FCR state and the roots it has sent the EL
+//!    (None when disabled).
 //!
 //! This module has to take great efforts to avoid causing a deadlock with these three methods. Any
 //! developers working in this module should tread carefully and seek a detailed review.
@@ -470,9 +470,15 @@ pub struct CanonicalHead<T: BeaconChainTypes> {
     /// Updated inside `recompute_head_at_slot_internal` after `get_head` completes, while
     /// the fork-choice read lock is still held. The Mutex is only locked briefly during
     /// FCR computation, which is already serialized by `recompute_head_lock`.
-    pub fast_confirmation: Option<Mutex<(FastConfirmationRule, FastConfirmationRoots)>>,
+    pub fast_confirmation: Option<Mutex<BeaconFastConfirmationRule>>,
     /// Set when fork choice has diverged from the store. Poisoned fork choice is never persisted.
     fork_choice_poisoned: AtomicBool,
+}
+
+/// The fast confirmation rule, and what this node has done with it.
+pub struct BeaconFastConfirmationRule {
+    pub fcr: FastConfirmationRule,
+    pub roots: FastConfirmationRoots,
 }
 
 /// The roots this node has sent its EL as the FCU safe block hash. Persisted with fork choice, so
@@ -514,7 +520,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 announced_root: fork_choice_view.finalized_checkpoint.root,
                 deepest_announced_root: fork_choice_view.finalized_checkpoint.root,
             });
-            Some(Mutex::new((rule, roots)))
+            Some(Mutex::new(BeaconFastConfirmationRule { fcr: rule, roots }))
         } else {
             None
         };
@@ -522,7 +528,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         // With FCR on the safe block hash is never the justified one, including at startup: the
         // startup update sends the root this node last sent, so the EL's does not regress.
         let justified_hash = if let Some(fcr) = &fcr {
-            let announced_root = fcr.lock().1.announced_root;
+            let announced_root = fcr.lock().roots.announced_root;
             fork_choice
                 .get_block(&announced_root)
                 .and_then(|node| match node.checkpoint_payload_block_hash() {
@@ -926,7 +932,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // it would force an expensive load+advance under the fork-choice lock.
         if let Some(ref fcr_mutex) = self.canonical_head.fast_confirmation {
             let mut fcr_guard = fcr_mutex.lock();
-            let (fcr, fcr_roots) = &mut *fcr_guard;
+            let BeaconFastConfirmationRule {
+                fcr,
+                roots: fcr_roots,
+            } = &mut *fcr_guard;
             // The safe block hash is FCR's confirmed root, or the finalized block when it has
             // none to give. Never the justified one.
             let finalized = (
@@ -1770,7 +1779,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Write the roots sent as the FCU safe block hash, for the next boot to read. Same batch as
     /// fork choice, so what a restart reads is a pair that fork choice holds.
     fn persist_fast_confirmation_roots_in_batch(&self) -> Option<KeyValueStoreOp> {
-        let roots = self.canonical_head.fast_confirmation.as_ref()?.lock().1;
+        let roots = self.canonical_head.fast_confirmation.as_ref()?.lock().roots;
         Some(persist_fast_confirmation_roots_in_batch(&roots))
     }
 
