@@ -506,9 +506,13 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                 spec,
             )
             .map_err(|e| format!("Unable to initialize fast confirmation rule: {e:?}"))?;
-            // The startup update sends the finalized block. The deepest carries on from disk.
+            // The root the startup update sends: the one from before the restart while the head
+            // still holds it, else the finalized block. The first recompute applies its age.
+            let startup_root = root_confirmed_before_restart
+                .filter(|root| fork_choice.is_descendant(*root, fork_choice_view.head_block_root))
+                .unwrap_or(fork_choice_view.finalized_checkpoint.root);
             let roots = FastConfirmationRoots {
-                announced_root: fork_choice_view.finalized_checkpoint.root,
+                announced_root: startup_root,
                 deepest_announced_root: root_confirmed_before_restart
                     .unwrap_or(fork_choice_view.finalized_checkpoint.root),
             };
@@ -517,18 +521,27 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             None
         };
 
+        // With FCR on the safe block hash is never the justified one, including at startup.
+        let justified_hash = if let Some(fcr) = &fcr {
+            let announced_root = fcr.lock().1.announced_root;
+            fork_choice
+                .get_block(&announced_root)
+                .and_then(|node| match node.checkpoint_payload_block_hash() {
+                    PayloadBlockHash::Hash(hash) => Some(hash),
+                    PayloadBlockHash::PreMerge => None,
+                })
+                .or(forkchoice_update_params.finalized_hash)
+        } else {
+            forkchoice_update_params.justified_hash
+        };
+
         let cached_head = CachedHead {
             snapshot,
             justified_checkpoint: fork_choice_view.justified_checkpoint,
             finalized_checkpoint: fork_choice_view.finalized_checkpoint,
             head_node,
             head_hash: forkchoice_update_params.head_hash,
-            // With FCR on the safe block hash is never the justified one, including at startup.
-            justified_hash: if fcr.is_some() {
-                forkchoice_update_params.finalized_hash
-            } else {
-                forkchoice_update_params.justified_hash
-            },
+            justified_hash,
             finalized_hash: forkchoice_update_params.finalized_hash,
         };
 
