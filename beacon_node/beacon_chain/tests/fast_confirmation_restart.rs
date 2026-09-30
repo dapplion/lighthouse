@@ -661,6 +661,49 @@ async fn the_confirmed_root_reaches_the_execution_layer() {
     assert_eq!(safe_block_hash, expected_hash);
 }
 
+/// The startup `forkchoiceUpdated` is sent from the cached head, before any recompute runs, so the
+/// root from before the restart has to be in there already or the EL's safe block hash regresses.
+#[tokio::test]
+async fn the_startup_update_sends_the_restored_root() {
+    let all = validators(VALIDATOR_COUNT);
+    let mut rig = Rig::new();
+    rig.steps(WARMUP_SLOTS, &all).await;
+    rig.stop(true);
+    let (stopped, _) = rig.stopped.unwrap();
+
+    rig.node = Some(node(
+        rig.node_store.clone(),
+        &rig.harness,
+        false,
+        true,
+        false,
+    ));
+    let chain = &rig.node().chain;
+    let expected_hash = match chain
+        .canonical_head
+        .fork_choice_read_lock()
+        .get_block(&stopped)
+        .unwrap()
+        .checkpoint_payload_block_hash()
+    {
+        PayloadBlockHash::Hash(hash) => Some(hash),
+        PayloadBlockHash::PreMerge => None,
+    };
+    assert_ne!(
+        stopped,
+        finalized(chain),
+        "the pre-restart root must be ahead of finality for this to test anything"
+    );
+    assert_eq!(
+        chain
+            .canonical_head
+            .cached_head()
+            .forkchoice_update_parameters()
+            .justified_hash,
+        expected_hash
+    );
+}
+
 /// A root off the head's chain is dropped: the EL rejects such a `forkchoiceUpdated`.
 #[tokio::test]
 async fn drops_a_root_that_was_reorged_out() {
