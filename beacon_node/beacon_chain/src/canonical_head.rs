@@ -481,11 +481,10 @@ pub struct BeaconFastConfirmationRule {
     pub roots: FastConfirmationRoots,
 }
 
-/// The roots this node has sent its EL as the FCU safe block hash. Persisted with fork choice, so
-/// a restart carries on from the pair it left off at.
+/// The roots this node has sent its EL as the FCU safe block hash.
 #[derive(Clone, Copy, Encode, Decode)]
 pub struct FastConfirmationRoots {
-    /// The root sent last. Spec: `get_root_confirmed_before_restart` reads this one.
+    /// The root sent last.
     pub announced_root: Hash256,
     /// Deepest announced descendant of `announced_root`.
     pub deepest_announced_root: Hash256,
