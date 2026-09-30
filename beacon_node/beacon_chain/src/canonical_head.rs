@@ -932,10 +932,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // it would force an expensive load+advance under the fork-choice lock.
         if let Some(ref fcr_mutex) = self.canonical_head.fast_confirmation {
             let mut fcr_guard = fcr_mutex.lock();
-            let BeaconFastConfirmationRule {
-                fcr,
-                roots: fcr_roots,
-            } = &mut *fcr_guard;
+            let BeaconFastConfirmationRule { fcr, roots } = &mut *fcr_guard;
             // The safe block hash is FCR's confirmed root, or the finalized block when it has
             // none to give. Never the justified one.
             let finalized = (
@@ -1021,19 +1018,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 );
             }
 
-            if confirmed_root != fcr_roots.announced_root {
+            if confirmed_root != roots.announced_root {
                 metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_ROOT_CHANGES);
             }
 
             let head_root = new_view.head_block_root;
-            let old_deepest = fcr_roots.deepest_announced_root;
+            let old_deepest = roots.deepest_announced_root;
             let new_descendant_of_old =
                 Self::is_descendant(&fork_choice_read_lock, old_deepest, confirmed_root);
             let old_descendant_of_new =
                 Self::is_descendant(&fork_choice_read_lock, confirmed_root, old_deepest);
 
-            fcr_roots.announced_root = confirmed_root;
-            fcr_roots.deepest_announced_root = if new_descendant_of_old {
+            roots.announced_root = confirmed_root;
+            roots.deepest_announced_root = if new_descendant_of_old {
                 // Advanced along the chain it was already on.
                 confirmed_root
             } else if old_descendant_of_new {
