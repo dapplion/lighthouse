@@ -1,0 +1,50 @@
+# Perf regression gate for block processing.
+#
+# Replays mainnet fixtures through state processing (see
+# consensus/state_processing/examples/replay_perf.rs) and fails if timings
+# breach the committed thresholds in
+# consensus/state_processing/examples/replay_perf_thresholds.json.
+#
+# Fixtures are downloaded from the repository variable PERF_FIXTURES_URL,
+# which must point to a tarball containing `finalized_state.ssz` and
+# `next_block_<slot>.ssz` files. The job skips gracefully when it is unset.
+name: perf-regression
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  perf-regression:
+    name: perf-regression
+    runs-on: ubuntu-latest
+    if: vars.PERF_FIXTURES_URL != ''
+    steps:
+      - uses: actions/checkout@v5
+      - name: Get latest version of stable Rust
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: stable
+          cache-target: release
+      - name: Download fixtures
+        run: |
+          mkdir -p ${{ runner.temp }}/fixtures
+          curl -sSfL "${{ vars.PERF_FIXTURES_URL }}" | tar -xz -C ${{ runner.temp }}/fixtures
+      - name: Build replay_perf
+        run: cargo build --release -p state_processing --example replay_perf
+      - name: Run perf regression gate
+        run: |
+          set -o pipefail
+          target/release/examples/replay_perf ${{ runner.temp }}/fixtures \
+            consensus/state_processing/examples/replay_perf_thresholds.json 2>&1 \
+            | tee perf-regression-output.txt
+      - name: Upload output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-regression-output
+          path: perf-regression-output.txt
