@@ -5616,7 +5616,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let forkchoice_update_params = ForkchoiceUpdateParameters {
             head_root: info.parent_node.root(),
             head_hash: parent_head_hash,
-            justified_hash: canonical_forkchoice_params.justified_hash,
+            safe_hash: canonical_forkchoice_params.safe_hash,
             finalized_hash: canonical_forkchoice_params.finalized_hash,
         };
 
@@ -6962,14 +6962,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // `execution_engine_forkchoice_lock` apart from the one here.
         let forkchoice_lock = execution_layer.execution_engine_forkchoice_lock().await;
 
-        let (head_block_root, head_hash, justified_hash, finalized_hash) =
+        let (head_block_root, head_hash, safe_hash, finalized_hash) =
             if let Some(head_hash) = params.head_hash {
                 (
                     params.head_root,
                     head_hash,
-                    params
-                        .justified_hash
-                        .unwrap_or_else(ExecutionBlockHash::zero),
+                    params.safe_hash.unwrap_or_else(ExecutionBlockHash::zero),
                     params
                         .finalized_hash
                         .unwrap_or_else(ExecutionBlockHash::zero),
@@ -6982,7 +6980,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let forkchoice_updated_response = execution_layer
             .notify_forkchoice_updated(
                 head_hash,
-                justified_hash,
+                safe_hash,
                 finalized_hash,
                 current_slot,
                 head_block_root,

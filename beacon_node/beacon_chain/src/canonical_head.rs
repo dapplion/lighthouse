@@ -298,8 +298,8 @@ pub struct CachedHead<E: EthSpec> {
     /// The `execution_payload.block_hash` of the block at the head of the chain. Set to `None`
     /// before Bellatrix.
     head_hash: Option<ExecutionBlockHash>,
-    /// The `execution_payload.block_hash` of the justified block. Set to `None` before Bellatrix.
-    justified_hash: Option<ExecutionBlockHash>,
+    /// The EL `safe_block_hash`. Set to `None` before Bellatrix.
+    safe_hash: Option<ExecutionBlockHash>,
     /// The `execution_payload.block_hash` of the finalized block. Set to `None` before Bellatrix.
     finalized_hash: Option<ExecutionBlockHash>,
 }
@@ -422,7 +422,7 @@ impl<E: EthSpec> CachedHead<E> {
         ForkchoiceUpdateParameters {
             head_root: self.snapshot.beacon_block_root,
             head_hash: self.head_hash,
-            justified_hash: self.justified_hash,
+            safe_hash: self.safe_hash,
             finalized_hash: self.finalized_hash,
         }
     }
@@ -506,7 +506,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             finalized_checkpoint: fork_choice_view.finalized_checkpoint,
             head_node,
             head_hash: forkchoice_update_params.head_hash,
-            justified_hash: forkchoice_update_params.justified_hash,
+            safe_hash: forkchoice_update_params.safe_hash,
             finalized_hash: forkchoice_update_params.finalized_hash,
         };
 
@@ -878,7 +878,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         // Get the parameters to update the execution layer since either the head or some finality
         // parameters have changed. Snapshot the pre-FCR value so the early-return below can detect
-        // an FCR-advanced `justified_hash` even when the head/checkpoints are unchanged.
+        // an FCR-advanced `safe_hash` even when the head/checkpoints are unchanged.
         let mut new_forkchoice_update_parameters =
             fork_choice_read_lock.get_forkchoice_update_parameters();
 
@@ -913,7 +913,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     // FC update params are only updated after successful FCR runs. This is
                     // conservative and will revert the `safe` tag to justified instead of using a
                     // previously confirmed root that may be stale by now if FCR can't reconfirm it.
-                    new_forkchoice_update_parameters.justified_hash = Some(confirmed_block_hash);
+                    new_forkchoice_update_parameters.safe_hash = Some(confirmed_block_hash);
 
                     let delay = current_slot
                         .as_u64()
@@ -1069,7 +1069,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 finalized_checkpoint: new_view.finalized_checkpoint,
                 head_node: new_head_node,
                 head_hash: new_forkchoice_update_parameters.head_hash,
-                justified_hash: new_forkchoice_update_parameters.justified_hash,
+                safe_hash: new_forkchoice_update_parameters.safe_hash,
                 finalized_hash: new_forkchoice_update_parameters.finalized_hash,
             };
 
@@ -1097,7 +1097,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 finalized_checkpoint: new_view.finalized_checkpoint,
                 head_node: new_head_node,
                 head_hash: new_forkchoice_update_parameters.head_hash,
-                justified_hash: new_forkchoice_update_parameters.justified_hash,
+                safe_hash: new_forkchoice_update_parameters.safe_hash,
                 finalized_hash: new_forkchoice_update_parameters.finalized_hash,
             };
 

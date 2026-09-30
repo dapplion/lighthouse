@@ -2337,7 +2337,7 @@ async fn payload_attribute_withdrawals_use_summary_after_body_pruning() {
     let params = fork_choice::ForkchoiceUpdateParameters {
         head_root: parent_root,
         head_hash: Some(parent_block.payload_bid_block_hash().unwrap()),
-        justified_hash: None,
+        safe_hash: None,
         finalized_hash: None,
     };
     let proposal_slot = head.beacon_block.slot() + 1;
@@ -2380,7 +2380,7 @@ async fn payload_attribute_withdrawals_use_head_summary_after_restart() {
     let params = fork_choice::ForkchoiceUpdateParameters {
         head_root,
         head_hash: Some(head.beacon_block.payload_bid_block_hash().unwrap()),
-        justified_hash: None,
+        safe_hash: None,
         finalized_hash: None,
     };
     let proposal_slot = head.beacon_block.slot() + 1;
