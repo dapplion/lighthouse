@@ -1,7 +1,7 @@
 use crate::proto_array_fork_choice::IndexedForkChoiceNode;
 use crate::{
-    Block, ExecutionStatus, ExecutionVerdict, JustifiedBalances, LatestMessage, PayloadBlockHash,
-    PayloadStatus, error::Error,
+    Block, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, JustifiedBalances, LatestMessage,
+    PayloadBlockHash, PayloadStatus, error::Error,
 };
 use fixed_bytes::FixedBytesExtended;
 use serde::{Deserialize, Serialize};
@@ -2168,6 +2168,29 @@ impl ProtoArray {
 
     pub fn get_parent(&self, node: &ProtoNode) -> Option<&ProtoNode> {
         self.nodes.get(node.parent()?)
+    }
+
+    /// The fork choice node immediately below `node` on its own branch: the parent block, on
+    /// whichever of its two payload nodes `node` extends. `None` at the root of the array.
+    pub(crate) fn parent_node(
+        &self,
+        node: ForkChoiceNode,
+    ) -> Result<Option<ForkChoiceNode>, Error> {
+        let proto_node = self
+            .get_block(node.root())
+            .ok_or(Error::NodeUnknown(node.root()))?;
+        let Some(parent) = self.get_parent(proto_node) else {
+            return Ok(None);
+        };
+        // As in `get_node_children`: a pre-Gloas parent has a single virtual node, named EMPTY.
+        let parent_payload_status = match proto_node.get_parent_payload_status() {
+            ParentPayloadStatus::Full => PayloadStatus::Full,
+            ParentPayloadStatus::Empty | ParentPayloadStatus::PreGloas => PayloadStatus::Empty,
+        };
+        Ok(Some(ForkChoiceNode::new(
+            parent.root(),
+            parent_payload_status,
+        )))
     }
 
     /// Returns `true` if `root` is equal to or a descendant of

@@ -176,7 +176,7 @@ impl IndexedForkChoiceNode {
 /// Spec's `ForkChoiceNode`: a block root paired with the payload status of the branch it names.
 ///
 /// Fields are private with no public constructor, so a `ForkChoiceNode` can only be produced by
-/// `find_head`, `get_head`, or `get_supported_node` — a node the chain actually elected or that was
+/// `find_head`, `get_head`, `parent_node`, or `get_supported_node` — a node the chain actually elected or that was
 /// voted for. This keeps callers from querying the "wrong half" of a block and getting an answer
 /// about a branch the chain never ran.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1190,6 +1190,11 @@ impl ProtoArrayForkChoice {
     ) -> Result<ExecutionVerdict, Error> {
         self.proto_array
             .node_execution_status(*block_root, PayloadStatus::Full)
+    }
+
+    /// The fork choice node immediately below `node` on its own branch.
+    pub fn parent_node(&self, node: ForkChoiceNode) -> Result<Option<ForkChoiceNode>, Error> {
+        self.proto_array.parent_node(node)
     }
 
     /// Spec's `get_supported_node`.

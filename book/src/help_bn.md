@@ -408,6 +408,12 @@ Options:
           Path to a json file containing the trusted setup params. NOTE: This
           will override the trusted setup that is generated from the mainnet kzg
           ceremony. Use with caution
+      --valid-head-lookback <ANCESTORS>
+          When fork choice selects a head whose execution payload the execution
+          client has not yet validated, search up to this many ancestors for one
+          it has validated and report that instead. The head then lags by at
+          most this many blocks. Defaults to 0, which reports whatever fork
+          choice selected; --proof-engine-endpoint raises the default to 2.
       --validator-monitor-file <PATH>
           As per --validator-monitor-pubkeys, but the comma-separated list is
           contained within a file at the given path.

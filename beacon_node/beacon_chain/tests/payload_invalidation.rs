@@ -49,12 +49,19 @@ impl InvalidPayloadRig {
     }
 
     fn new_with_spec(spec: ChainSpec) -> Self {
-        let harness = BeaconChainHarness::builder(MainnetEthSpec)
-            .spec(spec.into())
-            .chain_config(ChainConfig {
+        Self::new_with_spec_and_config(
+            spec,
+            ChainConfig {
                 archive: true,
                 ..ChainConfig::default()
-            })
+            },
+        )
+    }
+
+    fn new_with_spec_and_config(spec: ChainSpec, chain_config: ChainConfig) -> Self {
+        let harness = BeaconChainHarness::builder(MainnetEthSpec)
+            .spec(spec.into())
+            .chain_config(chain_config)
             .deterministic_keypairs(VALIDATOR_COUNT)
             .mock_execution_layer()
             .fresh_ephemeral_store()
@@ -1887,6 +1894,66 @@ async fn gloas_latest_valid_hash_keeps_its_child_on_empty() {
     assert_eq!(
         cached_head.head_payload_status(),
         proto_array::PayloadStatus::Empty
+    );
+}
+
+/// `valid_head_lookback` steps back from an unjudged head to a validated ancestor, but only so
+/// far. Once the optimistic run is longer than the lookback it reports the optimistic tip again,
+/// so the execution layer keeps getting a forkchoiceUpdated target that advances.
+#[tokio::test]
+async fn valid_head_lookback_steps_back_to_a_validated_ancestor_then_gives_up() {
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+        return;
+    }
+    let mut rig = InvalidPayloadRig::new_with_spec_and_config(
+        test_spec::<E>(),
+        ChainConfig {
+            archive: true,
+            valid_head_lookback: 2,
+            ..ChainConfig::default()
+        },
+    );
+    let valid = rig.import_block(Payload::Valid).await; // Valid transition block.
+
+    let mock_execution_layer = rig.harness.mock_execution_layer.as_ref().unwrap();
+    mock_execution_layer
+        .server
+        .all_payloads_syncing_on_new_payload(true);
+    mock_execution_layer
+        .server
+        .all_payloads_syncing_on_forkchoice_updated();
+
+    // The head stops advancing once the lookback engages, so each block is built on a threaded
+    // state rather than on the head.
+    let mut state = rig.harness.chain.head_snapshot().beacon_state.clone();
+    let mut optimistic = Vec::new();
+    let mut heads = Vec::new();
+    for _ in 0..3 {
+        let slot = state.slot() + 1;
+        let ((block, blobs), opt_envelope, post_state) =
+            rig.harness.make_block_with_envelope(state, slot).await;
+        let block_root = block.canonical_root();
+        rig.harness
+            .process_block(slot, block_root, (block.clone(), blobs))
+            .await
+            .unwrap();
+        rig.import_envelope(&block, opt_envelope).await.unwrap();
+        assert!(is_optimistic(rig.execution_status(block_root)));
+        optimistic.push(block_root);
+        state = post_state;
+        heads.push((rig.cached_head().head_block_root(), rig.head_payload_hash()));
+    }
+
+    let valid_payload = Some(rig.block_hash(valid));
+    let tip_payload = Some(rig.block_hash(optimistic[2]));
+    assert_eq!(
+        heads,
+        vec![
+            (valid, valid_payload),
+            (valid, valid_payload),
+            (optimistic[2], tip_payload)
+        ],
+        "one and two blocks of lookback reach the validated block; three exceeds it"
     );
 }
 

@@ -385,6 +385,8 @@ pub struct ForkChoice<T, E> {
     /// Rejects attestations from the current or a future slot instead of queueing them, as the
     /// spec does. Always `false` in production.
     spec_test_mode: bool,
+    /// See `ChainConfig::valid_head_lookback`.
+    valid_head_lookback: usize,
     _phantom: PhantomData<E>,
 }
 
@@ -412,6 +414,7 @@ where
         anchor_block: &SignedBeaconBlock<E>,
         anchor_state: &BeaconState<E>,
         current_slot: Option<Slot>,
+        valid_head_lookback: usize,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         // Sanity check: the anchor must lie on an epoch boundary.
@@ -480,6 +483,7 @@ where
             proto_array,
             queued_attestations: BTreeMap::new(),
             spec_test_mode: false,
+            valid_head_lookback,
             // This will be updated during the next call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
                 head_hash: None,
@@ -575,6 +579,9 @@ where
     /// Is equivalent to:
     ///
     /// https://github.com/ethereum/eth2.0-specs/blob/v0.12.1/specs/phase0/fork-choice.md#get_head
+    ///
+    /// A non-zero `ChainConfig::valid_head_lookback` departs from the spec; see
+    /// `Self::valid_head_or_ancestor`.
     #[instrument(skip_all, level = "debug")]
     pub fn get_head(
         &mut self,
@@ -597,6 +604,7 @@ where
             current_slot,
             spec,
         )?;
+        let head_node = self.valid_head_or_ancestor(head_node)?;
         let (head_root, head_payload_status) = head_node.as_pair();
 
         // Cache some values for the next forkchoiceUpdate call to the execution layer.
@@ -628,6 +636,50 @@ where
         };
 
         Ok(head_node)
+    }
+
+    /// The head to report, given that fork choice may have selected a block whose execution
+    /// payload the execution layer has not yet validated.
+    ///
+    /// Steps back up to `valid_head_lookback` ancestors looking for one whose payload is VALID,
+    /// stopping at the justified checkpoint since fork choice must not report a head below it.
+    /// Returns `head` unchanged when the lookback is `0` (the default), when the head is already
+    /// valid, or when nothing within the limit is valid. So the head lags by at most
+    /// `valid_head_lookback` blocks, and a node whose execution layer is behind still hands it a
+    /// forkchoiceUpdated target that advances.
+    fn valid_head_or_ancestor(
+        &self,
+        head: ForkChoiceNode,
+    ) -> Result<ForkChoiceNode, Error<T::Error>> {
+        if self.valid_head_lookback == 0 {
+            return Ok(head);
+        }
+
+        let justified_root = self.justified_checkpoint().root;
+        let mut node = head;
+        for _ in 0..=self.valid_head_lookback {
+            if self
+                .proto_array
+                .get_node_execution_status(node)
+                .map_err(Error::ProtoArrayError)?
+                .is_valid()
+            {
+                return Ok(node);
+            }
+            if node.root() == justified_root {
+                break;
+            }
+            let Some(parent) = self
+                .proto_array
+                .parent_node(node)
+                .map_err(Error::ProtoArrayError)?
+            else {
+                break;
+            };
+            node = parent;
+        }
+
+        Ok(head)
     }
 
     /// Get the block to build on as proposer, taking into account proposer re-orgs.
@@ -2008,6 +2060,7 @@ where
         persisted: PersistedForkChoice,
         reset_payload_statuses: ResetPayloadStatuses,
         fc_store: T,
+        valid_head_lookback: usize,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         let justified_balances = fc_store.justified_balances().clone();
@@ -2025,6 +2078,7 @@ where
             proto_array,
             queued_attestations: BTreeMap::new(),
             spec_test_mode: false,
+            valid_head_lookback,
             // Will be updated in the following call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
                 head_hash: None,

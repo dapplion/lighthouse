@@ -856,6 +856,18 @@ pub fn cli_app() -> Command {
                 .display_order(0)
         )
         .arg(
+            Arg::new("valid-head-lookback")
+                .long("valid-head-lookback")
+                .value_name("ANCESTORS")
+                .help("When fork choice selects a head whose execution payload the execution \
+                       client has not yet validated, search up to this many ancestors for one it \
+                       has validated and report that instead. The head then lags by at most this \
+                       many blocks. Defaults to 0, which reports whatever fork choice selected; \
+                       --proof-engine-endpoint raises the default to 2.")
+                .action(ArgAction::Set)
+                .display_order(0)
+        )
+        .arg(
             Arg::new("execution-jwt")
                 .long("execution-jwt")
                 .value_name("EXECUTION-JWT")
