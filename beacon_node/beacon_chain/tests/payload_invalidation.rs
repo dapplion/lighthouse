@@ -48,13 +48,32 @@ impl InvalidPayloadRig {
         Self::new_with_spec(spec)
     }
 
+    /// A rig whose fork choice excludes optimistically-imported blocks.
+    fn new_filtering_optimistic_nodes() -> Self {
+        Self::new_with_spec_and_config(
+            test_spec::<E>(),
+            ChainConfig {
+                archive: true,
+                filter_optimistic_nodes: true,
+                ..ChainConfig::default()
+            },
+        )
+    }
+
     fn new_with_spec(spec: ChainSpec) -> Self {
-        let harness = BeaconChainHarness::builder(MainnetEthSpec)
-            .spec(spec.into())
-            .chain_config(ChainConfig {
+        Self::new_with_spec_and_config(
+            spec,
+            ChainConfig {
                 archive: true,
                 ..ChainConfig::default()
-            })
+            },
+        )
+    }
+
+    fn new_with_spec_and_config(spec: ChainSpec, chain_config: ChainConfig) -> Self {
+        let harness = BeaconChainHarness::builder(MainnetEthSpec)
+            .spec(spec.into())
+            .chain_config(chain_config)
             .deterministic_keypairs(VALIDATOR_COUNT)
             .mock_execution_layer()
             .fresh_ephemeral_store()
@@ -1887,6 +1906,104 @@ async fn gloas_latest_valid_hash_keeps_its_child_on_empty() {
     assert_eq!(
         cached_head.head_payload_status(),
         proto_array::PayloadStatus::Empty
+    );
+}
+
+/// Import valid blocks until the head sits at `slot`.
+async fn build_valid_to_slot(rig: &mut InvalidPayloadRig, slot: Slot) {
+    while rig.harness.chain.head_snapshot().beacon_block.slot() < slot {
+        rig.import_block(Payload::Valid).await;
+    }
+}
+
+/// Under `ChainConfig::filter_optimistic_nodes` the head is the optimistic block's valid parent,
+/// so the node attests rather than withholding (contrast `attesting_to_optimistic_head`).
+///
+/// Mid-epoch the boundary block is valid and an ancestor of both, so only the head vote moves.
+#[tokio::test]
+async fn attestation_with_optimistic_head_mid_epoch() {
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+        return;
+    }
+    let mut rig = InvalidPayloadRig::new_filtering_optimistic_nodes();
+    rig.import_block(Payload::Valid).await; // Valid transition block.
+
+    build_valid_to_slot(&mut rig, Slot::new(34)).await;
+    let epoch_1_boundary = rig.block_root_at_slot(Slot::new(32)).unwrap();
+    let parent = rig.harness.chain.head_snapshot().beacon_block_root;
+
+    let optimistic = rig.import_block(Payload::Syncing).await;
+    assert!(is_optimistic(rig.execution_status(optimistic)));
+    rig.recompute_head().await;
+
+    assert_eq!(
+        rig.cached_head().head_block_root(),
+        parent,
+        "head is the optimistic block's valid parent"
+    );
+
+    let data = rig
+        .harness
+        .chain
+        .produce_unaggregated_attestation(rig.harness.chain.slot().unwrap(), 0)
+        .expect("a valid head is attestable")
+        .data()
+        .clone();
+
+    assert_eq!(data.beacon_block_root, parent, "head vote is the parent");
+    assert_eq!(data.target.epoch, Epoch::new(1));
+    assert_eq!(
+        data.target.root, epoch_1_boundary,
+        "FFG target is still the valid epoch boundary block"
+    );
+}
+
+/// The optimistic block *is* the epoch's first block, so filtering it moves the boundary too: the
+/// epoch-1 target becomes the last block of epoch 0.
+#[tokio::test]
+async fn attestation_with_optimistic_head_at_epoch_boundary() {
+    if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
+        return;
+    }
+    let mut rig = InvalidPayloadRig::new_filtering_optimistic_nodes();
+    rig.import_block(Payload::Valid).await; // Valid transition block.
+
+    // Valid blocks through the last slot of epoch 0.
+    build_valid_to_slot(&mut rig, Slot::new(31)).await;
+    let parent = rig.harness.chain.head_snapshot().beacon_block_root;
+
+    // The first block of epoch 1 is optimistic.
+    let optimistic = rig.import_block(Payload::Syncing).await;
+    assert!(is_optimistic(rig.execution_status(optimistic)));
+    rig.recompute_head().await;
+
+    let head = rig.harness.chain.head_snapshot();
+    assert_eq!(head.beacon_block_root, parent);
+    assert_eq!(
+        head.beacon_block.slot(),
+        Slot::new(31),
+        "head is pinned in epoch 0"
+    );
+
+    let slot = rig.harness.chain.slot().unwrap();
+    assert_eq!(slot, Slot::new(32));
+    let data = rig
+        .harness
+        .chain
+        .produce_unaggregated_attestation(slot, 0)
+        .expect("a valid head is attestable")
+        .data()
+        .clone();
+
+    assert_eq!(data.beacon_block_root, parent, "head vote is the parent");
+    assert_eq!(data.target.epoch, Epoch::new(1));
+    assert_eq!(
+        data.target.root, parent,
+        "the epoch-1 target is the last block of epoch 0"
+    );
+    assert_ne!(
+        data.target.root, optimistic,
+        "and not the optimistic block that actually sits on the boundary"
     );
 }
 

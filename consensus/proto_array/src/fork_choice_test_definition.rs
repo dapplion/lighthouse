@@ -149,6 +149,9 @@ pub struct ForkChoiceTestDefinition {
     pub spec: Option<ChainSpec>,
 }
 
+/// These definitions assert spec behaviour, which never filters optimistic nodes.
+const FILTER_OPTIMISTIC_NODES: bool = false;
+
 impl ForkChoiceTestDefinition {
     pub fn run(self) {
         let spec = self.spec.unwrap_or_else(|| {
@@ -200,6 +203,7 @@ impl ForkChoiceTestDefinition {
                             Hash256::zero(),
                             &equivocating_indices,
                             current_slot,
+                            FILTER_OPTIMISTIC_NODES,
                             &spec,
                         )
                         .unwrap_or_else(|e| {
@@ -250,6 +254,7 @@ impl ForkChoiceTestDefinition {
                             proposer_boost_root,
                             &equivocating_indices,
                             Slot::new(0),
+                            FILTER_OPTIMISTIC_NODES,
                             &spec,
                         )
                         .unwrap_or_else(|e| {
@@ -288,6 +293,7 @@ impl ForkChoiceTestDefinition {
                         Hash256::zero(),
                         &equivocating_indices,
                         Slot::new(0),
+                        FILTER_OPTIMISTIC_NODES,
                         &spec,
                     );
 
@@ -611,6 +617,7 @@ impl ForkChoiceTestDefinition {
                             &block_root,
                             current_slot.unwrap_or(last_current_slot),
                             proposer_boost_root.unwrap_or_else(Hash256::zero),
+                            FILTER_OPTIMISTIC_NODES,
                             &spec,
                         )
                         .unwrap();
@@ -683,6 +690,7 @@ fn assert_canonical_payload_status_matches_find_head(
         head,
         current_slot,
         proposer_boost_root,
+        FILTER_OPTIMISTIC_NODES,
         spec,
     ) {
         Ok(actual) => assert_eq!(

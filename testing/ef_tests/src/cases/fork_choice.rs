@@ -1405,6 +1405,7 @@ impl<E: EthSpec> Tester<E> {
                 finalized,
                 proposer_boost_root,
                 &justified_balances,
+                false,
                 &self.spec,
             )
             .map_err(|e| {
