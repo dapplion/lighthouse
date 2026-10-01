@@ -1192,9 +1192,15 @@ impl ProtoArrayForkChoice {
             .node_execution_status(*block_root, PayloadStatus::Full)
     }
 
-    /// The fork choice node immediately below `node` on its own branch.
-    pub fn parent_node(&self, node: ForkChoiceNode) -> Result<Option<ForkChoiceNode>, Error> {
-        self.proto_array.parent_node(node)
+    /// See `ProtoArray::valid_head_or_ancestor`.
+    pub fn valid_head_or_ancestor(
+        &self,
+        head: ForkChoiceNode,
+        lookback: usize,
+        justified_root: Hash256,
+    ) -> Result<ForkChoiceNode, Error> {
+        self.proto_array
+            .valid_head_or_ancestor(head, lookback, justified_root)
     }
 
     /// Spec's `get_supported_node`.

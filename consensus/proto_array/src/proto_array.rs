@@ -2170,27 +2170,54 @@ impl ProtoArray {
         self.nodes.get(node.parent()?)
     }
 
-    /// The fork choice node immediately below `node` on its own branch: the parent block, on
-    /// whichever of its two payload nodes `node` extends. `None` at the root of the array.
-    pub(crate) fn parent_node(
-        &self,
-        node: ForkChoiceNode,
-    ) -> Result<Option<ForkChoiceNode>, Error> {
-        let proto_node = self
-            .get_block(node.root())
-            .ok_or(Error::NodeUnknown(node.root()))?;
-        let Some(parent) = self.get_parent(proto_node) else {
+    /// The parent block, on whichever of its two payload nodes `block_root` extends. `None` at
+    /// the root of the array.
+    fn parent_node(&self, block_root: Hash256) -> Result<Option<ForkChoiceNode>, Error> {
+        let node = self
+            .get_block(block_root)
+            .ok_or(Error::NodeUnknown(block_root))?;
+        let Some(parent) = self.get_parent(node) else {
             return Ok(None);
         };
-        // As in `get_node_children`: a pre-Gloas parent has a single virtual node, named EMPTY.
-        let parent_payload_status = match proto_node.get_parent_payload_status() {
+        // As in `get_node_children`: a pre-Gloas parent's single node is named EMPTY.
+        let payload_status = match node.get_parent_payload_status() {
             ParentPayloadStatus::Full => PayloadStatus::Full,
             ParentPayloadStatus::Empty | ParentPayloadStatus::PreGloas => PayloadStatus::Empty,
         };
-        Ok(Some(ForkChoiceNode::new(
-            parent.root(),
-            parent_payload_status,
-        )))
+        Ok(Some(ForkChoiceNode::new(parent.root(), payload_status)))
+    }
+
+    /// Steps back up to `lookback` ancestors of `head` for a VALID payload, stopping at
+    /// `justified_root`. Unchanged if nothing within the limit is valid, so the lag is bounded
+    /// and the EL still gets an advancing target.
+    pub(crate) fn valid_head_or_ancestor(
+        &self,
+        head: ForkChoiceNode,
+        lookback: usize,
+        justified_root: Hash256,
+    ) -> Result<ForkChoiceNode, Error> {
+        if lookback == 0 {
+            return Ok(head);
+        }
+
+        let mut node = head;
+        for _ in 0..=lookback {
+            if self
+                .node_execution_status(node.root(), node.payload_status())?
+                .is_valid()
+            {
+                return Ok(node);
+            }
+            if node.root() == justified_root {
+                break;
+            }
+            let Some(parent) = self.parent_node(node.root())? else {
+                break;
+            };
+            node = parent;
+        }
+
+        Ok(head)
     }
 
     /// Returns `true` if `root` is equal to or a descendant of

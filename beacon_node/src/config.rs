@@ -32,7 +32,7 @@ use types::{Checkpoint, Epoch, EthSpec, Hash256};
 
 const PURGE_DB_CONFIRMATION: &str = "confirm";
 
-/// Ancestors to search for a validated head when an EIP-8025 proof engine is configured.
+/// Ancestors to search for a valid payload when an EIP-8025 proof engine is configured.
 const PROOF_ENGINE_VALID_HEAD_LOOKBACK: usize = 2;
 
 /// Gets the fully-initialized global client.

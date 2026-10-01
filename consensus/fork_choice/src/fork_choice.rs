@@ -580,8 +580,7 @@ where
     ///
     /// https://github.com/ethereum/eth2.0-specs/blob/v0.12.1/specs/phase0/fork-choice.md#get_head
     ///
-    /// A non-zero `ChainConfig::valid_head_lookback` departs from the spec; see
-    /// `Self::valid_head_or_ancestor`.
+    /// A non-zero `valid_head_lookback` departs from the spec.
     #[instrument(skip_all, level = "debug")]
     pub fn get_head(
         &mut self,
@@ -604,7 +603,14 @@ where
             current_slot,
             spec,
         )?;
-        let head_node = self.valid_head_or_ancestor(head_node)?;
+        let head_node = self
+            .proto_array
+            .valid_head_or_ancestor(
+                head_node,
+                self.valid_head_lookback,
+                self.justified_checkpoint().root,
+            )
+            .map_err(Error::ProtoArrayError)?;
         let (head_root, head_payload_status) = head_node.as_pair();
 
         // Cache some values for the next forkchoiceUpdate call to the execution layer.
@@ -636,50 +642,6 @@ where
         };
 
         Ok(head_node)
-    }
-
-    /// The head to report, given that fork choice may have selected a block whose execution
-    /// payload the execution layer has not yet validated.
-    ///
-    /// Steps back up to `valid_head_lookback` ancestors looking for one whose payload is VALID,
-    /// stopping at the justified checkpoint since fork choice must not report a head below it.
-    /// Returns `head` unchanged when the lookback is `0` (the default), when the head is already
-    /// valid, or when nothing within the limit is valid. So the head lags by at most
-    /// `valid_head_lookback` blocks, and a node whose execution layer is behind still hands it a
-    /// forkchoiceUpdated target that advances.
-    fn valid_head_or_ancestor(
-        &self,
-        head: ForkChoiceNode,
-    ) -> Result<ForkChoiceNode, Error<T::Error>> {
-        if self.valid_head_lookback == 0 {
-            return Ok(head);
-        }
-
-        let justified_root = self.justified_checkpoint().root;
-        let mut node = head;
-        for _ in 0..=self.valid_head_lookback {
-            if self
-                .proto_array
-                .get_node_execution_status(node)
-                .map_err(Error::ProtoArrayError)?
-                .is_valid()
-            {
-                return Ok(node);
-            }
-            if node.root() == justified_root {
-                break;
-            }
-            let Some(parent) = self
-                .proto_array
-                .parent_node(node)
-                .map_err(Error::ProtoArrayError)?
-            else {
-                break;
-            };
-            node = parent;
-        }
-
-        Ok(head)
     }
 
     /// Get the block to build on as proposer, taking into account proposer re-orgs.

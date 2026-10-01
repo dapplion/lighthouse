@@ -1897,9 +1897,8 @@ async fn gloas_latest_valid_hash_keeps_its_child_on_empty() {
     );
 }
 
-/// `valid_head_lookback` steps back from an unjudged head to a validated ancestor, but only so
-/// far. Once the optimistic run is longer than the lookback it reports the optimistic tip again,
-/// so the execution layer keeps getting a forkchoiceUpdated target that advances.
+/// Steps back to a valid ancestor, but only `valid_head_lookback` of them: a longer optimistic
+/// run reports the tip again, so the EL keeps getting an advancing target.
 #[tokio::test]
 async fn valid_head_lookback_steps_back_to_a_validated_ancestor_then_gives_up() {
     if fork_name_from_env().is_some_and(|f| !f.bellatrix_enabled()) {
@@ -1923,8 +1922,7 @@ async fn valid_head_lookback_steps_back_to_a_validated_ancestor_then_gives_up() 
         .server
         .all_payloads_syncing_on_forkchoice_updated();
 
-    // The head stops advancing once the lookback engages, so each block is built on a threaded
-    // state rather than on the head.
+    // The head stops advancing, so thread the state instead of building on the head.
     let mut state = rig.harness.chain.head_snapshot().beacon_state.clone();
     let mut optimistic = Vec::new();
     let mut heads = Vec::new();
@@ -1953,7 +1951,7 @@ async fn valid_head_lookback_steps_back_to_a_validated_ancestor_then_gives_up() 
             (valid, valid_payload),
             (optimistic[2], tip_payload)
         ],
-        "one and two blocks of lookback reach the validated block; three exceeds it"
+        "1 and 2 back reach the valid block; 3 exceeds the lookback"
     );
 }
 
