@@ -2211,6 +2211,7 @@ fn get_signature_verifier<'a, T: BeaconChainTypes>(
 
 #[derive(Debug)]
 pub enum LookupProposerError {
+    UnrequestedBlockRoot(Hash256),
     SlotOutOfRange,
     InvalidSignature,
     ProposerMismatch,
@@ -2219,24 +2220,38 @@ pub enum LookupProposerError {
 }
 
 impl<T: BeaconChainTypes> BeaconChain<T> {
-    /// Check a lookup block against the head's cached proposer schedule before following its parent.
+    /// Check a lookup block's root and the head's cached proposer schedule before following its parent.
     /// Normal block validation must still verify the proposer against the block's own branch.
     ///
-    /// Caller must ensure that `block_root == block.canonical_root()`.
+    /// Hashing and signature verification run together on a blocking worker. The caller must
+    /// admit this work through the per-peer lookup processing limit before calling this method.
     pub async fn verify_lookup_block_proposer(
         self: &Arc<Self>,
         block_root: Hash256,
         block: Arc<SignedBeaconBlock<T::EthSpec>>,
         max_slot_distance: u64,
-    ) -> Result<(), LookupProposerError> {
+    ) -> Result<LookupBlock<T::EthSpec>, LookupProposerError> {
         let chain = self.clone();
         self.spawn_blocking_handle(
             move || {
                 let start = Instant::now();
-                let result =
-                    chain.check_lookup_block_proposer(block_root, &block, max_slot_distance);
+                let result = (|| {
+                    let block = LookupBlock::new(block);
+                    if block.block_root() != block_root {
+                        return Err(LookupProposerError::UnrequestedBlockRoot(
+                            block.block_root(),
+                        ));
+                    }
+                    chain.check_lookup_block_proposer(
+                        block_root,
+                        block.block(),
+                        max_slot_distance,
+                    )?;
+                    Ok(block)
+                })();
                 let outcome = match &result {
-                    Ok(()) => "valid",
+                    Ok(_) => "valid",
+                    Err(LookupProposerError::UnrequestedBlockRoot(_)) => "unrequested_block_root",
                     Err(LookupProposerError::SlotOutOfRange) => "slot_out_of_range",
                     Err(LookupProposerError::InvalidSignature) => "invalid_signature",
                     Err(LookupProposerError::ProposerMismatch) => "proposer_mismatch",

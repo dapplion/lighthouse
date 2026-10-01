@@ -21,6 +21,12 @@ const MAX_ACTIVE_GOSSIP_BLOCKS_PER_PEER: usize = 1;
 /// Maximum number of gossip blocks queued behind active blocks from the same peer.
 const MAX_PENDING_GOSSIP_BLOCKS_PER_PEER: usize = 2;
 
+/// Maximum number of lookup blocks from the same peer processed concurrently.
+const MAX_ACTIVE_RPC_BLOCKS_PER_PEER: usize = 1;
+
+/// Maximum number of lookup blocks queued behind active blocks from the same peer.
+const MAX_PENDING_RPC_BLOCKS_PER_PEER: usize = 2;
+
 /// A simple first-in-first-out queue with a maximum length.
 pub struct FifoQueue<T> {
     queue: VecDeque<T>,
@@ -120,8 +126,8 @@ impl<T> PeerWorkQueue<T> {
         }
     }
 
-    /// Queue an item, dropping it if either the global or per-peer limit is reached.
-    pub fn push(&mut self, peer_id: PeerId, item: T, item_desc: &str) {
+    /// Queue an item, returning it if either the global or per-peer limit is reached.
+    pub fn push(&mut self, peer_id: PeerId, item: T, item_desc: &str) -> Result<(), T> {
         if self.len() >= self.max_length {
             error!(
                 queue = item_desc,
@@ -129,7 +135,7 @@ impl<T> PeerWorkQueue<T> {
                 msg = "the system has insufficient resources for load",
                 "Work queue is full",
             );
-            return;
+            return Err(item);
         }
 
         let peer_work = self.peers.entry(peer_id).or_default();
@@ -141,27 +147,38 @@ impl<T> PeerWorkQueue<T> {
                 msg = "peer has too much pending work",
                 "Per-peer work queue is full",
             );
-            return;
+            return Err(item);
         }
 
         peer_work.pending.push_back(item);
+        Ok(())
     }
 
     /// Queue an item, then return the peer's next item if the peer is below its active work limit.
     ///
     /// Used for newly received work, so the peer is assumed to still be connected and no connection
     /// check is performed here. Work left queued is checked for disconnection by `pop`.
-    pub fn push_and_pop(&mut self, peer_id: PeerId, item: T, item_desc: &str) -> Option<T> {
-        self.push(peer_id, item, item_desc);
-        self.peers
-            .get_mut(&peer_id)?
-            .start_next(self.max_active_per_peer)
+    pub fn push_and_pop(
+        &mut self,
+        peer_id: PeerId,
+        item: T,
+        item_desc: &str,
+    ) -> Result<Option<T>, T> {
+        self.push(peer_id, item, item_desc)?;
+        Ok(self
+            .peers
+            .get_mut(&peer_id)
+            .and_then(|peer| peer.start_next(self.max_active_per_peer)))
     }
 
     /// Return the next item from a connected peer that is below its active work limit.
     ///
     /// Pending work is discarded for peers that have disconnected.
-    pub fn pop(&mut self, is_connected: impl Fn(&PeerId) -> bool) -> Option<T> {
+    pub fn pop(
+        &mut self,
+        is_connected: impl Fn(&PeerId) -> bool,
+        mut discard: impl FnMut(T),
+    ) -> Option<T> {
         let max_active = self.max_active_per_peer;
         let mut next = None;
         self.peers.retain(|peer_id, peer_work| {
@@ -169,7 +186,9 @@ impl<T> PeerWorkQueue<T> {
                 if is_connected(peer_id) {
                     next = peer_work.start_next(max_active);
                 } else {
-                    peer_work.pending.clear();
+                    for item in peer_work.pending.drain(..) {
+                        discard(item);
+                    }
                 }
             }
             !peer_work.is_empty()
@@ -400,7 +419,7 @@ pub struct WorkQueues<E: EthSpec> {
     pub gossip_proposer_slashing_queue: FifoQueue<Work<E>>,
     pub gossip_attester_slashing_queue: FifoQueue<Work<E>>,
     pub unknown_light_client_update_queue: FifoQueue<Work<E>>,
-    pub rpc_block_queue: FifoQueue<Work<E>>,
+    pub rpc_block_queue: PeerWorkQueue<Work<E>>,
     pub rpc_blob_queue: FifoQueue<Work<E>>,
     pub rpc_custody_column_queue: FifoQueue<Work<E>>,
     pub rpc_envelope_queue: FifoQueue<Work<E>>,
@@ -473,8 +492,12 @@ impl<E: EthSpec> WorkQueues<E> {
         // Using a FIFO queue for light client updates to maintain sequence order.
         let unknown_light_client_update_queue =
             FifoQueue::new(queue_lengths.unknown_light_client_update_queue);
-        // Using a FIFO queue since blocks need to be imported sequentially.
-        let rpc_block_queue = FifoQueue::new(queue_lengths.rpc_block_queue);
+        // Keep blocks ordered per peer without allowing one peer to occupy every worker.
+        let rpc_block_queue = PeerWorkQueue::new(
+            queue_lengths.rpc_block_queue,
+            MAX_ACTIVE_RPC_BLOCKS_PER_PEER,
+            MAX_PENDING_RPC_BLOCKS_PER_PEER,
+        );
         let rpc_blob_queue = FifoQueue::new(queue_lengths.rpc_blob_queue);
         let rpc_custody_column_queue = FifoQueue::new(queue_lengths.rpc_custody_column_queue);
         let rpc_envelope_queue = FifoQueue::new(queue_lengths.rpc_envelope_queue);
@@ -612,18 +635,18 @@ mod tests {
         let peer_b = PeerId::random();
         let mut queue = PeerWorkQueue::new(4, 1, 2);
 
-        queue.push(peer_a, 1, "test");
-        queue.push(peer_a, 2, "test");
-        queue.push(peer_b, 3, "test");
+        assert_eq!(queue.push(peer_a, 1, "test"), Ok(()));
+        assert_eq!(queue.push(peer_a, 2, "test"), Ok(()));
+        assert_eq!(queue.push(peer_b, 3, "test"), Ok(()));
 
         // One item per peer, in either order.
-        let mut popped = [queue.pop(|_| true), queue.pop(|_| true)];
+        let mut popped = [queue.pop(|_| true, drop), queue.pop(|_| true, drop)];
         popped.sort();
         assert_eq!(popped, [Some(1), Some(3)]);
-        assert_eq!(queue.pop(|_| true), None);
+        assert_eq!(queue.pop(|_| true, drop), None);
 
         queue.worker_finished(&peer_a);
-        assert_eq!(queue.pop(|_| true), Some(2));
+        assert_eq!(queue.pop(|_| true, drop), Some(2));
     }
 
     #[test]
@@ -631,18 +654,17 @@ mod tests {
         let peer = PeerId::random();
         let mut queue = PeerWorkQueue::new(4, 1, 2);
 
-        queue.push(peer, 1, "test");
-        assert_eq!(queue.pop(|_| true), Some(1));
+        assert_eq!(queue.push_and_pop(peer, 1, "test"), Ok(Some(1)));
 
-        queue.push(peer, 2, "test");
-        queue.push(peer, 3, "test");
-        queue.push(peer, 4, "test");
+        assert_eq!(queue.push_and_pop(peer, 2, "test"), Ok(None));
+        assert_eq!(queue.push(peer, 3, "test"), Ok(()));
+        assert_eq!(queue.push_and_pop(peer, 4, "test"), Err(4));
         assert_eq!(queue.len(), 2);
 
         queue.worker_finished(&peer);
-        assert_eq!(queue.pop(|_| true), Some(2));
+        assert_eq!(queue.pop(|_| true, drop), Some(2));
         queue.worker_finished(&peer);
-        assert_eq!(queue.pop(|_| true), Some(3));
+        assert_eq!(queue.pop(|_| true, drop), Some(3));
     }
 
     #[test]
@@ -650,18 +672,32 @@ mod tests {
         let peer = PeerId::random();
         let mut queue = PeerWorkQueue::new(4, 1, 2);
 
-        queue.push(peer, 1, "test");
-        queue.push(peer, 2, "test");
-        assert_eq!(queue.pop(|_| false), None);
+        assert_eq!(queue.push(peer, 1, "test"), Ok(()));
+        assert_eq!(queue.push(peer, 2, "test"), Ok(()));
+        let mut discarded = Vec::new();
+        assert_eq!(queue.pop(|_| false, |item| discarded.push(item)), None);
+        assert_eq!(discarded, vec![1, 2]);
         assert!(queue.is_empty());
 
         // Active work is still tracked after the peer's pending work is discarded.
-        queue.push(peer, 3, "test");
-        assert_eq!(queue.pop(|_| true), Some(3));
-        queue.push(peer, 4, "test");
-        assert_eq!(queue.pop(|_| false), None);
+        assert_eq!(queue.push(peer, 3, "test"), Ok(()));
+        assert_eq!(queue.pop(|_| true, drop), Some(3));
+        assert_eq!(queue.push(peer, 4, "test"), Ok(()));
+        assert_eq!(queue.pop(|_| false, |item| discarded.push(item)), None);
+        assert_eq!(discarded, vec![1, 2, 4]);
         assert!(queue.is_empty());
         queue.worker_finished(&peer);
         assert!(queue.peers.is_empty());
+    }
+
+    #[test]
+    fn peer_work_queue_preserves_global_bound() {
+        let mut queue = PeerWorkQueue::new(2, 1, 2);
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+        assert_eq!(queue.push(peer_a, 1, "test"), Ok(()));
+        assert_eq!(queue.push(peer_b, 2, "test"), Ok(()));
+        assert_eq!(queue.push(PeerId::random(), 3, "test"), Err(3));
+        assert_eq!(queue.len(), 2);
     }
 }

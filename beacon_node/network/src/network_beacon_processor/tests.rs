@@ -487,8 +487,9 @@ impl TestRig {
         let block_root = self.next_block.canonical_root();
         self.network_beacon_processor
             .send_lookup_beacon_block(
+                junk_peer_id(),
                 block_root,
-                LookupBlock::new(self.next_block.clone()),
+                self.next_block.clone(),
                 BlockProcessType::SingleBlock { id: 0 },
             )
             .unwrap();
@@ -498,8 +499,9 @@ impl TestRig {
         let block_root = self.next_block.canonical_root();
         self.network_beacon_processor
             .send_lookup_beacon_block(
+                junk_peer_id(),
                 block_root,
-                LookupBlock::new(self.next_block.clone()),
+                self.next_block.clone(),
                 BlockProcessType::SingleBlock { id: 1 },
             )
             .unwrap();

@@ -6,7 +6,6 @@ use crate::sync::{
     ChainId, PeerGroup, SyncNetworkContext,
     manager::{BlockProcessType, SyncMessage},
 };
-use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::block_verification_types::{AsBlock, RangeSyncBlock};
 use beacon_chain::data_availability_checker::{
     AvailabilityCheckError, AvailabilityCheckErrorCategory,
@@ -29,7 +28,9 @@ use lighthouse_network::service::api_types::CustodyBackfillBatchId;
 use logging::crit;
 use std::sync::Arc;
 use tracing::{debug, debug_span, error, info, instrument, warn};
-use types::{BlockImportSource, DataColumnSidecarList, Epoch, ExecutionBlockHash, Hash256};
+use types::{
+    BlockImportSource, DataColumnSidecarList, Epoch, ExecutionBlockHash, Hash256, SignedBeaconBlock,
+};
 
 /// Id associated to a batch processing request, either a sync batch or a parent lookup.
 #[derive(Clone, Debug, PartialEq)]
@@ -55,13 +56,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     /// type checking.
     pub fn generate_lookup_beacon_block_process_fn(
         self: Arc<Self>,
+        peer_id: PeerId,
         block_root: Hash256,
-        block: LookupBlock<T::EthSpec>,
+        block: Arc<SignedBeaconBlock<T::EthSpec>>,
         process_type: BlockProcessType,
     ) -> AsyncFn {
         let process_fn = async move {
             let duplicate_cache = self.duplicate_cache.clone();
-            self.process_lookup_block(block_root, block, process_type, duplicate_cache)
+            self.process_lookup_block(peer_id, block_root, block, process_type, duplicate_cache)
                 .await;
         };
         Box::pin(process_fn)
@@ -70,12 +72,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     /// Returns the `process_fn` and `ignore_fn` required when requeuing an RPC block.
     pub fn generate_lookup_beacon_block_fns(
         self: Arc<Self>,
+        peer_id: PeerId,
         block_root: Hash256,
-        block: LookupBlock<T::EthSpec>,
+        block: Arc<SignedBeaconBlock<T::EthSpec>>,
         process_type: BlockProcessType,
     ) -> (AsyncFn, BlockingFn) {
         // An async closure which will import the block.
         let process_fn = self.clone().generate_lookup_beacon_block_process_fn(
+            peer_id,
             block_root,
             block,
             process_type.clone(),
@@ -109,8 +113,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     )]
     pub async fn process_lookup_block(
         self: Arc<NetworkBeaconProcessor<T>>,
+        peer_id: PeerId,
         block_root: Hash256,
-        block: LookupBlock<T::EthSpec>,
+        block: Arc<SignedBeaconBlock<T::EthSpec>>,
         process_type: BlockProcessType,
         duplicate_cache: DuplicateCache,
     ) {
@@ -124,67 +129,82 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             );
 
             // Send message to work reprocess queue to retry the block
-            let (process_fn, ignore_fn) =
-                self.clone()
-                    .generate_lookup_beacon_block_fns(block_root, block, process_type);
+            let (process_fn, ignore_fn) = self.clone().generate_lookup_beacon_block_fns(
+                peer_id,
+                block_root,
+                block,
+                process_type,
+            );
             let reprocess_msg = ReprocessQueueMessage::RpcBlock(QueuedRpcBlock {
+                peer_id,
                 beacon_block_root: block_root,
                 process_fn,
                 ignore_fn,
             });
 
-            if self
-                .beacon_processor_send
-                .try_send(WorkEvent {
-                    drop_during_sync: false,
-                    work: Work::Reprocess(reprocess_msg),
-                })
-                .is_err()
-            {
+            if let Err(error) = self.beacon_processor_send.try_send(WorkEvent {
+                drop_during_sync: false,
+                work: Work::Reprocess(reprocess_msg),
+            }) {
+                // The reprocessing queue never took ownership, so complete this attempt here.
+                if let Work::Reprocess(ReprocessQueueMessage::RpcBlock(block)) =
+                    error.into_inner().work
+                {
+                    (block.ignore_fn)();
+                }
                 error!(source = "rpc", %block_root,"Failed to inform block import")
             };
             return;
         };
 
-        if let Err(error) = self
+        let block = match self
             .chain
-            .verify_lookup_block_proposer(
-                block_root,
-                block.block_cloned(),
-                SLOT_IMPORT_TOLERANCE as u64,
-            )
+            .verify_lookup_block_proposer(block_root, block, SLOT_IMPORT_TOLERANCE as u64)
             .await
         {
-            debug!(%block_root, ?error, "Lookup block failed early proposer check");
-            let result = match error {
-                LookupProposerError::SlotOutOfRange => {
-                    BlockProcessingResult::Ignored("slot_out_of_range")
-                }
-                LookupProposerError::InvalidSignature => BlockProcessingResult::Error {
-                    penalty: Some((
-                        PeerAction::LowToleranceError,
-                        WhichPeerToPenalize::BlockPeer,
-                        "lookup_proposer_signature_invalid",
-                    )),
-                    reason: "lookup_proposer_signature_invalid".to_string(),
-                },
-                LookupProposerError::ProposerMismatch => {
-                    BlockProcessingResult::Ignored("proposer_mismatch")
-                }
-                LookupProposerError::OutsideLookahead => {
-                    BlockProcessingResult::Ignored("outside_lookahead")
-                }
-                LookupProposerError::Internal(error) => BlockProcessingResult::Error {
-                    penalty: None,
-                    reason: format!("{error:?}"),
-                },
-            };
-            self.send_sync_message(SyncMessage::BlockComponentProcessed {
-                process_type,
-                result,
-            });
-            return;
-        }
+            Ok(block) => block,
+            Err(error) => {
+                debug!(%block_root, ?error, "Lookup block failed early proposer check");
+                let result = match error {
+                    LookupProposerError::UnrequestedBlockRoot(actual_root) => {
+                        BlockProcessingResult::Error {
+                            penalty: Some((
+                                PeerAction::LowToleranceError,
+                                WhichPeerToPenalize::BlockPeer,
+                                "UnrequestedBlockRoot",
+                            )),
+                            reason: format!("UnrequestedBlockRoot({actual_root:?})"),
+                        }
+                    }
+                    LookupProposerError::SlotOutOfRange => {
+                        BlockProcessingResult::Ignored("slot_out_of_range")
+                    }
+                    LookupProposerError::InvalidSignature => BlockProcessingResult::Error {
+                        penalty: Some((
+                            PeerAction::LowToleranceError,
+                            WhichPeerToPenalize::BlockPeer,
+                            "lookup_proposer_signature_invalid",
+                        )),
+                        reason: "lookup_proposer_signature_invalid".to_string(),
+                    },
+                    LookupProposerError::ProposerMismatch => {
+                        BlockProcessingResult::Ignored("proposer_mismatch")
+                    }
+                    LookupProposerError::OutsideLookahead => {
+                        BlockProcessingResult::Ignored("outside_lookahead")
+                    }
+                    LookupProposerError::Internal(error) => BlockProcessingResult::Error {
+                        penalty: None,
+                        reason: format!("{error:?}"),
+                    },
+                };
+                self.send_sync_message(SyncMessage::BlockComponentProcessed {
+                    process_type,
+                    result,
+                });
+                return;
+            }
+        };
 
         let commitments_formatted = block.as_block().commitments_formatted();
 

@@ -1,4 +1,3 @@
-use beacon_chain::get_block_root;
 use lighthouse_network::rpc::BlocksByRootRequest;
 use std::sync::Arc;
 use types::{EthSpec, ForkContext, Hash256, SignedBeaconBlock};
@@ -16,31 +15,22 @@ impl BlocksByRootSingleRequest {
 }
 
 pub struct BlocksByRootRequestItems<E: EthSpec> {
-    request: BlocksByRootSingleRequest,
     items: Vec<Arc<SignedBeaconBlock<E>>>,
 }
 
 impl<E: EthSpec> BlocksByRootRequestItems<E> {
-    pub fn new(request: BlocksByRootSingleRequest) -> Self {
-        Self {
-            request,
-            items: vec![],
-        }
+    pub fn new() -> Self {
+        Self { items: vec![] }
     }
 }
 
 impl<E: EthSpec> ActiveRequestItems for BlocksByRootRequestItems<E> {
     type Item = Arc<SignedBeaconBlock<E>>;
 
-    /// Append a response to the single chunk request. If the chunk is valid, the request is
-    /// resolved immediately.
-    /// The active request SHOULD be dropped after `add_response` returns an error
+    /// Collect the single response without hashing it on the async sync task.
+    /// Root equality is checked by the per-peer-limited block processing worker before import
+    /// or any requests based on the returned body's contents.
     fn add(&mut self, block: Self::Item) -> Result<bool, LookupVerifyError> {
-        let block_root = get_block_root(&block);
-        if self.request.0 != block_root {
-            return Err(LookupVerifyError::UnrequestedBlockRoot(block_root));
-        }
-
         self.items.push(block);
         // Always returns true, blocks by root expects a single response
         Ok(true)

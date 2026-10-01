@@ -1,6 +1,5 @@
 use crate::sync::manager::BlockProcessType;
 use crate::{service::NetworkMessage, sync::manager::SyncMessage};
-use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::block_verification_types::RangeSyncBlock;
 use beacon_chain::data_column_verification::{
     GossipDataColumnError, KzgVerifiedCustodyDataColumn, observe_gossip_data_column,
@@ -554,17 +553,20 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     /// sent to the other side of `result_tx`.
     pub fn send_lookup_beacon_block(
         self: &Arc<Self>,
+        peer_id: PeerId,
         block_root: Hash256,
-        block: LookupBlock<T::EthSpec>,
+        block: Arc<SignedBeaconBlock<T::EthSpec>>,
         process_type: BlockProcessType,
     ) -> Result<(), Error<T::EthSpec>> {
-        let process_fn =
+        let (process_fn, ignore_fn) =
             self.clone()
-                .generate_lookup_beacon_block_process_fn(block_root, block, process_type);
+                .generate_lookup_beacon_block_fns(peer_id, block_root, block, process_type);
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
             work: Work::RpcBlock {
+                peer_id,
                 process_fn,
+                ignore_fn,
                 beacon_block_root: block_root,
             },
         })

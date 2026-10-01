@@ -2393,7 +2393,8 @@ async fn assert_component_downloads_wait_for_block_processing(wrong_root: bool) 
     let Some(mut r) = TestRig::new_after_fulu() else {
         return;
     };
-    r.build_chain_and_trigger_last_block(1).await;
+    // Gloas needs a FULL child to identify peers that can serve the parent's components.
+    r.trigger_custody_lookup_from_all_peers().await;
     let block_root = r.block_root_at_slot(1);
     let (peer_id, sync_request_id) = r
         .pop_received_network_event(|event| match event {
@@ -2410,7 +2411,7 @@ async fn assert_component_downloads_wait_for_block_processing(wrong_root: bool) 
     let mut block = (*r.block_at_slot(1)).clone();
     if wrong_root {
         // Keep the known parent and component commitments, but change the requested root.
-        *block.message_mut().state_root_mut() = Hash256::zero();
+        *block.message_mut().state_root_mut() = Hash256::ZERO;
         assert_ne!(block.canonical_root(), block_root);
     }
     r.send_sync_message(SyncMessage::RpcBlock {
@@ -2437,12 +2438,27 @@ async fn assert_component_downloads_wait_for_block_processing(wrong_root: bool) 
     };
     assert_eq!(beacon_block_root, block_root);
 
-    if !wrong_root {
-        process_fn.await;
-        while let Ok(message) = r.sync_rx.try_recv() {
-            r.send_sync_message(message);
-        }
-        r.drain_network_rx();
+    process_fn.await;
+    while let Ok(message) = r.sync_rx.try_recv() {
+        r.send_sync_message(message);
+    }
+    r.drain_network_rx();
+    if wrong_root {
+        assert!(r.network_rx_queue.iter().any(|event| matches!(
+            event,
+            NetworkMessage::ReportPeer {
+                msg: "UnrequestedBlockRoot",
+                ..
+            }
+        )));
+        assert!(!r.network_rx_queue.iter().any(|event| matches!(
+            event,
+            NetworkMessage::SendRequest {
+                request: RequestType::DataColumnsByRoot(_) | RequestType::PayloadEnvelopesByRoot(_),
+                ..
+            }
+        )));
+    } else {
         assert!(
             r.network_rx_queue.iter().any(|event| matches!(
                 event,

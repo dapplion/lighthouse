@@ -387,8 +387,18 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
         if self.awaiting_parent.is_none()
             && let Some(data) = self.block_request.state.maybe_start_processing()
         {
-            cx.send_block_for_processing(self.id, self.block_root, data.value)
+            let peer_id = data.peer_group.all().next().copied().ok_or_else(|| {
+                LookupRequestError::BadState("Downloaded block has no serving peer".into())
+            })?;
+            cx.send_block_for_processing(self.id, peer_id, self.block_root, data.value)
                 .map_err(LookupRequestError::SendFailedProcessor)?;
+        }
+
+        // Downloaded bodies have not had their roots checked yet. Wait for block processing
+        // (including MissingComponents) before using their contents to request data or payloads.
+        // ParentUnknown follows the existing parent-fetch-and-retry path first.
+        if !self.block_request.state.is_processed() {
+            return Ok(LookupResult::Pending);
         }
 
         // === Data request ===
@@ -559,10 +569,18 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
                 });
             }
             BlockProcessingResult::Error { penalty, .. } => {
-                let peers = self.block_request.state.on_processing_failure()?;
-                if let Some((action, whom, msg)) = penalty {
-                    whom.apply(action, &peers, msg, cx);
+                // Report even the response that exhausts the retry budget. Wrong-root responses
+                // are now rejected here rather than by the RPC response collector.
+                if let Some((action, whom, msg)) = penalty
+                    && let State::Processing(data) = &self.block_request.state.state
+                {
+                    whom.apply(action, &data.peer_group, msg, cx);
+                    self.block_request
+                        .state
+                        .failed_peers
+                        .extend(data.peer_group.all().copied());
                 }
+                self.block_request.state.on_processing_failure()?;
             }
         }
         self.continue_requests(cx)
