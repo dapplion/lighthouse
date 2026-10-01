@@ -104,7 +104,7 @@ use task_executor::JoinHandle;
 use tracing::{Instrument, Span, debug, debug_span, error, info_span, instrument};
 use types::{
     BeaconBlockRef, BeaconState, BeaconStateError, BlobsList, ChainSpec, DataColumnSidecarList,
-    Epoch, EthSpec, ExecutionBlockHash, FullPayload, Hash256, InconsistentFork, KzgProofs,
+    Epoch, EthSpec, ExecutionBlockHash, Fork, FullPayload, Hash256, InconsistentFork, KzgProofs,
     RelativeEpoch, SignedBeaconBlock, SignedBeaconBlockHeader, Slot, data::DataColumnSidecarError,
 };
 
@@ -2244,17 +2244,32 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             move || {
                 let start = Instant::now();
                 let result = (|| {
+                    // Policy rejections are unpenalized, so reject them before hashing the body.
+                    let (pubkey, fork) =
+                        chain.check_lookup_block_admission(&block, max_slot_distance)?;
                     let block = LookupBlock::new(block);
                     if block.block_root() != block_root {
                         return Err(LookupProposerError::UnrequestedBlockRoot(
                             block.block_root(),
                         ));
                     }
-                    chain.check_lookup_block_proposer(
-                        block_root,
-                        block.block(),
-                        max_slot_distance,
-                    )?;
+
+                    let signature_start = Instant::now();
+                    let valid = block.block().verify_signature(
+                        Some(block_root),
+                        &pubkey,
+                        &fork,
+                        chain.genesis_validators_root,
+                        &chain.spec,
+                    );
+                    metrics::observe_vec(
+                        &metrics::LOOKUP_BLOCK_PROPOSER_SIGNATURE_TIMES,
+                        &[if valid { "valid" } else { "invalid" }],
+                        signature_start.elapsed().as_secs_f64(),
+                    );
+                    if !valid {
+                        return Err(LookupProposerError::InvalidSignature);
+                    }
                     Ok(block)
                 })();
                 let outcome = match &result {
@@ -2279,12 +2294,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         .map_err(|error| LookupProposerError::Internal(Box::new(error)))?
     }
 
-    fn check_lookup_block_proposer(
+    /// Apply the local slot/proposer policy without hashing the body or verifying its signature.
+    /// Return the proposer key and fork for signature verification after root equality is checked.
+    fn check_lookup_block_admission(
         &self,
-        block_root: Hash256,
         block: &SignedBeaconBlock<T::EthSpec>,
         max_slot_distance: u64,
-    ) -> Result<(), LookupProposerError> {
+    ) -> Result<(PublicKey, Fork), LookupProposerError> {
         let head = self.canonical_head.cached_head();
         let state = &head.snapshot.beacon_state;
         let slot = block.slot();
@@ -2340,26 +2356,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .get(proposer.index)
             .cloned()
             .ok_or(LookupProposerError::OutsideLookahead)?;
-        drop(head);
 
-        let start = Instant::now();
-        let valid = block.verify_signature(
-            Some(block_root),
-            &pubkey,
-            &proposer.fork,
-            self.genesis_validators_root,
-            &self.spec,
-        );
-        metrics::observe_vec(
-            &metrics::LOOKUP_BLOCK_PROPOSER_SIGNATURE_TIMES,
-            &[if valid { "valid" } else { "invalid" }],
-            start.elapsed().as_secs_f64(),
-        );
-        if valid {
-            Ok(())
-        } else {
-            Err(LookupProposerError::InvalidSignature)
-        }
+        Ok((pubkey, proposer.fork))
     }
 }
 
