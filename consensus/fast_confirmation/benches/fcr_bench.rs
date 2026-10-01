@@ -236,6 +236,7 @@ fn build_chain_inner(
         Hash256::zero(), // no proposer boost
         &BTreeSet::new(),
         Slot::new(CHAIN_TIP_SLOT),
+        false,
         &spec,
     )
     .expect("find head");

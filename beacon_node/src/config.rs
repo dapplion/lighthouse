@@ -827,6 +827,8 @@ pub fn get_config<E: EthSpec>(
     client_config.chain.optimistic_finalized_sync =
         !cli_args.get_flag("disable-optimistic-finalized-sync");
 
+    client_config.chain.filter_optimistic_nodes = cli_args.get_flag("filter-optimistic-nodes");
+
     if cli_args.get_flag("genesis-backfill") {
         client_config.chain.genesis_backfill = true;
     }

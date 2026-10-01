@@ -506,6 +506,13 @@ Flags:
       --enable-private-discovery
           Lighthouse by default does not discover private IP addresses. Set this
           flag to enable connection attempts to local addresses.
+      --filter-optimistic-nodes
+          Exclude optimistically-imported blocks when running fork choice, so
+          the head never advances onto a block whose payload the execution
+          client has not judged. This is non-standard and will stop the head
+          advancing for as long as the execution client is behind, since
+          optimistic sync relies on the head reaching those blocks to give the
+          execution client a sync target. For testing only.
       --genesis-backfill
           Attempts to download blocks all the way back to genesis when
           checkpoint syncing.

@@ -1535,6 +1535,19 @@ pub fn cli_app() -> Command {
                 .display_order(0)
         )
         .arg(
+            Arg::new("filter-optimistic-nodes")
+                .long("filter-optimistic-nodes")
+                .action(ArgAction::SetTrue)
+                .help_heading(FLAG_HEADER)
+                .help("Exclude optimistically-imported blocks when running fork choice, so the \
+                       head never advances onto a block whose payload the execution client has \
+                       not judged. This is non-standard and will stop the head advancing for as \
+                       long as the execution client is behind, since optimistic sync relies on \
+                       the head reaching those blocks to give the execution client a sync \
+                       target. For testing only.")
+                .display_order(0)
+        )
+        .arg(
             Arg::new("disable-light-client-server")
                 .long("disable-light-client-server")
                 .help("Disables light client support on the p2p network")

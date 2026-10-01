@@ -385,6 +385,8 @@ pub struct ForkChoice<T, E> {
     /// Rejects attestations from the current or a future slot instead of queueing them, as the
     /// spec does. Always `false` in production.
     spec_test_mode: bool,
+    /// See `ChainConfig::filter_optimistic_nodes`.
+    filter_optimistic_nodes: bool,
     _phantom: PhantomData<E>,
 }
 
@@ -412,6 +414,7 @@ where
         anchor_block: &SignedBeaconBlock<E>,
         anchor_state: &BeaconState<E>,
         current_slot: Option<Slot>,
+        filter_optimistic_nodes: bool,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         // Sanity check: the anchor must lie on an epoch boundary.
@@ -480,6 +483,7 @@ where
             proto_array,
             queued_attestations: BTreeMap::new(),
             spec_test_mode: false,
+            filter_optimistic_nodes,
             // This will be updated during the next call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
                 head_hash: None,
@@ -595,6 +599,7 @@ where
             store.proposer_boost_root(),
             store.equivocating_indices(),
             current_slot,
+            self.filter_optimistic_nodes,
             spec,
         )?;
         let (head_root, head_payload_status) = head_node.as_pair();
@@ -1782,6 +1787,7 @@ where
                     block_root,
                     current_slot,
                     proposer_boost_root,
+                    self.filter_optimistic_nodes,
                     spec,
                 )
                 .map_err(Error::ProtoArrayError)
@@ -2008,6 +2014,7 @@ where
         persisted: PersistedForkChoice,
         reset_payload_statuses: ResetPayloadStatuses,
         fc_store: T,
+        filter_optimistic_nodes: bool,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         let justified_balances = fc_store.justified_balances().clone();
@@ -2025,6 +2032,7 @@ where
             proto_array,
             queued_attestations: BTreeMap::new(),
             spec_test_mode: false,
+            filter_optimistic_nodes,
             // Will be updated in the following call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
                 head_hash: None,

@@ -2612,6 +2612,25 @@ fn disable_optimistic_finalized_sync() {
 }
 
 #[test]
+fn filter_optimistic_nodes_default() {
+    CommandLineTest::new()
+        .run_with_zero_port()
+        .with_config(|config| {
+            assert!(!config.chain.filter_optimistic_nodes);
+        });
+}
+
+#[test]
+fn filter_optimistic_nodes() {
+    CommandLineTest::new()
+        .flag("filter-optimistic-nodes", None)
+        .run_with_zero_port()
+        .with_config(|config| {
+            assert!(config.chain.filter_optimistic_nodes);
+        });
+}
+
+#[test]
 fn invalid_gossip_verified_blocks_path_default() {
     CommandLineTest::new()
         .run_with_zero_port()

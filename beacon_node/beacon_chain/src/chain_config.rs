@@ -63,6 +63,14 @@ pub struct ChainConfig {
     pub prepare_payload_lookahead: Duration,
     /// Use EL-free optimistic sync for the finalized part of the chain.
     pub optimistic_finalized_sync: bool,
+    /// Exclude optimistically-imported blocks when filtering the block tree, so the head never
+    /// advances onto a block whose payload no execution client has judged. The justified root is
+    /// exempt: fork choice cannot pick a head below it.
+    ///
+    /// Non-standard and off by default. The spec's `filter_block_tree` never filters optimistic
+    /// blocks, and optimistic sync needs the head to reach them so the execution layer gets a
+    /// sync target. With this on, the head stays put while the EL is behind.
+    pub filter_optimistic_nodes: bool,
     /// The size of the shuffling cache,
     pub shuffling_cache_size: usize,
     /// If using a weak-subjectivity sync, whether we should download blocks all the way back to
@@ -156,6 +164,7 @@ impl Default for ChainConfig {
             prepare_payload_lookahead: Duration::from_secs(4),
             // This value isn't actually read except in tests.
             optimistic_finalized_sync: true,
+            filter_optimistic_nodes: false,
             shuffling_cache_size: crate::shuffling_cache::DEFAULT_CACHE_SIZE,
             genesis_backfill: false,
             complete_blob_backfill: false,
