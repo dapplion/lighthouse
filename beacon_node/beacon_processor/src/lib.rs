@@ -470,6 +470,7 @@ pub enum Work<E: EthSpec> {
     GossipExecutionPayloadBid(BlockingFn),
     GossipPayloadAttestation(BlockingFn),
     GossipProposerPreferences(BlockingFn),
+    GossipInclusionList(BlockingFn),
     LightClientBootstrapRequest(BlockingFn),
     LightClientOptimisticUpdateRequest(BlockingFn),
     LightClientFinalityUpdateRequest(BlockingFn),
@@ -533,6 +534,7 @@ pub enum WorkType {
     GossipExecutionPayloadBid,
     GossipPayloadAttestation,
     GossipProposerPreferences,
+    GossipInclusionList,
     LightClientBootstrapRequest,
     LightClientOptimisticUpdateRequest,
     LightClientFinalityUpdateRequest,
@@ -574,6 +576,7 @@ impl<E: EthSpec> Work<E> {
             Work::GossipExecutionPayloadBid(_) => WorkType::GossipExecutionPayloadBid,
             Work::GossipPayloadAttestation(_) => WorkType::GossipPayloadAttestation,
             Work::GossipProposerPreferences(_) => WorkType::GossipProposerPreferences,
+            Work::GossipInclusionList(_) => WorkType::GossipInclusionList,
             Work::RpcBlock { .. } => WorkType::RpcBlock,
             Work::RpcBlobs { .. } => WorkType::RpcBlobs,
             Work::RpcCustodyColumn { .. } => WorkType::RpcCustodyColumn,
@@ -1039,6 +1042,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             work_queues.gossip_payload_attestation_queue.pop()
                         {
                             Some(item)
+                        // Check inclusion lists next, they also influence fork choice.
+                        } else if let Some(item) = work_queues.gossip_inclusion_list_queue.pop() {
+                            Some(item)
                         // Check sync committee messages after attestations as their rewards are lesser
                         // and they don't influence fork choice.
                         } else if let Some(item) = work_queues.sync_contribution_queue.pop() {
@@ -1371,6 +1377,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             Work::GossipProposerPreferences { .. } => work_queues
                                 .gossip_proposer_preferences_queue
                                 .push(work, work_id),
+                            Work::GossipInclusionList { .. } => {
+                                work_queues.gossip_inclusion_list_queue.push(work, work_id)
+                            }
                             Work::BlobsByRootsRequest { .. } => {
                                 work_queues.blob_broots_queue.push(work, work_id)
                             }
@@ -1484,6 +1493,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         }
                         WorkType::GossipProposerPreferences => {
                             work_queues.gossip_proposer_preferences_queue.len()
+                        }
+                        WorkType::GossipInclusionList => {
+                            work_queues.gossip_inclusion_list_queue.len()
                         }
                         WorkType::LightClientBootstrapRequest => {
                             work_queues.lc_bootstrap_queue.len()
@@ -1694,6 +1706,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
             | Work::GossipExecutionPayloadBid(process_fn)
             | Work::GossipPayloadAttestation(process_fn)
             | Work::GossipProposerPreferences(process_fn)
+            | Work::GossipInclusionList(process_fn)
             | Work::LightClientBootstrapRequest(process_fn)
             | Work::LightClientOptimisticUpdateRequest(process_fn)
             | Work::LightClientFinalityUpdateRequest(process_fn)
