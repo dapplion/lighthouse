@@ -1192,6 +1192,17 @@ impl ProtoArrayForkChoice {
             .node_execution_status(*block_root, PayloadStatus::Full)
     }
 
+    /// See `ProtoArray::rewind_to_valid_payload`.
+    pub fn rewind_to_valid_payload(
+        &self,
+        head: ForkChoiceNode,
+        max_ancestors: usize,
+        stop_root: Hash256,
+    ) -> Result<ForkChoiceNode, Error> {
+        self.proto_array
+            .rewind_to_valid_payload(head, max_ancestors, stop_root)
+    }
+
     /// Spec's `get_supported_node`.
     pub fn supported_node(
         &self,

@@ -856,6 +856,16 @@ pub fn cli_app() -> Command {
                 .display_order(0)
         )
         .arg(
+            Arg::new("valid-head-lookback")
+                .long("valid-head-lookback")
+                .value_name("ANCESTORS")
+                .help("Search up to this many ancestors for a valid payload when fork choice \
+                       picks an optimistic head, lagging the head by at most that many blocks. \
+                       Default 0.")
+                .action(ArgAction::Set)
+                .display_order(0)
+        )
+        .arg(
             Arg::new("execution-jwt")
                 .long("execution-jwt")
                 .value_name("EXECUTION-JWT")
