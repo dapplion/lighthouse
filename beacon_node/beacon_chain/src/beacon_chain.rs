@@ -4253,7 +4253,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         self: &Arc<Self>,
         verified_proof: &GossipVerifiedExecutionProof,
     ) -> Result<(), BlockError> {
-        let block_root = verified_proof.proof.beacon_block_root();
+        let block_root = verified_proof.proof.beacon_root();
         if !self.execution_proofs_satisfied(&block_root) {
             return Ok(());
         }

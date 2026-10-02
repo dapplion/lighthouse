@@ -30,15 +30,25 @@ pub struct PublicInput {
     pub parent_hash: ExecutionBlockHash,
 }
 
+/// A zkEVM proof of an execution payload (EIP-8025 `ZKEVMProof`).
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode, TreeHash)]
+#[context_deserialize(ForkName)]
+pub struct ZkevmProof {
+    pub proof_data: ProofData,
+    pub proof_type: ProofType,
+    pub public_inputs: PublicInput,
+}
+
 /// An execution proof attesting to the validity of an execution payload (EIP-8025).
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode, TreeHash)]
 #[context_deserialize(ForkName)]
 pub struct ExecutionProof {
-    pub proof_data: ProofData,
-    pub proof_type: ProofType,
-    pub public_input: PublicInput,
-    pub beacon_block_root: Hash256,
+    pub beacon_root: Hash256,
+    pub zk_proof: ZkevmProof,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub validator_index: u64,
 }
 
 impl SignedRoot for ExecutionProof {}
@@ -48,18 +58,16 @@ impl SignedRoot for ExecutionProof {}
 #[context_deserialize(ForkName)]
 pub struct SignedExecutionProof {
     pub message: ExecutionProof,
-    #[serde(with = "serde_utils::quoted_u64")]
-    pub validator_index: u64,
     pub signature: Signature,
 }
 
 impl SignedExecutionProof {
-    pub fn beacon_block_root(&self) -> Hash256 {
-        self.message.beacon_block_root
+    pub fn beacon_root(&self) -> Hash256 {
+        self.message.beacon_root
     }
 
     pub fn proof_type(&self) -> ProofType {
-        self.message.proof_type
+        self.message.zk_proof.proof_type
     }
 }
 

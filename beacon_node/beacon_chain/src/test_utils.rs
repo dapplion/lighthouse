@@ -857,15 +857,17 @@ where
     ) {
         let proof = SignedExecutionProof {
             message: ExecutionProof {
-                proof_data: ProofData::new(vec![1]).expect("proof data"),
-                proof_type,
-                public_input: PublicInput {
-                    block_hash: ExecutionBlockHash::zero(),
-                    parent_hash: ExecutionBlockHash::zero(),
+                beacon_root: block_root,
+                zk_proof: ZkevmProof {
+                    proof_data: ProofData::new(vec![1]).expect("proof data"),
+                    proof_type,
+                    public_inputs: PublicInput {
+                        block_hash: ExecutionBlockHash::zero(),
+                        parent_hash: ExecutionBlockHash::zero(),
+                    },
                 },
-                beacon_block_root: block_root,
+                validator_index: 0,
             },
-            validator_index: 0,
             signature: Signature::infinity().expect("infinity signature"),
         };
 
@@ -876,7 +878,7 @@ where
                     proof.message.tree_hash_root(),
                     block_root,
                     proof_type,
-                    proof.validator_index,
+                    proof.message.validator_index,
                     block_slot,
                 )
                 .expect("proof should be observable");
