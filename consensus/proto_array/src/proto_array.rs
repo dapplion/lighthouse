@@ -2172,7 +2172,10 @@ impl ProtoArray {
 
     /// The parent block, on whichever of its two payload nodes `block_root` extends. `None` at
     /// the root of the array.
-    fn parent_node(&self, block_root: Hash256) -> Result<Option<ForkChoiceNode>, Error> {
+    fn parent_fork_choice_node(
+        &self,
+        block_root: Hash256,
+    ) -> Result<Option<ForkChoiceNode>, Error> {
         let node = self
             .get_block(block_root)
             .ok_or(Error::NodeUnknown(block_root))?;
@@ -2187,31 +2190,32 @@ impl ProtoArray {
         Ok(Some(ForkChoiceNode::new(parent.root(), payload_status)))
     }
 
-    /// Steps back up to `lookback` ancestors of `head` for a VALID payload, stopping at
-    /// `justified_root`. Unchanged if nothing within the limit is valid, so the lag is bounded
-    /// and the EL still gets an advancing target.
-    pub(crate) fn valid_head_or_ancestor(
+    /// The first node with a valid payload at or above `head`, searching no further back than
+    /// `stop_root` and no more than `max_ancestors` steps. `head` itself if there is none.
+    pub(crate) fn rewind_to_valid_payload(
         &self,
         head: ForkChoiceNode,
-        lookback: usize,
-        justified_root: Hash256,
+        max_ancestors: usize,
+        stop_root: Hash256,
     ) -> Result<ForkChoiceNode, Error> {
-        if lookback == 0 {
+        // Returning `head` is infallible; the walk is not.
+        if max_ancestors == 0 {
             return Ok(head);
         }
 
         let mut node = head;
-        for _ in 0..=lookback {
+        // `head`, then its ancestors.
+        for _ in 0..=max_ancestors {
             if self
                 .node_execution_status(node.root(), node.payload_status())?
                 .is_valid()
             {
                 return Ok(node);
             }
-            if node.root() == justified_root {
+            if node.root() == stop_root {
                 break;
             }
-            let Some(parent) = self.parent_node(node.root())? else {
+            let Some(parent) = self.parent_fork_choice_node(node.root())? else {
                 break;
             };
             node = parent;

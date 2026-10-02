@@ -64,7 +64,8 @@ pub struct ChainConfig {
     /// Use EL-free optimistic sync for the finalized part of the chain.
     pub optimistic_finalized_sync: bool,
     /// Ancestors to search for a valid payload when fork choice picks an optimistic head.
-    /// `0` reports fork choice's own head; higher values lag it by at most that many blocks.
+    /// `0` reports fork choice's own head; higher values lag it by at most that many blocks, so
+    /// the execution layer still receives an advancing target.
     pub valid_head_lookback: usize,
     /// The size of the shuffling cache,
     pub shuffling_cache_size: usize,

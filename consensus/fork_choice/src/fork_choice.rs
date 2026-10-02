@@ -385,7 +385,8 @@ pub struct ForkChoice<T, E> {
     /// Rejects attestations from the current or a future slot instead of queueing them, as the
     /// spec does. Always `false` in production.
     spec_test_mode: bool,
-    /// See `ChainConfig::valid_head_lookback`.
+    /// Ancestors the head may be rewound by to reach a valid payload. `0` leaves the head as
+    /// fork choice selected it.
     valid_head_lookback: usize,
     _phantom: PhantomData<E>,
 }
@@ -603,9 +604,10 @@ where
             current_slot,
             spec,
         )?;
+        // The head must not be rewound below the justified checkpoint.
         let head_node = self
             .proto_array
-            .valid_head_or_ancestor(
+            .rewind_to_valid_payload(
                 head_node,
                 self.valid_head_lookback,
                 self.justified_checkpoint().root,

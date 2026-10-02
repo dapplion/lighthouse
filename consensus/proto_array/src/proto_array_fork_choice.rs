@@ -176,9 +176,9 @@ impl IndexedForkChoiceNode {
 /// Spec's `ForkChoiceNode`: a block root paired with the payload status of the branch it names.
 ///
 /// Fields are private with no public constructor, so a `ForkChoiceNode` can only be produced by
-/// `find_head`, `get_head`, `parent_node`, or `get_supported_node` — a node the chain actually elected or that was
-/// voted for. This keeps callers from querying the "wrong half" of a block and getting an answer
-/// about a branch the chain never ran.
+/// `find_head`, `get_head`, `rewind_to_valid_payload`, or `get_supported_node` — a node the chain
+/// actually elected, an ancestor of one, or that was voted for. This keeps callers from querying
+/// the "wrong half" of a block and getting an answer about a branch the chain never ran.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ForkChoiceNode {
     root: Hash256,
@@ -1192,15 +1192,15 @@ impl ProtoArrayForkChoice {
             .node_execution_status(*block_root, PayloadStatus::Full)
     }
 
-    /// See `ProtoArray::valid_head_or_ancestor`.
-    pub fn valid_head_or_ancestor(
+    /// See `ProtoArray::rewind_to_valid_payload`.
+    pub fn rewind_to_valid_payload(
         &self,
         head: ForkChoiceNode,
-        lookback: usize,
-        justified_root: Hash256,
+        max_ancestors: usize,
+        stop_root: Hash256,
     ) -> Result<ForkChoiceNode, Error> {
         self.proto_array
-            .valid_head_or_ancestor(head, lookback, justified_root)
+            .rewind_to_valid_payload(head, max_ancestors, stop_root)
     }
 
     /// Spec's `get_supported_node`.
