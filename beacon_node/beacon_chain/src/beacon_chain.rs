@@ -7,9 +7,9 @@ use crate::beacon_block_streamer::{BeaconBlockStreamer, CheckCaches};
 use crate::beacon_proposer_cache::{BeaconProposerCache, EpochBlockProposers};
 use crate::block_times_cache::BlockTimesCache;
 use crate::block_verification::{
-    BlockError, ExecutionPendingBlock, GossipVerifiedBlock, IntoExecutionPendingBlock,
-    check_block_is_finalized_checkpoint_or_descendant, check_block_relevancy,
-    signature_verify_chain_segment, verify_header_signature,
+    BlockError, ExecutionPendingBlock, GossipVerificationError, GossipVerifiedBlock,
+    IntoExecutionPendingBlock, check_block_is_finalized_checkpoint_or_descendant,
+    check_block_relevancy, signature_verify_chain_segment, verify_header_signature,
 };
 use crate::block_verification_types::{
     AsBlock, AvailableExecutedBlock, BlockImportData, ExecutedBlock, RangeSyncBlock,
@@ -3241,6 +3241,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 if let RangeSyncBlock::Gloas {
                     block,
                     envelope: Some(envelope),
+                    ..
                 } = block
                 {
                     let chain = self.clone();
@@ -3377,7 +3378,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     pub async fn verify_block_for_gossip(
         self: &Arc<Self>,
         block: Arc<SignedBeaconBlock<T::EthSpec>>,
-    ) -> Result<GossipVerifiedBlock<T>, BlockError> {
+    ) -> Result<GossipVerifiedBlock<T>, GossipVerificationError> {
         let chain = self.clone();
         self.task_executor
             .clone()
@@ -3386,7 +3387,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     let slot = block.slot();
                     let graffiti_string = block.message().body().graffiti().as_utf8_lossy();
 
-                    match GossipVerifiedBlock::new(block, &chain) {
+                    match GossipVerifiedBlock::new_with_error_root(block, &chain) {
                         Ok(verified) => {
                             let commitments_formatted = verified.block.commitments_formatted();
                             debug!(
@@ -3401,7 +3402,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         }
                         Err(e) => {
                             debug!(
-                                error = e.to_string(),
+                                error = e.error.to_string(),
                                 graffiti = graffiti_string,
                                 %slot,
                                 "Rejected gossip block"
@@ -3413,9 +3414,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 },
                 "gossip_block_verification_handle",
             )
-            .ok_or(BeaconChainError::RuntimeShutdown)?
+            .ok_or(GossipVerificationError::Internal(
+                BeaconChainError::RuntimeShutdown,
+            ))?
             .await
-            .map_err(BeaconChainError::TokioJoin)?
+            .map_err(|error| GossipVerificationError::Internal(BeaconChainError::TokioJoin(error)))?
+            .map_err(GossipVerificationError::Block)
     }
 
     /// Cache the data columns in the processing cache, process it, then evict it from the cache if it was
@@ -7124,34 +7128,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         self.spec
             .bellatrix_fork_epoch
             .is_none_or(|bellatrix| slot.epoch(T::EthSpec::slots_per_epoch()) < bellatrix)
-    }
-
-    /// Returns the value of `execution_optimistic` for `head_block`.
-    ///
-    /// Returns `Ok(false)` if the block is pre-Bellatrix, or has `ExecutionVerdict::Valid`.
-    /// Returns `Ok(true)` if the block has `ExecutionVerdict::Optimistic` or `ExecutionVerdict::Invalid`.
-    ///
-    /// This function will return an error if `head_block` is not present in the fork choice store
-    /// and so should only be used on the head block or when the block *should* be present in the
-    /// fork choice store.
-    ///
-    /// There is a potential race condition when syncing where the block_root of `head_block` could
-    /// be pruned from the fork choice store before being read.
-    pub fn is_optimistic_or_invalid_head_block<Payload: AbstractExecPayload<T::EthSpec>>(
-        &self,
-        head_block: &SignedBeaconBlock<T::EthSpec, Payload>,
-    ) -> Result<bool, BeaconChainError> {
-        // Check if the block is pre-Bellatrix.
-        if self.slot_is_prior_to_bellatrix(head_block.slot()) {
-            Ok(false)
-        } else {
-            self.canonical_head
-                .fork_choice_read_lock()
-                .is_optimistic_or_invalid_block_assuming_full_no_fallback(
-                    &head_block.canonical_root(),
-                )
-                .map_err(BeaconChainError::ForkChoiceError)
-        }
     }
 
     /// Returns the value of `execution_optimistic` for the current head block.

@@ -337,6 +337,27 @@ pub enum BlockError {
     EnvelopeError(Box<EnvelopeError>),
 }
 
+#[derive(Debug)]
+pub struct BlockErrorWithRoot {
+    pub block_root: Hash256,
+    pub error: Box<BlockError>,
+}
+
+#[derive(Debug)]
+pub enum GossipVerificationError {
+    Block(BlockErrorWithRoot),
+    Internal(BeaconChainError),
+}
+
+impl GossipVerificationError {
+    pub fn into_block_error(self) -> BlockError {
+        match self {
+            Self::Block(error) => *error.error,
+            Self::Internal(error) => error.into(),
+        }
+    }
+}
+
 /// Which specific signature(s) are invalid in a SignedBeaconBlock
 #[derive(Debug)]
 pub enum InvalidSignature {
@@ -843,6 +864,13 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
         block: Arc<SignedBeaconBlock<T::EthSpec>>,
         chain: &BeaconChain<T>,
     ) -> Result<Self, BlockError> {
+        Self::new_with_error_root(block, chain).map_err(|error| *error.error)
+    }
+
+    pub(crate) fn new_with_error_root(
+        block: Arc<SignedBeaconBlock<T::EthSpec>>,
+        chain: &BeaconChain<T>,
+    ) -> Result<Self, BlockErrorWithRoot> {
         // If the block is valid for gossip we don't supply it to the slasher here because
         // we assume it will be transformed into a fully verified block. We *do* need to supply
         // it to the slasher if an error occurs, because that's the end of this block's journey,
@@ -851,23 +879,25 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
         // The `SignedBeaconBlock` and `SignedBeaconBlockHeader` have the same canonical root,
         // but it's way quicker to calculate root of the header since the hash of the tree rooted
         // at `BeaconBlockBody` is already computed in the header.
-        Self::new_without_slasher_checks(block, &header, chain)
+        let block_root = get_block_header_root(&header);
+        Span::current().record("block_root", block_root.to_string());
+        Self::new_without_slasher_checks(block, block_root, chain)
             .map_err(|e| {
                 process_block_slash_info::<_, BlockError>(
                     chain,
                     BlockSlashInfo::from_early_error_block(header, e),
                 )
             })
-            .inspect(|block| {
-                let current_span = Span::current();
-                current_span.record("block_root", block.block_root.to_string());
+            .map_err(|error| BlockErrorWithRoot {
+                block_root,
+                error: Box::new(error),
             })
     }
 
     /// As for new, but doesn't pass the block to the slasher.
     fn new_without_slasher_checks(
         block: Arc<SignedBeaconBlock<T::EthSpec>>,
-        block_header: &SignedBeaconBlockHeader,
+        block_root: Hash256,
         chain: &BeaconChain<T>,
     ) -> Result<Self, BlockError> {
         // Ensure the block is the correct structure for the fork at `block.slot()`.
@@ -918,8 +948,6 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
                 ));
             }
         }
-
-        let block_root = get_block_header_root(block_header);
 
         // Do not gossip a block from a finalized slot.
         check_block_against_finalized_slot(block.message(), block_root, chain)?;
@@ -1259,6 +1287,7 @@ impl<T: BeaconChainTypes> SignatureVerifiedBlock<T> {
                 {
                     MaybeAvailableBlock::Available(
                         AvailableBlock::new(
+                            from.block_root,
                             block,
                             AvailableBlockData::NoData,
                             &chain.custody_context,
@@ -2247,12 +2276,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     // Policy rejections are unpenalized, so reject them before hashing the body.
                     let (pubkey, fork) =
                         chain.check_lookup_block_admission(&block, max_slot_distance)?;
-                    let block = LookupBlock::new(block);
-                    if block.block_root() != block_root {
+                    let block_root_computed = get_block_root(&block);
+                    if block_root_computed != block_root {
                         return Err(LookupProposerError::UnrequestedBlockRoot(
-                            block.block_root(),
+                            block_root_computed,
                         ));
                     }
+                    let block = LookupBlock::new(block_root, block);
 
                     let signature_start = Instant::now();
                     let valid = block.block().verify_signature(

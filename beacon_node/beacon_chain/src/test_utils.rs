@@ -1532,7 +1532,7 @@ where
 
         let signed_block = self.sign_beacon_block(block, state);
         let block_root = signed_block.canonical_root();
-        let lookup_block = LookupBlock::new(Arc::new(signed_block));
+        let lookup_block = LookupBlock::new(block_root, Arc::new(signed_block));
         self.chain.slot_clock.set_slot(slot.as_u64());
         self.chain
             .process_block(
@@ -3002,7 +3002,7 @@ where
             self.chain
                 .process_block(
                     block_root,
-                    LookupBlock::new(block),
+                    LookupBlock::new(block_root, block),
                     NotifyExecutionLayer::Yes,
                     BlockImportSource::Lookup,
                     || Ok(()),
@@ -3061,7 +3061,7 @@ where
             self.chain
                 .process_block(
                     block_root,
-                    LookupBlock::new(block),
+                    LookupBlock::new(block_root, block),
                     NotifyExecutionLayer::Yes,
                     BlockImportSource::Lookup,
                     || Ok(()),
@@ -3210,9 +3210,10 @@ where
                     })
                     .transpose()
                     .unwrap();
-                RangeSyncBlock::new_gloas(block, envelope).unwrap()
+                RangeSyncBlock::new_gloas(block_root, block, envelope).unwrap()
             } else {
                 RangeSyncBlock::new(
+                    block_root,
                     block,
                     AvailableBlockData::NoData,
                     &self.chain.custody_context,
@@ -3246,10 +3247,11 @@ where
                     })
                     .transpose()
                     .unwrap();
-                RangeSyncBlock::new_gloas(block, envelope).unwrap()
+                RangeSyncBlock::new_gloas(block_root, block, envelope).unwrap()
             } else {
                 let block_data = AvailableBlockData::new_with_data_columns(custody_columns);
-                RangeSyncBlock::new(block, block_data, &self.chain.custody_context).unwrap()
+                RangeSyncBlock::new(block_root, block, block_data, &self.chain.custody_context)
+                    .unwrap()
             }
         } else {
             let blobs = self.chain.get_blobs(&block_root).unwrap().blobs();
@@ -3259,7 +3261,7 @@ where
                 AvailableBlockData::NoData
             };
 
-            RangeSyncBlock::new(block, block_data, &self.chain.custody_context).unwrap()
+            RangeSyncBlock::new(block_root, block, block_data, &self.chain.custody_context).unwrap()
         }
     }
 
@@ -3269,13 +3271,14 @@ where
         block: Arc<SignedBeaconBlock<E, FullPayload<E>>>,
         blob_items: Option<(KzgProofs<E>, BlobsList<E>)>,
     ) -> Result<RangeSyncBlock<E>, BlockError> {
+        let block_root = block.canonical_root();
         if let Ok(bid) = block.message().body().signed_execution_payload_bid() {
             let columns = blob_items
                 .map(|_| generate_data_column_sidecars_from_block(&block, &self.spec))
                 .unwrap_or_default();
             let envelope = self
                 .chain
-                .get_payload_envelope(&block.canonical_root())
+                .get_payload_envelope(&block_root)
                 .map_err(|e| BlockError::BeaconChainError(Box::new(e)))?
                 .map(Arc::new)
                 .map(|envelope| {
@@ -3283,7 +3286,8 @@ where
                 })
                 .transpose()
                 .unwrap();
-            return RangeSyncBlock::new_gloas(block, envelope).map_err(BlockError::InternalError);
+            return RangeSyncBlock::new_gloas(block_root, block, envelope)
+                .map_err(BlockError::InternalError);
         }
 
         Ok(if self.spec.is_peer_das_enabled_for_epoch(block.epoch()) {
@@ -3299,9 +3303,10 @@ where
                     .filter(|d| sampling_columns.contains(d.index()))
                     .collect::<Vec<_>>();
                 let block_data = AvailableBlockData::new_with_data_columns(columns);
-                RangeSyncBlock::new(block, block_data, &self.chain.custody_context)?
+                RangeSyncBlock::new(block_root, block, block_data, &self.chain.custody_context)?
             } else {
                 RangeSyncBlock::new(
+                    block_root,
                     block,
                     AvailableBlockData::NoData,
                     &self.chain.custody_context,
@@ -3320,7 +3325,7 @@ where
                 AvailableBlockData::NoData
             };
 
-            RangeSyncBlock::new(block, block_data, &self.chain.custody_context)?
+            RangeSyncBlock::new(block_root, block, block_data, &self.chain.custody_context)?
         })
     }
 
