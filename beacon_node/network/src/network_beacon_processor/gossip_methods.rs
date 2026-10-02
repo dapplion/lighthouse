@@ -20,8 +20,7 @@ use beacon_chain::proposer_preferences_verification::ProposerPreferencesError;
 use beacon_chain::store::Error;
 use beacon_chain::{
     AvailabilityProcessingStatus, BeaconChainError, BeaconChainTypes, BlockError, ExitInvalid,
-    ExitValidationError, ForkChoiceError, GossipVerificationError, GossipVerifiedBlock,
-    NotifyExecutionLayer,
+    ExitValidationError, ForkChoiceError, GossipVerifiedBlock, NotifyExecutionLayer,
     attestation_verification::{self, Error as AttnError, VerifiedAttestation},
     data_availability_checker::AvailabilityCheckErrorCategory,
     light_client_finality_update_verification::Error as LightClientFinalityUpdateError,
@@ -1598,19 +1597,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             .verify_block_for_gossip(block.clone())
             .await;
 
-        let verification_result = match verification_result {
-            Ok(verified_block) => Ok(verified_block),
-            Err(GossipVerificationError::Block(error)) => Err(error),
-            Err(GossipVerificationError::Internal(error)) => {
-                debug!(
-                    error = ?error,
-                    "Gossip block beacon chain error"
-                );
-                self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
-                return None;
-            }
-        };
-
         let block_root = match &verification_result {
             Ok(verified_block) => {
                 metrics::set_gauge(
@@ -1628,7 +1614,21 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 );
                 verified_block.block_root
             }
-            Err(error) => error.block_root,
+            Err(error) => match error.block_root {
+                Some(block_root) => block_root,
+                None => {
+                    debug!(
+                        error = ?error.error,
+                        "Gossip block beacon chain error"
+                    );
+                    self.propagate_validation_result(
+                        message_id,
+                        peer_id,
+                        MessageAcceptance::Ignore,
+                    );
+                    return None;
+                }
+            },
         };
 
         let verification_result = verification_result.map_err(|error| *error.error);

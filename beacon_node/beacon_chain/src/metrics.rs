@@ -77,6 +77,7 @@ pub static BLOCK_PROCESSING_TIMES: LazyLock<Result<Histogram>> = LazyLock::new(|
         "Full runtime of block processing",
     )
 });
+// TODO(pawan): delete these metrics before merging this PR.
 pub static LOOKUP_BLOCK_PROPOSER_CHECK_TIMES: LazyLock<Result<HistogramVec>> =
     LazyLock::new(|| {
         try_create_histogram_vec_with_buckets(

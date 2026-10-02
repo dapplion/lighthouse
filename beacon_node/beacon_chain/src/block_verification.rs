@@ -337,23 +337,28 @@ pub enum BlockError {
     EnvelopeError(Box<EnvelopeError>),
 }
 
+/// Wraps the `BlockError` with the root of the block being computed to avoid
+/// computing it again on error.
 #[derive(Debug)]
 pub struct BlockErrorWithRoot {
-    pub block_root: Hash256,
+    /// Absent when the verification task fails without returning a computed root.
+    /// Note: We should return the root in almost all cases.
+    /// Only runtime failures can be returned without it.
+    pub block_root: Option<Hash256>,
     pub error: Box<BlockError>,
 }
 
-#[derive(Debug)]
-pub enum GossipVerificationError {
-    Block(BlockErrorWithRoot),
-    Internal(BeaconChainError),
+impl BlockErrorWithRoot {
+    pub fn into_block_error(self) -> BlockError {
+        *self.error
+    }
 }
 
-impl GossipVerificationError {
-    pub fn into_block_error(self) -> BlockError {
-        match self {
-            Self::Block(error) => *error.error,
-            Self::Internal(error) => error.into(),
+impl From<BeaconChainError> for BlockErrorWithRoot {
+    fn from(error: BeaconChainError) -> Self {
+        Self {
+            block_root: None,
+            error: Box::new(error.into()),
         }
     }
 }
@@ -889,7 +894,7 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
                 )
             })
             .map_err(|error| BlockErrorWithRoot {
-                block_root,
+                block_root: Some(block_root),
                 error: Box::new(error),
             })
     }

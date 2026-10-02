@@ -7,7 +7,7 @@ use crate::beacon_block_streamer::{BeaconBlockStreamer, CheckCaches};
 use crate::beacon_proposer_cache::{BeaconProposerCache, EpochBlockProposers};
 use crate::block_times_cache::BlockTimesCache;
 use crate::block_verification::{
-    BlockError, ExecutionPendingBlock, GossipVerificationError, GossipVerifiedBlock,
+    BlockError, BlockErrorWithRoot, ExecutionPendingBlock, GossipVerifiedBlock,
     IntoExecutionPendingBlock, check_block_is_finalized_checkpoint_or_descendant,
     check_block_relevancy, signature_verify_chain_segment, verify_header_signature,
 };
@@ -3378,7 +3378,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     pub async fn verify_block_for_gossip(
         self: &Arc<Self>,
         block: Arc<SignedBeaconBlock<T::EthSpec>>,
-    ) -> Result<GossipVerifiedBlock<T>, GossipVerificationError> {
+    ) -> Result<GossipVerifiedBlock<T>, BlockErrorWithRoot> {
         let chain = self.clone();
         self.task_executor
             .clone()
@@ -3414,12 +3414,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 },
                 "gossip_block_verification_handle",
             )
-            .ok_or(GossipVerificationError::Internal(
-                BeaconChainError::RuntimeShutdown,
-            ))?
+            .ok_or(BeaconChainError::RuntimeShutdown)?
             .await
-            .map_err(|error| GossipVerificationError::Internal(BeaconChainError::TokioJoin(error)))?
-            .map_err(GossipVerificationError::Block)
+            .map_err(BeaconChainError::TokioJoin)?
     }
 
     /// Cache the data columns in the processing cache, process it, then evict it from the cache if it was

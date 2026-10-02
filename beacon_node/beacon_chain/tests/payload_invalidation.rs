@@ -4,7 +4,7 @@
 use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::payload_envelope_verification::{EnvelopeError, EnvelopeSource};
 use beacon_chain::{
-    BeaconChainError, BlockError, ChainConfig, ExecutionPayloadError, GossipVerificationError,
+    BeaconChainError, BlockError, BlockErrorWithRoot, ChainConfig, ExecutionPayloadError,
     INVALID_JUSTIFIED_PAYLOAD_SHUTDOWN_REASON, NotifyExecutionLayer, StateSkipConfig,
     WhenSlotSkipped,
     canonical_head::CachedHead,
@@ -1171,7 +1171,7 @@ async fn invalid_parent() {
             .clone()
             .verify_block_for_gossip(block.clone())
             .await
-            .map_err(GossipVerificationError::into_block_error),
+            .map_err(BlockErrorWithRoot::into_block_error),
         Err(BlockError::ParentExecutionPayloadInvalid { parent_root: invalid_root })
         if invalid_root == parent_root
     ));
