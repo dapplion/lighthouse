@@ -77,14 +77,14 @@ impl<T> FifoQueue<T> {
 struct PeerWork<T> {
     /// Items popped from the queue whose worker has not yet finished.
     active: usize,
-    pending: VecDeque<T>,
+    queue: VecDeque<T>,
 }
 
 impl<T> Default for PeerWork<T> {
     fn default() -> Self {
         Self {
             active: 0,
-            pending: VecDeque::new(),
+            queue: VecDeque::new(),
         }
     }
 }
@@ -95,13 +95,13 @@ impl<T> PeerWork<T> {
         if self.active >= max_active {
             return None;
         }
-        let item = self.pending.pop_front()?;
+        let item = self.queue.pop_front()?;
         self.active = self.active.saturating_add(1);
         Some(item)
     }
 
     fn is_empty(&self) -> bool {
-        self.active == 0 && self.pending.is_empty()
+        self.active == 0 && self.queue.is_empty()
     }
 }
 
@@ -111,22 +111,27 @@ impl<T> PeerWork<T> {
 /// Pending work from disconnected peers is discarded lazily when it is next considered.
 pub struct PeerWorkQueue<T> {
     peers: HashMap<PeerId, PeerWork<T>>,
+    /// Max number of work items across all peers before we start discarding work.
     max_length: usize,
     max_active_per_peer: usize,
-    max_pending_per_peer: usize,
+    /// Max number of work items that can be queued per peer.
+    max_queued_per_peer: usize,
 }
 
 impl<T> PeerWorkQueue<T> {
-    pub fn new(max_length: usize, max_active_per_peer: usize, max_pending_per_peer: usize) -> Self {
+    pub fn new(max_length: usize, max_active_per_peer: usize, max_queued_per_peer: usize) -> Self {
         Self {
             peers: HashMap::new(),
             max_length,
             max_active_per_peer,
-            max_pending_per_peer,
+            max_queued_per_peer,
         }
     }
 
     /// Queue an item, returning it if either the global or per-peer limit is reached.
+    ///
+    /// Returns `Ok(())` if the push succeeded.
+    /// Returns `Err(item)` if the push failed because it exceeded capacity.
     pub fn push(&mut self, peer_id: PeerId, item: T, item_desc: &str) -> Result<(), T> {
         if self.len() >= self.max_length {
             error!(
@@ -139,18 +144,18 @@ impl<T> PeerWorkQueue<T> {
         }
 
         let peer_work = self.peers.entry(peer_id).or_default();
-        if peer_work.pending.len() >= self.max_pending_per_peer {
+        if peer_work.queue.len() >= self.max_queued_per_peer {
             error!(
                 queue = item_desc,
                 peer = %peer_id,
-                queue_len = peer_work.pending.len(),
+                queue_len = peer_work.queue.len(),
                 msg = "peer has too much pending work",
                 "Per-peer work queue is full",
             );
             return Err(item);
         }
 
-        peer_work.pending.push_back(item);
+        peer_work.queue.push_back(item);
         Ok(())
     }
 
@@ -158,6 +163,10 @@ impl<T> PeerWorkQueue<T> {
     ///
     /// Used for newly received work, so the peer is assumed to still be connected and no connection
     /// check is performed here. Work left queued is checked for disconnection by `pop`.
+    ///
+    /// Returns `Ok(Some(T))` if work can be immediately started.
+    /// Returns `Ok(None)` if work can be queued, but not immediately started.
+    /// Returns `Err(T)` if work can't be started or queued.
     pub fn push_and_pop(
         &mut self,
         peer_id: PeerId,
@@ -174,10 +183,15 @@ impl<T> PeerWorkQueue<T> {
     /// Return the next item from a connected peer that is below its active work limit.
     ///
     /// Pending work is discarded for peers that have disconnected.
+    ///
+    /// `is_connected` closure takes a `PeerId` and returns if the peer is still connected.
+    /// `cleanup` does any cleanup work associated with the work item.
+    /// This could be logging, metrics or sending a message to services that were waiting on
+    /// the result of the work.
     pub fn pop(
         &mut self,
         is_connected: impl Fn(&PeerId) -> bool,
-        mut discard: impl FnMut(T),
+        mut cleanup: impl FnMut(T),
     ) -> Option<T> {
         let max_active = self.max_active_per_peer;
         let mut next = None;
@@ -186,8 +200,8 @@ impl<T> PeerWorkQueue<T> {
                 if is_connected(peer_id) {
                     next = peer_work.start_next(max_active);
                 } else {
-                    for item in peer_work.pending.drain(..) {
-                        discard(item);
+                    for item in peer_work.queue.drain(..) {
+                        cleanup(item);
                     }
                 }
             }
@@ -210,7 +224,7 @@ impl<T> PeerWorkQueue<T> {
     pub fn len(&self) -> usize {
         self.peers
             .values()
-            .map(|peer_work| peer_work.pending.len())
+            .map(|peer_work| peer_work.queue.len())
             .sum()
     }
 

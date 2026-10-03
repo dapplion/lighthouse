@@ -437,6 +437,8 @@ pub enum Work<E: EthSpec> {
         beacon_block_root: Hash256,
         process_fn: AsyncFn,
         /// Cheap, notification-only callback used when processing is rejected.
+        /// This is used by the sync service to do any required cleanup associated
+        /// with the work.
         ignore_fn: BlockingFn,
     },
     RpcBlobs {
@@ -628,12 +630,9 @@ struct WorkerCompletion {
     peer_id: Option<PeerId>,
 }
 
-fn is_connected_or_unknown<E: EthSpec>(
-    network_globals: &NetworkGlobals<E>,
-    peer_id: &PeerId,
-) -> bool {
-    let peers = network_globals.peers.read();
-    peers.peer_info(peer_id).is_none() || peers.is_connected(peer_id)
+/// Returns true if the `peer_id` is connected and false otherwise.
+fn is_connected<E: EthSpec>(network_globals: &NetworkGlobals<E>, peer_id: &PeerId) -> bool {
+    network_globals.peers.read().is_connected(peer_id)
 }
 
 /// Unifies all the messages processed by the `BeaconProcessor`.
@@ -884,7 +883,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         // Check sync blocks before gossip blocks, since we've already explicitly
                         // requested these blocks.
                         } else if let Some(item) = work_queues.rpc_block_queue.pop(
-                            |peer_id| is_connected_or_unknown(&self.network_globals, peer_id),
+                            |peer_id| is_connected(&self.network_globals, peer_id),
                             notify_ignored_rpc_block,
                         ) {
                             Some(item)
@@ -903,8 +902,8 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         // Check gossip blocks and payloads before gossip attestations, since a block might be
                         // required to verify some attestations.
                         } else if let Some(item) = work_queues.gossip_block_queue.pop(
-                            |peer_id| is_connected_or_unknown(&self.network_globals, peer_id),
-                            drop,
+                            |peer_id| is_connected(&self.network_globals, peer_id),
+                            drop, // drop the work if we failed to process it
                         ) {
                             Some(item)
                         } else if let Some(item) = work_queues.gossip_execution_payload_queue.pop()
@@ -1212,17 +1211,23 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                     }
                                 }
                             }
+                            // If we can spawn and the task can be dispatched, dispatch immediately
                             Work::GossipBlock { peer_id, .. } if can_spawn => {
-                                if let Ok(Some(work)) = work_queues
+                                match work_queues
                                     .gossip_block_queue
                                     .push_and_pop(peer_id, work, work_id)
                                 {
-                                    self.spawn_worker(work, created_timestamp, idle_tx);
+                                    Ok(Some(work)) => {
+                                        self.spawn_worker(work, created_timestamp, idle_tx);
+                                    }
+                                    Ok(None) => {}
+                                    Err(_) => {}
                                 }
                             }
                             Work::GossipBlock { peer_id, .. } => {
                                 let _ = work_queues.gossip_block_queue.push(peer_id, work, work_id);
                             }
+                            // If we can spawn and the task can be dispatched, dispatch immediately
                             Work::RpcBlock { peer_id, .. } if can_spawn => {
                                 match work_queues
                                     .rpc_block_queue
