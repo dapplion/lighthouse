@@ -15,7 +15,7 @@ use beacon_chain::historical_data_columns::HistoricalDataColumnError;
 use beacon_chain::payload_envelope_verification::EnvelopeSource;
 use beacon_chain::{
     AvailabilityProcessingStatus, BeaconChainTypes, BlockError, ChainSegmentResult,
-    HistoricalBlockError, LookupProposerError, NotifyExecutionLayer,
+    HistoricalBlockError, LookupEarlyError, NotifyExecutionLayer,
 };
 use beacon_processor::{
     AsyncFn, BlockingFn, DuplicateCache,
@@ -159,14 +159,14 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
 
         let block = match self
             .chain
-            .verify_lookup_block_proposer(block_root, block, SLOT_IMPORT_TOLERANCE as u64)
+            .early_checks_lookup_block(block_root, block, SLOT_IMPORT_TOLERANCE as u64)
             .await
         {
             Ok(block) => block,
             Err(error) => {
                 debug!(%block_root, ?error, "Lookup block failed early proposer check");
                 let result = match error {
-                    LookupProposerError::UnrequestedBlockRoot(actual_root) => {
+                    LookupEarlyError::UnrequestedBlockRoot(actual_root) => {
                         BlockProcessingResult::Error {
                             penalty: Some((
                                 PeerAction::LowToleranceError,
@@ -176,10 +176,25 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             reason: format!("UnrequestedBlockRoot({actual_root:?})"),
                         }
                     }
-                    LookupProposerError::SlotOutOfRange => {
-                        BlockProcessingResult::Ignored("slot_out_of_range")
+                    LookupEarlyError::WouldRevertFinality(slot) => BlockProcessingResult::Error {
+                        penalty: Some((
+                            PeerAction::LowToleranceError,
+                            WhichPeerToPenalize::BlockPeer,
+                            "would_revert_finality",
+                        )),
+                        reason: format!("would revert finality slot: {}", slot),
+                    },
+                    LookupEarlyError::InvalidProposer(proposer_index) => {
+                        BlockProcessingResult::Error {
+                            penalty: Some((
+                                PeerAction::LowToleranceError,
+                                WhichPeerToPenalize::BlockPeer,
+                                "invalid_proposer",
+                            )),
+                            reason: format!("invalid proposer index {}", proposer_index),
+                        }
                     }
-                    LookupProposerError::InvalidSignature => BlockProcessingResult::Error {
+                    LookupEarlyError::InvalidSignature => BlockProcessingResult::Error {
                         penalty: Some((
                             PeerAction::LowToleranceError,
                             WhichPeerToPenalize::BlockPeer,
@@ -187,13 +202,21 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         )),
                         reason: "lookup_proposer_signature_invalid".to_string(),
                     },
-                    LookupProposerError::ProposerMismatch => {
-                        BlockProcessingResult::Ignored("proposer_mismatch")
+                    LookupEarlyError::ProposerMismatch => BlockProcessingResult::Error {
+                        penalty: Some((
+                            PeerAction::MidToleranceError,
+                            WhichPeerToPenalize::BlockPeer,
+                            "proposer_mismatch",
+                        )),
+                        reason: "proposer_mismatch".to_string(),
+                    },
+                    LookupEarlyError::SlotOutOfRange => {
+                        BlockProcessingResult::Ignored("slot_out_of_range")
                     }
-                    LookupProposerError::OutsideLookahead => {
+                    LookupEarlyError::OutsideLookahead => {
                         BlockProcessingResult::Ignored("outside_lookahead")
                     }
-                    LookupProposerError::Internal(error) => BlockProcessingResult::Error {
+                    LookupEarlyError::Internal(error) => BlockProcessingResult::Error {
                         penalty: None,
                         reason: format!("{error:?}"),
                     },
