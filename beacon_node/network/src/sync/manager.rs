@@ -269,6 +269,8 @@ pub struct SyncManager<T: BeaconChainTypes> {
     custody_backfill_sync: CustodyBackFillSync<T>,
 
     block_lookups: BlockLookups<T>,
+    /// Debounce duplicate unknown-root reports from the same peer before applying quorum.
+    notified_unknown_roots: LRUTimeCache<(PeerId, Hash256)>,
     /// Recent peer reports used to require corroboration before requesting an unknown root.
     pending_unknown_roots: LruCache<Hash256, PendingUnknownRoot>,
     /// Number of distinct peers that must report an unknown root before we request it.
@@ -336,6 +338,9 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             backfill_sync: BackFillSync::new(beacon_chain.clone(), network_globals.clone()),
             custody_backfill_sync: CustodyBackFillSync::new(beacon_chain.clone(), network_globals),
             block_lookups: BlockLookups::new(),
+            notified_unknown_roots: LRUTimeCache::new(Duration::from_secs(
+                NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS,
+            )),
             pending_unknown_roots: LruCache::new(MAX_PENDING_UNKNOWN_ROOTS),
             unknown_root_min_peers,
             notified_unknown_payload_roots: LRUTimeCache::new(Duration::from_secs(
@@ -910,7 +915,10 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 );
             }
             SyncMessage::UnknownBlockHashFromAttestation(peer_id, block_root) => {
-                self.handle_unknown_block_root(peer_id, block_root);
+                if !self.notified_unknown_roots.contains(&(peer_id, block_root)) {
+                    self.notified_unknown_roots.insert((peer_id, block_root));
+                    self.handle_unknown_block_root(peer_id, block_root);
+                }
             }
             SyncMessage::UnknownPayloadEnvelopeFromAttestation(peer_id, block_root) => {
                 if !self
