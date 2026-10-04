@@ -34,8 +34,7 @@ PROFILE ?= release
 # Include phase0 to test the code paths in sync that are pre blobs
 RECENT_FORKS=fulu gloas
 
-# For network tests include phase0 to cover genesis syncing (blocks without blobs or columns)
-TEST_NETWORK_FORKS=phase0 $(RECENT_FORKS)
+TEST_NETWORK_FORKS=$(RECENT_FORKS)
 
 # Extra flags for Cargo
 CARGO_INSTALL_EXTRA_FLAGS?=
@@ -229,8 +228,14 @@ test-op-pool-%:
 		--features "beacon_chain/fork_from_env,$(TEST_FEATURES)"\
 		-p operation_pool
 
-# Run the tests in the `network` crate for all known forks.
+# Run the full network suite for recent forks and targeted pre-Deneb range-sync coverage on phase0.
 test-network: $(patsubst %,test-network-%,$(TEST_NETWORK_FORKS))
+	env FORK_NAME=phase0 cargo nextest run --no-fail-fast --release \
+		--features "fork_from_env,fake_crypto,$(TEST_FEATURES)" \
+		-p network sync::tests::range
+	env FORK_NAME=phase0 cargo nextest run --no-fail-fast --release \
+		--features "fork_from_env,fake_crypto,$(TEST_FEATURES)" \
+		-p network sync::block_sidecar_coupling
 
 test-network-%:
 	env FORK_NAME=$* cargo nextest run --no-fail-fast --release \

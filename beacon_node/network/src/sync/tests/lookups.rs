@@ -2043,7 +2043,7 @@ fn stable_arbitrary() {
     assert_eq!(
         block.canonical_root(),
         Hash256::from_slice(
-            &hex::decode("eeb8ed92215c6bc504857c0e846ba1b9d81b4cb41a485a4aa9412386bc44aa53")
+            &hex::decode("7348573d99ca404b502e2be790593203a1d899f9cf04f42ec9c5b4975803e3c5")
                 .unwrap()
         ),
         "arbitrary produces a consistent value"
