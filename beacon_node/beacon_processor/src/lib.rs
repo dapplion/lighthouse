@@ -347,7 +347,7 @@ pub struct GossipAggregatePackage<E: EthSpec> {
 pub struct BeaconProcessorSend<E: EthSpec>(pub mpsc::Sender<WorkEvent<E>>);
 
 impl<E: EthSpec> BeaconProcessorSend<E> {
-    pub fn try_send(&self, message: WorkEvent<E>) -> Result<(), TrySendError<WorkEvent<E>>> {
+    pub fn try_send(&self, message: WorkEvent<E>) -> Result<(), Box<TrySendError<WorkEvent<E>>>> {
         let work_type = message.work_type();
         match self.0.try_send(message) {
             Ok(res) => Ok(res),
@@ -356,7 +356,7 @@ impl<E: EthSpec> BeaconProcessorSend<E> {
                     &metrics::BEACON_PROCESSOR_SEND_ERROR_PER_WORK_TYPE,
                     &[work_type.into()],
                 );
-                Err(e)
+                Err(Box::new(e))
             }
         }
     }

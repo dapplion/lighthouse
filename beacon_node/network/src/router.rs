@@ -841,7 +841,7 @@ impl<T: BeaconChainTypes> Router<T> {
         result: Result<(), crate::network_beacon_processor::Error<T::EthSpec>>,
     ) {
         if let Err(e) = result {
-            let work_type = match &e {
+            let work_type = match e.as_ref() {
                 mpsc::error::TrySendError::Closed(work) | mpsc::error::TrySendError::Full(work) => {
                     work.work_type_str()
                 }
