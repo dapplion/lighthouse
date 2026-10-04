@@ -91,6 +91,7 @@ impl<T: BeaconChainTypes> Router<T> {
         invalid_block_storage: InvalidBlockStorage,
         beacon_processor_send: BeaconProcessorSend<T::EthSpec>,
         fork_context: Arc<ForkContext>,
+        unknown_root_min_peers: usize,
     ) -> Result<mpsc::UnboundedSender<RouterMessage<T::EthSpec>>, String> {
         trace!("Service starting");
 
@@ -119,6 +120,7 @@ impl<T: BeaconChainTypes> Router<T> {
             network_beacon_processor.clone(),
             sync_recv,
             fork_context,
+            unknown_root_min_peers,
         );
 
         // generate the Message handler

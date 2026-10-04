@@ -328,6 +328,7 @@ impl<T: BeaconChainTypes> NetworkService<T> {
             invalid_block_storage,
             beacon_processor_send,
             fork_context.clone(),
+            config.unknown_root_min_peers,
         )?;
 
         // attestation and sync committee subnet service

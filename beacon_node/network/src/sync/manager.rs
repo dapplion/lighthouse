@@ -92,8 +92,6 @@ pub const SLOT_IMPORT_TOLERANCE: usize = 32;
 /// arbitrary number that covers a full slot, but allows recovery if sync get stuck for a few slots.
 const NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS: u64 = 30;
 
-/// Default number of distinct peers that must report an unknown root before we request it.
-const UNKNOWN_ROOT_MIN_PEERS: usize = 3;
 const MAX_PENDING_UNKNOWN_ROOTS: NonZeroUsize = new_non_zero_usize(1_024);
 
 /// An unknown root awaiting corroboration from `unknown_root_min_peers` distinct peers.
@@ -291,6 +289,7 @@ pub fn spawn<T: BeaconChainTypes>(
     beacon_processor: Arc<NetworkBeaconProcessor<T>>,
     sync_recv: mpsc::UnboundedReceiver<SyncMessage<T::EthSpec>>,
     fork_context: Arc<ForkContext>,
+    unknown_root_min_peers: usize,
 ) {
     assert!(
         beacon_chain
@@ -307,7 +306,7 @@ pub fn spawn<T: BeaconChainTypes>(
         beacon_processor,
         sync_recv,
         fork_context,
-        UNKNOWN_ROOT_MIN_PEERS,
+        unknown_root_min_peers,
     );
 
     // spawn the sync manager thread
