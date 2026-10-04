@@ -167,9 +167,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             Err(error) => {
                 debug!(%block_root, ?error, "Lookup block failed early proposer check");
                 let result = match error {
-                    LookupEarlyError::GenesisBlock => {
-                        BlockProcessingResult::Imported(true, "genesis")
-                    }
                     LookupEarlyError::UnrequestedBlockRoot(actual_root) => {
                         BlockProcessingResult::Error {
                             penalty: Some((

@@ -2255,8 +2255,6 @@ fn get_signature_verifier<'a, T: BeaconChainTypes>(
 /// This is helpful in weeding out obviously invalid blocks before we process them fully.
 #[derive(Debug)]
 pub enum LookupEarlyError {
-    /// Genesis is already known and does not need to be processed again.
-    GenesisBlock,
     /// The peer returned a block with a different hash than requested.
     ///
     /// Peer scoring: This is a malicious peer with high confidence.
@@ -2309,9 +2307,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 let current_slot = chain
                     .slot()
                     .map_err(|error| LookupEarlyError::Internal(Box::new(error)))?;
-                if slot == Slot::new(0) {
-                    return Err(LookupEarlyError::GenesisBlock);
-                }
                 if slot
                     <= head
                         .finalized_checkpoint()

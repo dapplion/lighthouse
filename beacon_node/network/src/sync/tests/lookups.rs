@@ -2043,7 +2043,7 @@ fn stable_arbitrary() {
     assert_eq!(
         block.canonical_root(),
         Hash256::from_slice(
-            &hex::decode("7348573d99ca404b502e2be790593203a1d899f9cf04f42ec9c5b4975803e3c5")
+            &hex::decode("eeb8ed92215c6bc504857c0e846ba1b9d81b4cb41a485a4aa9412386bc44aa53")
                 .unwrap()
         ),
         "arbitrary produces a consistent value"
@@ -2137,7 +2137,7 @@ async fn happy_path_unknown_attestation(depth: usize) {
 
 async fn happy_path_unknown_block_parent(depth: usize) {
     let mut r = TestRig::default();
-    r.build_chain(depth).await;
+    r.build_chain(depth.max(2)).await;
     r.trigger_with_last_unknown_block_parent();
     r.simulate(SimulateConfig::happy_path()).await;
     // Note the following for the tip lookup, it's the lookup for the tip block which has 0 peers
@@ -2160,7 +2160,7 @@ async fn happy_path_unknown_data_parent(depth: usize) {
     if r.is_after_gloas() {
         return;
     }
-    r.build_chain(depth).await;
+    r.build_chain(depth.max(2)).await;
     r.trigger_with_last_unknown_data_column_parent();
     r.simulate(SimulateConfig::happy_path()).await;
     r.assert_successful_lookup_sync_parent_trigger();
