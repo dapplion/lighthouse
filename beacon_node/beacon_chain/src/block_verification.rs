@@ -2277,10 +2277,11 @@ pub enum LookupEarlyError {
     ///
     /// Peer scording: This is not necessarily invalid, it just may be a block on a different branch.
     ProposerMismatch,
-    /// The block is too far behind our head or beyond the current clock slot.
+    /// The block is too far ahead of our head or beyond the current clock slot.
     SlotOutOfRange,
 
-    /// The block is ahead of our head and requires range sync to establish its ancestry.
+    /// The block is too far behind our head to follow its ancestry with lookups. Range sync
+    /// should fetch it instead.
     RangeSyncRequired(Slot),
 
     OutsideLookahead,
@@ -2320,13 +2321,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     return Err(LookupEarlyError::WouldRevertFinality(slot));
                 }
 
-                // Range sync can catch up to an ahead-of-head block, but cannot admit future blocks.
-                if slot < head.head_slot().saturating_sub(max_slot_distance) || slot > current_slot
+                if slot > current_slot || slot > head.head_slot().saturating_add(max_slot_distance)
                 {
                     return Err(LookupEarlyError::SlotOutOfRange);
-                }
-                if slot >= head.head_slot().saturating_add(max_slot_distance) {
-                    return Err(LookupEarlyError::RangeSyncRequired(slot));
                 }
 
                 // Validators get activated only at finality. Lookup sync is only done when sync thinks
@@ -2342,6 +2339,49 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         block.message().proposer_index(),
                     ));
                 }
+
+                // Check that the block root we requested is the same as the block root
+                // that we got.
+                let block_root_computed = get_block_root(&block);
+                if block_root_computed != block_root {
+                    return Err(LookupEarlyError::UnrequestedBlockRoot(block_root_computed));
+                }
+                let block = LookupBlock::new(block_root, block);
+
+                // Check the signature based against the proposer index in the block
+                let pubkey = chain
+                    .validator_pubkey_cache
+                    .read()
+                    .get(block.message().proposer_index() as usize)
+                    .ok_or(LookupEarlyError::Internal(Box::new(
+                        BeaconChainError::ValidatorPubkeyCacheIncomplete(
+                            block.message().proposer_index() as usize,
+                        ),
+                    )))?
+                    .clone();
+                let signature_start = Instant::now();
+                let valid = block.block().verify_signature(
+                    Some(block_root),
+                    &pubkey,
+                    &chain.spec.fork_at_epoch(epoch),
+                    chain.genesis_validators_root,
+                    &chain.spec,
+                );
+                metrics::observe_vec(
+                    &metrics::LOOKUP_BLOCK_PROPOSER_SIGNATURE_TIMES,
+                    &[if valid { "valid" } else { "invalid" }],
+                    signature_start.elapsed().as_secs_f64(),
+                );
+                if !valid {
+                    return Err(LookupEarlyError::InvalidSignature);
+                }
+
+                // A signed block this far behind our head is on a fork whose ancestry is too long
+                // to follow with lookups, so let range sync fetch it.
+                if slot <= head.head_slot().saturating_sub(max_slot_distance) {
+                    return Err(LookupEarlyError::RangeSyncRequired(slot));
+                }
+
                 let decision_root = state
                     .proposer_shuffling_decision_root_at_epoch(
                         epoch,
@@ -2349,9 +2389,6 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         &chain.spec,
                     )
                     .map_err(|error| match error {
-                        BeaconStateError::SlotOutOfBounds if slot > head.head_slot() => {
-                            LookupEarlyError::RangeSyncRequired(slot)
-                        }
                         BeaconStateError::SlotOutOfBounds => LookupEarlyError::OutsideLookahead,
                         error => LookupEarlyError::Internal(Box::new(error.into())),
                     })?;
@@ -2395,50 +2432,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     )
                     .map_err(|error| match error {
                         BeaconChainError::BeaconStateError(BeaconStateError::SlotOutOfBounds) => {
-                            if slot > head.head_slot() {
-                                LookupEarlyError::RangeSyncRequired(slot)
-                            } else {
-                                LookupEarlyError::OutsideLookahead
-                            }
+                            LookupEarlyError::OutsideLookahead
                         }
                         error => LookupEarlyError::Internal(Box::new(error)),
                     })?;
-                // Check that the block root we requested is the same as the block root
-                // that we got.
-                let block_root_computed = get_block_root(&block);
-                if block_root_computed != block_root {
-                    return Err(LookupEarlyError::UnrequestedBlockRoot(block_root_computed));
-                }
-                let block = LookupBlock::new(block_root, block);
-
-                // Check the signature based against the proposer index in the block
-                let pubkey = chain
-                    .validator_pubkey_cache
-                    .read()
-                    .get(block.message().proposer_index() as usize)
-                    .ok_or(LookupEarlyError::Internal(Box::new(
-                        BeaconChainError::ValidatorPubkeyCacheIncomplete(
-                            block.message().proposer_index() as usize,
-                        ),
-                    )))?
-                    .clone();
-                let signature_start = Instant::now();
-                let valid = block.block().verify_signature(
-                    Some(block_root),
-                    &pubkey,
-                    &chain.spec.fork_at_epoch(epoch),
-                    chain.genesis_validators_root,
-                    &chain.spec,
-                );
-                metrics::observe_vec(
-                    &metrics::LOOKUP_BLOCK_PROPOSER_SIGNATURE_TIMES,
-                    &[if valid { "valid" } else { "invalid" }],
-                    signature_start.elapsed().as_secs_f64(),
-                );
-                if !valid {
-                    return Err(LookupEarlyError::InvalidSignature);
-                }
-
                 // Now check that the proposer index lines up with our view of the schedule
                 if block.message().proposer_index() != proposer.index as u64 {
                     return Err(LookupEarlyError::ProposerMismatch);

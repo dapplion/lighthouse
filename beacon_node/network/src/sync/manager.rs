@@ -382,11 +382,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn get_ignored_chains(&mut self) -> Vec<Hash256> {
-        self.block_lookups.get_ignored_chains()
-    }
-
-    #[cfg(test)]
     pub(crate) fn insert_ignored_chain(&mut self, block_root: Hash256) {
         self.block_lookups.insert_ignored_chain(block_root);
     }

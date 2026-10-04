@@ -38,7 +38,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::info;
 use types::{
-    BlobSidecar, BlockImportSource, ColumnIndex, DataColumnSidecar, DataColumnSubnetId,
+    BlobSidecar, BlockImportSource, ColumnIndex, DataColumnSidecar, DataColumnSubnetId, EthSpec,
     ForkContext, ForkName, Hash256, MinimalEthSpec as E, SignedBeaconBlock,
     SignedExecutionPayloadEnvelope, Slot,
 };
@@ -1785,13 +1785,6 @@ impl TestRig {
         self.sync_manager.insert_ignored_chain(block_root);
     }
 
-    fn assert_ignored_chain(&mut self, chain_hash: Hash256) {
-        let chains = self.sync_manager.get_ignored_chains();
-        if !chains.contains(&chain_hash) {
-            panic!("expected ignored chains to contain {chain_hash:?}: {chains:?}");
-        }
-    }
-
     #[track_caller]
     fn assert_no_active_single_lookups(&self) {
         assert!(
@@ -2573,38 +2566,39 @@ async fn lookups_form_chain() {
 }
 
 #[tokio::test]
-/// Assert that an ahead-of-head lookup switches to range sync before fetching ancestors.
+/// Assert that a lookup for a block beyond the slot import tolerance is dropped without
+/// fetching ancestors or forcing range sync.
 async fn test_parent_lookup_too_deep_grow_ancestor_one() {
     let mut r = TestRig::default();
     r.build_chain(PARENT_DEPTH_TOLERANCE + 1).await;
     r.trigger_with_last_block();
     r.simulate(SimulateConfig::happy_path()).await;
 
-    r.assert_head_slot(PARENT_DEPTH_TOLERANCE as u64 + 1);
+    r.assert_head_slot(0);
     r.assert_no_penalties();
     assert_eq!(r.created_lookups(), 1, "only the tip lookup created");
     assert_eq!(r.completed_lookups(), 0, "no completed lookups");
-    assert_eq!(r.dropped_lookups(), 1, "tip handed off to range sync");
-    r.assert_successful_range_sync();
+    assert_eq!(r.dropped_lookups(), 1, "tip lookup dropped");
+    assert_eq!(r.range_sync_chains_added(), 0, "no range sync forced");
     r.assert_no_active_lookups();
     r.assert_empty_network();
 }
 
 #[tokio::test]
-/// Assert that a lookup beyond proposer lookahead hands off at an epoch-boundary target.
+/// Assert that a lookup for a block beyond the proposer lookahead is dropped without fetching
+/// ancestors or forcing range sync.
 async fn test_parent_lookup_too_deep_grow_ancestor_zero() {
     let mut r = TestRig::default();
     r.build_chain(PARENT_DEPTH_TOLERANCE).await;
     r.trigger_with_last_block();
     r.simulate(SimulateConfig::happy_path()).await;
 
-    // Range sync completes at the batch boundary before fetching the target epoch's first slot.
-    r.assert_head_slot(PARENT_DEPTH_TOLERANCE as u64 - 1);
+    r.assert_head_slot(0);
     r.assert_no_penalties();
     assert_eq!(r.created_lookups(), 1, "only the tip lookup created");
     assert_eq!(r.completed_lookups(), 0, "no completed lookups");
-    assert_eq!(r.dropped_lookups(), 1, "tip handed off to range sync");
-    r.assert_successful_range_sync();
+    assert_eq!(r.dropped_lookups(), 1, "tip lookup dropped");
+    assert_eq!(r.range_sync_chains_added(), 0, "no range sync forced");
     r.assert_no_active_lookups();
     r.assert_empty_network();
 }
@@ -2620,13 +2614,13 @@ async fn test_child_lookup_not_created_for_ignored_chain_parent_after_processing
     r.trigger_with_block_at_slot(depth as u64);
     r.simulate(SimulateConfig::new().no_range_sync()).await;
 
-    // At this point, the chain should have been deemed too deep and pruned.
-    // The tip root should have been inserted into ignored chains.
-    // Ensure no blocks have been synced
+    // The tip is beyond the slot import tolerance, so its lookup is dropped after processing
+    // without syncing any blocks. Lookups can no longer grow a parent chain past
+    // `PARENT_DEPTH_TOLERANCE`, so mark the tip as ignored directly.
     r.assert_head_slot(0);
     r.assert_no_active_lookups();
     r.assert_no_penalties();
-    r.assert_ignored_chain(r.block_at_slot(depth as u64).canonical_root());
+    r.insert_ignored_chain(r.block_at_slot(depth as u64).canonical_root());
 
     // WHEN: Trigger the extending block that points to the tip.
     let peer = r.new_connected_peer();
@@ -2639,7 +2633,8 @@ async fn test_child_lookup_not_created_for_ignored_chain_parent_after_processing
 }
 
 #[tokio::test]
-/// Assert that concurrent tip lookups complete through lookup or range sync without penalties.
+/// Assert that concurrent tip lookups import blocks within the proposer lookahead and drop the
+/// rest without penalties.
 async fn test_parent_lookup_too_deep_grow_tip() {
     let depth = PARENT_DEPTH_TOLERANCE + 1;
     let mut r = TestRig::default();
@@ -2650,13 +2645,17 @@ async fn test_parent_lookup_too_deep_grow_tip() {
     r.simulate(SimulateConfig::happy_path()).await;
 
     assert!(r.created_lookups() > 0, "no created lookups");
+    assert!(r.dropped_lookups() > 0, "lookups beyond lookahead dropped");
     assert_eq!(
         r.completed_lookups() + r.dropped_lookups(),
         r.created_lookups(),
-        "not all lookups completed or handed off"
+        "not all lookups completed or dropped"
     );
-    r.assert_head_slot(depth as u64);
-    r.assert_successful_range_sync();
+    // Lookups only import blocks within the proposer lookahead (previous, current and next epoch
+    // relative to head). Head is at genesis, so tips past the next epoch are dropped without
+    // forcing range sync.
+    r.assert_head_slot(2 * E::slots_per_epoch() - 1);
+    assert_eq!(r.range_sync_chains_added(), 0, "no range sync forced");
     r.assert_no_active_lookups();
     r.assert_empty_network();
     r.assert_no_penalties();

@@ -140,11 +140,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn get_ignored_chains(&mut self) -> Vec<Hash256> {
-        self.ignored_chains.keys().cloned().collect()
-    }
-
-    #[cfg(test)]
     pub(crate) fn active_single_lookups(&self) -> Vec<BlockLookupSummary> {
         self.single_block_lookups
             .iter()
