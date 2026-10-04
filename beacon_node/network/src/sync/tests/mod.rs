@@ -72,7 +72,6 @@ struct TestRig {
     /// Beacon chain harness
     harness: BeaconChainHarness<EphemeralHarnessType<E>>,
     rng_08: rand_chacha_03::ChaCha20Rng,
-    unstructured: arbitrary::Unstructured<'static>,
     fork_name: ForkName,
     /// Blocks that will be used in the test but may not be known to `harness` yet.
     network_blocks_by_root: HashMap<Hash256, RangeSyncBlock<E>>,

@@ -29,7 +29,8 @@ use logging::crit;
 use std::sync::Arc;
 use tracing::{debug, debug_span, error, info, instrument, warn};
 use types::{
-    BlockImportSource, DataColumnSidecarList, Epoch, ExecutionBlockHash, Hash256, SignedBeaconBlock,
+    BlockImportSource, DataColumnSidecarList, Epoch, ExecutionBlockHash, Hash256,
+    SignedBeaconBlock, Slot,
 };
 
 /// Id associated to a batch processing request, either a sync batch or a parent lookup.
@@ -166,6 +167,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             Err(error) => {
                 debug!(%block_root, ?error, "Lookup block failed early proposer check");
                 let result = match error {
+                    LookupEarlyError::GenesisBlock => {
+                        BlockProcessingResult::Imported(true, "genesis")
+                    }
                     LookupEarlyError::UnrequestedBlockRoot(actual_root) => {
                         BlockProcessingResult::Error {
                             penalty: Some((
@@ -215,6 +219,9 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     }
                     LookupEarlyError::OutsideLookahead => {
                         BlockProcessingResult::Ignored("outside_lookahead")
+                    }
+                    LookupEarlyError::RangeSyncRequired(slot) => {
+                        BlockProcessingResult::RangeSyncRequired(slot)
                     }
                     LookupEarlyError::Internal(error) => BlockProcessingResult::Error {
                         penalty: None,
@@ -1051,6 +1058,8 @@ pub enum BlockProcessingResult {
     Imported(bool, &'static str),
     /// Local admission policy declined the lookup. Do not retry or penalize its peers.
     Ignored(&'static str),
+    /// Lookup admission requires fetching this head through range sync without penalizing peers.
+    RangeSyncRequired(Slot),
     ParentUnknown {
         parent_root: Hash256,
         parent_block_hash: Option<ExecutionBlockHash>,

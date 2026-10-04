@@ -2255,6 +2255,8 @@ fn get_signature_verifier<'a, T: BeaconChainTypes>(
 /// This is helpful in weeding out obviously invalid blocks before we process them fully.
 #[derive(Debug)]
 pub enum LookupEarlyError {
+    /// Genesis is already known and does not need to be processed again.
+    GenesisBlock,
     /// The peer returned a block with a different hash than requested.
     ///
     /// Peer scoring: This is a malicious peer with high confidence.
@@ -2275,9 +2277,11 @@ pub enum LookupEarlyError {
     ///
     /// Peer scording: This is not necessarily invalid, it just may be a block on a different branch.
     ProposerMismatch,
-    /// The block we received is beyond the lookup slot tolerance. We should re-request
-    /// via range sync instead of using lookup sync.
+    /// The block is too far behind our head or beyond the current clock slot.
     SlotOutOfRange,
+
+    /// The block is ahead of our head and requires range sync to establish its ancestry.
+    RangeSyncRequired(Slot),
 
     OutsideLookahead,
     Internal(Box<BeaconChainError>),
@@ -2304,6 +2308,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 let current_slot = chain
                     .slot()
                     .map_err(|error| LookupEarlyError::Internal(Box::new(error)))?;
+                if slot == Slot::new(0) {
+                    return Err(LookupEarlyError::GenesisBlock);
+                }
                 if slot
                     <= head
                         .finalized_checkpoint()
@@ -2313,13 +2320,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     return Err(LookupEarlyError::WouldRevertFinality(slot));
                 }
 
-                // If the block's slot is out of range for lookup sync, then just return
-                // an error and let sync deal with it.
-                if slot < head.head_slot().saturating_sub(max_slot_distance)
-                    || slot > head.head_slot().saturating_add(max_slot_distance)
-                    || slot > current_slot
+                // Range sync can catch up to an ahead-of-head block, but cannot admit future blocks.
+                if slot < head.head_slot().saturating_sub(max_slot_distance) || slot > current_slot
                 {
                     return Err(LookupEarlyError::SlotOutOfRange);
+                }
+                if slot >= head.head_slot().saturating_add(max_slot_distance) {
+                    return Err(LookupEarlyError::RangeSyncRequired(slot));
                 }
 
                 // Validators get activated only at finality. Lookup sync is only done when sync thinks
@@ -2342,6 +2349,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         &chain.spec,
                     )
                     .map_err(|error| match error {
+                        BeaconStateError::SlotOutOfBounds if slot > head.head_slot() => {
+                            LookupEarlyError::RangeSyncRequired(slot)
+                        }
                         BeaconStateError::SlotOutOfBounds => LookupEarlyError::OutsideLookahead,
                         error => LookupEarlyError::Internal(Box::new(error.into())),
                     })?;
@@ -2351,7 +2361,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         epoch,
                         |proposers| proposers.get_slot::<T::EthSpec>(slot),
                         || {
-                            if epoch == state.previous_epoch() {
+                            if epoch < state.current_epoch() && epoch == state.previous_epoch() {
                                 let last_slot = epoch.end_slot(T::EthSpec::slots_per_epoch());
                                 let ancestor_root = *state.get_block_root(last_slot)?;
                                 let ancestor = chain
@@ -2385,7 +2395,11 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     )
                     .map_err(|error| match error {
                         BeaconChainError::BeaconStateError(BeaconStateError::SlotOutOfBounds) => {
-                            LookupEarlyError::OutsideLookahead
+                            if slot > head.head_slot() {
+                                LookupEarlyError::RangeSyncRequired(slot)
+                            } else {
+                                LookupEarlyError::OutsideLookahead
+                            }
                         }
                         error => LookupEarlyError::Internal(Box::new(error)),
                     })?;

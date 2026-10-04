@@ -326,7 +326,6 @@ impl TestRig {
             sync_rx,
             sync_rx_queue: vec![],
             rng_08,
-            unstructured: types::test_utils::test_unstructured(),
             network_globals: beacon_processor.network_globals.clone(),
             sync_manager: SyncManager::new(
                 chain,
@@ -335,6 +334,8 @@ impl TestRig {
                 // Pass empty recv not tied to any tx
                 mpsc::unbounded_channel().1,
                 fork_context,
+                // Request unknown roots on the first report
+                1,
             ),
             harness,
             fork_name,
@@ -572,7 +573,19 @@ impl TestRig {
                                 None
                             } else if self.complete_strategy.return_wrong_blocks_n_times > 0 {
                                 self.complete_strategy.return_wrong_blocks_n_times -= 1;
-                                Some(Arc::new(self.rand_block()))
+                                let mut block = self
+                                    .network_blocks_by_root
+                                    .get(block_root)
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "Test consumer requested unknown block: {block_root:?}"
+                                        )
+                                    })
+                                    .block_cloned();
+                                *Arc::make_mut(&mut block).message_mut().state_root_mut() =
+                                    Hash256::ZERO;
+                                assert_ne!(block.canonical_root(), *block_root);
+                                Some(block)
                             } else {
                                 Some(self.network_blocks_by_root
                                 .get(block_root)
@@ -1735,18 +1748,6 @@ impl TestRig {
         ));
     }
 
-    fn rand_block(&mut self) -> SignedBeaconBlock<E> {
-        self.rand_block_and_blobs(NumBlobs::None).0
-    }
-
-    fn rand_block_and_blobs(
-        &mut self,
-        num_blobs: NumBlobs,
-    ) -> (SignedBeaconBlock<E>, Vec<BlobSidecar<E>>) {
-        let fork_name = self.fork_name;
-        generate_rand_block_and_blobs::<E>(fork_name, num_blobs, &mut self.unstructured).unwrap()
-    }
-
     pub fn send_sync_message(&mut self, sync_message: SyncMessage<E>) {
         self.sync_manager.handle_message(sync_message);
     }
@@ -2572,7 +2573,7 @@ async fn lookups_form_chain() {
 }
 
 #[tokio::test]
-/// Assert that if a lookup chain (by appending ancestors) is too long we drop it
+/// Assert that an ahead-of-head lookup switches to range sync before fetching ancestors.
 async fn test_parent_lookup_too_deep_grow_ancestor_one() {
     let mut r = TestRig::default();
     r.build_chain(PARENT_DEPTH_TOLERANCE + 1).await;
@@ -2581,39 +2582,31 @@ async fn test_parent_lookup_too_deep_grow_ancestor_one() {
 
     r.assert_head_slot(PARENT_DEPTH_TOLERANCE as u64 + 1);
     r.assert_no_penalties();
-    // Should not penalize peer, but network is not clear because of the blocks_by_range requests
-    // r.assert_ignored_chain(chain_hash);
-    //
-    // Assert that chain is in failed chains
-    // Assert that there were 0 lookups completed, 33 dropped
-    // Assert that there were 1 range sync chains
-    // Bound resources:
-    // - Limit amount of requests
-    // - Limit the types of sync used
+    assert_eq!(r.created_lookups(), 1, "only the tip lookup created");
     assert_eq!(r.completed_lookups(), 0, "no completed lookups");
-    assert_eq!(
-        r.dropped_lookups(),
-        PARENT_DEPTH_TOLERANCE,
-        "All lookups dropped"
-    );
+    assert_eq!(r.dropped_lookups(), 1, "tip handed off to range sync");
     r.assert_successful_range_sync();
+    r.assert_no_active_lookups();
+    r.assert_empty_network();
 }
 
 #[tokio::test]
+/// Assert that a lookup beyond proposer lookahead hands off at an epoch-boundary target.
 async fn test_parent_lookup_too_deep_grow_ancestor_zero() {
     let mut r = TestRig::default();
     r.build_chain(PARENT_DEPTH_TOLERANCE).await;
     r.trigger_with_last_block();
     r.simulate(SimulateConfig::happy_path()).await;
 
-    r.assert_head_slot(PARENT_DEPTH_TOLERANCE as u64);
+    // Range sync completes at the batch boundary before fetching the target epoch's first slot.
+    r.assert_head_slot(PARENT_DEPTH_TOLERANCE as u64 - 1);
     r.assert_no_penalties();
-    assert_eq!(
-        r.completed_lookups(),
-        PARENT_DEPTH_TOLERANCE,
-        "completed all lookups"
-    );
-    assert_eq!(r.dropped_lookups(), 0, "no dropped lookups");
+    assert_eq!(r.created_lookups(), 1, "only the tip lookup created");
+    assert_eq!(r.completed_lookups(), 0, "no completed lookups");
+    assert_eq!(r.dropped_lookups(), 1, "tip handed off to range sync");
+    r.assert_successful_range_sync();
+    r.assert_no_active_lookups();
+    r.assert_empty_network();
 }
 
 // Regression test for https://github.com/sigp/lighthouse/pull/7118
@@ -2646,7 +2639,7 @@ async fn test_child_lookup_not_created_for_ignored_chain_parent_after_processing
 }
 
 #[tokio::test]
-/// Assert that if a lookup chain (by appending tips) is too long we drop it
+/// Assert that concurrent tip lookups complete through lookup or range sync without penalties.
 async fn test_parent_lookup_too_deep_grow_tip() {
     let depth = PARENT_DEPTH_TOLERANCE + 1;
     let mut r = TestRig::default();
@@ -2656,18 +2649,16 @@ async fn test_parent_lookup_too_deep_grow_tip() {
     }
     r.simulate(SimulateConfig::happy_path()).await;
 
-    // Even if the chain is longer than `PARENT_DEPTH_TOLERANCE` because the lookups are created all
-    // at once they chain by sections and it's possible that the oldest ancestors start processing
-    // before the full chain is connected.
     assert!(r.created_lookups() > 0, "no created lookups");
     assert_eq!(
-        r.completed_lookups(),
+        r.completed_lookups() + r.dropped_lookups(),
         r.created_lookups(),
-        "not all completed lookups"
+        "not all lookups completed or handed off"
     );
-    assert_eq!(r.dropped_lookups(), 0, "some dropped lookups");
-    r.assert_successful_lookup_sync();
-    // Should not penalize peer, but network is not clear because of the blocks_by_range requests
+    r.assert_head_slot(depth as u64);
+    r.assert_successful_range_sync();
+    r.assert_no_active_lookups();
+    r.assert_empty_network();
     r.assert_no_penalties();
 }
 
@@ -2864,7 +2855,7 @@ async fn crypto_on_fail_with_invalid_block_signature() {
         r.assert_no_penalties();
     } else {
         r.assert_failed_lookup_sync();
-        r.assert_penalties_of_type("InvalidSignature");
+        r.assert_penalties_of_type("lookup_proposer_signature_invalid");
     }
 }
 

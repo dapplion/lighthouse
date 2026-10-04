@@ -570,6 +570,12 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
         self.on_lookup_result(lookup_id, lookup_result, "processing_result", cx);
     }
 
+    pub fn has_lookup_for_block(&self, block_root: Hash256) -> bool {
+        self.single_block_lookups
+            .values()
+            .any(|lookup| lookup.is_for_block(block_root))
+    }
+
     pub fn has_any_awaiting_children(&self, block_root: Hash256) -> bool {
         self.single_block_lookups
             .iter()
@@ -643,6 +649,21 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     ) -> bool {
         match result {
             Ok(LookupResult::Pending) => true,
+            Ok(LookupResult::RangeSyncRequired {
+                block_root,
+                slot,
+                peers,
+            }) => {
+                cx.send_sync_message(SyncMessage::AddPeersForceRangeSync {
+                    peers,
+                    head_slot: Some(slot),
+                    head_root: block_root,
+                });
+                self.ignored_chains.insert(block_root);
+                self.drop_lookup_and_children(id, "range_sync_required");
+                self.update_metrics();
+                false
+            }
             Ok(LookupResult::ParentUnknown {
                 parent_root,
                 parent_block_hash,

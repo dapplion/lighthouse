@@ -31,6 +31,12 @@ pub enum LookupResult {
     Completed,
     /// Lookup is expecting some future event from the network
     Pending,
+    /// The block cannot be admitted through lookup sync and must be fetched through range sync.
+    RangeSyncRequired {
+        block_root: Hash256,
+        slot: Slot,
+        peers: Vec<PeerId>,
+    },
     /// Block's parent is not known to fork-choice, a parent lookup is needed
     ParentUnknown {
         parent_root: Hash256,
@@ -548,6 +554,13 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             BlockProcessingResult::Ignored(reason) => {
                 return Err(LookupRequestError::Failed(reason.to_owned()));
             }
+            BlockProcessingResult::RangeSyncRequired(slot) => {
+                return Ok(LookupResult::RangeSyncRequired {
+                    block_root: self.block_root,
+                    slot,
+                    peers: self.all_peers(),
+                });
+            }
             BlockProcessingResult::ParentUnknown {
                 parent_root,
                 parent_block_hash,
@@ -603,9 +616,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             BlockProcessingResult::Ignored(reason) => {
                 return Err(LookupRequestError::Failed(reason.to_owned()));
             }
-            BlockProcessingResult::ParentUnknown { .. } => {
+            BlockProcessingResult::ParentUnknown { .. }
+            | BlockProcessingResult::RangeSyncRequired(_) => {
                 return Err(LookupRequestError::BadState(
-                    "data processing returned ParentUnknown".to_owned(),
+                    "data processing returned a block-only result".to_owned(),
                 ));
             }
             BlockProcessingResult::Error { penalty, .. } => {
@@ -637,9 +651,10 @@ impl<T: BeaconChainTypes> SingleBlockLookup<T> {
             BlockProcessingResult::Ignored(reason) => {
                 return Err(LookupRequestError::Failed(reason.to_owned()));
             }
-            BlockProcessingResult::ParentUnknown { .. } => {
+            BlockProcessingResult::ParentUnknown { .. }
+            | BlockProcessingResult::RangeSyncRequired(_) => {
                 return Err(LookupRequestError::BadState(
-                    "payload processing returned ParentUnknown".to_owned(),
+                    "payload processing returned a block-only result".to_owned(),
                 ));
             }
             BlockProcessingResult::Error { penalty, .. } => {
