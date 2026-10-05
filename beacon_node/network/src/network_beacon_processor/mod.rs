@@ -948,7 +948,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         publish_blobs: bool,
         source: EnvelopeSource,
     ) {
-        if self.chain.config.disable_get_blobs {
+        // With no execution layer there is no engine to ask, and every block would log an error.
+        if self.chain.config.disable_get_blobs || self.chain.execution_layer.is_none() {
             return;
         }
         let epoch = header_or_bid.slot().epoch(T::EthSpec::slots_per_epoch());

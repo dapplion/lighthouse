@@ -4237,6 +4237,23 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         self.proof_engine.is_some()
     }
 
+    /// Whether this node runs with no execution layer, taking payload validity from EIP-8025
+    /// proofs instead.
+    ///
+    /// Only viable from Gloas. Before it a payload cannot be verified without an engine, so a node
+    /// in that state is not running without one deliberately, it is simply unable to execute.
+    pub fn runs_without_execution_layer(&self) -> bool {
+        let Some(current_slot) = self.slot_clock.now_or_genesis() else {
+            return false;
+        };
+        self.execution_layer.is_none()
+            && self.execution_proofs_enabled()
+            && self
+                .spec
+                .fork_name_at_slot::<T::EthSpec>(current_slot)
+                .gloas_enabled()
+    }
+
     /// Whether `block_root`'s payload has proofs from as many proof systems as we require.
     ///
     /// TODO(9658): nothing checks that a proof's public input is this payload, so a proof of another
