@@ -508,17 +508,9 @@ impl<E: EthSpec> Relay<E> {
         if self.config.reject_all {
             return false;
         }
-        if self.config.source == Source::Synthetic {
-            return bytes == self.synthesise(block_hash, proof_type).as_slice();
-        }
-        if self.config.source == Source::Fixture {
-            return self
-                .fixtures
-                .iter()
-                .any(|proof| proof.proof_type == proof_type && proof.bytes == bytes);
-        }
 
-        // Holding proofs of this payload but not from this system is a miss, not an INVALID:
+        // What this relay holds, whether it fetched it or relayed it, answers first. Holding
+        // proofs of this payload but not from this system is a miss rather than an INVALID:
         // another relay's proof of a system this one never fetched must not be rejected.
         let held = self.held.lock().peek(&block_hash).map(|held| {
             held.iter()
@@ -527,6 +519,16 @@ impl<E: EthSpec> Relay<E> {
         });
         if let Some(Some(verdict)) = held {
             return verdict;
+        }
+
+        if self.config.source == Source::Synthetic {
+            return bytes == self.synthesise(block_hash, proof_type).as_slice();
+        }
+        if self.config.source == Source::Fixture {
+            return self
+                .fixtures
+                .iter()
+                .any(|proof| proof.proof_type == proof_type && proof.bytes == bytes);
         }
 
         // A consuming node asks about payloads this relay never seeded. Fetch them once, under the
@@ -608,12 +610,19 @@ async fn submit_proof<E: EthSpec>(
         query.proof_type,
         body.len()
     );
-    relay.hold(block_hash, query.proof_type, body.to_vec());
+    let bytes = body.to_vec();
     match relay
-        .seed(block_hash, vec![(query.proof_type, body.to_vec())])
+        .seed(block_hash, vec![(query.proof_type, bytes.clone())])
         .await
     {
-        Ok(_) => (StatusCode::ACCEPTED, String::new()),
+        Ok(0) => (
+            StatusCode::ACCEPTED,
+            "a proof of this payload and system was already submitted".to_string(),
+        ),
+        Ok(_) => {
+            relay.hold(block_hash, query.proof_type, bytes);
+            (StatusCode::ACCEPTED, String::new())
+        }
         Err(e) => {
             println!("{e}");
             (StatusCode::BAD_GATEWAY, e)

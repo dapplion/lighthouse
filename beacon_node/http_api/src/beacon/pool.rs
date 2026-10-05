@@ -771,11 +771,11 @@ async fn publish_execution_proofs<T: BeaconChainTypes>(
                 }
             }
             // The network already has this proof, so the submitter has nothing to do differently
-            // and a resubmission must not look like a failure to it.
+            // and a resubmission must not look like a failure to it. `DuplicateFromValidator` is
+            // not in this group: it is recorded before the engine's verdict, so corrected bytes
+            // after a rejected proof would be reported as accepted while nothing was published.
             Err(
-                ExecutionProofError::ProofAlreadySeen
-                | ExecutionProofError::ValidProofAlreadyKnown
-                | ExecutionProofError::DuplicateFromValidator { .. },
+                ExecutionProofError::ProofAlreadySeen | ExecutionProofError::ValidProofAlreadyKnown,
             ) => num_already_known += 1,
             Err(e) => {
                 debug!(
