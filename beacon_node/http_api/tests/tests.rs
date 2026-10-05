@@ -3229,7 +3229,7 @@ impl ApiTester {
 
         // Nothing can verify a proof of a block this node does not have, so it is not gossiped.
         self.client
-            .post_beacon_pool_execution_proofs(&[proof])
+            .post_beacon_pool_execution_proofs(vec![proof])
             .await
             .unwrap_err();
 

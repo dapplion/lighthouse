@@ -301,22 +301,22 @@ impl<E: EthSpec> Relay<E> {
             .iter()
             .map(|proof| proof.message.zk_proof.proof_type)
             .collect::<Vec<_>>();
+        let count = signed.len();
         match self
             .beacon_node
-            .post_beacon_pool_execution_proofs(&signed)
+            .post_beacon_pool_execution_proofs(signed)
             .await
         {
             Ok(()) => {
                 println!(
-                    "submitted {} proofs of {block_hash:?} (slot {}, types {proof_types:?})",
-                    signed.len(),
+                    "submitted {count} proofs of {block_hash:?} (slot {}, types {proof_types:?})",
                     payload.slot
                 );
                 let mut submitted = self.submitted.lock();
                 for proof_type in proof_types {
                     submitted.put((block_hash, proof_type), ());
                 }
-                Ok(signed.len())
+                Ok(count)
             }
             Err(e) => Err(format!(
                 "beacon node rejected proofs of {block_hash:?}: {e:?}"
@@ -386,10 +386,11 @@ impl<E: EthSpec> Relay<E> {
                 })
                 .collect::<Vec<_>>();
 
-            if !proofs.is_empty() {
-                if let Err(e) = self.seed(block_hash, proofs).await {
-                    println!("{e}");
-                }
+            if proofs.is_empty() {
+                continue;
+            }
+            if let Err(e) = self.seed(block_hash, proofs).await {
+                println!("{e}");
             }
         }
     }

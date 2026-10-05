@@ -2047,9 +2047,11 @@ impl BeaconNodeHttpClient {
     }
 
     /// `POST beacon/pool/execution_proofs` (SSZ)
+    ///
+    /// Takes the proofs by value because each can be megabytes.
     pub async fn post_beacon_pool_execution_proofs(
         &self,
-        proofs: &[SignedExecutionProof],
+        proofs: Vec<SignedExecutionProof>,
     ) -> Result<(), Error> {
         let mut path = self.eth_path(V1)?;
 
@@ -2064,7 +2066,7 @@ impl BeaconNodeHttpClient {
             .post(path)
             .timeout(self.timeouts.default)
             .header("Content-Type", "application/octet-stream")
-            .body(proofs.to_vec().as_ssz_bytes())
+            .body(proofs.as_ssz_bytes())
             .send()
             .await?;
         success_or_error(response).await?;
