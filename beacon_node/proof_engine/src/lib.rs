@@ -67,19 +67,19 @@ impl ProofEngine {
             .client
             .post(url)
             .query(&[
-                ("block_hash", format!("{:?}", proof.public_input.block_hash)),
+                (
+                    "block_hash",
+                    format!("{:?}", proof.zk_proof.public_inputs.block_hash),
+                ),
                 (
                     "parent_hash",
-                    format!("{:?}", proof.public_input.parent_hash),
+                    format!("{:?}", proof.zk_proof.public_inputs.parent_hash),
                 ),
-                ("proof_type", proof.proof_type.to_string()),
-                (
-                    "beacon_block_root",
-                    format!("{:?}", proof.beacon_block_root),
-                ),
+                ("proof_type", proof.zk_proof.proof_type.to_string()),
+                ("beacon_block_root", format!("{:?}", proof.beacon_root)),
             ])
             .header("content-type", "application/octet-stream")
-            .body(proof.proof_data.to_vec())
+            .body(proof.zk_proof.proof_data.to_vec())
             .send()
             .await
             .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?

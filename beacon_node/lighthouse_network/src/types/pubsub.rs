@@ -693,7 +693,9 @@ impl<E: EthSpec> std::fmt::Display for PubsubMessage<E> {
                 write!(
                     f,
                     "Execution proof: beacon_block_root: {:?}, proof_type: {:?}, validator_index: {:?}",
-                    data.message.beacon_block_root, data.message.proof_type, data.validator_index
+                    data.message.beacon_root,
+                    data.proof_type(),
+                    data.message.validator_index
                 )
             }
             PubsubMessage::InclusionList(data) => {

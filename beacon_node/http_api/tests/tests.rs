@@ -51,6 +51,7 @@ use store::StoreOp;
 use tokio::time::Duration;
 use tree_hash::TreeHash;
 use types::ApplicationDomain;
+use types::execution::{ExecutionProof, ProofData, PublicInput, SignedExecutionProof, ZkevmProof};
 use types::{
     Address, Builder, Domain, EthSpec, ExecutionBlockHash, ExecutionPayloadBid, Hash256,
     MainnetEthSpec, ProposerPreferences, RelativeEpoch, SelectionProof, SignedExecutionPayloadBid,
@@ -3207,6 +3208,32 @@ impl ApiTester {
             data,
             signature,
         }
+    }
+
+    pub async fn test_post_beacon_pool_execution_proofs_unknown_block(self) -> Self {
+        let proof = SignedExecutionProof {
+            message: ExecutionProof {
+                beacon_root: Hash256::repeat_byte(42),
+                zk_proof: ZkevmProof {
+                    proof_data: ProofData::new(vec![0; 32]).unwrap(),
+                    proof_type: 0,
+                    public_inputs: PublicInput {
+                        block_hash: ExecutionBlockHash::repeat_byte(1),
+                        parent_hash: ExecutionBlockHash::repeat_byte(2),
+                    },
+                },
+                validator_index: 0,
+            },
+            signature: Signature::empty(),
+        };
+
+        // Nothing can verify a proof of a block this node does not have, so it is not gossiped.
+        self.client
+            .post_beacon_pool_execution_proofs(vec![proof])
+            .await
+            .unwrap_err();
+
+        self
     }
 
     pub async fn test_post_beacon_pool_payload_attestations_valid(mut self) -> Self {
@@ -10447,6 +10474,14 @@ async fn payload_attestation_unavailable_without_envelope() {
     ApiTester::new_with_hard_forks()
         .await
         .test_payload_attestation_unavailable_without_envelope()
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_beacon_pool_execution_proofs_unknown_block() {
+    ApiTester::new()
+        .await
+        .test_post_beacon_pool_execution_proofs_unknown_block()
         .await;
 }
 

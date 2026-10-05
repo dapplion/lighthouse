@@ -6,7 +6,10 @@ use ssz_derive::{Decode, Encode};
 use ssz_types::VariableList;
 use tree_hash_derive::TreeHash;
 
-/// Maximum size of `proof_data` in bytes (EIP-8025 `MAX_PROOF_SIZE`).
+/// Maximum size of `proof_data` in bytes.
+///
+/// Above the spec's `MAX_PROOF_SIZE` of 307200, which real proofs exceed: the artifacts Ethproofs
+/// serves run from 250 KB to 2.1 MB.
 pub const MAX_PROOF_SIZE: usize = 4_194_304;
 
 /// SSZ bound for `proof_data`.
@@ -30,15 +33,25 @@ pub struct PublicInput {
     pub parent_hash: ExecutionBlockHash,
 }
 
+/// A zkEVM proof of an execution payload (EIP-8025 `ZKEVMProof`).
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode, TreeHash)]
+#[context_deserialize(ForkName)]
+pub struct ZkevmProof {
+    pub proof_data: ProofData,
+    pub proof_type: ProofType,
+    pub public_inputs: PublicInput,
+}
+
 /// An execution proof attesting to the validity of an execution payload (EIP-8025).
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Encode, Decode, TreeHash)]
 #[context_deserialize(ForkName)]
 pub struct ExecutionProof {
-    pub proof_data: ProofData,
-    pub proof_type: ProofType,
-    pub public_input: PublicInput,
-    pub beacon_block_root: Hash256,
+    pub beacon_root: Hash256,
+    pub zk_proof: ZkevmProof,
+    #[serde(with = "serde_utils::quoted_u64")]
+    pub validator_index: u64,
 }
 
 impl SignedRoot for ExecutionProof {}
@@ -48,18 +61,16 @@ impl SignedRoot for ExecutionProof {}
 #[context_deserialize(ForkName)]
 pub struct SignedExecutionProof {
     pub message: ExecutionProof,
-    #[serde(with = "serde_utils::quoted_u64")]
-    pub validator_index: u64,
     pub signature: Signature,
 }
 
 impl SignedExecutionProof {
-    pub fn beacon_block_root(&self) -> Hash256 {
-        self.message.beacon_block_root
+    pub fn beacon_root(&self) -> Hash256 {
+        self.message.beacon_root
     }
 
     pub fn proof_type(&self) -> ProofType {
-        self.message.proof_type
+        self.message.zk_proof.proof_type
     }
 }
 

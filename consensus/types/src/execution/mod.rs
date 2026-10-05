@@ -34,7 +34,7 @@ pub use execution_payload_header::{
 };
 pub use execution_proof::{
     ExecutionProof, MAX_PROOF_SIZE, MaxProofSize, ProofData, ProofType, PublicInput,
-    SignedExecutionProof,
+    SignedExecutionProof, ZkevmProof,
 };
 pub use execution_requests::{
     BuilderDepositRequests, BuilderExitRequests, ConsolidationRequests, DepositRequests,

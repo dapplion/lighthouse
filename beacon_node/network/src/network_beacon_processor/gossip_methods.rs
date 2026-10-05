@@ -4155,7 +4155,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         peer_id: PeerId,
         execution_proof: Arc<SignedExecutionProof>,
     ) {
-        let beacon_block_root = execution_proof.beacon_block_root();
+        let beacon_block_root = execution_proof.beacon_root();
         let proof_type = execution_proof.proof_type();
 
         match self

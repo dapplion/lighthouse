@@ -41,14 +41,14 @@ impl GossipVerifiedExecutionProof {
     ) -> Result<Self, Error> {
         // [REJECT] `proof.proof_data` is non-empty. The `MAX_PROOF_SIZE` upper bound is enforced
         // structurally by the SSZ type at decode.
-        if proof.message.proof_data.is_empty() {
+        if proof.message.zk_proof.proof_data.is_empty() {
             return Err(Error::EmptyProofData);
         }
 
         let proof_root = proof.message.tree_hash_root();
-        let block_root = proof.beacon_block_root();
+        let block_root = proof.beacon_root();
         let proof_type = proof.proof_type();
-        let validator_index = proof.validator_index;
+        let validator_index = proof.message.validator_index;
 
         // [IGNORE] The referenced beacon block is known. Its slot determines the fork for the
         // signing domain.
@@ -69,13 +69,13 @@ impl GossipVerifiedExecutionProof {
             | ExecutionStatus::Invalid(block_hash) => block_hash,
             ExecutionStatus::Irrelevant(_) => {
                 return Err(Error::PayloadMismatch {
-                    proof_block_hash: proof.message.public_input.block_hash,
+                    proof_block_hash: proof.message.zk_proof.public_inputs.block_hash,
                 });
             }
         };
-        if proof.message.public_input.block_hash != committed_block_hash {
+        if proof.message.zk_proof.public_inputs.block_hash != committed_block_hash {
             return Err(Error::PayloadMismatch {
-                proof_block_hash: proof.message.public_input.block_hash,
+                proof_block_hash: proof.message.zk_proof.public_inputs.block_hash,
             });
         }
 
