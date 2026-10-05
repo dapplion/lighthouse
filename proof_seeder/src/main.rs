@@ -33,7 +33,6 @@ use parking_lot::Mutex;
 use sensitive_url::SensitiveUrl;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use ssz::Encode;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
@@ -240,11 +239,16 @@ impl<E: EthSpec> Relay<E> {
     }
 
     /// Sign proofs of `block_hash` and submit them to the beacon node.
-    async fn seed(&self, block_hash: ExecutionBlockHash, proofs: Vec<(ProofType, Vec<u8>)>) {
-        let Some(prover) = &self.prover else { return };
+    async fn seed(
+        &self,
+        block_hash: ExecutionBlockHash,
+        proofs: Vec<(ProofType, Vec<u8>)>,
+    ) -> Result<usize, String> {
+        let Some(prover) = &self.prover else {
+            return Err("this relay holds no key".to_string());
+        };
         let Some(payload) = self.payloads.lock().get(&block_hash).copied() else {
-            println!("no payload known for {block_hash:?}, nothing to sign against");
-            return;
+            return Err(format!("no payload known for {block_hash:?}"));
         };
 
         let fork_name = self.spec.fork_name_at_slot::<E>(payload.slot);
@@ -260,8 +264,9 @@ impl<E: EthSpec> Relay<E> {
                 continue;
             }
             let Ok(proof_data) = ProofData::new(bytes) else {
-                println!("proof of {block_hash:?} type {proof_type} exceeds MAX_PROOF_SIZE");
-                continue;
+                return Err(format!(
+                    "proof of {block_hash:?} type {proof_type} exceeds MAX_PROOF_SIZE"
+                ));
             };
 
             let message = ExecutionProof {
@@ -289,14 +294,18 @@ impl<E: EthSpec> Relay<E> {
         }
 
         if signed.is_empty() {
-            return;
+            return Ok(0);
         }
 
         let proof_types = signed
             .iter()
             .map(|proof| proof.message.zk_proof.proof_type)
             .collect::<Vec<_>>();
-        match self.submit(&signed).await {
+        match self
+            .beacon_node
+            .post_beacon_pool_execution_proofs(&signed)
+            .await
+        {
             Ok(()) => {
                 println!(
                     "submitted {} proofs of {block_hash:?} (slot {}, types {proof_types:?})",
@@ -307,59 +316,49 @@ impl<E: EthSpec> Relay<E> {
                 for proof_type in proof_types {
                     submitted.put((block_hash, proof_type), ());
                 }
+                Ok(signed.len())
             }
-            Err(e) => println!("beacon node rejected proofs of {block_hash:?}: {e}"),
+            Err(e) => Err(format!(
+                "beacon node rejected proofs of {block_hash:?}: {e:?}"
+            )),
         }
     }
 
-    async fn submit(&self, proofs: &[SignedExecutionProof]) -> Result<(), String> {
-        let mut url = self.beacon_node.server().expose_full().clone();
-        url.set_path("eth/v1/beacon/pool/execution_proofs");
-
-        let response = self
-            .http
-            .post(url)
-            .header("content-type", "application/octet-stream")
-            .body(proofs.to_vec().as_ssz_bytes())
-            .send()
-            .await
-            .map_err(|e| format!("cannot reach the beacon node: {e}"))?;
-
-        let status = response.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        Err(format!(
-            "{status}: {}",
-            response.text().await.unwrap_or_default()
-        ))
-    }
-
-    /// The proofs this relay has for a payload, from whichever source it was given.
-    fn proofs_for(&self, block_hash: ExecutionBlockHash) -> Vec<(ProofType, Vec<u8>)> {
+    /// The proof systems this relay has a proof of this payload from.
+    fn proof_types_for(&self, block_hash: ExecutionBlockHash) -> Vec<ProofType> {
         match self.config.source {
             Source::None => vec![],
             Source::Synthetic => (0..self.config.max_proofs_per_payload)
-                .map(|proof_type| {
-                    let proof_type = proof_type as ProofType;
-                    (proof_type, self.synthesise(block_hash, proof_type))
-                })
+                .map(|proof_type| proof_type as ProofType)
                 .collect(),
-            Source::Fixture => self
-                .fixtures
-                .iter()
-                .map(|proof| (proof.proof_type, proof.bytes.clone()))
-                .collect(),
+            Source::Fixture => self.fixtures.iter().map(|proof| proof.proof_type).collect(),
             Source::Live => self
                 .held
                 .lock()
-                .get(&block_hash)
-                .map(|held| {
-                    held.iter()
-                        .map(|proof| (proof.proof_type, proof.bytes.clone()))
-                        .collect()
-                })
+                .peek(&block_hash)
+                .map(|held| held.iter().map(|proof| proof.proof_type).collect())
                 .unwrap_or_default(),
+        }
+    }
+
+    fn proof_bytes_for(
+        &self,
+        block_hash: ExecutionBlockHash,
+        proof_type: ProofType,
+    ) -> Option<Vec<u8>> {
+        match self.config.source {
+            Source::None => None,
+            Source::Synthetic => Some(self.synthesise(block_hash, proof_type)),
+            Source::Fixture => self
+                .fixtures
+                .iter()
+                .find(|proof| proof.proof_type == proof_type)
+                .map(|proof| proof.bytes.clone()),
+            Source::Live => self.held.lock().peek(&block_hash).and_then(|held| {
+                held.iter()
+                    .find(|proof| proof.proof_type == proof_type)
+                    .map(|proof| proof.bytes.clone())
+            }),
         }
     }
 
@@ -373,9 +372,24 @@ impl<E: EthSpec> Relay<E> {
             .collect::<Vec<_>>();
 
         for block_hash in block_hashes {
-            let proofs = self.proofs_for(block_hash);
+            let proof_types = self
+                .proof_types_for(block_hash)
+                .into_iter()
+                .filter(|proof_type| !self.submitted.lock().contains(&(block_hash, *proof_type)))
+                .collect::<Vec<_>>();
+
+            let proofs = proof_types
+                .into_iter()
+                .filter_map(|proof_type| {
+                    self.proof_bytes_for(block_hash, proof_type)
+                        .map(|bytes| (proof_type, bytes))
+                })
+                .collect::<Vec<_>>();
+
             if !proofs.is_empty() {
-                self.seed(block_hash, proofs).await;
+                if let Err(e) = self.seed(block_hash, proofs).await {
+                    println!("{e}");
+                }
             }
         }
     }
@@ -540,29 +554,37 @@ async fn submit_proof<E: EthSpec>(
     let Some(block_hash) = parse_root(&query.block_hash).map(ExecutionBlockHash::from_root) else {
         return (
             StatusCode::BAD_REQUEST,
-            "block_hash is not a 32 byte hex root",
+            "block_hash is not a 32 byte hex root".to_string(),
         );
     };
     if relay.prover.is_none() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "this relay holds no key");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this relay holds no key".to_string(),
+        );
     }
     if !relay.payloads.lock().contains(&block_hash) {
         return (
             StatusCode::NOT_FOUND,
-            "no payload with that block hash on the chain this relay follows",
+            "no payload with that block hash on the chain this relay follows".to_string(),
         );
     }
 
     println!(
-        "submitted proof of {block_hash:?} type {} ({} bytes)",
+        "offered proof of {block_hash:?} type {} ({} bytes)",
         query.proof_type,
         body.len()
     );
-    relay
+    match relay
         .seed(block_hash, vec![(query.proof_type, body.to_vec())])
-        .await;
-
-    (StatusCode::ACCEPTED, "")
+        .await
+    {
+        Ok(_) => (StatusCode::ACCEPTED, String::new()),
+        Err(e) => {
+            println!("{e}");
+            (StatusCode::BAD_GATEWAY, e)
+        }
+    }
 }
 
 #[derive(Deserialize)]
