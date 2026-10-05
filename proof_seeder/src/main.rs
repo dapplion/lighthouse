@@ -19,7 +19,7 @@ mod ethproofs;
 use axum::{
     Router,
     body::Bytes,
-    extract::{Query, State},
+    extract::{DefaultBodyLimit, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::post,
@@ -41,7 +41,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tree_hash::TreeHash;
 use types::execution::{
-    ExecutionProof, ProofData, ProofType, PublicInput, SignedExecutionProof, ZkevmProof,
+    ExecutionProof, MAX_PROOF_SIZE, ProofData, ProofType, PublicInput, SignedExecutionProof,
+    ZkevmProof,
 };
 use types::{
     ChainSpec, ConfigAndPreset, Domain, EthSpec, ExecutionBlockHash, GnosisEthSpec, Hash256,
@@ -203,6 +204,7 @@ impl<E: EthSpec> Relay<E> {
             .saturating_add(1)
             .max(head_slot.as_u64().saturating_sub(window));
 
+        let mut read_through = from.saturating_sub(1);
         for slot in (from..=head_slot.as_u64()).map(Slot::new) {
             let block = if slot == head_slot {
                 Some(head.clone())
@@ -215,10 +217,12 @@ impl<E: EthSpec> Relay<E> {
                     Ok(block) => block,
                     Err(e) => {
                         println!("cannot read slot {slot} from the beacon node: {e:?}");
-                        continue;
+                        // Leave the cursor behind this slot so the next pass retries it.
+                        break;
                     }
                 }
             };
+            read_through = slot.as_u64();
             // A skipped slot, or a fork with no payload bid to read a block hash from.
             let Some(block) = block else { continue };
             let Ok(bid) = block.message().body().signed_execution_payload_bid() else {
@@ -235,7 +239,22 @@ impl<E: EthSpec> Relay<E> {
             );
         }
 
-        *last_seen = head_slot;
+        *last_seen = Slot::new(read_through);
+    }
+
+    /// Remember a proof so this relay's verify route recognises it.
+    ///
+    /// A node whose proof engine is its own relay asks it to verify what the relay just submitted,
+    /// and nothing else here would know those bytes.
+    fn hold(&self, block_hash: ExecutionBlockHash, proof_type: ProofType, bytes: Vec<u8>) {
+        let mut held = self.held.lock();
+        let proofs = held.get_or_insert_mut(block_hash, Vec::new);
+        proofs.retain(|proof| proof.proof_type != proof_type);
+        proofs.push(FetchedProof {
+            proof_type,
+            team: "submitted".to_string(),
+            bytes,
+        });
     }
 
     /// Sign proofs of `block_hash` and submit them to the beacon node.
@@ -421,6 +440,9 @@ impl<E: EthSpec> Relay<E> {
                 });
             }
             pending.retain(|block_hash, state| {
+                if !self.payloads.lock().contains(block_hash) {
+                    return false;
+                }
                 if state.first_seen.elapsed() > give_up {
                     println!(
                         "giving up on {block_hash:?} after {} attempts",
@@ -459,7 +481,12 @@ impl<E: EthSpec> Relay<E> {
                             .map(|proof| (proof.proof_type, &proof.team, proof.bytes.len()))
                             .collect::<Vec<_>>()
                     );
-                    self.pending.lock().remove(&block_hash);
+                    // Ethproofs fills a block's set over the twenty minutes after it, so a short
+                    // set means ask again rather than settle for fewer systems than a consumer
+                    // requires.
+                    if proofs.len() >= self.config.max_proofs_per_payload {
+                        self.pending.lock().remove(&block_hash);
+                    }
                     self.held.lock().put(block_hash, proofs);
                 }
                 Err(e) => println!("ethproofs error for {block_hash:?}: {e}"),
@@ -491,10 +518,15 @@ impl<E: EthSpec> Relay<E> {
                 .any(|proof| proof.proof_type == proof_type && proof.bytes == bytes);
         }
 
-        if let Some(held) = self.held.lock().peek(&block_hash) {
-            return held
-                .iter()
-                .any(|proof| proof.proof_type == proof_type && proof.bytes == bytes);
+        // Holding proofs of this payload but not from this system is a miss, not an INVALID:
+        // another relay's proof of a system this one never fetched must not be rejected.
+        let held = self.held.lock().peek(&block_hash).map(|held| {
+            held.iter()
+                .find(|proof| proof.proof_type == proof_type)
+                .map(|proof| proof.bytes == bytes)
+        });
+        if let Some(Some(verdict)) = held {
+            return verdict;
         }
 
         // A consuming node asks about payloads this relay never seeded. Fetch them once, under the
@@ -576,6 +608,7 @@ async fn submit_proof<E: EthSpec>(
         query.proof_type,
         body.len()
     );
+    relay.hold(block_hash, query.proof_type, body.to_vec());
     match relay
         .seed(block_hash, vec![(query.proof_type, body.to_vec())])
         .await
@@ -717,24 +750,28 @@ async fn run<E: EthSpec>(
         _phantom: PhantomData,
     });
 
-    let seeder = relay.clone();
-    tokio::spawn(async move {
-        let mut last_seen = Slot::new(0);
-        loop {
-            seeder.track_payloads(&mut last_seen).await;
-            match source {
-                Source::Live => seeder.poll_ethproofs().await,
-                Source::Fixture | Source::Synthetic | Source::None => {}
-            }
-            seeder.seed_tracked_payloads().await;
-            tokio::time::sleep(TICK).await;
-        }
-    });
-
     let signs = relay.prover.is_some();
+    if signs {
+        let seeder = relay.clone();
+        tokio::spawn(async move {
+            let mut last_seen = Slot::new(0);
+            loop {
+                seeder.track_payloads(&mut last_seen).await;
+                match source {
+                    Source::Live => seeder.poll_ethproofs().await,
+                    Source::Fixture | Source::Synthetic | Source::None => {}
+                }
+                seeder.seed_tracked_payloads().await;
+                tokio::time::sleep(TICK).await;
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/proofs", post(submit_proof))
         .route("/v1/execution_proof_verifications", post(verify))
+        // A real proof runs to a couple of megabytes, over axum's default.
+        .layer(DefaultBodyLimit::max(MAX_PROOF_SIZE.saturating_add(1024)))
         .with_state(relay);
 
     let listener = tokio::net::TcpListener::bind(listen_address)
