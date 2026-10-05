@@ -8,6 +8,7 @@ use crate::version::{
     unsupported_version_rejection,
 };
 use crate::{sync_committees, utils};
+use beacon_chain::execution_proof_verification::Error as ExecutionProofError;
 use beacon_chain::observed_operations::ObservationOutcome;
 use beacon_chain::payload_attestation_verification::Error as PayloadAttestationError;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
@@ -746,6 +747,7 @@ async fn publish_execution_proofs<T: BeaconChainTypes>(
         .map_err(|e| warp_utils::reject::custom_bad_request(format!("invalid SSZ: {e:?}")))?;
 
     let mut failures = vec![];
+    let mut num_already_known = 0;
     for (index, proof) in proofs.into_iter().enumerate() {
         let proof = Arc::new(proof);
         match chain.verify_execution_proof_for_gossip(proof.clone()).await {
@@ -768,8 +770,15 @@ async fn publish_execution_proofs<T: BeaconChainTypes>(
                     );
                 }
             }
+            // The network already has this proof, so the submitter has nothing to do differently
+            // and a resubmission must not look like a failure to it.
+            Err(
+                ExecutionProofError::ProofAlreadySeen
+                | ExecutionProofError::ValidProofAlreadyKnown
+                | ExecutionProofError::DuplicateFromValidator { .. },
+            ) => num_already_known += 1,
             Err(e) => {
-                error!(
+                debug!(
                     error = ?e,
                     request_index = index,
                     "Failure verifying submitted execution proof"
@@ -777,6 +786,13 @@ async fn publish_execution_proofs<T: BeaconChainTypes>(
                 failures.push(Failure::new(index, format!("{e:?}")));
             }
         }
+    }
+
+    if num_already_known > 0 {
+        debug!(
+            count = num_already_known,
+            "Some submitted execution proofs already known"
+        );
     }
 
     if failures.is_empty() {
