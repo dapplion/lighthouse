@@ -1,7 +1,6 @@
 /// This crate provides the network server for Lighthouse.
 pub mod service;
 
-mod execution_proof_seeding;
 mod metrics;
 mod nat;
 mod network_beacon_processor;

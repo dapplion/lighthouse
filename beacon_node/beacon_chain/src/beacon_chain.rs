@@ -4233,12 +4233,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     }
 
     /// Whether EIP-8025 proofs decide payload validity here, which takes a proof engine.
-    pub fn execution_proofs_enabled(&self) -> bool {
+    pub(crate) fn execution_proofs_enabled(&self) -> bool {
         self.proof_engine.is_some()
     }
 
     /// Whether `block_root`'s payload has proofs from as many proof systems as we require.
-    pub fn execution_proofs_satisfied(&self, block_root: &Hash256) -> bool {
+    pub(crate) fn execution_proofs_satisfied(&self, block_root: &Hash256) -> bool {
         self.observed_execution_proofs
             .read()
             .valid_proof_count(block_root)

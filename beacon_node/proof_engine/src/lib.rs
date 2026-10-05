@@ -7,15 +7,12 @@
 
 use sensitive_url::SensitiveUrl;
 use serde::Deserialize;
-use ssz::Decode;
 use std::time::Duration;
-use types::ExecutionBlockHash;
-use types::execution::{ExecutionProof, SignedExecutionProof};
+use types::execution::ExecutionProof;
 
 pub const DEFAULT_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const PATH_PROOF_VERIFICATIONS: &str = "/v1/execution_proof_verifications";
-const PATH_PROOFS: &str = "/v1/execution_proofs";
 
 #[derive(Debug)]
 pub enum ProofEngineError {
@@ -57,43 +54,6 @@ impl ProofEngine {
             .build()
             .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?;
         Ok(Self { client, url })
-    }
-
-    /// Collect the signed proofs this engine has produced for a payload.
-    ///
-    /// Empty for an engine that only verifies, which is how a node opts out of seeding: the
-    /// difference between a seeder and a consumer is a property of the engine, not of the node.
-    ///
-    /// `domain` is passed in rather than derived here so the engine needs no chain configuration to
-    /// sign, the same arrangement a remote signer has with a validator client.
-    pub async fn get_execution_proofs(
-        &self,
-        beacon_block_root: types::Hash256,
-        block_hash: ExecutionBlockHash,
-        parent_hash: ExecutionBlockHash,
-        domain: types::Hash256,
-    ) -> Result<Vec<SignedExecutionProof>, ProofEngineError> {
-        let mut url = self.url.expose_full().clone();
-        url.set_path(PATH_PROOFS);
-        let bytes = self
-            .client
-            .get(url)
-            .query(&[
-                ("beacon_block_root", format!("{beacon_block_root:?}")),
-                ("block_hash", format!("{block_hash:?}")),
-                ("parent_hash", format!("{parent_hash:?}")),
-                ("domain", format!("{domain:?}")),
-            ])
-            .send()
-            .await
-            .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?
-            .error_for_status()
-            .map_err(|e| ProofEngineError::HttpClient(e.to_string()))?
-            .bytes()
-            .await
-            .map_err(|e| ProofEngineError::InvalidResponse(e.to_string()))?;
-
-        Vec::from_ssz_bytes(&bytes).map_err(|e| ProofEngineError::InvalidResponse(format!("{e:?}")))
     }
 
     /// EIP-8025 `ProofEngine.verify_execution_proof`.

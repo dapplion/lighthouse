@@ -24,6 +24,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
+use types::execution::SignedExecutionProof;
 use types::{
     Attestation, AttestationData, AttesterSlashing, ForkName, PayloadAttestationMessage,
     ProposerSlashing, SignedBlsToExecutionChange, SignedVoluntaryExit, SingleAttestation,
@@ -698,6 +699,86 @@ fn publish_payload_attestation_messages<T: BeaconChainTypes>(
     } else {
         Err(warp_utils::reject::indexed_bad_request(
             "error processing payload attestations".to_string(),
+            failures,
+        ))
+    }
+}
+
+/// POST beacon/pool/execution_proofs (SSZ)
+///
+/// Where EIP-8025 proofs enter the network. A proving service signs a proof and submits it here on
+/// its own schedule; this node verifies and gossips it. Nothing about a proof's timing is decided
+/// by the beacon node.
+pub fn post_beacon_pool_execution_proofs<T: BeaconChainTypes>(
+    eth_v1: EthV1Filter,
+    task_spawner_filter: TaskSpawnerFilter<T>,
+    chain_filter: ChainFilter<T>,
+    network_tx_filter: NetworkTxFilter<T>,
+) -> ResponseFilter {
+    eth_v1
+        .and(warp::path("beacon"))
+        .and(warp::path("pool"))
+        .and(warp::path("execution_proofs"))
+        .and(warp::path::end())
+        .and(warp::body::bytes())
+        .and(task_spawner_filter)
+        .and(chain_filter)
+        .and(network_tx_filter)
+        .then(
+            |body_bytes: Bytes,
+             task_spawner: TaskSpawner<T::EthSpec>,
+             chain: Arc<BeaconChain<T>>,
+             network_tx: UnboundedSender<NetworkMessage<T::EthSpec>>| {
+                task_spawner.spawn_async_with_rejection(Priority::P0, async move {
+                    publish_execution_proofs(&chain, &network_tx, body_bytes).await
+                })
+            },
+        )
+        .boxed()
+}
+
+async fn publish_execution_proofs<T: BeaconChainTypes>(
+    chain: &Arc<BeaconChain<T>>,
+    network_tx: &UnboundedSender<NetworkMessage<T::EthSpec>>,
+    body_bytes: Bytes,
+) -> Result<warp::reply::Response, warp::Rejection> {
+    let proofs = Vec::<SignedExecutionProof>::from_ssz_bytes(&body_bytes)
+        .map_err(|e| warp_utils::reject::custom_bad_request(format!("invalid SSZ: {e:?}")))?;
+
+    let mut failures = vec![];
+    for (index, proof) in proofs.into_iter().enumerate() {
+        let proof = Arc::new(proof);
+        match chain.verify_execution_proof_for_gossip(proof.clone()).await {
+            Ok(verified) => {
+                utils::publish_pubsub_message(
+                    network_tx,
+                    PubsubMessage::ExecutionProof(proof.clone()),
+                )?;
+
+                if let Err(e) = chain.process_execution_proof(&verified).await {
+                    warn!(
+                        error = ?e,
+                        request_index = index,
+                        "Could not act on submitted execution proof"
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    error = ?e,
+                    request_index = index,
+                    "Failure verifying submitted execution proof"
+                );
+                failures.push(Failure::new(index, format!("{e:?}")));
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(warp::reply::reply().into_response())
+    } else {
+        Err(warp_utils::reject::indexed_bad_request(
+            "error processing execution proofs".to_string(),
             failures,
         ))
     }

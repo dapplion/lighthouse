@@ -4070,13 +4070,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 // The payload envelope is imported (`is_payload_received` is now true); release any
                 // attestations awaiting this block's payload so they can be re-processed.
                 self.notify_payload_envelope_imported(*block_root, EnvelopeSource::Gossip);
-                self.publish_execution_proofs(*block_root).await;
             }
-            Ok(AvailabilityProcessingStatus::MissingComponents(_, block_root)) => {
-                // The envelope executed and is cached, it just has no columns yet. Seed from it
-                // anyway, so a payload's proofs do not wait on its data.
-                self.publish_execution_proofs(*block_root).await;
-            }
+            Ok(_) => {}
             Err(e) => {
                 debug!(
                     ?beacon_block_root,
@@ -4086,50 +4081,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 );
             }
         }
-    }
-
-    /// Gossip the execution proofs our proof engine holds for an executed payload.
-    ///
-    /// A no-op unless the engine produces proofs as well as verifying them. Our own proofs go
-    /// through the same verification as anyone else's, which is what makes a seeder count them
-    /// towards its own payloads.
-    pub(crate) async fn publish_execution_proofs(&self, block_root: Hash256) {
-        let proofs = self.chain.fetch_execution_proofs(block_root).await;
-        if proofs.is_empty() {
-            return;
-        }
-
-        let mut messages = Vec::with_capacity(proofs.len());
-        for proof in proofs {
-            let proof = Arc::new(proof);
-            debug!(
-                ?block_root,
-                proof_type = proof.proof_type(),
-                "Publishing execution proof"
-            );
-            messages.push(PubsubMessage::ExecutionProof(proof.clone()));
-
-            match self.chain.verify_execution_proof_for_gossip(proof).await {
-                Ok(verified) => {
-                    if let Err(error) = self.chain.process_execution_proof(&verified).await {
-                        debug!(
-                            ?block_root,
-                            ?error,
-                            "Could not act on our own execution proof"
-                        );
-                    }
-                }
-                Err(error) => {
-                    debug!(
-                        ?block_root,
-                        ?error,
-                        "Our own execution proof did not verify"
-                    )
-                }
-            }
-        }
-
-        self.send_network_message(NetworkMessage::Publish { messages });
     }
 
     /// Inform the reprocess queue that a fully available block (or its payload envelope, post-gloas)
