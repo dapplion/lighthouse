@@ -180,7 +180,13 @@ where
             None
         };
 
-        let execution_layer = if let Some(config) = config.execution_layer.clone() {
+        // With no execution layer the config is still here — it carries the builder settings —
+        // but has no endpoint to connect to.
+        let execution_layer = if let Some(config) = config
+            .execution_layer
+            .clone()
+            .filter(|config| config.execution_endpoint.is_some())
+        {
             let context = runtime_context.clone();
             let execution_layer = ExecutionLayer::from_config(config, context.executor.clone())
                 .map_err(|e| format!("unable to start execution layer endpoints: {:?}", e))?;
@@ -198,6 +204,13 @@ where
                     .map_err(|e| format!("unable to start proof engine client: {:?}", e))
             })
             .transpose()?;
+
+        if execution_layer.is_none() && proof_engine.is_some() {
+            info!(
+                info = "the node cannot verify pre-Gloas payloads or propose a locally built one",
+                "Running with no execution layer; EIP-8025 proofs decide payload validity"
+            );
+        }
 
         // Construct the Gloas builder handle (Builder API client) when the Gloas fork is scheduled.
         // The client is stateless w.r.t. the target builder — each request carries its own URL — but
