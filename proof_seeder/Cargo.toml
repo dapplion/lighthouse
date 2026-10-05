@@ -6,6 +6,8 @@ authors = ["Sigma Prime <contact@sigmaprime.io>"]
 
 [dependencies]
 axum = { workspace = true }
+eth2 = { workspace = true }
+sensitive_url = { workspace = true }
 eth2_keystore = { workspace = true }
 lru = { workspace = true }
 parking_lot = { workspace = true }

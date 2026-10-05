@@ -1,7 +1,7 @@
 # Optional execution proofs devnet
 
 Runs a local network where some nodes take EIP-8025 execution proofs as a payload's validity and
-never send payloads to their execution layer, and one node produces and gossips those proofs. Use it
+never send payloads to their execution layer, and one node has proofs submitted to it and gossips them. Use it
 to check that a gated node keeps up with an ungated one, which is the question the optional-proof
 rollout turns on.
 
@@ -13,29 +13,29 @@ Five Lighthouse nodes, Gloas from genesis, minimal preset, all paired with geth.
 | --- | --- | --- |
 | `cl-1`, `cl-2` | none | Control. Imports payloads unconditionally. |
 | `cl-3`, `cl-4` | `proof-verifier` | Consumer. Verify-only engine, so a payload stays optimistic until proofs from two distinct proof systems arrive. |
-| `cl-5` | `proof-seeder` | Seeder. Its engine holds a validator key, so it produces signed proofs and gossips them. |
+| `cl-5` | `proof-seeder` | Seeder. Its relay holds a validator key, so it signs proofs and submits them to this node, which gossips them. |
 
 The controls exist so a stalled consumer is distinguishable from a broken devnet. Without them, a
 chain that stops moving tells you nothing about why.
 
-Every node using proofs is given the same `--proof-engine-endpoint` flag. Whether a node seeds is
-decided by the engine behind that flag, not by the node's configuration: an engine with a key
-returns signed proofs, one without returns nothing. The beacon node never holds a validator key,
-and both the proving and the signing stay inside the engine binary.
+Every node using proofs is given the same `--proof-engine-endpoint` flag, which is what verifies
+incoming proofs. Seeding is separate and goes the other way: a relay signs proofs and submits them
+to `POST /eth/v1/beacon/pool/execution_proofs`, so a node seeds because something is submitting to
+it, not because of how it is configured. The beacon node never holds a validator key.
 
-A seeder verifies and counts the proofs it was handed as well as gossiping them, so it satisfies its
-own gate and does not stall waiting on a proof it is already holding.
+A seeder verifies and counts the proofs it publishes, so it satisfies its own gate and does not
+stall waiting on a proof it is already holding.
 
 Proving is mocked by `proof_seeder`, but the proofs are not: it runs with `--source fixture`, which
-downloads real zkEVM artifacts from the Ethproofs public API at startup, one per proof type from a
-pinned mainnet block. Those run from roughly 96 KB to 2.6 MB against the 2 KB a synthetic proof
-costs, so proof propagation is exercised at something like true size. The BLS signature over each
-proof is real too, because consumers check it.
+downloads real zkEVM artifacts from the Ethproofs public API, one per proof type from a pinned
+mainnet block. Those run from roughly 250 KB to 2.1 MB against the 1 KB a synthetic proof costs, so
+proof propagation is exercised at something like true size. The BLS signature over each proof is
+real too, because consumers check it.
 
-It is not an always-`VALID` stub either: bytes the engine did not serve verify as `INVALID`, so the
+It is not an always-`VALID` stub either: bytes the relay does not hold verify as `INVALID`, so the
 consumer's reject path stays reachable. The artifacts are not derived from the payload, but the
-public inputs are: the engine stamps the payload's block hash and parent hash into every proof it
-serves, and a consumer rejects one that names another payload.
+public inputs are: the relay stamps the payload's block hash and parent hash into every proof it
+signs, and a consumer rejects one that names another payload.
 
 ## Prerequisites
 
@@ -103,7 +103,7 @@ kurtosis enclave rm -f optional-proofs
 
 ## Notes
 
-The seeding engine signs with validator 0's key, derived from the `ethereum-package` mnemonic, set
+The seeding relay signs with validator 0's key, derived from the `ethereum-package` mnemonic, set
 in `optional-proofs.star`. Consumers reject proofs from validators that are not in the active set,
 so this has to be a real key. To regenerate it, or to use a different mnemonic or index:
 
@@ -111,12 +111,15 @@ so this has to be a real key. To regenerate it, or to use a different mnemonic o
 python3 scripts/tests/derive_validator_key.py "<mnemonic>" 0
 ```
 
-Both engines fetch from Ethproofs on startup, which needs outbound network access from the enclave
+Both relays fetch from Ethproofs on startup, which needs outbound network access from the enclave
 and adds a few seconds to it. Use `--source synthetic` in `optional-proofs.star` to run offline on
 synthetic proofs instead.
 
 A consumer that misses a proof holds that payload as optimistic for good, since nothing else can
 validate it: the payload is never sent to an execution layer. Proofs have no RPC or sync path, on the
 assumption that they are recursive, and an unreachable proof engine is ignored without penalty, so a
-node whose engine is down during a payload's slot stalls on that payload silently. This is why the
-engine has to be up before the first Gloas payload rather than attached later.
+node whose engine is down during a payload's slot stalls on that payload silently.
+
+The relays start after the package rather than before it, because a relay reads the spec from its
+beacon node before it can sign. A consumer's verification engine only has to be up before the first
+Gloas payload it needs to verify.
