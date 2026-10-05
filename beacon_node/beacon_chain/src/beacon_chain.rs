@@ -4233,15 +4233,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     }
 
     /// Whether EIP-8025 proofs decide payload validity here, which takes a proof engine.
-    pub(crate) fn execution_proofs_enabled(&self) -> bool {
+    pub fn execution_proofs_enabled(&self) -> bool {
         self.proof_engine.is_some()
     }
 
     /// Whether `block_root`'s payload has proofs from as many proof systems as we require.
-    ///
-    /// TODO(9658): nothing checks that a proof's public input is this payload, so a proof of another
-    /// payload carrying this block's root counts. https://github.com/sigp/lighthouse/issues/9658
-    pub(crate) fn execution_proofs_satisfied(&self, block_root: &Hash256) -> bool {
+    pub fn execution_proofs_satisfied(&self, block_root: &Hash256) -> bool {
         self.observed_execution_proofs
             .read()
             .valid_proof_count(block_root)

@@ -12,8 +12,8 @@ Five Lighthouse nodes, Gloas from genesis, minimal preset, all paired with geth.
 | Nodes | Engine | Behaviour |
 | --- | --- | --- |
 | `cl-1`, `cl-2` | none | Control. Imports payloads unconditionally. |
-| `cl-3`, `cl-4` | `mock-proof-engine` | Consumer. Verify-only engine, so a payload stays optimistic until proofs from two distinct proof systems arrive. |
-| `cl-5` | `mock-proof-seeder` | Seeder. Its engine holds a validator key, so it produces signed proofs and gossips them. |
+| `cl-3`, `cl-4` | `proof-verifier` | Consumer. Verify-only engine, so a payload stays optimistic until proofs from two distinct proof systems arrive. |
+| `cl-5` | `proof-seeder` | Seeder. Its engine holds a validator key, so it produces signed proofs and gossips them. |
 
 The controls exist so a stalled consumer is distinguishable from a broken devnet. Without them, a
 chain that stops moving tells you nothing about why.
@@ -26,7 +26,7 @@ and both the proving and the signing stay inside the engine binary.
 A seeder verifies and counts the proofs it was handed as well as gossiping them, so it satisfies its
 own gate and does not stall waiting on a proof it is already holding.
 
-Proving is mocked by `mock_proof_engine`, but the proofs are not: it runs with `--ethproofs`, which
+Proving is mocked by `proof_seeder`, but the proofs are not: it runs with `--source fixture`, which
 downloads real zkEVM artifacts from the Ethproofs public API at startup, one per proof type from a
 pinned mainnet block. Those run from roughly 96 KB to 2.6 MB against the 2 KB a synthetic proof
 costs, so proof propagation is exercised at something like true size. The BLS signature over each
@@ -57,7 +57,7 @@ Lighthouse **must** be built with `spec-minimal`. Without it the nodes exit at s
 
 ```
 docker build --build-arg FEATURES=portable,spec-minimal -t lighthouse:local .
-docker build -t mock-proof-engine:local -f testing/mock_proof_engine/Dockerfile .
+docker build -t proof-seeder:local -f proof_seeder/Dockerfile .
 ```
 
 ## Run it
@@ -112,7 +112,7 @@ python3 scripts/tests/derive_validator_key.py "<mnemonic>" 0
 ```
 
 Both engines fetch from Ethproofs on startup, which needs outbound network access from the enclave
-and adds a few seconds to it. Drop `--ethproofs` from `optional-proofs.star` to run offline on
+and adds a few seconds to it. Use `--source synthetic` in `optional-proofs.star` to run offline on
 synthetic proofs instead.
 
 A consumer that misses a proof holds that payload as optimistic for good, since nothing else can

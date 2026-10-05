@@ -6,7 +6,7 @@
 # because the config runs the minimal preset:
 #
 #   docker build --build-arg FEATURES=portable,spec-minimal -t lighthouse:local .
-#   docker build -t mock-proof-engine:local -f testing/mock_proof_engine/Dockerfile .
+#   docker build -t proof-seeder:local -f proof_seeder/Dockerfile .
 set -Eeuo pipefail
 
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"

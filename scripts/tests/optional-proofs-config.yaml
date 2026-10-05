@@ -22,7 +22,7 @@ participants:
     supernode: true
     count: 2
     cl_extra_params:
-      - --proof-engine-endpoint=http://mock-proof-engine:8025
+      - --proof-engine-endpoint=http://proof-verifier:8025
   - cl_type: lighthouse
     cl_image: lighthouse:local
     el_type: geth
@@ -30,7 +30,7 @@ participants:
     supernode: true
     validator_count: 0
     cl_extra_params:
-      - --proof-engine-endpoint=http://mock-proof-seeder:8025
+      - --proof-engine-endpoint=http://proof-seeder:8025
 network_params:
   gloas_fork_epoch: 0
   slot_duration_ms: 6000

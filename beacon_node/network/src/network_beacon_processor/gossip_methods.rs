@@ -4093,7 +4093,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
     /// A no-op unless the engine produces proofs as well as verifying them. Our own proofs go
     /// through the same verification as anyone else's, which is what makes a seeder count them
     /// towards its own payloads.
-    async fn publish_execution_proofs(&self, block_root: Hash256) {
+    pub(crate) async fn publish_execution_proofs(&self, block_root: Hash256) {
         let proofs = self.chain.fetch_execution_proofs(block_root).await;
         if proofs.is_empty() {
             return;

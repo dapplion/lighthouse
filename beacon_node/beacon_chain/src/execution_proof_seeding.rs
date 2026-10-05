@@ -6,9 +6,44 @@
 use crate::{BeaconChain, BeaconChainTypes};
 use tracing::{debug, warn};
 use types::execution::SignedExecutionProof;
-use types::{Domain, Hash256};
+use types::{Domain, EthSpec, Hash256, Slot};
+
+/// How far back a sweep looks for payloads to seed.
+///
+/// Ethproofs serves a block's first proof around five minutes after it and the rest of the cohort
+/// over the following twenty, so a payload is proven long after it stopped being the head and a
+/// sweep that only looked at recent slots would seed nothing. 256 slots is about fifty minutes of
+/// mainnet.
+const SEEDING_WINDOW: u64 = 256;
 
 impl<T: BeaconChainTypes> BeaconChain<T> {
+    /// Canonical payloads within the seeding window that proofs have not yet validated.
+    pub fn unproven_payload_block_roots(&self) -> Vec<Hash256> {
+        let head = self.canonical_head.cached_head();
+        let head_slot = head.head_slot();
+        let finalized_slot = head
+            .finalized_checkpoint()
+            .epoch
+            .start_slot(T::EthSpec::slots_per_epoch());
+        let oldest = head_slot
+            .as_u64()
+            .saturating_sub(SEEDING_WINDOW)
+            .max(finalized_slot.as_u64());
+
+        let mut roots: Vec<Hash256> = vec![];
+        for slot in (oldest..=head_slot.as_u64()).map(Slot::new) {
+            // A skipped slot carries the previous slot's root, so the same payload repeats.
+            let Ok(root) = head.snapshot.beacon_state.get_block_root(slot) else {
+                continue;
+            };
+            if roots.last() == Some(root) || self.execution_proofs_satisfied(root) {
+                continue;
+            }
+            roots.push(*root);
+        }
+        roots
+    }
+
     /// Collect the signed execution proofs our proof engine holds for an executed payload.
     pub async fn fetch_execution_proofs(
         &self,

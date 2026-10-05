@@ -111,6 +111,11 @@ impl<T: BeaconChainTypes> Router<T> {
         };
         let network_beacon_processor = Arc::new(network_beacon_processor);
 
+        crate::execution_proof_seeding::spawn_execution_proof_seeding_service(
+            executor.clone(),
+            network_beacon_processor.clone(),
+        );
+
         // spawn the sync thread
         crate::sync::manager::spawn(
             executor.clone(),
