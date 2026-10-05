@@ -3450,6 +3450,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethproofs_bridge"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "eth2",
+ "lru",
+ "reqwest",
+ "sensitive_url",
+ "tokio",
+ "types",
+ "zip",
+]
+
+[[package]]
 name = "event-listener"
 version = "2.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7220,18 +7234,13 @@ dependencies = [
  "clap",
  "eth2",
  "eth2_keystore",
- "ethereum_ssz",
  "hex",
- "lru",
- "parking_lot",
  "reqwest",
  "sensitive_url",
  "serde",
- "sha2",
  "tokio",
  "tree_hash",
  "types",
- "zip",
 ]
 
 [[package]]

@@ -65,6 +65,7 @@ members = [
     "crypto/kzg",
     "database_manager",
     "lcli",
+    "ethproofs_bridge",
     "proof_seeder",
     "lighthouse",
     "lighthouse/environment",
