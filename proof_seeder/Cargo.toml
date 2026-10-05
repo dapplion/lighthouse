@@ -9,16 +9,11 @@ axum = { workspace = true }
 eth2 = { workspace = true }
 sensitive_url = { workspace = true }
 eth2_keystore = { workspace = true }
-lru = { workspace = true }
-parking_lot = { workspace = true }
 bls = { workspace = true }
 clap = { workspace = true }
-ethereum_ssz = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
-serde = { workspace = true }
-sha2 = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
 tree_hash = { workspace = true }
 types = { workspace = true }
-zip = { workspace = true }
