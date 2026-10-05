@@ -40,15 +40,16 @@ struct Config {
     /// Proofs to post per payload.
     #[arg(long, default_value_t = 4)]
     max_proofs_per_payload: usize,
-    /// Payloads to track, and the slot window read at startup.
-    #[arg(long, default_value_t = 64)]
-    window: usize,
     /// Ethproofs requests a minute. Their quota is ten.
     #[arg(long, default_value_t = 8)]
     requests_per_minute: u32,
-    /// How long to wait before asking Ethproofs about a payload. Nothing is proven sooner.
-    #[arg(long, default_value_t = 5)]
+    /// How long to wait before asking Ethproofs about a payload. At five minutes a block has
+    /// about four proof systems, at ten about seven, so asking later asks once instead of twice.
+    #[arg(long, default_value_t = 10)]
     first_poll_after_minutes: u64,
+    /// How long to wait before asking again about a payload that is not fully proven.
+    #[arg(long, default_value_t = 15)]
+    retry_after_minutes: u64,
     /// How long to keep asking Ethproofs about a payload before giving up on it.
     #[arg(long, default_value_t = 45)]
     give_up_after_minutes: u64,
@@ -95,17 +96,18 @@ struct Bridge<E: EthSpec> {
     /// known about it, so a payload leaving the window takes its schedule with it.
     tracked: LruCache<ExecutionBlockHash, Tracked>,
     budget: Budget,
-    cursor: Slot,
     _phantom: std::marker::PhantomData<E>,
 }
 
 impl<E: EthSpec> Bridge<E> {
-    /// Read the chain forward, learning which beacon block committed which execution block.
+    /// Walk back from the head, learning which beacon block committed which execution block.
     ///
-    /// Returns how many payloads this pass added, which is the only sign the bridge is following
-    /// anything until Ethproofs has something to give.
+    /// Walking by parent root rather than by slot means a re-org is followed: the walk stops at the
+    /// first block already tracked, which is the common ancestor, so blocks that became canonical
+    /// below the previous head are picked up. Returns how many payloads this pass added, which is
+    /// the only sign the bridge is following anything until Ethproofs has something to give.
     async fn track_payloads(&mut self) -> usize {
-        let head = match self
+        let mut block = match self
             .beacon_node
             .get_beacon_blocks_ssz::<E>(BlockId::Head, &self.spec)
             .await
@@ -118,63 +120,56 @@ impl<E: EthSpec> Bridge<E> {
             }
         };
 
-        let head_slot = head.slot();
-        let window = self.config.window as u64;
-        let from = self
-            .cursor
-            .as_u64()
-            .saturating_add(1)
-            .max(head_slot.as_u64().saturating_sub(window));
-
+        let first_poll =
+            Duration::from_secs(self.config.first_poll_after_minutes.saturating_mul(60));
         let mut added = 0;
-        let mut read_through = from.saturating_sub(1);
-        for slot in (from..=head_slot.as_u64()).map(Slot::new) {
-            let block = if slot == head_slot {
-                Some(head.clone())
-            } else {
-                match self
-                    .beacon_node
-                    .get_beacon_blocks_ssz::<E>(BlockId::Slot(slot), &self.spec)
-                    .await
-                {
-                    Ok(block) => block,
-                    Err(e) => {
-                        println!("cannot read slot {slot} from the beacon node: {e:?}");
-                        // Leave the cursor behind this slot so the next pass retries it.
-                        break;
-                    }
+        for _ in 0..self.tracked.cap().get() {
+            if self.is_tracked(block.canonical_root()) {
+                break;
+            }
+
+            // A fork with no payload bid has no execution block hash to ask Ethproofs about, but
+            // its ancestors may, so the walk continues either way.
+            if let Ok(bid) = block.message().body().signed_execution_payload_bid() {
+                let now = Instant::now();
+                self.tracked.put(
+                    bid.message.block_hash,
+                    Tracked {
+                        beacon_root: block.canonical_root(),
+                        parent_hash: bid.message.parent_block_hash,
+                        slot: block.slot(),
+                        posted: vec![],
+                        first_seen: now,
+                        next_poll: now + first_poll,
+                        attempts: 0,
+                    },
+                );
+                added += 1;
+            }
+
+            let parent_root = block.message().parent_root();
+            block = match self
+                .beacon_node
+                .get_beacon_blocks_ssz::<E>(BlockId::Root(parent_root), &self.spec)
+                .await
+            {
+                Ok(Some(parent)) => parent,
+                Ok(None) => break,
+                Err(e) => {
+                    println!("cannot read block {parent_root:?}: {e:?}");
+                    break;
                 }
             };
-            read_through = slot.as_u64();
-            // A skipped slot, or a fork with no payload bid to read an execution block hash from.
-            let Some(block) = block else { continue };
-            let Ok(bid) = block.message().body().signed_execution_payload_bid() else {
-                continue;
-            };
-
-            let now = Instant::now();
-            let first_poll =
-                Duration::from_secs(self.config.first_poll_after_minutes.saturating_mul(60));
-            if self.tracked.contains(&bid.message.block_hash) {
-                continue;
-            }
-            self.tracked.put(
-                bid.message.block_hash,
-                Tracked {
-                    beacon_root: block.canonical_root(),
-                    parent_hash: bid.message.parent_block_hash,
-                    slot,
-                    posted: vec![],
-                    first_seen: now,
-                    next_poll: now + first_poll,
-                    attempts: 0,
-                },
-            );
-            added += 1;
         }
 
-        self.cursor = Slot::new(read_through);
         added
+    }
+
+    /// Whether this beacon block's payload is already tracked, which ends the walk.
+    fn is_tracked(&self, beacon_root: Hash256) -> bool {
+        self.tracked
+            .iter()
+            .any(|(_, state)| state.beacon_root == beacon_root)
     }
 
     /// Ask Ethproofs about the payloads that are due, and post what comes back.
@@ -182,21 +177,32 @@ impl<E: EthSpec> Bridge<E> {
         let give_up = Duration::from_secs(self.config.give_up_after_minutes.saturating_mul(60));
         let now = Instant::now();
 
+        // Oldest due first. Ethproofs allows fewer requests a minute than mainnet produces
+        // payloads, so the budget is always short: spending it on the payloads closest to ageing
+        // out beats spending it on the newest, which have the most chances left.
+        let mut eligible = self
+            .tracked
+            .iter()
+            .filter(|(_, state)| {
+                state.first_seen.elapsed() <= give_up
+                    && state.posted.len() < self.config.max_proofs_per_payload
+                    && state.next_poll <= now
+            })
+            .map(|(block_hash, state)| (*block_hash, state.next_poll))
+            .collect::<Vec<_>>();
+        eligible.sort_by_key(|(_, next_poll)| *next_poll);
+
+        let retry = Duration::from_secs(self.config.retry_after_minutes.saturating_mul(60));
         let mut due = vec![];
-        for (block_hash, state) in self.tracked.iter_mut() {
-            if state.first_seen.elapsed() > give_up {
-                continue;
-            }
-            if state.posted.len() >= self.config.max_proofs_per_payload || state.next_poll > now {
-                continue;
-            }
+        for (block_hash, _) in eligible {
             if !self.budget.take() {
                 break;
             }
-            state.attempts += 1;
-            // A block nobody has proven in ten minutes will not be proven in ten seconds.
-            state.next_poll = now + Duration::from_secs(60 * state.attempts.min(5) as u64);
-            due.push(*block_hash);
+            if let Some(state) = self.tracked.peek_mut(&block_hash) {
+                state.attempts += 1;
+                state.next_poll = now + retry;
+            }
+            due.push(block_hash);
         }
 
         for block_hash in due {
@@ -221,6 +227,9 @@ impl<E: EthSpec> Bridge<E> {
                 let Some(state) = self.tracked.peek(&block_hash) else {
                     continue;
                 };
+                if state.posted.len() >= self.config.max_proofs_per_payload {
+                    break;
+                }
                 if state.posted.contains(&proof.proof_type) {
                     continue;
                 }
@@ -238,7 +247,7 @@ impl<E: EthSpec> Bridge<E> {
                             proof.proof_type,
                             proof.bytes.len()
                         );
-                        if let Some(state) = self.tracked.get_mut(&block_hash) {
+                        if let Some(state) = self.tracked.peek_mut(&block_hash) {
                             state.posted.push(proof.proof_type);
                         }
                     }
@@ -293,11 +302,20 @@ async fn run<E: EthSpec>(
 ) {
     let spec = ChainSpec::from_config::<E>(&chain_config)
         .expect("beacon node spec does not match its own preset");
-    let window = NonZeroUsize::new(config.window.max(1)).expect("non-zero");
+
+    // Hold a payload for as long as this is willing to ask Ethproofs about it. Sized in slots
+    // because that is what the chain hands over, and from the give-up time because evicting a
+    // payload before its proofs appear is the same as never asking.
+    let retention = Duration::from_secs(config.give_up_after_minutes.saturating_mul(60))
+        .as_millis()
+        .checked_div(spec.get_slot_duration().as_millis())
+        .unwrap_or(0)
+        .max(8) as usize;
+    let window = NonZeroUsize::new(retention).expect("non-zero");
 
     let mut bridge = Bridge::<E> {
         http: reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(30))
             .build()
             .expect("cannot build http client"),
         tracked: LruCache::new(window),
@@ -306,7 +324,6 @@ async fn run<E: EthSpec>(
             per_minute: config.requests_per_minute,
             refilled_at: Instant::now(),
         },
-        cursor: Slot::new(0),
         beacon_node,
         spec,
         config,
@@ -314,15 +331,14 @@ async fn run<E: EthSpec>(
     };
 
     println!(
-        "ethproofs bridge posting to {}",
+        "ethproofs bridge posting to {}, holding {window} payloads",
         bridge.config.relay.trim_end_matches('/')
     );
     loop {
         let added = bridge.track_payloads().await;
         if added > 0 {
             println!(
-                "tracking {added} more payloads, through slot {} ({} in the window)",
-                bridge.cursor,
+                "tracking {added} more payloads ({} held)",
                 bridge.tracked.len()
             );
         }

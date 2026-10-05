@@ -151,11 +151,22 @@ async fn submit_proof<E: EthSpec>(
         );
     };
 
-    let signed = match relay.sign(&query, proof_data) {
-        Ok(signed) => signed,
-        Err(e) => return (StatusCode::BAD_REQUEST, e),
+    let signing = relay.clone();
+    let signed = match tokio::task::spawn_blocking(move || signing.sign(&query, proof_data)).await {
+        Ok(Ok(signed)) => signed,
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("signing panicked: {e}"),
+            );
+        }
     };
 
+    let (block_hash, proof_type) = (
+        signed.message.zk_proof.public_inputs.block_hash,
+        signed.message.zk_proof.proof_type,
+    );
     match relay
         .beacon_node
         .post_beacon_pool_execution_proofs(vec![signed])
@@ -163,9 +174,9 @@ async fn submit_proof<E: EthSpec>(
     {
         Ok(()) => {
             println!(
-                "submitted proof of {} type {} ({} bytes)",
-                query.block_hash,
-                query.proof_type,
+                "submitted proof of {:?} type {} ({} bytes)",
+                block_hash,
+                proof_type,
                 body.len()
             );
             (StatusCode::ACCEPTED, String::new())
@@ -212,13 +223,14 @@ async fn serve<E: EthSpec>(
     chain_config: types::Config,
     beacon_node: BeaconNodeHttpClient,
     genesis_validators_root: Hash256,
+    secret_key: SecretKey,
 ) {
     let spec = ChainSpec::from_config::<E>(&chain_config)
         .expect("beacon node spec does not match its own preset");
 
     let listen_address = config.listen_address;
     let relay = Arc::new(Relay::<E> {
-        secret_key: load_key(&config),
+        secret_key,
         validator_index: config.validator_index,
         beacon_node,
         genesis_validators_root,
@@ -242,6 +254,8 @@ async fn serve<E: EthSpec>(
 #[tokio::main]
 async fn main() {
     let config = Config::parse();
+    // Before waiting on the beacon node, so a bad keystore fails at once.
+    let secret_key = load_key(&config);
 
     let beacon_node = BeaconNodeHttpClient::new(
         sensitive_url::SensitiveUrl::parse(&config.beacon_node)
@@ -273,15 +287,34 @@ async fn main() {
     // The preset decides the spec constants, which decide the fork at a slot.
     match chain_config.preset_base.as_str() {
         "mainnet" => {
-            serve::<MainnetEthSpec>(config, chain_config, beacon_node, genesis_validators_root)
-                .await
+            serve::<MainnetEthSpec>(
+                config,
+                chain_config,
+                beacon_node,
+                genesis_validators_root,
+                secret_key,
+            )
+            .await
         }
         "minimal" => {
-            serve::<MinimalEthSpec>(config, chain_config, beacon_node, genesis_validators_root)
-                .await
+            serve::<MinimalEthSpec>(
+                config,
+                chain_config,
+                beacon_node,
+                genesis_validators_root,
+                secret_key,
+            )
+            .await
         }
         "gnosis" => {
-            serve::<GnosisEthSpec>(config, chain_config, beacon_node, genesis_validators_root).await
+            serve::<GnosisEthSpec>(
+                config,
+                chain_config,
+                beacon_node,
+                genesis_validators_root,
+                secret_key,
+            )
+            .await
         }
         preset => panic!("unsupported preset {preset}"),
     }

@@ -74,7 +74,7 @@ pub async fn fetch_by_hash(
     extract(&bytes, max_proofs)
 }
 
-/// Read one proof per proving system out of a download, smallest first.
+/// Read the first proof of each proving system out of a download, keeping the smallest systems.
 fn extract(archive: &[u8], max_proofs: usize) -> Result<Vec<FetchedProof>, String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))
         .map_err(|e| format!("download is not a zip: {e}"))?;

@@ -12,7 +12,6 @@ eth2_keystore = { workspace = true }
 bls = { workspace = true }
 clap = { workspace = true }
 hex = { workspace = true }
-reqwest = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 tree_hash = { workspace = true }

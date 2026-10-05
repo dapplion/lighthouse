@@ -1,8 +1,8 @@
 """Derive an EIP-2334 validator signing key from a BIP39 mnemonic.
 
-The optional-proofs devnet needs the secret key of an active validator to sign execution proofs
-with, because consumers reject proofs from validators they cannot find in the active set. Run this
-against the mnemonic the devnet generated its keys from.
+A proof relay signs execution proofs with a validator key, and a beacon node rejects proofs from
+validators it cannot find in the registry, so the key has to be a real one. Run this against the
+mnemonic a devnet generated its keys from to get a key `proof_seeder --secret-key` accepts.
 
 Needs `py_ecc` (pip install py_ecc), which is not a Lighthouse dependency.
 

@@ -6,7 +6,10 @@ use ssz_derive::{Decode, Encode};
 use ssz_types::VariableList;
 use tree_hash_derive::TreeHash;
 
-/// Maximum size of `proof_data` in bytes (EIP-8025 `MAX_PROOF_SIZE`).
+/// Maximum size of `proof_data` in bytes.
+///
+/// Above the spec's `MAX_PROOF_SIZE` of 307200, which real proofs exceed: the artifacts Ethproofs
+/// serves run from 250 KB to 2.1 MB.
 pub const MAX_PROOF_SIZE: usize = 4_194_304;
 
 /// SSZ bound for `proof_data`.
