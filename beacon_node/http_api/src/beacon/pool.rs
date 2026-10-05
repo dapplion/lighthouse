@@ -750,6 +750,11 @@ async fn publish_execution_proofs<T: BeaconChainTypes>(
         let proof = Arc::new(proof);
         match chain.verify_execution_proof_for_gossip(proof.clone()).await {
             Ok(verified) => {
+                debug!(
+                    block_root = ?proof.beacon_root(),
+                    proof_type = proof.proof_type(),
+                    "Publishing submitted execution proof"
+                );
                 utils::publish_pubsub_message(
                     network_tx,
                     PubsubMessage::ExecutionProof(proof.clone()),

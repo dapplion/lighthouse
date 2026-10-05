@@ -29,7 +29,7 @@ for container in $(docker ps --format '{{.Names}}' | grep -E '^cl-[0-9]+-lightho
     python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; print(d["current_justified"]["epoch"]+"/"+d["finalized"]["epoch"])' 2>/dev/null)
 
   logs=$(docker logs --tail 60000 "$container" 2>&1)
-  published=$(grep -c "Publishing execution proof" <<<"$logs" || true)
+  published=$(grep -c "Publishing submitted execution proof" <<<"$logs" || true)
   verified=$(grep -c "Verified execution proof from gossip" <<<"$logs" || true)
   validated=$(grep -c "Execution proofs complete" <<<"$logs" || true)
 
