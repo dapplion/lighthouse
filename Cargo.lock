@@ -7235,7 +7235,6 @@ dependencies = [
  "eth2",
  "eth2_keystore",
  "hex",
- "reqwest",
  "sensitive_url",
  "serde",
  "tokio",
