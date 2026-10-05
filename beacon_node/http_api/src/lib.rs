@@ -333,6 +333,14 @@ pub fn tracing_logging() -> warp::filters::log::Log<impl Fn(warp::filters::log::
 ///
 /// Returns an error if the server is unable to bind or there is another error during
 /// configuration.
+/// Whether the node has no execution layer able to tell it a payload is valid.
+async fn is_el_offline<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> bool {
+    match &chain.execution_layer {
+        Some(execution_layer) => execution_layer.is_offline_or_erroring().await,
+        None => !chain.runs_without_execution_layer(),
+    }
+}
+
 pub async fn serve<T: BeaconChainTypes>(
     ctx: Arc<Context<T>>,
     shutdown: impl Future<Output = ()> + Send + Sync + 'static,
@@ -2302,11 +2310,7 @@ pub async fn serve<T: BeaconChainTypes>(
              network_globals: Arc<NetworkGlobals<T::EthSpec>>,
              chain: Arc<BeaconChain<T>>| {
                 async move {
-                    let el_offline = if let Some(el) = &chain.execution_layer {
-                        el.is_offline_or_erroring().await
-                    } else {
-                        true
-                    };
+                    let el_offline = is_el_offline(&chain).await;
 
                     task_spawner
                         .blocking_json_task(Priority::P0, move || {
@@ -2364,11 +2368,7 @@ pub async fn serve<T: BeaconChainTypes>(
              network_globals: Arc<NetworkGlobals<T::EthSpec>>,
              chain: Arc<BeaconChain<T>>| {
                 async move {
-                    let el_offline = if let Some(el) = &chain.execution_layer {
-                        el.is_offline_or_erroring().await
-                    } else {
-                        true
-                    };
+                    let el_offline = is_el_offline(&chain).await;
 
                     task_spawner
                         .blocking_response_task(Priority::P0, move || {
