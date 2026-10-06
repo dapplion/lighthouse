@@ -110,11 +110,9 @@ impl<T: BeaconChainTypes> GraffitiCalculator<T> {
             GraffitiOrigin::UserSpecified(graffiti) => graffiti,
             GraffitiOrigin::Calculated(default_graffiti) => {
                 let Some(execution_layer) = self.execution_layer.as_ref() else {
-                    // Return default graffiti if there is no execution layer. This
-                    // shouldn't occur if we're actually producing blocks.
-                    crit!(
-                        "No execution layer available for graffiti calculation during block production!"
-                    );
+                    // A node running with no execution layer has no engine version to advertise,
+                    // so the default graffiti is all there is to say.
+                    debug!("No execution layer to take a graffiti engine version from");
                     return default_graffiti;
                 };
 
