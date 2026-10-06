@@ -140,6 +140,11 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     }
 
     #[cfg(test)]
+    pub(crate) fn get_ignored_chains(&mut self) -> Vec<Hash256> {
+        self.ignored_chains.keys().cloned().collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn active_single_lookups(&self) -> Vec<BlockLookupSummary> {
         self.single_block_lookups
             .iter()
@@ -644,21 +649,6 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
     ) -> bool {
         match result {
             Ok(LookupResult::Pending) => true,
-            Ok(LookupResult::RangeSyncRequired {
-                block_root,
-                slot,
-                peers,
-            }) => {
-                cx.send_sync_message(SyncMessage::AddPeersForceRangeSync {
-                    peers,
-                    head_slot: Some(slot),
-                    head_root: block_root,
-                });
-                self.ignored_chains.insert(block_root);
-                self.drop_lookup_and_children(id, "range_sync_required");
-                self.update_metrics();
-                false
-            }
             Ok(LookupResult::ParentUnknown {
                 parent_root,
                 parent_block_hash,

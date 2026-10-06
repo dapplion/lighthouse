@@ -91,7 +91,7 @@ pub use beacon_fork_choice_store::{
 pub use block_verification::{
     BlockError, BlockErrorWithRoot, ExecutionPayloadError, ExecutionPendingBlock,
     GossipVerifiedBlock, IntoExecutionPendingBlock, IntoGossipVerifiedBlock, InvalidSignature,
-    LookupEarlyError, ParentImportStatus, PayloadVerificationError, PayloadVerificationOutcome,
+    ParentImportStatus, PayloadVerificationError, PayloadVerificationOutcome,
     PayloadVerificationStatus, build_blob_data_column_sidecars, get_block_root,
     signature_verify_chain_segment,
 };

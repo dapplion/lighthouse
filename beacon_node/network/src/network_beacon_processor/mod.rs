@@ -1,6 +1,6 @@
 use crate::sync::manager::BlockProcessType;
 use crate::{service::NetworkMessage, sync::manager::SyncMessage};
-use beacon_chain::block_verification_types::RangeSyncBlock;
+use beacon_chain::block_verification_types::{LookupBlock, RangeSyncBlock};
 use beacon_chain::data_column_verification::{
     GossipDataColumnError, KzgVerifiedCustodyDataColumn, observe_gossip_data_column,
 };
@@ -572,7 +572,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self: &Arc<Self>,
         peer_id: PeerId,
         block_root: Hash256,
-        block: Arc<SignedBeaconBlock<T::EthSpec>>,
+        block: LookupBlock<T::EthSpec>,
         process_type: BlockProcessType,
     ) -> Result<(), Error<T::EthSpec>> {
         let (process_fn, ignore_fn) =

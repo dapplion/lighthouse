@@ -18,7 +18,7 @@ use crate::sync::batch::ByRangeRequestType;
 use crate::sync::block_lookups::{DownloadResult, SingleLookupId};
 use crate::sync::block_sidecar_coupling::CouplingError;
 use crate::sync::range_data_column_batch_request::RangeDataColumnBatchRequest;
-use beacon_chain::block_verification_types::{AsBlock, RangeSyncBlock};
+use beacon_chain::block_verification_types::{AsBlock, LookupBlock, RangeSyncBlock};
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
@@ -807,7 +807,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             // true = enforce max_requests as returned for blocks_by_root. We always request a single
             // block and the peer must have it.
             true,
-            BlocksByRootRequestItems::new(),
+            BlocksByRootRequestItems::new(request),
             request_span,
         );
 
@@ -1528,14 +1528,16 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .beacon_processor_if_enabled()
             .ok_or(SendErrorProcessor::ProcessorNotAvailable)?;
 
-        debug!(block = ?block_root, block_slot = %block.slot(), id, "Sending block for processing");
+        let lookup_block = LookupBlock::new(block_root, block);
+
+        debug!(block = ?block_root, block_slot = %lookup_block.slot(), id, "Sending block for processing");
         // Lookup sync event safety: If `beacon_processor.send_rpc_beacon_block` returns Ok() sync
         // must receive a single `SyncMessage::BlockComponentProcessed` with this process type
         beacon_processor
             .send_lookup_beacon_block(
                 peer_id,
                 block_root,
-                block,
+                lookup_block,
                 BlockProcessType::SingleBlock { id },
             )
             .map_err(|e| {

@@ -391,6 +391,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 
     #[cfg(test)]
+    pub(crate) fn get_ignored_chains(&mut self) -> Vec<Hash256> {
+        self.block_lookups.get_ignored_chains()
+    }
+
+    #[cfg(test)]
     pub(crate) fn update_execution_engine_state(&mut self, state: EngineState) {
         self.handle_new_execution_engine_state(state);
     }

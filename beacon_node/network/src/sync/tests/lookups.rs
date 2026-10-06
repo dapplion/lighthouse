@@ -38,7 +38,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::info;
 use types::{
-    BlobSidecar, BlockImportSource, ColumnIndex, DataColumnSidecar, DataColumnSubnetId, EthSpec,
+    BlobSidecar, BlockImportSource, ColumnIndex, DataColumnSidecar, DataColumnSubnetId,
     ForkContext, ForkName, Hash256, MinimalEthSpec as E, SignedBeaconBlock,
     SignedExecutionPayloadEnvelope, Slot,
 };
@@ -326,6 +326,7 @@ impl TestRig {
             sync_rx,
             sync_rx_queue: vec![],
             rng_08,
+            unstructured: types::test_utils::test_unstructured(),
             network_globals: beacon_processor.network_globals.clone(),
             sync_manager: SyncManager::new(
                 chain,
@@ -573,19 +574,7 @@ impl TestRig {
                                 None
                             } else if self.complete_strategy.return_wrong_blocks_n_times > 0 {
                                 self.complete_strategy.return_wrong_blocks_n_times -= 1;
-                                let mut block = self
-                                    .network_blocks_by_root
-                                    .get(block_root)
-                                    .unwrap_or_else(|| {
-                                        panic!(
-                                            "Test consumer requested unknown block: {block_root:?}"
-                                        )
-                                    })
-                                    .block_cloned();
-                                *Arc::make_mut(&mut block).message_mut().state_root_mut() =
-                                    Hash256::ZERO;
-                                assert_ne!(block.canonical_root(), *block_root);
-                                Some(block)
+                                Some(Arc::new(self.rand_block()))
                             } else {
                                 Some(self.network_blocks_by_root
                                 .get(block_root)
@@ -1748,6 +1737,18 @@ impl TestRig {
         ));
     }
 
+    fn rand_block(&mut self) -> SignedBeaconBlock<E> {
+        self.rand_block_and_blobs(NumBlobs::None).0
+    }
+
+    fn rand_block_and_blobs(
+        &mut self,
+        num_blobs: NumBlobs,
+    ) -> (SignedBeaconBlock<E>, Vec<BlobSidecar<E>>) {
+        let fork_name = self.fork_name;
+        generate_rand_block_and_blobs::<E>(fork_name, num_blobs, &mut self.unstructured).unwrap()
+    }
+
     pub fn send_sync_message(&mut self, sync_message: SyncMessage<E>) {
         self.sync_manager.handle_message(sync_message);
     }
@@ -1783,6 +1784,13 @@ impl TestRig {
     fn insert_ignored_chain(&mut self, block_root: Hash256) {
         self.log(&format!("Inserting block in ignored chains {block_root:?}"));
         self.sync_manager.insert_ignored_chain(block_root);
+    }
+
+    fn assert_ignored_chain(&mut self, chain_hash: Hash256) {
+        let chains = self.sync_manager.get_ignored_chains();
+        if !chains.contains(&chain_hash) {
+            panic!("expected ignored chains to contain {chain_hash:?}: {chains:?}");
+        }
     }
 
     #[track_caller]
@@ -2137,7 +2145,7 @@ async fn happy_path_unknown_attestation(depth: usize) {
 
 async fn happy_path_unknown_block_parent(depth: usize) {
     let mut r = TestRig::default();
-    r.build_chain(depth.max(2)).await;
+    r.build_chain(depth).await;
     r.trigger_with_last_unknown_block_parent();
     r.simulate(SimulateConfig::happy_path()).await;
     // Note the following for the tip lookup, it's the lookup for the tip block which has 0 peers
@@ -2160,7 +2168,7 @@ async fn happy_path_unknown_data_parent(depth: usize) {
     if r.is_after_gloas() {
         return;
     }
-    r.build_chain(depth.max(2)).await;
+    r.build_chain(depth).await;
     r.trigger_with_last_unknown_data_column_parent();
     r.simulate(SimulateConfig::happy_path()).await;
     r.assert_successful_lookup_sync_parent_trigger();
@@ -2377,113 +2385,9 @@ async fn test_single_block_lookup_ignored_response() {
     // The block was not actually imported
     r.assert_head_slot(0);
     r.assert_no_penalties();
-    assert!(
-        r.requests
-            .iter()
-            .all(|(request, _)| matches!(request, RequestType::BlocksByRoot(_))),
-        "ignored block processing must not start component downloads"
-    );
     assert_eq!(r.created_lookups(), 1, "no created lookups");
     assert_eq!(r.dropped_lookups(), 1, "no dropped lookups");
     assert_eq!(r.completed_lookups(), 0, "some completed lookups");
-}
-
-/// Hold the downloaded block in the processor queue, where its root and validity have not yet
-/// been checked. Neither a matching block nor an unrequested block may trigger component requests.
-async fn assert_component_downloads_wait_for_block_processing(wrong_root: bool) {
-    let Some(mut r) = TestRig::new_after_fulu() else {
-        return;
-    };
-    // Gloas needs a FULL child to identify peers that can serve the parent's components.
-    r.trigger_custody_lookup_from_all_peers().await;
-    let block_root = r.block_root_at_slot(1);
-    let (peer_id, sync_request_id) = r
-        .pop_received_network_event(|event| match event {
-            NetworkMessage::SendRequest {
-                peer_id,
-                request: RequestType::BlocksByRoot(_),
-                app_request_id: AppRequestId::Sync(id),
-            } => Some((*peer_id, *id)),
-            _ => None,
-        })
-        .expect("block request");
-    r.assert_empty_network();
-
-    let mut block = (*r.block_at_slot(1)).clone();
-    if wrong_root {
-        // Keep the known parent and component commitments, but change the requested root.
-        *block.message_mut().state_root_mut() = Hash256::ZERO;
-        assert_ne!(block.canonical_root(), block_root);
-    }
-    r.send_sync_message(SyncMessage::RpcBlock {
-        sync_request_id,
-        peer_id,
-        beacon_block: Some(Arc::new(block)),
-    });
-    r.send_sync_message(SyncMessage::RpcBlock {
-        sync_request_id,
-        peer_id,
-        beacon_block: None,
-    });
-    r.assert_empty_network();
-    r.drain_processor_rx();
-    assert_eq!(r.beacon_processor_rx_queue.len(), 1);
-    let event = r.beacon_processor_rx_queue.remove(0);
-    let Work::RpcBlock {
-        beacon_block_root,
-        process_fn,
-        ..
-    } = event.work
-    else {
-        panic!("expected block processing work");
-    };
-    assert_eq!(beacon_block_root, block_root);
-
-    process_fn.await;
-    while let Ok(message) = r.sync_rx.try_recv() {
-        r.send_sync_message(message);
-    }
-    r.drain_network_rx();
-    if wrong_root {
-        assert!(r.network_rx_queue.iter().any(|event| matches!(
-            event,
-            NetworkMessage::ReportPeer {
-                msg: "UnrequestedBlockRoot",
-                ..
-            }
-        )));
-        assert!(!r.network_rx_queue.iter().any(|event| matches!(
-            event,
-            NetworkMessage::SendRequest {
-                request: RequestType::DataColumnsByRoot(_) | RequestType::PayloadEnvelopesByRoot(_),
-                ..
-            }
-        )));
-    } else {
-        assert!(
-            r.network_rx_queue.iter().any(|event| matches!(
-                event,
-                NetworkMessage::SendRequest {
-                    request: RequestType::DataColumnsByRoot(_)
-                        | RequestType::PayloadEnvelopesByRoot(_),
-                    ..
-                }
-            )),
-            "processed block with missing components must start component downloads"
-        );
-        r.simulate(SimulateConfig::happy_path()).await;
-        r.assert_successful_lookup_sync();
-    }
-}
-
-#[tokio::test]
-async fn downloaded_block_waits_for_processing_before_component_requests() {
-    assert_component_downloads_wait_for_block_processing(false).await;
-}
-
-#[tokio::test]
-async fn wrong_downloaded_block_cannot_start_component_requests() {
-    assert_component_downloads_wait_for_block_processing(true).await;
 }
 
 #[tokio::test]
@@ -2566,41 +2470,48 @@ async fn lookups_form_chain() {
 }
 
 #[tokio::test]
-/// Assert that a lookup for a block beyond the slot import tolerance is dropped without
-/// fetching ancestors or forcing range sync.
+/// Assert that if a lookup chain (by appending ancestors) is too long we drop it
 async fn test_parent_lookup_too_deep_grow_ancestor_one() {
     let mut r = TestRig::default();
     r.build_chain(PARENT_DEPTH_TOLERANCE + 1).await;
     r.trigger_with_last_block();
     r.simulate(SimulateConfig::happy_path()).await;
 
-    r.assert_head_slot(0);
+    r.assert_head_slot(PARENT_DEPTH_TOLERANCE as u64 + 1);
     r.assert_no_penalties();
-    assert_eq!(r.created_lookups(), 1, "only the tip lookup created");
+    // Should not penalize peer, but network is not clear because of the blocks_by_range requests
+    // r.assert_ignored_chain(chain_hash);
+    //
+    // Assert that chain is in failed chains
+    // Assert that there were 0 lookups completed, 33 dropped
+    // Assert that there were 1 range sync chains
+    // Bound resources:
+    // - Limit amount of requests
+    // - Limit the types of sync used
     assert_eq!(r.completed_lookups(), 0, "no completed lookups");
-    assert_eq!(r.dropped_lookups(), 1, "tip lookup dropped");
-    assert_eq!(r.range_sync_chains_added(), 0, "no range sync forced");
-    r.assert_no_active_lookups();
-    r.assert_empty_network();
+    assert_eq!(
+        r.dropped_lookups(),
+        PARENT_DEPTH_TOLERANCE,
+        "All lookups dropped"
+    );
+    r.assert_successful_range_sync();
 }
 
 #[tokio::test]
-/// Assert that a lookup for a block beyond the proposer lookahead is dropped without fetching
-/// ancestors or forcing range sync.
 async fn test_parent_lookup_too_deep_grow_ancestor_zero() {
     let mut r = TestRig::default();
     r.build_chain(PARENT_DEPTH_TOLERANCE).await;
     r.trigger_with_last_block();
     r.simulate(SimulateConfig::happy_path()).await;
 
-    r.assert_head_slot(0);
+    r.assert_head_slot(PARENT_DEPTH_TOLERANCE as u64);
     r.assert_no_penalties();
-    assert_eq!(r.created_lookups(), 1, "only the tip lookup created");
-    assert_eq!(r.completed_lookups(), 0, "no completed lookups");
-    assert_eq!(r.dropped_lookups(), 1, "tip lookup dropped");
-    assert_eq!(r.range_sync_chains_added(), 0, "no range sync forced");
-    r.assert_no_active_lookups();
-    r.assert_empty_network();
+    assert_eq!(
+        r.completed_lookups(),
+        PARENT_DEPTH_TOLERANCE,
+        "completed all lookups"
+    );
+    assert_eq!(r.dropped_lookups(), 0, "no dropped lookups");
 }
 
 // Regression test for https://github.com/sigp/lighthouse/pull/7118
@@ -2614,13 +2525,13 @@ async fn test_child_lookup_not_created_for_ignored_chain_parent_after_processing
     r.trigger_with_block_at_slot(depth as u64);
     r.simulate(SimulateConfig::new().no_range_sync()).await;
 
-    // The tip is beyond the slot import tolerance, so its lookup is dropped after processing
-    // without syncing any blocks. Lookups can no longer grow a parent chain past
-    // `PARENT_DEPTH_TOLERANCE`, so mark the tip as ignored directly.
+    // At this point, the chain should have been deemed too deep and pruned.
+    // The tip root should have been inserted into ignored chains.
+    // Ensure no blocks have been synced
     r.assert_head_slot(0);
     r.assert_no_active_lookups();
     r.assert_no_penalties();
-    r.insert_ignored_chain(r.block_at_slot(depth as u64).canonical_root());
+    r.assert_ignored_chain(r.block_at_slot(depth as u64).canonical_root());
 
     // WHEN: Trigger the extending block that points to the tip.
     let peer = r.new_connected_peer();
@@ -2633,8 +2544,7 @@ async fn test_child_lookup_not_created_for_ignored_chain_parent_after_processing
 }
 
 #[tokio::test]
-/// Assert that concurrent tip lookups import blocks within the proposer lookahead and drop the
-/// rest without penalties.
+/// Assert that if a lookup chain (by appending tips) is too long we drop it
 async fn test_parent_lookup_too_deep_grow_tip() {
     let depth = PARENT_DEPTH_TOLERANCE + 1;
     let mut r = TestRig::default();
@@ -2644,20 +2554,18 @@ async fn test_parent_lookup_too_deep_grow_tip() {
     }
     r.simulate(SimulateConfig::happy_path()).await;
 
+    // Even if the chain is longer than `PARENT_DEPTH_TOLERANCE` because the lookups are created all
+    // at once they chain by sections and it's possible that the oldest ancestors start processing
+    // before the full chain is connected.
     assert!(r.created_lookups() > 0, "no created lookups");
-    assert!(r.dropped_lookups() > 0, "lookups beyond lookahead dropped");
     assert_eq!(
-        r.completed_lookups() + r.dropped_lookups(),
+        r.completed_lookups(),
         r.created_lookups(),
-        "not all lookups completed or dropped"
+        "not all completed lookups"
     );
-    // Lookups only import blocks within the proposer lookahead (previous, current and next epoch
-    // relative to head). Head is at genesis, so tips past the next epoch are dropped without
-    // forcing range sync.
-    r.assert_head_slot(2 * E::slots_per_epoch() - 1);
-    assert_eq!(r.range_sync_chains_added(), 0, "no range sync forced");
-    r.assert_no_active_lookups();
-    r.assert_empty_network();
+    assert_eq!(r.dropped_lookups(), 0, "some dropped lookups");
+    r.assert_successful_lookup_sync();
+    // Should not penalize peer, but network is not clear because of the blocks_by_range requests
     r.assert_no_penalties();
 }
 
@@ -2854,7 +2762,7 @@ async fn crypto_on_fail_with_invalid_block_signature() {
         r.assert_no_penalties();
     } else {
         r.assert_failed_lookup_sync();
-        r.assert_penalties_of_type("lookup_proposer_signature_invalid");
+        r.assert_penalties_of_type("InvalidSignature");
     }
 }
 

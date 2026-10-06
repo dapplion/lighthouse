@@ -487,7 +487,7 @@ impl TestRig {
             .send_lookup_beacon_block(
                 junk_peer_id(),
                 block_root,
-                self.next_block.clone(),
+                LookupBlock::new(block_root, self.next_block.clone()),
                 BlockProcessType::SingleBlock { id: 0 },
             )
             .unwrap();
@@ -499,7 +499,7 @@ impl TestRig {
             .send_lookup_beacon_block(
                 junk_peer_id(),
                 block_root,
-                self.next_block.clone(),
+                LookupBlock::new(block_root, self.next_block.clone()),
                 BlockProcessType::SingleBlock { id: 1 },
             )
             .unwrap();
