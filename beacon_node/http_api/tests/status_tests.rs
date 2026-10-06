@@ -11,7 +11,7 @@ use eth2::types::ProposerPreparationData;
 use execution_layer::{PayloadStatusV1, PayloadStatusV1Status};
 use http_api::test_utils::InteractiveTester;
 use reqwest::StatusCode;
-use types::{Address, ChainSpec, EthSpec, ExecPayload, MinimalEthSpec, Slot, Uint256};
+use types::{Address, EthSpec, ExecPayload, MinimalEthSpec, Slot, Uint256};
 
 type E = MinimalEthSpec;
 
@@ -240,16 +240,12 @@ async fn node_health_el_online_and_not_synced() {
     }
 }
 
-/// From Gloas a node with no execution layer takes payload validity from EIP-8025 proofs, so it
-/// has nothing that can be offline. A validator client ranks a node reporting `el_offline` below
-/// every node with a healthy execution layer, which would leave this one unused.
+/// A node with no execution layer takes payload validity from EIP-8025 proofs, so it has nothing
+/// that can be offline. A validator client ranks a node reporting `el_offline` below every node
+/// with a healthy execution layer, which would leave this one unused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_execution_layer_with_a_proof_engine_is_not_offline() {
-    if !fork_name_from_env().is_some_and(|fork| fork.gloas_enabled()) {
-        return;
-    }
-
-    let tester = proof_engine_tester(None).await;
+    let tester = proof_engine_tester().await;
 
     let api_response = tester.client.get_node_syncing().await.unwrap().data;
     assert!(!api_response.el_offline);
@@ -261,28 +257,11 @@ async fn no_execution_layer_with_a_proof_engine_is_not_offline() {
     );
 }
 
-/// Before Gloas there are no proofs to stand in for the engine, so the same node cannot verify a
-/// payload at all and must say so.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn no_execution_layer_before_gloas_is_offline() {
-    let mut spec = test_spec::<E>();
-    spec.gloas_fork_epoch = None;
-    let tester = proof_engine_tester(Some(spec)).await;
-
-    let api_response = tester.client.get_node_syncing().await.unwrap().data;
-    assert!(api_response.el_offline);
-
-    assert_eq!(
-        tester.client.get_node_health().await.unwrap_err().status(),
-        Some(StatusCode::SERVICE_UNAVAILABLE)
-    );
-}
-
 /// The proposer preparation the validator client sends every epoch has no execution layer to
 /// prime, but it must not fail: the rest of the endpoint still applies.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn proposer_preparation_without_an_execution_layer() {
-    let tester = proof_engine_tester(None).await;
+    let tester = proof_engine_tester().await;
 
     tester
         .client
@@ -295,10 +274,10 @@ async fn proposer_preparation_without_an_execution_layer() {
 }
 
 /// A tester whose node runs no execution layer and requires EIP-8025 execution proofs.
-async fn proof_engine_tester(spec: Option<ChainSpec>) -> InteractiveTester<E> {
+async fn proof_engine_tester() -> InteractiveTester<E> {
     let validator_count = E::slots_per_epoch() as usize;
     InteractiveTester::<E>::new_with_initializer_and_mutator(
-        spec,
+        None,
         validator_count,
         Some(Box::new(move |builder| {
             builder

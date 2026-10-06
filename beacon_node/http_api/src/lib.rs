@@ -318,6 +318,15 @@ pub fn tracing_logging() -> warp::filters::log::Log<impl Fn(warp::filters::log::
     })
 }
 
+/// Whether the node has nothing able to tell it a payload is valid.
+async fn is_el_offline<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> bool {
+    match &chain.execution_layer {
+        Some(execution_layer) => execution_layer.is_offline_or_erroring().await,
+        // Running with no execution layer is deliberate when EIP-8025 proofs decide validity.
+        None => !chain.execution_proofs_enabled(),
+    }
+}
+
 /// Creates a server that will serve requests using information from `ctx`.
 ///
 /// The server will shut down gracefully when the `shutdown` future resolves.
@@ -333,14 +342,6 @@ pub fn tracing_logging() -> warp::filters::log::Log<impl Fn(warp::filters::log::
 ///
 /// Returns an error if the server is unable to bind or there is another error during
 /// configuration.
-/// Whether the node has no execution layer able to tell it a payload is valid.
-async fn is_el_offline<T: BeaconChainTypes>(chain: &BeaconChain<T>) -> bool {
-    match &chain.execution_layer {
-        Some(execution_layer) => execution_layer.is_offline_or_erroring().await,
-        None => !chain.runs_without_execution_layer(),
-    }
-}
-
 pub async fn serve<T: BeaconChainTypes>(
     ctx: Arc<Context<T>>,
     shutdown: impl Future<Output = ()> + Send + Sync + 'static,

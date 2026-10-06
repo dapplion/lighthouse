@@ -551,10 +551,8 @@ fn proof_engine_endpoint_without_execution_endpoint() {
                 "http://localhost:8552/"
             );
             assert!(config.network.enable_execution_proof);
-            // No endpoint means no execution layer is built, so no JWT is needed either.
-            let el_config = config.execution_layer.as_ref().unwrap();
-            assert!(el_config.execution_endpoint.is_none());
-            assert!(el_config.secret_file.is_none());
+            // No endpoint means no execution layer at all, and so no JWT is needed either.
+            assert!(config.execution_layer.is_none());
         });
 }
 #[test]

@@ -180,13 +180,7 @@ where
             None
         };
 
-        // With no execution layer the config is still here — it carries the builder settings —
-        // but has no endpoint to connect to.
-        let execution_layer = if let Some(config) = config
-            .execution_layer
-            .clone()
-            .filter(|config| config.execution_endpoint.is_some())
-        {
+        let execution_layer = if let Some(config) = config.execution_layer.clone() {
             let context = runtime_context.clone();
             let execution_layer = ExecutionLayer::from_config(config, context.executor.clone())
                 .map_err(|e| format!("unable to start execution layer endpoints: {:?}", e))?;
@@ -206,6 +200,16 @@ where
             .transpose()?;
 
         if execution_layer.is_none() && proof_engine.is_some() {
+            // Proofs only stand in for the engine from Gloas, so on a chain that never reaches it
+            // the node could not verify a single payload.
+            if !spec.is_gloas_scheduled() {
+                return Err(
+                    "Running with no execution layer needs the Gloas fork scheduled, since EIP-8025 \
+                     proofs decide payload validity only from Gloas. Set --execution-endpoint."
+                        .to_string(),
+                );
+            }
+
             info!(
                 info = "the node cannot verify pre-Gloas payloads or propose a locally built one",
                 "Running with no execution layer; EIP-8025 proofs decide payload validity"

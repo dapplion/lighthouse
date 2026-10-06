@@ -371,8 +371,11 @@ pub fn get_config<E: EthSpec>(
         clap_utils::parse_required(cli_args, "execution-timeout-multiplier")?;
     el_config.execution_timeout_multiplier = Some(execution_timeout_multiplier);
 
-    // Store the EL config in the client config.
-    client_config.execution_layer = Some(el_config);
+    // Store the EL config in the client config. With no endpoint there is no execution layer to
+    // configure: every remaining field here is read only through one.
+    if el_config.execution_endpoint.is_some() {
+        client_config.execution_layer = Some(el_config);
+    }
 
     // Override default trusted setup file if required
     if let Some(trusted_setup_file_path) = cli_args.get_one::<String>("trusted-setup-file-override")

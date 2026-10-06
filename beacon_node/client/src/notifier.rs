@@ -436,7 +436,7 @@ async fn post_bellatrix_readiness_logging<T: BeaconChainTypes>(
     current_slot: Slot,
     beacon_chain: &BeaconChain<T>,
 ) {
-    if beacon_chain.runs_without_execution_layer() {
+    if beacon_chain.execution_layer.is_none() {
         return;
     }
 
@@ -581,7 +581,7 @@ fn methods_required_for_fork(
 
 async fn genesis_execution_payload_logging<T: BeaconChainTypes>(beacon_chain: &BeaconChain<T>) {
     // The genesis payload header is read back from the engine, and there is no engine.
-    if beacon_chain.runs_without_execution_layer() {
+    if beacon_chain.execution_layer.is_none() {
         return;
     }
 
