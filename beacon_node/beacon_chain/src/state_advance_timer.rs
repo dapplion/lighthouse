@@ -213,19 +213,17 @@ async fn state_advance_timer<T: BeaconChainTypes>(
 
                 // Prepare proposers so that the node can send payload attributes in the case where
                 // it decides to abandon a proposer boost re-org.
-                if beacon_chain.execution_layer.is_some() {
-                    beacon_chain
-                        .prepare_beacon_proposer(current_slot)
-                        .await
-                        .unwrap_or_else(|e| {
-                            warn!(
-                                error = ?e,
-                                slot = %next_slot,
-                                "Unable to prepare proposer with lookahead"
-                            );
-                            None
-                        });
-                }
+                beacon_chain
+                    .prepare_beacon_proposer(current_slot)
+                    .await
+                    .unwrap_or_else(|e| {
+                        warn!(
+                            error = ?e,
+                            slot = %next_slot,
+                            "Unable to prepare proposer with lookahead"
+                        );
+                        None
+                    });
 
                 // Use a blocking task to avoid blocking the core executor whilst waiting for locks
                 // in `ForkChoiceSignalTx`.

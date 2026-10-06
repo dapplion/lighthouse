@@ -1906,10 +1906,6 @@ fn spawn_execution_layer_updates<T: BeaconChainTypes>(
                     return;
                 }
 
-                if chain.execution_layer.is_none() {
-                    return;
-                }
-
                 if let Err(e) = chain
                     .update_execution_engine_forkchoice(
                         current_slot,

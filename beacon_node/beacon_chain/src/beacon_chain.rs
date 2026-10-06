@@ -4233,25 +4233,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     }
 
     /// Whether EIP-8025 proofs decide payload validity here, which takes a proof engine.
-    pub(crate) fn execution_proofs_enabled(&self) -> bool {
+    pub fn execution_proofs_enabled(&self) -> bool {
         self.proof_engine.is_some()
-    }
-
-    /// Whether this node runs with no execution layer, taking payload validity from EIP-8025
-    /// proofs instead.
-    ///
-    /// Only viable from Gloas. Before it a payload cannot be verified without an engine, so a node
-    /// in that state is not running without one deliberately, it is simply unable to execute.
-    pub fn runs_without_execution_layer(&self) -> bool {
-        let Some(current_slot) = self.slot_clock.now_or_genesis() else {
-            return false;
-        };
-        self.execution_layer.is_none()
-            && self.execution_proofs_enabled()
-            && self
-                .spec
-                .fork_name_at_slot::<T::EthSpec>(current_slot)
-                .gloas_enabled()
     }
 
     /// Whether `block_root`'s payload has proofs from as many proof systems as we require.
@@ -6715,10 +6698,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(None);
         }
 
-        let execution_layer = self
-            .execution_layer
-            .clone()
-            .ok_or(Error::ExecutionLayerMissing)?;
+        // Nor is there anything to prepare when the node runs with no execution layer.
+        let Some(execution_layer) = self.execution_layer.clone() else {
+            return Ok(None);
+        };
 
         // Nothing to do if there are no proposers registered with the EL, exit early to avoid
         // wasting cycles.
@@ -6974,10 +6957,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         head_payload_status: fork_choice::PayloadStatus,
         override_forkchoice_update: OverrideForkchoiceUpdate,
     ) -> Result<(), Error> {
-        let execution_layer = self
-            .execution_layer
-            .as_ref()
-            .ok_or(Error::ExecutionLayerMissing)?;
+        // There is no engine to notify when the node runs with no execution layer.
+        let Some(execution_layer) = self.execution_layer.as_ref() else {
+            return Ok(());
+        };
 
         // Determine whether to override the forkchoiceUpdated message if we want to re-org
         // the current head at the next slot.
