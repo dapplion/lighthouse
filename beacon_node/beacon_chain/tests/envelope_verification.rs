@@ -892,3 +892,40 @@ fn is_valid_and_post_bellatrix(status: ExecutionStatus) -> bool {
 fn is_optimistic(status: ExecutionStatus) -> bool {
     matches!(status, ExecutionStatus::Optimistic(_))
 }
+
+/// With the proofs in, the node is not optimistic: a proof engine node that keeps up with proofs
+/// attests and proposes like any other, which is the whole point of taking validity from proofs.
+#[tokio::test]
+async fn a_node_is_not_optimistic_once_its_proofs_arrive() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+
+    let harness = gloas_harness_with_proof_engine();
+    harness.extend_to_slot(Slot::new(1)).await;
+
+    let slot = Slot::new(2);
+    let block_root = import_block_and_envelope(&harness, slot).await;
+    assert!(
+        harness
+            .chain
+            .is_optimistic_or_invalid_head()
+            .expect("head execution status should be known"),
+        "a payload still short of its proofs leaves the head optimistic",
+    );
+
+    for proof_type in 0..REQUIRED_EXECUTION_PROOFS {
+        harness
+            .observe_execution_proof(block_root, proof_type as ProofType, slot)
+            .await;
+    }
+    harness.chain.recompute_head_at_current_slot().await;
+
+    assert!(
+        !harness
+            .chain
+            .is_optimistic_or_invalid_head()
+            .expect("head execution status should be known"),
+        "once the proofs are in the head is valid, and the node is not optimistic",
+    );
+}

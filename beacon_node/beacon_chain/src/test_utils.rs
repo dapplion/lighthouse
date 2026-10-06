@@ -1507,6 +1507,31 @@ where
         sk.sign(message)
     }
 
+    /// Sign an execution payload bid with the bidding builder's key.
+    ///
+    /// The builder registry is keyed separately from the validator registry, so this only works
+    /// for a builder registered from `validator_keypairs[builder_index]`.
+    pub fn sign_payload_bid(
+        &self,
+        bid: ExecutionPayloadBid<E>,
+        state: &BeaconState<E>,
+    ) -> Arc<SignedExecutionPayloadBid<E>> {
+        let domain = self.spec.get_domain(
+            bid.slot.epoch(E::slots_per_epoch()),
+            Domain::BeaconBuilder,
+            &state.fork(),
+            state.genesis_validators_root(),
+        );
+        let signature = self.validator_keypairs[bid.builder_index as usize]
+            .sk
+            .sign(bid.signing_root(domain));
+
+        Arc::new(SignedExecutionPayloadBid {
+            message: bid,
+            signature,
+        })
+    }
+
     /// Sign a beacon block using the proposer's key.
     pub fn sign_beacon_block(
         &self,

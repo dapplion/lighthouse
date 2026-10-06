@@ -13,10 +13,10 @@ use proto_array::PayloadStatus;
 use ssz::Encode;
 use std::sync::Arc;
 use types::{
-    Address, BeaconBlock, BeaconState, Checkpoint, Domain, Epoch, ExecutionBlockHash,
-    ExecutionPayloadBid, ExecutionPayloadHeader, ExecutionPayloadHeaderFulu, ExecutionRequests,
-    ExecutionRequestsGloas, Hash256, MinimalEthSpec, SignedExecutionPayloadBid, SignedRoot, Slot,
-    WithdrawalRequest, consts::gloas::PAYLOAD_BUILDER_VERSION,
+    Address, BeaconBlock, BeaconState, Checkpoint, Epoch, ExecutionBlockHash, ExecutionPayloadBid,
+    ExecutionPayloadHeader, ExecutionPayloadHeaderFulu, ExecutionRequests, ExecutionRequestsGloas,
+    Hash256, MinimalEthSpec, SignedExecutionPayloadBid, Slot, WithdrawalRequest,
+    consts::gloas::PAYLOAD_BUILDER_VERSION,
 };
 
 type E = MinimalEthSpec;
@@ -259,20 +259,7 @@ impl BuilderOnlyProposer {
             ..ExecutionPayloadBid::default()
         };
 
-        let domain = self.harness.spec.get_domain(
-            Epoch::new(0),
-            Domain::BeaconBuilder,
-            &self.state.fork(),
-            self.state.genesis_validators_root(),
-        );
-        let signature = self.harness.validator_keypairs[BUILDER_INDEX as usize]
-            .sk
-            .sign(bid.signing_root(domain));
-
-        Arc::new(SignedExecutionPayloadBid {
-            message: bid,
-            signature,
-        })
+        self.harness.sign_payload_bid(bid, &self.state)
     }
 
     /// Record `bid` as if it had arrived and passed gossip verification.
