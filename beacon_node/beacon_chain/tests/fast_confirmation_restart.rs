@@ -615,6 +615,71 @@ async fn re_enabling_fcr_drops_roots_finality_passed() {
     assert_eq!(roots.roots.deepest_announced_root, finalized);
 }
 
+/// Catching up after a long downtime finalizes past the checkpoint FCR seeded itself with at boot,
+/// and fork choice prunes that block while the rule still holds it: nothing replaces it before the
+/// next epoch boundary. Running the rule there must revert to finality, not error out.
+#[tokio::test]
+async fn catching_up_past_the_seeded_checkpoint() {
+    if pre_bellatrix() {
+        return;
+    }
+    let all = validators(VALIDATOR_COUNT);
+    let mut rig = Rig::new();
+    rig.steps(WARMUP_SLOTS, &all).await;
+    rig.stop(true);
+    rig.steps(4 * E::slots_per_epoch(), &all).await;
+
+    rig.node = Some(node(
+        rig.node_store.clone(),
+        &rig.harness,
+        false,
+        true,
+        false,
+    ));
+    // Fork choice only prunes once `DEFAULT_PRUNE_THRESHOLD` blocks sit behind finality, which a
+    // chain this short never reaches. Prune on every finalization instead, to land where a mainnet
+    // node lands after catching up a few hundred blocks.
+    rig.node()
+        .chain
+        .canonical_head
+        .fork_choice_write_lock()
+        .proto_array_mut()
+        .set_prune_threshold(0);
+    let seeded = finalized(&rig.node().chain);
+    let head = rig.node().chain.canonical_head.cached_head().head_slot();
+    for block in &rig.blocks {
+        if block.slot > head {
+            Rig::import(rig.node(), block).await;
+        }
+    }
+
+    assert!(
+        rig.node()
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .proto_array()
+            .core_proto_array()
+            .get_block(seeded)
+            .is_none(),
+        "the catch-up should have pruned the checkpoint FCR was seeded with"
+    );
+    // A run that errors returns before assigning, so the pruned root would still be sitting here.
+    assert_eq!(
+        rig.node()
+            .chain
+            .canonical_head
+            .fast_confirmation
+            .as_ref()
+            .unwrap()
+            .lock()
+            .fcr
+            .confirmed_root,
+        finalized(&rig.node().chain),
+        "the rule should have reverted to the finalized block"
+    );
+}
+
 /// A `--reset-payload-statuses` boot marks every pre-Gloas block optimistic, and an optimistic
 /// block is not confirmed. The EL is the one that lost the statuses, so it may lack the block too.
 #[tokio::test]

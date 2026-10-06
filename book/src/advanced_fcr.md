@@ -38,13 +38,13 @@ DEBUG FCR restarted from observed justified         prev_confirmed: 0xb8dfdf0b53
 
 The above logs are harmless and expected after a restart.
 
-If the beacon node has been offline for some time (e.g. one hour), when it is back online, you may see the following error log:
+If the beacon node has been offline for some time (e.g. one hour), the rule starts again from the finalized checkpoint the node booted with, and the chain finalizes past that checkpoint while the node catches up. The fall-back log then repeats, once per finalization, until the node is back in sync:
 
 ```text
-ERROR Error running FCR: NodeNotFound(0xb471d7f9b3e760aea6a364dad4987fd033db672ec8f1efdc46a79f2bdd5427be)  current_slot: Slot(4046686), slot: 4046686
+DEBUG FCR fell back to finalized                    prev_confirmed: 0x1f92a52bf914720564776a1a392a7e10ed7cd998141fbcbd708622ba8ff5cc0d, finalized: 0xb8dfdf0b53d01b5197c058bf6b23891a826a5d3f606da195b4b71d4ad78891e1, slot: 4052704, reason: "epoch_too_old"
 ```
 
-The error should go away once the beacon node is back in sync.
+The beacon node sends its execution engine the finalized block as the safe block hash for as long as this lasts. It confirms blocks again at the first epoch boundary after it is in sync, where the pair of logs above is seen once more.
 
 ## Metrics
 

@@ -470,21 +470,25 @@ impl FastConfirmationRule {
 
         // Restart the confirmation chain if each of the following conditions are true:
         // 1) it is the start of the current epoch,
-        let observed_justified_block_slot = get_block_slot(
-            self.current_epoch_observed_justified.checkpoint().root,
-            proto_array,
-        )?;
+        // DIVERGENCE: after a long enough downtime finality passes the checkpoint the rule was
+        // seeded with at boot and fork choice prunes it. Nothing behind finality is the previous
+        // epoch's checkpoint, so condition 2 is false.
+        let observed_justified_block_slot = proto_array
+            .get_block(self.current_epoch_observed_justified.checkpoint().root)
+            .map(|node| node.slot());
         // 2) epoch of fcr_store.current_epoch_observed_justified_checkpoint.root equals to the previous epoch,
-        let is_observed_justified_block_epoch_ok = observed_justified_block_slot
-            .epoch(E::slots_per_epoch())
-            .safe_add(1)?
-            == current_epoch;
+        let is_observed_justified_block_epoch_ok = match observed_justified_block_slot {
+            Some(slot) => slot.epoch(E::slots_per_epoch()).safe_add(1)? == current_epoch,
+            None => false,
+        };
         // 3) fcr_store.current_epoch_observed_justified_checkpoint equals to unrealized justification of the head,
         let is_head_unrealized_justified_ok = self.current_epoch_observed_justified.checkpoint()
             == unrealized_justification_of(head_root, proto_array)?;
         // 4) confirmed block is older than the block of fcr_store.current_epoch_observed_justified_checkpoint.
-        let is_confirmed_block_stale =
-            get_block_slot(confirmed_root, proto_array)? < observed_justified_block_slot;
+        let is_confirmed_block_stale = match observed_justified_block_slot {
+            Some(slot) => get_block_slot(confirmed_root, proto_array)? < slot,
+            None => false,
+        };
         if is_epoch_start
             && is_observed_justified_block_epoch_ok
             && is_head_unrealized_justified_ok
