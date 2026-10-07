@@ -13,10 +13,10 @@ use proto_array::PayloadStatus;
 use ssz::Encode;
 use std::sync::Arc;
 use types::{
-    Address, BeaconBlock, BeaconState, Checkpoint, Epoch, ExecutionBlockHash, ExecutionPayloadBid,
-    ExecutionPayloadHeader, ExecutionPayloadHeaderFulu, ExecutionRequests, ExecutionRequestsGloas,
-    Hash256, MinimalEthSpec, SignedExecutionPayloadBid, Slot, WithdrawalRequest,
-    consts::gloas::PAYLOAD_BUILDER_VERSION,
+    Address, BeaconBlock, BeaconState, Checkpoint, Epoch, ExecutionBlockHash,
+    ExecutionPayloadBidGloas, ExecutionPayloadHeader, ExecutionPayloadHeaderFulu,
+    ExecutionRequests, ExecutionRequestsGloas, Hash256, MinimalEthSpec, SignedExecutionPayloadBid,
+    Slot, WithdrawalRequest, consts::gloas::PAYLOAD_BUILDER_VERSION,
 };
 
 type E = MinimalEthSpec;
@@ -241,7 +241,7 @@ impl BuilderOnlyProposer {
 
     /// A bid for slot 1 from the registered builder, signed with the builder's key.
     fn signed_builder_bid(&self) -> Arc<SignedExecutionPayloadBid<E>> {
-        let bid = ExecutionPayloadBid::<E> {
+        let bid = ExecutionPayloadBidGloas::<E> {
             slot: Slot::new(1),
             builder_index: BUILDER_INDEX,
             value: BID_VALUE,
@@ -256,7 +256,7 @@ impl BuilderOnlyProposer {
                 .state
                 .get_randao_mix(Epoch::new(0))
                 .expect("should read the genesis randao mix"),
-            ..ExecutionPayloadBid::default()
+            ..Default::default()
         };
 
         self.harness.sign_payload_bid(bid, &self.state)
@@ -317,10 +317,11 @@ async fn gloas_block_production_without_an_execution_layer_uses_a_builder_bid() 
         .expect("a bid is all an execution-layer-less proposer needs");
 
     assert_eq!(
-        block
+        &block
             .body()
             .signed_execution_payload_bid()
-            .expect("a Gloas block carries a bid"),
+            .expect("a Gloas block carries a bid")
+            .clone_as_signed_execution_payload_bid(),
         bid.as_ref(),
         "the proposal must carry the builder's bid, not a local build"
     );
