@@ -199,23 +199,6 @@ where
             })
             .transpose()?;
 
-        if execution_layer.is_none() && proof_engine.is_some() {
-            // Proofs only stand in for the engine from Gloas, so on a chain that never reaches it
-            // the node could not verify a single payload.
-            if !spec.is_gloas_scheduled() {
-                return Err(
-                    "Running with no execution layer needs the Gloas fork scheduled, since EIP-8025 \
-                     proofs decide payload validity only from Gloas. Set --execution-endpoint."
-                        .to_string(),
-                );
-            }
-
-            info!(
-                info = "the node cannot verify pre-Gloas payloads or propose a locally built one",
-                "Running with no execution layer; EIP-8025 proofs decide payload validity"
-            );
-        }
-
         // Construct the Gloas builder handle (Builder API client) when the Gloas fork is scheduled.
         // The client is stateless w.r.t. the target builder — each request carries its own URL — but
         // still honors the same `--builder-user-agent` / `--builder-disable-ssz` flags as the
@@ -891,6 +874,24 @@ where
             .shutdown_sender(context.executor.shutdown_sender())
             .build()
             .map_err(|e| format!("Failed to build beacon chain: {}", e))?;
+
+        if chain.execution_layer.is_none() && chain.execution_proofs_enabled() {
+            // Only the head matters: backfill never verifies a payload.
+            let head_slot = chain.best_slot();
+            if !chain.spec.fork_name_at_slot::<E>(head_slot).gloas_enabled() {
+                return Err(format!(
+                    "Running with no execution layer needs a head at or after the Gloas fork, \
+                     where EIP-8025 proofs decide payload validity. The head is at slot \
+                     {head_slot}. Set --execution-endpoint, or checkpoint sync past the fork \
+                     with --purge-db."
+                ));
+            }
+
+            info!(
+                info = "the node cannot verify pre-Gloas payloads or propose a locally built one",
+                "Running with no execution layer; EIP-8025 proofs decide payload validity"
+            );
+        }
 
         self.beacon_chain = Some(Arc::new(chain));
         self.beacon_chain_builder = None;
