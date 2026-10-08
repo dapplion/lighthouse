@@ -371,10 +371,12 @@ pub fn get_config<E: EthSpec>(
         clap_utils::parse_required(cli_args, "execution-timeout-multiplier")?;
     el_config.execution_timeout_multiplier = Some(execution_timeout_multiplier);
 
-    // Store the EL config in the client config. With no endpoint there is no execution layer to
-    // configure: every remaining field here is read only through one.
+    // With no endpoint there is no execution layer, and every field here is read only through one.
     if el_config.execution_endpoint.is_some() {
         client_config.execution_layer = Some(el_config);
+    } else {
+        // No engine to fetch blobs from.
+        client_config.chain.disable_get_blobs = true;
     }
 
     // Override default trusted setup file if required

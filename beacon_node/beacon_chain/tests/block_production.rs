@@ -142,19 +142,12 @@ async fn gloas_block_production_filters_exits_with_parent_partial_withdrawals() 
     );
 }
 
-/// The one builder registered in the genesis state of [`BuilderOnlyProposer`].
 const BUILDER_INDEX: u64 = 0;
-/// Balance given to the registered builder, far above any bid made here.
 const BUILDER_BALANCE: u64 = 2_000_000_000;
-/// Value of the bid offered to the proposer.
 const BID_VALUE: u64 = 1_000_000;
-/// Gas limit shared by the genesis payload and the bid.
 const GENESIS_GAS_LIMIT: u64 = 30_000_000;
 
 /// A Gloas node running with no execution layer, proposing at slot 1 on top of genesis.
-///
-/// Such a node cannot build a payload itself, so every proposal it makes has to come from the one
-/// builder the genesis state registers.
 struct BuilderOnlyProposer {
     harness: BeaconChainHarness<EphemeralHarnessType<E>>,
     state: BeaconState<E>,
@@ -163,7 +156,7 @@ struct BuilderOnlyProposer {
 }
 
 impl BuilderOnlyProposer {
-    /// Returns `None` when the fork under test is not Gloas, where there are no bids at all.
+    /// Returns `None` when the fork under test is not Gloas.
     fn new() -> Option<Self> {
         let spec = Arc::new(test_spec::<E>());
         if !spec.fork_name_at_slot::<E>(Slot::new(0)).gloas_enabled() {
@@ -171,8 +164,8 @@ impl BuilderOnlyProposer {
         }
 
         let keypairs = generate_deterministic_keypairs(64);
-        // Gloas replaces the execution payload header with a bid, so seed genesis with the last
-        // pre-Gloas header and let the genesis upgrades convert it.
+        // Gloas has no payload header, so seed genesis with the last pre-Gloas one and let the
+        // genesis upgrades convert it.
         let execution_payload_header = ExecutionPayloadHeader::Fulu(ExecutionPayloadHeaderFulu {
             block_hash: ExecutionBlockHash::repeat_byte(0x42),
             gas_limit: GENESIS_GAS_LIMIT,
@@ -217,12 +210,8 @@ impl BuilderOnlyProposer {
         let genesis_block_root = genesis_block.canonical_root();
         let genesis_state_root = genesis_block.message().state_root();
 
-        // A builder is active only once its deposit epoch is behind finalization, and genesis is
-        // epoch 0. `BeaconChainBuilder::build` refuses a genesis state that claims otherwise, so
-        // finalize only the copy handed to production. That copy no longer hashes to
-        // `genesis_state_root`, so production is given the real one to seal the parent header
-        // with. The produced block's own state root comes from the mutated state, so it is not
-        // importable against the real chain.
+        // Finalize only the copy handed to production: a builder is active only once its deposit
+        // epoch is behind finalization.
         let mut state = harness.get_current_state();
         *state.finalized_checkpoint_mut() = Checkpoint {
             epoch: Epoch::new(1),
@@ -239,7 +228,6 @@ impl BuilderOnlyProposer {
         })
     }
 
-    /// A bid for slot 1 from the registered builder, signed with the builder's key.
     fn signed_builder_bid(&self) -> Arc<SignedExecutionPayloadBid<E>> {
         let bid = ExecutionPayloadBidGloas::<E> {
             slot: Slot::new(1),
@@ -273,7 +261,6 @@ impl BuilderOnlyProposer {
         );
     }
 
-    /// Propose at slot 1.
     async fn produce_block(&self) -> Result<BeaconBlock<E>, BlockProductionError> {
         let slot = Slot::new(1);
         let proposer_index = self

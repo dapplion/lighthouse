@@ -553,6 +553,7 @@ fn proof_engine_endpoint_without_execution_endpoint() {
             assert!(config.network.enable_execution_proof);
             // No endpoint means no execution layer at all, and so no JWT is needed either.
             assert!(config.execution_layer.is_none());
+            assert!(config.chain.disable_get_blobs);
         });
 }
 #[test]

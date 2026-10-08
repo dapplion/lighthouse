@@ -1459,10 +1459,7 @@ where
         sk.sign(message)
     }
 
-    /// Sign an execution payload bid with the bidding builder's key.
-    ///
-    /// The builder registry is keyed separately from the validator registry, so this only works
-    /// for a builder registered from `validator_keypairs[builder_index]`.
+    /// Only works for a builder registered from `validator_keypairs[builder_index]`.
     pub fn sign_payload_bid(
         &self,
         bid: ExecutionPayloadBidGloas<E>,

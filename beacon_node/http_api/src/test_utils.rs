@@ -98,7 +98,6 @@ impl<E: EthSpec> InteractiveTester<E> {
         let harness_builder =
             BeaconChainHarness::builder(E::default()).spec_or_default(spec.map(Arc::new));
 
-        // The initializer owns the execution layer, so a caller can build a node without one.
         let mut harness_builder = if let Some(initializer) = initializer {
             // Apply custom initialization provided by the caller.
             initializer(harness_builder)

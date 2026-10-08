@@ -240,9 +240,6 @@ async fn node_health_el_online_and_not_synced() {
     }
 }
 
-/// A node with no execution layer takes payload validity from EIP-8025 proofs, so it has nothing
-/// that can be offline. A validator client ranks a node reporting `el_offline` below every node
-/// with a healthy execution layer, which would leave this one unused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_execution_layer_with_a_proof_engine_is_not_offline() {
     let tester = proof_engine_tester().await;
@@ -257,8 +254,6 @@ async fn no_execution_layer_with_a_proof_engine_is_not_offline() {
     );
 }
 
-/// The proposer preparation the validator client sends every epoch has no execution layer to
-/// prime, but it must not fail: the rest of the endpoint still applies.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn proposer_preparation_without_an_execution_layer() {
     let tester = proof_engine_tester().await;
@@ -273,7 +268,6 @@ async fn proposer_preparation_without_an_execution_layer() {
         .expect("proposer preparation should be accepted with no execution layer");
 }
 
-/// A tester whose node runs no execution layer and requires EIP-8025 execution proofs.
 async fn proof_engine_tester() -> InteractiveTester<E> {
     let validator_count = E::slots_per_epoch() as usize;
     InteractiveTester::<E>::new_with_initializer_and_mutator(
@@ -287,7 +281,6 @@ async fn proof_engine_tester() -> InteractiveTester<E> {
         })),
         None,
         Default::default(),
-        // The mock builder talks to the execution layer, so there is none to run.
         false,
         NodeCustodyType::Fullnode,
     )
