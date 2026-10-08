@@ -851,7 +851,9 @@ pub fn cli_app() -> Command {
                 .value_name("PROOF-ENGINE-ENDPOINT")
                 .help("Server endpoint for an EIP-8025 proof engine used to verify execution \
                        proofs. When present, the node subscribes to the execution_proof gossip \
-                       topic and propagates proofs that verify. Experimental.")
+                       topic and propagates proofs that verify. With --execution-endpoint the \
+                       execution layer still decides payload validity; without it the proofs \
+                       do. Experimental.")
                 .action(ArgAction::Set)
                 .display_order(0)
         )

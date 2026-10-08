@@ -320,7 +320,9 @@ Options:
       --proof-engine-endpoint <PROOF-ENGINE-ENDPOINT>
           Server endpoint for an EIP-8025 proof engine used to verify execution
           proofs. When present, the node subscribes to the execution_proof
-          gossip topic and propagates proofs that verify. Experimental.
+          gossip topic and propagates proofs that verify. With
+          --execution-endpoint the execution layer still decides payload
+          validity; without it the proofs do. Experimental.
       --proposer-reorg-cutoff <MILLISECONDS>
           DEPRECATED. This flag has no effect.
       --proposer-reorg-disallowed-offsets <N1,N2,...>
