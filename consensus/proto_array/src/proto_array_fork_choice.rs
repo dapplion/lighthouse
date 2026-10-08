@@ -2562,3 +2562,286 @@ mod test_find_head {
         }
     }
 }
+
+/// `rewind_to_valid_payload` exists so that a node which imports payloads eagerly and marks them
+/// optimistic (EIP-8025 proofs) attests exactly as a node that imports a payload only once its
+/// execution layer has returned VALID. Chain: A(0) <- N-1(1, EMPTY edge on A, payload VALID) <-
+/// N(2, FULL edge) <- N+1(3), with proposer boost on N+1 when it exists.
+#[cfg(test)]
+mod rewind_to_valid_payload {
+    use super::*;
+    use fixed_bytes::FixedBytesExtended;
+    use types::{ForkName, MainnetEthSpec};
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum PayloadN {
+        /// The execution layer answered VALID.
+        Valid,
+        /// Still with the execution layer, or never seen: nothing in fork choice.
+        NotImported,
+        /// Imported eagerly, proof not yet in.
+        Optimistic,
+        /// Imported eagerly, then proven.
+        Proven,
+    }
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum SlotN1 {
+        Full,
+        Empty,
+        Missed,
+    }
+
+    /// What the node attests to, or `None` for an abstention: `beacon_block_root` and
+    /// `payload_present`, by the rule in `BeaconChain::produce_unaggregated_attestation` (same
+    /// slot as the head block: `payload_present = false`; otherwise it is whether the head is on
+    /// `FULL`) and the gate in `filter_optimistic_attestation` (the node voted for must be valid).
+    type Vote = Option<(Hash256, bool)>;
+
+    fn root(i: u64) -> Hash256 {
+        Hash256::from_low_u64_be(i)
+    }
+    fn hash(i: u64) -> ExecutionBlockHash {
+        ExecutionBlockHash::from_root(Hash256::from_low_u64_be(100 + i))
+    }
+
+    struct Rig {
+        fc: ProtoArrayForkChoice,
+        spec: ChainSpec,
+        checkpoint: Checkpoint,
+        balances: JustifiedBalances,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let spec = ForkName::Gloas.make_genesis_spec(MainnetEthSpec::default_spec());
+            let checkpoint = Checkpoint {
+                epoch: Epoch::new(0),
+                root: root(0),
+            };
+            let shuffling_id =
+                AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
+            let fc = ProtoArrayForkChoice::new::<MainnetEthSpec>(
+                Slot::new(0),
+                Slot::new(0),
+                Hash256::zero(),
+                checkpoint,
+                checkpoint,
+                shuffling_id.clone(),
+                shuffling_id,
+                ExecutionStatus::NotYetRevealed(hash(0)),
+                Some(hash(99)),
+                Some(hash(0)),
+                0,
+                &spec,
+            )
+            .unwrap();
+            Self {
+                fc,
+                spec,
+                checkpoint,
+                balances: JustifiedBalances::from_effective_balances(vec![32]).unwrap(),
+            }
+        }
+
+        /// Block `i` at slot `i` on parent `i - 1`, building on payload `parent_hash`.
+        fn block(&mut self, i: u64, parent_hash: ExecutionBlockHash) {
+            let shuffling_id =
+                AttestationShufflingId::from_components(Epoch::new(0), Hash256::zero());
+            self.fc
+                .process_block::<MainnetEthSpec>(
+                    Block {
+                        slot: Slot::new(i),
+                        root: root(i),
+                        parent_root: Some(root(i - 1)),
+                        state_root: Hash256::zero(),
+                        target_root: root(0),
+                        current_epoch_shuffling_id: shuffling_id.clone(),
+                        next_epoch_shuffling_id: shuffling_id,
+                        justified_checkpoint: self.checkpoint,
+                        finalized_checkpoint: self.checkpoint,
+                        execution_status: ExecutionStatus::NotYetRevealed(hash(i)),
+                        unrealized_justified_checkpoint: Some(self.checkpoint),
+                        unrealized_finalized_checkpoint: Some(self.checkpoint),
+                        execution_payload_parent_hash: Some(parent_hash),
+                        execution_payload_block_hash: Some(hash(i)),
+                        proposer_index: Some(0),
+                        payload_received: false,
+                    },
+                    Slot::new(i),
+                    &self.spec,
+                    Duration::ZERO,
+                )
+                .unwrap();
+        }
+
+        fn envelope(&mut self, i: u64, status: ExecutionStatus) {
+            self.fc
+                .on_payload_envelope_received(root(i), status)
+                .unwrap();
+        }
+
+        fn head(&mut self, current_slot: Slot, boost: Hash256, rewind: bool) -> ForkChoiceNode {
+            let head = self
+                .fc
+                .find_head::<MainnetEthSpec>(
+                    self.checkpoint,
+                    self.checkpoint,
+                    &self.balances,
+                    boost,
+                    &BTreeSet::new(),
+                    current_slot,
+                    &self.spec,
+                )
+                .unwrap();
+            if rewind {
+                self.fc
+                    .rewind_to_valid_payload(head, self.checkpoint.root)
+                    .unwrap()
+            } else {
+                head
+            }
+        }
+
+        fn vote(&self, head: ForkChoiceNode, current_slot: Slot) -> Vote {
+            let head_slot = self.fc.get_proto_node(&head.root()).unwrap().slot();
+            let payload_present = if head_slot == current_slot {
+                false
+            } else {
+                head.payload_status() == PayloadStatus::Full
+            };
+            let node = self
+                .fc
+                .supported_node(head.root(), current_slot, payload_present)
+                .unwrap();
+            self.fc
+                .get_node_execution_status(node)
+                .unwrap()
+                .is_valid()
+                .then_some((node.root(), payload_present))
+        }
+    }
+
+    /// `(head, vote)` at each point the node attests: in slot N after block N, in slot N after
+    /// payload N, and in slot N+1.
+    fn outcomes(payload_n: PayloadN, slot_n1: SlotN1, rewind: bool) -> Vec<(ForkChoiceNode, Vote)> {
+        let mut rig = Rig::new();
+        let mut out = Vec::new();
+        let mut record = |rig: &mut Rig, slot: u64, boost: Hash256| {
+            let slot = Slot::new(slot);
+            let head = rig.head(slot, boost, rewind);
+            out.push((head, rig.vote(head, slot)));
+        };
+        rig.block(1, hash(99));
+        rig.envelope(1, ExecutionStatus::Valid(hash(1)));
+        rig.block(2, hash(1));
+        record(&mut rig, 2, Hash256::zero());
+        match payload_n {
+            PayloadN::Valid => rig.envelope(2, ExecutionStatus::Valid(hash(2))),
+            PayloadN::NotImported => {}
+            PayloadN::Optimistic => rig.envelope(2, ExecutionStatus::Optimistic(hash(2))),
+            PayloadN::Proven => {
+                rig.envelope(2, ExecutionStatus::Optimistic(hash(2)));
+                rig.fc
+                    .process_execution_payload_validation_by_block_root(root(2))
+                    .unwrap();
+            }
+        }
+        record(&mut rig, 2, Hash256::zero());
+        let boost = match slot_n1 {
+            SlotN1::Full => {
+                rig.block(3, hash(2));
+                root(3)
+            }
+            SlotN1::Empty => {
+                rig.block(3, hash(1));
+                root(3)
+            }
+            SlotN1::Missed => Hash256::zero(),
+        };
+        record(&mut rig, 3, boost);
+        out
+    }
+
+    const SLOT_N1: [SlotN1; 3] = [SlotN1::Full, SlotN1::Empty, SlotN1::Missed];
+
+    #[test]
+    fn late_proof_attests_as_if_the_payload_were_not_imported() {
+        for slot_n1 in SLOT_N1 {
+            assert_eq!(
+                outcomes(PayloadN::Optimistic, slot_n1, true),
+                outcomes(PayloadN::NotImported, slot_n1, false),
+                "N+1 {slot_n1:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verified_payloads_are_untouched() {
+        for payload_n in [PayloadN::Valid, PayloadN::Proven] {
+            for slot_n1 in SLOT_N1 {
+                assert_eq!(
+                    outcomes(payload_n, slot_n1, true),
+                    outcomes(payload_n, slot_n1, false),
+                    "{payload_n:?}, N+1 {slot_n1:?}"
+                );
+            }
+        }
+    }
+
+    /// The step is one payload, never one block: a `FULL` head goes to its own `EMPTY` side, an
+    /// `EMPTY` head to its parent's.
+    #[test]
+    fn one_payload_per_step() {
+        let mut rig = Rig::new();
+        rig.block(1, hash(99));
+        rig.envelope(1, ExecutionStatus::Valid(hash(1)));
+        rig.block(2, hash(1));
+        rig.envelope(2, ExecutionStatus::Optimistic(hash(2)));
+        rig.block(3, hash(2));
+        let (n, n1) = (root(2), root(3));
+
+        let from_full = rig
+            .fc
+            .rewind_to_valid_payload(ForkChoiceNode::new(n, PayloadStatus::Full), root(0))
+            .unwrap();
+        assert_eq!(from_full, ForkChoiceNode::new(n, PayloadStatus::Empty));
+
+        let from_empty = rig
+            .fc
+            .rewind_to_valid_payload(ForkChoiceNode::new(n1, PayloadStatus::Empty), root(0))
+            .unwrap();
+        assert_eq!(from_empty, ForkChoiceNode::new(n, PayloadStatus::Empty));
+    }
+
+    /// The walk stops at the justified root. If that node is itself optimistic the node does
+    /// not attest, which is also what a node that had not imported those payloads would do.
+    #[test]
+    fn stops_at_the_justified_root() {
+        let mut rig = Rig::new();
+        rig.block(1, hash(99));
+        rig.envelope(1, ExecutionStatus::Optimistic(hash(1)));
+        rig.block(2, hash(1));
+        rig.envelope(2, ExecutionStatus::Optimistic(hash(2)));
+        rig.block(3, hash(2));
+        rig.envelope(3, ExecutionStatus::Optimistic(hash(3)));
+        let head = ForkChoiceNode::new(root(3), PayloadStatus::Full);
+
+        let at_justified = rig.fc.rewind_to_valid_payload(head, root(2)).unwrap();
+        assert_eq!(
+            at_justified,
+            ForkChoiceNode::new(root(2), PayloadStatus::Empty)
+        );
+        assert!(
+            !rig.fc
+                .get_node_execution_status(at_justified)
+                .unwrap()
+                .is_valid(),
+            "block 1's payload is optimistic, so the justified EMPTY node is too"
+        );
+        assert_eq!(rig.vote(at_justified, Slot::new(4)), None);
+
+        let below = rig.fc.rewind_to_valid_payload(head, root(0)).unwrap();
+        assert_eq!(below, ForkChoiceNode::new(root(1), PayloadStatus::Empty));
+        assert!(rig.fc.get_node_execution_status(below).unwrap().is_valid());
+    }
+}
