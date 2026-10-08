@@ -2612,43 +2612,18 @@ fn disable_optimistic_finalized_sync() {
 }
 
 #[test]
-fn valid_head_lookback_default() {
+fn rewind_head_to_valid_payload_default() {
     CommandLineTest::new()
         .run_with_zero_port()
-        .with_config(|config| {
-            assert_eq!(config.chain.valid_head_lookback, 0);
-        });
+        .with_config(|config| assert!(!config.chain.rewind_head_to_valid_payload));
 }
 
 #[test]
-fn valid_head_lookback_flag() {
-    CommandLineTest::new()
-        .flag("valid-head-lookback", Some("5"))
-        .run_with_zero_port()
-        .with_config(|config| {
-            assert_eq!(config.chain.valid_head_lookback, 5);
-        });
-}
-
-#[test]
-fn valid_head_lookback_raised_by_proof_engine() {
+fn rewind_head_to_valid_payload_with_proof_engine() {
     CommandLineTest::new()
         .flag("proof-engine-endpoint", Some("http://localhost:8552"))
         .run_with_zero_port()
-        .with_config(|config| {
-            assert_eq!(config.chain.valid_head_lookback, 2);
-        });
-}
-
-#[test]
-fn valid_head_lookback_flag_beats_proof_engine() {
-    CommandLineTest::new()
-        .flag("proof-engine-endpoint", Some("http://localhost:8552"))
-        .flag("valid-head-lookback", Some("0"))
-        .run_with_zero_port()
-        .with_config(|config| {
-            assert_eq!(config.chain.valid_head_lookback, 0);
-        });
+        .with_config(|config| assert!(config.chain.rewind_head_to_valid_payload));
 }
 
 #[test]

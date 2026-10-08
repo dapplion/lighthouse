@@ -2184,58 +2184,39 @@ impl ProtoArray {
         self.nodes.get(node.parent()?)
     }
 
-    /// The parent block, on whichever of its two payload nodes `block_root` extends. `None` at
-    /// the root of the array.
-    fn parent_fork_choice_node(
-        &self,
-        block_root: Hash256,
-    ) -> Result<Option<ForkChoiceNode>, Error> {
-        let node = self
-            .get_block(block_root)
-            .ok_or(Error::NodeUnknown(block_root))?;
-        let Some(parent) = self.get_parent(node) else {
-            return Ok(None);
-        };
-        // As in `get_node_children`: a pre-Gloas parent's single node is named EMPTY.
-        let payload_status = match node.get_parent_payload_status() {
-            ParentPayloadStatus::Full => PayloadStatus::Full,
-            ParentPayloadStatus::Empty | ParentPayloadStatus::PreGloas => PayloadStatus::Empty,
-        };
-        Ok(Some(ForkChoiceNode::new(parent.root(), payload_status)))
-    }
-
-    /// The first node with a valid payload at or above `head`, searching no further back than
-    /// `stop_root` and no more than `max_ancestors` steps. `head` itself if there is none.
+    /// The nearest node at or above `head` that rests on no unverified payload, one payload per
+    /// step: a `FULL` node to its own `EMPTY` side, an `EMPTY` node to its parent's. Stops at
+    /// `stop_root`, where the node returned may still be optimistic.
     pub(crate) fn rewind_to_valid_payload(
         &self,
         head: ForkChoiceNode,
-        max_ancestors: usize,
         stop_root: Hash256,
     ) -> Result<ForkChoiceNode, Error> {
-        // Returning `head` is infallible; the walk is not.
-        if max_ancestors == 0 {
-            return Ok(head);
-        }
-
         let mut node = head;
-        // `head`, then its ancestors.
-        for _ in 0..=max_ancestors {
+        loop {
             if self
                 .node_execution_status(node.root(), node.payload_status())?
                 .is_valid()
             {
                 return Ok(node);
             }
-            if node.root() == stop_root {
-                break;
-            }
-            let Some(parent) = self.parent_fork_choice_node(node.root())? else {
-                break;
+            let next_root = match node.payload_status() {
+                PayloadStatus::Full | PayloadStatus::Pending => node.root(),
+                PayloadStatus::Empty => {
+                    if node.root() == stop_root {
+                        return Ok(node);
+                    }
+                    let block = self
+                        .get_block(node.root())
+                        .ok_or(Error::NodeUnknown(node.root()))?;
+                    match self.get_parent(block) {
+                        Some(parent) => parent.root(),
+                        None => return Ok(node),
+                    }
+                }
             };
-            node = parent;
+            node = ForkChoiceNode::new(next_root, PayloadStatus::Empty);
         }
-
-        Ok(head)
     }
 
     /// Returns `true` if `root` is equal to or a descendant of

@@ -32,9 +32,6 @@ use types::{Checkpoint, Epoch, EthSpec, Hash256};
 
 const PURGE_DB_CONFIRMATION: &str = "confirm";
 
-/// Ancestors to search for a valid payload when an EIP-8025 proof engine is configured.
-const PROOF_ENGINE_VALID_HEAD_LOOKBACK: usize = 2;
-
 /// Gets the fully-initialized global client.
 ///
 /// The top-level `clap` arguments should be provided as `cli_args`.
@@ -339,12 +336,7 @@ pub fn get_config<E: EthSpec>(
             "--proof-engine-endpoint",
         )?);
         client_config.network.enable_execution_proof = true;
-        client_config.chain.valid_head_lookback = PROOF_ENGINE_VALID_HEAD_LOOKBACK;
-    }
-
-    // Set after the proof engine, so an explicit value wins over its raised default.
-    if let Some(lookback) = clap_utils::parse_optional(cli_args, "valid-head-lookback")? {
-        client_config.chain.valid_head_lookback = lookback;
+        client_config.chain.rewind_head_to_valid_payload = true;
     }
 
     // Parse and set the payload builder, if any.
