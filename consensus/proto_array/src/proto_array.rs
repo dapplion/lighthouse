@@ -1,7 +1,7 @@
 use crate::proto_array_fork_choice::IndexedForkChoiceNode;
 use crate::{
-    Block, ExecutionStatus, ExecutionVerdict, JustifiedBalances, LatestMessage, PayloadBlockHash,
-    PayloadStatus, error::Error,
+    Block, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, JustifiedBalances, LatestMessage,
+    PayloadBlockHash, PayloadStatus, error::Error,
 };
 use fixed_bytes::FixedBytesExtended;
 use serde::{Deserialize, Serialize};
@@ -2182,6 +2182,60 @@ impl ProtoArray {
 
     pub fn get_parent(&self, node: &ProtoNode) -> Option<&ProtoNode> {
         self.nodes.get(node.parent()?)
+    }
+
+    /// The parent block, on whichever of its two payload nodes `block_root` extends. `None` at
+    /// the root of the array.
+    fn parent_fork_choice_node(
+        &self,
+        block_root: Hash256,
+    ) -> Result<Option<ForkChoiceNode>, Error> {
+        let node = self
+            .get_block(block_root)
+            .ok_or(Error::NodeUnknown(block_root))?;
+        let Some(parent) = self.get_parent(node) else {
+            return Ok(None);
+        };
+        // As in `get_node_children`: a pre-Gloas parent's single node is named EMPTY.
+        let payload_status = match node.get_parent_payload_status() {
+            ParentPayloadStatus::Full => PayloadStatus::Full,
+            ParentPayloadStatus::Empty | ParentPayloadStatus::PreGloas => PayloadStatus::Empty,
+        };
+        Ok(Some(ForkChoiceNode::new(parent.root(), payload_status)))
+    }
+
+    /// The first node with a valid payload at or above `head`, searching no further back than
+    /// `stop_root` and no more than `max_ancestors` steps. `head` itself if there is none.
+    pub(crate) fn rewind_to_valid_payload(
+        &self,
+        head: ForkChoiceNode,
+        max_ancestors: usize,
+        stop_root: Hash256,
+    ) -> Result<ForkChoiceNode, Error> {
+        // Returning `head` is infallible; the walk is not.
+        if max_ancestors == 0 {
+            return Ok(head);
+        }
+
+        let mut node = head;
+        // `head`, then its ancestors.
+        for _ in 0..=max_ancestors {
+            if self
+                .node_execution_status(node.root(), node.payload_status())?
+                .is_valid()
+            {
+                return Ok(node);
+            }
+            if node.root() == stop_root {
+                break;
+            }
+            let Some(parent) = self.parent_fork_choice_node(node.root())? else {
+                break;
+            };
+            node = parent;
+        }
+
+        Ok(head)
     }
 
     /// Returns `true` if `root` is equal to or a descendant of

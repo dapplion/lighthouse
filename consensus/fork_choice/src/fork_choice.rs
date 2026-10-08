@@ -385,6 +385,9 @@ pub struct ForkChoice<T, E> {
     /// Rejects attestations from the current or a future slot instead of queueing them, as the
     /// spec does. Always `false` in production.
     spec_test_mode: bool,
+    /// Ancestors the head may be rewound by to reach a valid payload. `0` leaves the head as
+    /// fork choice selected it.
+    valid_head_lookback: usize,
     _phantom: PhantomData<E>,
 }
 
@@ -412,6 +415,7 @@ where
         anchor_block: &SignedBeaconBlock<E>,
         anchor_state: &BeaconState<E>,
         current_slot: Option<Slot>,
+        valid_head_lookback: usize,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         // Sanity check: the anchor must lie on an epoch boundary.
@@ -480,6 +484,7 @@ where
             proto_array,
             queued_attestations: BTreeMap::new(),
             spec_test_mode: false,
+            valid_head_lookback,
             // This will be updated during the next call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
                 head_hash: None,
@@ -575,6 +580,8 @@ where
     /// Is equivalent to:
     ///
     /// https://github.com/ethereum/eth2.0-specs/blob/v0.12.1/specs/phase0/fork-choice.md#get_head
+    ///
+    /// A non-zero `valid_head_lookback` departs from the spec.
     #[instrument(skip_all, level = "debug")]
     pub fn get_head(
         &mut self,
@@ -597,6 +604,15 @@ where
             current_slot,
             spec,
         )?;
+        // The head must not be rewound below the justified checkpoint.
+        let head_node = self
+            .proto_array
+            .rewind_to_valid_payload(
+                head_node,
+                self.valid_head_lookback,
+                self.justified_checkpoint().root,
+            )
+            .map_err(Error::ProtoArrayError)?;
         let (head_root, head_payload_status) = head_node.as_pair();
 
         // Cache some values for the next forkchoiceUpdate call to the execution layer.
@@ -2018,6 +2034,7 @@ where
         persisted: PersistedForkChoice,
         reset_payload_statuses: ResetPayloadStatuses,
         fc_store: T,
+        valid_head_lookback: usize,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         let justified_balances = fc_store.justified_balances().clone();
@@ -2035,6 +2052,7 @@ where
             proto_array,
             queued_attestations: BTreeMap::new(),
             spec_test_mode: false,
+            valid_head_lookback,
             // Will be updated in the following call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
                 head_hash: None,
