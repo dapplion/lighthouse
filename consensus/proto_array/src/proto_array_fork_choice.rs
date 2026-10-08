@@ -250,7 +250,7 @@ impl fmt::Display for ExecutionStatus {
 ///
 /// Do not implement a direct conversion from `ExecutionStatus`; deriving a verdict requires fork
 /// choice state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionVerdict {
     Valid,
     Invalid,
@@ -605,6 +605,7 @@ impl ProtoArrayForkChoice {
             nodes: Vec::with_capacity(1),
             indices: HashMap::with_capacity(1),
             children: Vec::with_capacity(1),
+            filter_optimistic_payloads: false,
         };
 
         let block = Block {
@@ -657,6 +658,11 @@ impl ProtoArrayForkChoice {
         self.proto_array
             .on_payload_envelope_received(block_root, execution_status)
             .map_err(|e| format!("Failed to process execution payload: {:?}", e))
+    }
+
+    /// See `ProtoArray::filter_optimistic_payloads`.
+    pub fn set_filter_optimistic_payloads(&mut self, filter_optimistic_payloads: bool) {
+        self.proto_array.filter_optimistic_payloads = filter_optimistic_payloads;
     }
 
     /// See `ProtoArray::propagate_execution_payload_validation` for documentation.

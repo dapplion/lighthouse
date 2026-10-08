@@ -420,6 +420,9 @@ pub struct ProtoArray {
     /// node `i`. Maintained incrementally by `on_block` and `maybe_prune`.
     #[serde(skip)]
     pub children: Vec<Vec<usize>>,
+    /// Treat an optimistic payload as not received. Departs from the spec.
+    #[serde(skip)]
+    pub filter_optimistic_payloads: bool,
 }
 
 impl ProtoArray {
@@ -1611,6 +1614,17 @@ impl ProtoArray {
         }
     }
 
+    /// If this proto node has a possible FULL edge.
+    fn has_full_node(&self, proto_node: &ProtoNode) -> bool {
+        proto_node.payload_received().is_ok_and(|received| received)
+            && !proto_node.is_invalid()
+            && !(self.filter_optimistic_payloads
+                && matches!(
+                    proto_node.execution_status(),
+                    ExecutionStatus::Optimistic(_)
+                ))
+    }
+
     /// Returns the canonical payload status of a block, matching the decision
     /// `get_head` would make between `(root, FULL)` and `(root, EMPTY)`.
     pub(crate) fn get_canonical_payload_status<E: EthSpec>(
@@ -1628,11 +1642,7 @@ impl ProtoArray {
             .ok_or(Error::InvalidNodeIndex(proto_node_index))?;
 
         // As in `get_node_children`, an invalid payload has no FULL node.
-        if !proto_node
-            .payload_received()
-            .map_err(|_| Error::InvalidNodeVariant { block_root: root })?
-            || proto_node.is_invalid()
-        {
+        if !self.has_full_node(proto_node) {
             return Ok(PayloadStatus::Empty);
         }
 
@@ -1832,9 +1842,7 @@ impl ProtoArray {
             let mut children = vec![(node.with_status(PayloadStatus::Empty), proto_node.clone())];
             // The FULL virtual child only exists if the payload has been received and not found
             // invalid.
-            if proto_node.payload_received().is_ok_and(|received| received)
-                && !proto_node.is_invalid()
-            {
+            if self.has_full_node(proto_node) {
                 children.push((node.with_status(PayloadStatus::Full), proto_node.clone()));
             }
             Ok(children)
