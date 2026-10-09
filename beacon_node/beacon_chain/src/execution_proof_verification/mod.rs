@@ -125,6 +125,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             },
             "validate_proven_payload",
         )
-        .await?
+        .await??;
+        // The head stays on the EMPTY node until fork choice runs again.
+        self.recompute_head_at_current_slot().await;
+        Ok(())
     }
 }
