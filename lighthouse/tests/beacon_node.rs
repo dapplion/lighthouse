@@ -169,6 +169,13 @@ fn max_skip_slots_flag() {
         .run_with_zero_port()
         .with_config(|config| assert_eq!(config.chain.import_max_skip_slots, Some(10)));
 }
+#[test]
+fn proposer_optimistic_payload_depth_flag() {
+    CommandLineTest::new()
+        .flag("proposer-optimistic-payload-depth", Some("1"))
+        .run_with_zero_port()
+        .with_config(|config| assert_eq!(config.chain.proposer_optimistic_payload_depth, 1));
+}
 
 #[test]
 fn shuffling_cache_default() {

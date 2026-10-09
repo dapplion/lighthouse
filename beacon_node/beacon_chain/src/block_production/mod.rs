@@ -7,7 +7,7 @@ use tracing::{debug, error, info, instrument, warn};
 use types::{BeaconState, Epoch, EthSpec, Hash256, SignedExecutionPayloadEnvelopeSummary, Slot};
 
 use crate::{
-    BeaconChain, BeaconChainTypes, BlockProductionError, StateSkipConfig,
+    BeaconChain, BeaconChainError, BeaconChainTypes, BlockProductionError, StateSkipConfig,
     fork_choice_signal::ForkChoiceWaitResult, metrics,
 };
 
@@ -90,12 +90,42 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     .map_err(BlockProductionError::FailedToLoadState)?
                     .ok_or(BlockProductionError::UnableToProduceAtSlot(slot))?;
 
+                // The head sits on EMPTY while its payload is unproven; the proposer may still
+                // build on it within the configured depth.
+                let (parent_payload_status, parent_envelope) = if head_payload_status
+                    == PayloadStatus::Empty
+                    && self
+                        .canonical_head
+                        .fork_choice_read_lock()
+                        .get_proposer_payload_status(&head_block_root, &self.spec)
+                        .map_err(|e| {
+                            BlockProductionError::BeaconChain(Box::new(
+                                BeaconChainError::ForkChoiceError(e),
+                            ))
+                        })?
+                        == PayloadStatus::Full
+                {
+                    let envelope = match head_envelope {
+                        Some(envelope) => envelope,
+                        None => self
+                            .store
+                            .get_payload_envelope_summary(&head_block_root)
+                            .ok()
+                            .flatten()
+                            .map(Arc::new)
+                            .ok_or(BlockProductionError::MissingParentExecutionPayload)?,
+                    };
+                    (PayloadStatus::Full, Some(envelope))
+                } else {
+                    (head_payload_status, head_envelope)
+                };
+
                 BlockProductionState {
                     state,
                     state_root: Some(state_root),
                     parent_root: head_block_root,
-                    parent_payload_status: head_payload_status,
-                    parent_envelope: head_envelope,
+                    parent_payload_status,
+                    parent_envelope,
                 }
             }
         } else {

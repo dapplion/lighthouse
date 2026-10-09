@@ -668,6 +668,12 @@ pub fn get_config<E: EthSpec>(
         };
     }
 
+    if let Some(depth) = cli_args.get_one::<String>("proposer-optimistic-payload-depth") {
+        client_config.chain.proposer_optimistic_payload_depth = depth
+            .parse()
+            .map_err(|_| "Invalid proposer-optimistic-payload-depth".to_string())?;
+    }
+
     client_config.chain.max_network_size = spec.max_payload_size as usize;
 
     if cli_args.get_flag("slasher") {

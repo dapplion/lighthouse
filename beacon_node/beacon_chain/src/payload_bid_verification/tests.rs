@@ -159,6 +159,7 @@ impl TestContext {
             &state,
             None,
             false,
+            0,
             &spec,
         )
         .expect("should create fork choice");

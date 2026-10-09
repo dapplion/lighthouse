@@ -4,8 +4,8 @@ use fixed_bytes::FixedBytesExtended;
 use logging::crit;
 use proto_array::{
     Block as ProtoBlock, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, JustifiedBalances,
-    LatestMessage, PayloadBlockHash, PayloadStatus, ProposerHeadError, ProposerHeadInfo,
-    ProtoArrayForkChoice, ReOrgThreshold,
+    LatestMessage, OptimisticPayloads, PayloadBlockHash, PayloadStatus, ProposerHeadError,
+    ProposerHeadInfo, ProtoArrayForkChoice, ReOrgThreshold,
 };
 use ssz_derive::{Decode, Encode};
 use state_processing::{
@@ -385,7 +385,20 @@ pub struct ForkChoice<T, E> {
     /// Rejects attestations from the current or a future slot instead of queueing them, as the
     /// spec does. Always `false` in production.
     spec_test_mode: bool,
+    /// Not persisted: it comes from the chain config.
+    optimistic_payloads: OptimisticPayloads,
+    /// Not persisted: it comes from the chain config.
+    proposer_optimistic_payloads: OptimisticPayloads,
     _phantom: PhantomData<E>,
+}
+
+/// The proposer's view of an unproven payload: the head rule, relaxed by `depth` when filtering.
+fn proposer_policy(filter_optimistic_payloads: bool, depth: usize) -> OptimisticPayloads {
+    match (filter_optimistic_payloads, depth) {
+        (false, _) => OptimisticPayloads::Eligible,
+        (true, 0) => OptimisticPayloads::Filtered,
+        (true, depth) => OptimisticPayloads::Tolerated { depth },
+    }
 }
 
 impl<T, E> PartialEq for ForkChoice<T, E>
@@ -413,6 +426,7 @@ where
         anchor_state: &BeaconState<E>,
         current_slot: Option<Slot>,
         filter_optimistic_payloads: bool,
+        proposer_optimistic_payload_depth: usize,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         // Sanity check: the anchor must lie on an epoch boundary.
@@ -461,7 +475,7 @@ where
         // If the current slot is not provided, use the value that was last provided to the store.
         let current_slot = current_slot.unwrap_or_else(|| fc_store.get_current_slot());
 
-        let mut proto_array = ProtoArrayForkChoice::new::<E>(
+        let proto_array = ProtoArrayForkChoice::new::<E>(
             current_slot,
             finalized_block_slot,
             finalized_block_state_root,
@@ -475,13 +489,21 @@ where
             anchor_block.message().proposer_index(),
             spec,
         )?;
-        proto_array.set_filter_optimistic_payloads(filter_optimistic_payloads);
 
         let mut fork_choice = Self {
             fc_store,
             proto_array,
             queued_attestations: BTreeMap::new(),
             spec_test_mode: false,
+            optimistic_payloads: if filter_optimistic_payloads {
+                OptimisticPayloads::Filtered
+            } else {
+                OptimisticPayloads::Eligible
+            },
+            proposer_optimistic_payloads: proposer_policy(
+                filter_optimistic_payloads,
+                proposer_optimistic_payload_depth,
+            ),
             // This will be updated during the next call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
                 head_hash: None,
@@ -597,6 +619,7 @@ where
             store.proposer_boost_root(),
             store.equivocating_indices(),
             current_slot,
+            self.optimistic_payloads,
             spec,
         )?;
         let (head_root, head_payload_status) = head_node.as_pair();
@@ -1786,6 +1809,24 @@ where
         block_root: &Hash256,
         spec: &ChainSpec,
     ) -> Result<PayloadStatus, Error<T::Error>> {
+        self.payload_status_under(block_root, self.optimistic_payloads, spec)
+    }
+
+    /// The payload status a proposer builds on: the head rule, relaxed by the configured depth.
+    pub fn get_proposer_payload_status(
+        &self,
+        block_root: &Hash256,
+        spec: &ChainSpec,
+    ) -> Result<PayloadStatus, Error<T::Error>> {
+        self.payload_status_under(block_root, self.proposer_optimistic_payloads, spec)
+    }
+
+    fn payload_status_under(
+        &self,
+        block_root: &Hash256,
+        policy: OptimisticPayloads,
+        spec: &ChainSpec,
+    ) -> Result<PayloadStatus, Error<T::Error>> {
         if self.is_finalized_checkpoint_or_descendant(*block_root) {
             let current_slot = self.fc_store.get_current_slot();
             let proposer_boost_root = self.fc_store.proposer_boost_root();
@@ -1794,6 +1835,7 @@ where
                     block_root,
                     current_slot,
                     proposer_boost_root,
+                    policy,
                     spec,
                 )
                 .map_err(Error::ProtoArrayError)
@@ -2021,16 +2063,16 @@ where
         reset_payload_statuses: ResetPayloadStatuses,
         fc_store: T,
         filter_optimistic_payloads: bool,
+        proposer_optimistic_payload_depth: usize,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         let justified_balances = fc_store.justified_balances().clone();
-        let mut proto_array = Self::proto_array_from_persisted(
+        let proto_array = Self::proto_array_from_persisted(
             persisted.proto_array,
             justified_balances,
             reset_payload_statuses,
             fc_store.equivocating_indices(),
         )?;
-        proto_array.set_filter_optimistic_payloads(filter_optimistic_payloads);
 
         let current_slot = fc_store.get_current_slot();
 
@@ -2039,6 +2081,15 @@ where
             proto_array,
             queued_attestations: BTreeMap::new(),
             spec_test_mode: false,
+            optimistic_payloads: if filter_optimistic_payloads {
+                OptimisticPayloads::Filtered
+            } else {
+                OptimisticPayloads::Eligible
+            },
+            proposer_optimistic_payloads: proposer_policy(
+                filter_optimistic_payloads,
+                proposer_optimistic_payload_depth,
+            ),
             // Will be updated in the following call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
                 head_hash: None,

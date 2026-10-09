@@ -5,7 +5,7 @@ The primary component which connects to the Ethereum 2.0 P2P network and
 downloads, verifies and stores blocks. Provides a HTTP API for querying the
 beacon chain and publishing messages to the network.
 
-Usage: lighthouse beacon_node [OPTIONS]
+Usage: lighthouse beacon_node [OPTIONS] --execution-endpoint <EXECUTION-ENDPOINT>
 
 Options:
       --auto-compact-db <auto-compact-db>
@@ -133,7 +133,6 @@ Options:
       --execution-endpoint <EXECUTION-ENDPOINT>
           Server endpoint for an execution layer JWT-authenticated HTTP JSON-RPC
           connection. Uses the same endpoint to populate the deposit cache.
-          Optional when --proof-engine-endpoint is set.
       --execution-jwt <EXECUTION-JWT>
           File path which contains the hex-encoded JWT secret for the execution
           endpoint provided in the --execution-endpoint flag.
@@ -148,9 +147,6 @@ Options:
           Used by the beacon node to communicate a client version to execution
           nodes during JWT authentication. It corresponds to the 'clv' field in
           the JWT claims object.Set to empty by default
-      --execution-proofs-required <COUNT>
-          Distinct EIP-8025 proof types a payload needs before it is valid. Only
-          read with --proof-engine-endpoint. [default: 2]
       --execution-timeout-multiplier <NUM>
           Unsigned integer to multiply the default execution timeouts by.
           [default: 1]
@@ -319,8 +315,12 @@ Options:
           1/3 of a slot.
       --proof-engine-endpoint <PROOF-ENGINE-ENDPOINT>
           Server endpoint for an EIP-8025 proof engine used to verify execution
-          proofs. Proofs decide payload validity if there's no
-          --execution-endpoint. Experimental.
+          proofs. When present, the node subscribes to the execution_proof
+          gossip topic and propagates proofs that verify. Experimental.
+      --proposer-optimistic-payload-depth <COUNT>
+          Propose on top of up to this many unproven execution payloads when
+          --proof-engine-endpoint keeps them out of the head. The block then
+          builds on a payload this node has not verified. Default 0.
       --proposer-reorg-cutoff <MILLISECONDS>
           DEPRECATED. This flag has no effect.
       --proposer-reorg-disallowed-offsets <N1,N2,...>
