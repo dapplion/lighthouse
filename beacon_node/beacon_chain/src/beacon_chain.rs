@@ -686,6 +686,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         store: BeaconStore<T>,
         reset_payload_statuses: ResetPayloadStatuses,
         filter_optimistic_payloads: bool,
+        proposer_optimistic_payload_depth: usize,
         spec: &ChainSpec,
     ) -> Result<Option<BeaconForkChoice<T>>, Error> {
         let Some(persisted_fork_choice_bytes) = store
@@ -705,6 +706,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             reset_payload_statuses,
             fc_store,
             filter_optimistic_payloads,
+            proposer_optimistic_payload_depth,
             spec,
         )?))
     }

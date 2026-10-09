@@ -317,6 +317,10 @@ Options:
           Server endpoint for an EIP-8025 proof engine used to verify execution
           proofs. When present, the node subscribes to the execution_proof
           gossip topic and propagates proofs that verify. Experimental.
+      --proposer-optimistic-payload-depth <COUNT>
+          Propose on top of up to this many unproven execution payloads when
+          --proof-engine-endpoint keeps them out of the head. The block then
+          builds on a payload this node has not verified. Default 0.
       --proposer-reorg-cutoff <MILLISECONDS>
           DEPRECATED. This flag has no effect.
       --proposer-reorg-disallowed-offsets <N1,N2,...>
