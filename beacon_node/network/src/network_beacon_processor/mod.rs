@@ -19,7 +19,8 @@ use beacon_processor::{
 use lighthouse_network::rpc::InboundRequestId;
 use lighthouse_network::rpc::methods::{
     BlobsByRangeRequest, BlobsByRootRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
-    DataColumnsByRootRequest, LightClientUpdatesByRangeRequest, PayloadEnvelopesByRangeRequest,
+    DataColumnsByRootRequest, ExecutionProofsByRangeRequest, ExecutionProofsByRootRequest,
+    LightClientUpdatesByRangeRequest, PayloadEnvelopesByRangeRequest,
     PayloadEnvelopesByRootRequest,
 };
 use lighthouse_network::service::api_types::CustodyBackfillBatchId;
@@ -783,6 +784,46 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
             work: Work::PayloadEnvelopesByRangeRequest(Box::pin(process_fn)),
+        })
+    }
+
+    /// Create a new work event to process `ExecutionProofsByRootRequest`s from the RPC network.
+    pub fn send_execution_proofs_by_roots_request(
+        self: &Arc<Self>,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        request: ExecutionProofsByRootRequest,
+    ) -> Result<(), Error<T::EthSpec>> {
+        let processor = self.clone();
+        let process_fn = async move {
+            processor
+                .handle_execution_proofs_by_root_request(peer_id, inbound_request_id, request)
+                .await;
+        };
+
+        self.try_send(BeaconWorkEvent {
+            drop_during_sync: false,
+            work: Work::ExecutionProofsByRootRequest(Box::pin(process_fn)),
+        })
+    }
+
+    /// Create a new work event to process `ExecutionProofsByRangeRequest`s from the RPC network.
+    pub fn send_execution_proofs_by_range_request(
+        self: &Arc<Self>,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        request: ExecutionProofsByRangeRequest,
+    ) -> Result<(), Error<T::EthSpec>> {
+        let processor = self.clone();
+        let process_fn = async move {
+            processor
+                .handle_execution_proofs_by_range_request(peer_id, inbound_request_id, request)
+                .await;
+        };
+
+        self.try_send(BeaconWorkEvent {
+            drop_during_sync: false,
+            work: Work::ExecutionProofsByRangeRequest(Box::pin(process_fn)),
         })
     }
 

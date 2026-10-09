@@ -5,7 +5,7 @@ use regex::bytes::Regex;
 use serde::Serialize;
 use ssz::Encode;
 use ssz_derive::{Decode, Encode};
-use ssz_types::{RuntimeVariableList, VariableList, typenum::U256};
+use ssz_types::{RuntimeVariableList, VariableList, typenum::U256, typenum::Unsigned};
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -16,9 +16,10 @@ use types::data::BlobIdentifier;
 use types::light_client::consts::MAX_REQUEST_LIGHT_CLIENT_UPDATES;
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnsByRootIdentifier, Epoch,
-    EthSpec, ForkContext, Hash256, LightClientBootstrap, LightClientFinalityUpdate,
-    LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock,
-    SignedExecutionPayloadEnvelope, Slot,
+    EthSpec, ExecutionProofsByRootIdentifier, ForkContext, Hash256, LightClientBootstrap,
+    LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate, MaxProofTypes,
+    ProofType, SignedBeaconBlock, SignedExecutionPayloadEnvelope, SignedExecutionProofEnvelope,
+    Slot,
 };
 
 /// Maximum length of error message.
@@ -373,6 +374,45 @@ pub struct PayloadEnvelopesByRangeRequest {
     pub count: u64,
 }
 
+/// Request a number of execution proofs from a peer.
+#[derive(Encode, Decode, Clone, Debug, PartialEq)]
+pub struct ExecutionProofsByRangeRequest {
+    /// The starting slot to request execution proofs.
+    pub start_slot: u64,
+
+    /// The number of slots from the start slot.
+    pub count: u64,
+
+    /// The proof types being requested.
+    pub proof_types: Vec<ProofType>,
+}
+
+impl ExecutionProofsByRangeRequest {
+    pub fn max_requested(&self) -> u64 {
+        self.count.saturating_mul(self.proof_types.len() as u64)
+    }
+
+    pub fn ssz_min_len() -> usize {
+        ExecutionProofsByRangeRequest {
+            start_slot: 0,
+            count: 0,
+            proof_types: vec![0],
+        }
+        .as_ssz_bytes()
+        .len()
+    }
+
+    pub fn ssz_max_len() -> usize {
+        ExecutionProofsByRangeRequest {
+            start_slot: 0,
+            count: 0,
+            proof_types: vec![0; MaxProofTypes::to_usize()],
+        }
+        .as_ssz_bytes()
+        .len()
+    }
+}
+
 /// Request a number of beacon blobs from a peer.
 #[derive(Encode, Decode, Clone, Debug, PartialEq)]
 pub struct BlobsByRangeRequest {
@@ -551,6 +591,35 @@ impl PayloadEnvelopesByRootRequest {
     }
 }
 
+/// Request a number of execution proofs from a peer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionProofsByRootRequest {
+    /// The beacon block roots, and the proof types wanted for each, being requested.
+    pub proof_ids: RuntimeVariableList<ExecutionProofsByRootIdentifier>,
+}
+
+impl ExecutionProofsByRootRequest {
+    pub fn new(
+        proof_ids: Vec<ExecutionProofsByRootIdentifier>,
+        fork_context: &ForkContext,
+    ) -> Result<Self, String> {
+        // One identifier per payload, so the payload bound applies.
+        let max_request_payloads = fork_context.spec.max_request_payloads();
+
+        let proof_ids = RuntimeVariableList::new(proof_ids, max_request_payloads)
+            .map_err(|e| format!("ExecutionProofsByRootRequest too many proof IDs: {e:?}"))?;
+
+        Ok(Self { proof_ids })
+    }
+
+    pub fn max_requested(&self) -> u64 {
+        self.proof_ids
+            .iter()
+            .map(|proof_id| proof_id.proof_types.len() as u64)
+            .fold(0, u64::saturating_add)
+    }
+}
+
 /// Request a number of beacon blocks and blobs from a peer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlobsByRootRequest {
@@ -644,6 +713,13 @@ pub enum RpcSuccessResponse<E: EthSpec> {
     /// A response to a get EXECUTION_PAYLOAD_ENVELOPES_BY_ROOT request.
     PayloadEnvelopesByRoot(Arc<SignedExecutionPayloadEnvelope<E>>),
 
+    /// A response to a get EXECUTION_PROOFS_BY_RANGE request. A None response signifies the end
+    /// of the batch.
+    ExecutionProofsByRange(Arc<SignedExecutionProofEnvelope>),
+
+    /// A response to a get EXECUTION_PROOFS_BY_ROOT request.
+    ExecutionProofsByRoot(Arc<SignedExecutionProofEnvelope>),
+
     /// A response to a get BLOBS_BY_RANGE request
     BlobsByRange(Arc<BlobSidecar<E>>),
 
@@ -693,6 +769,12 @@ pub enum ResponseTermination {
     /// Execution payload envelopes by root stream termination.
     PayloadEnvelopesByRoot,
 
+    /// Execution proofs by range stream termination.
+    ExecutionProofsByRange,
+
+    /// Execution proofs by root stream termination.
+    ExecutionProofsByRoot,
+
     /// Blobs by range stream termination.
     BlobsByRange,
 
@@ -717,6 +799,8 @@ impl ResponseTermination {
             ResponseTermination::BlocksByHead => Protocol::BlocksByHead,
             ResponseTermination::PayloadEnvelopesByRange => Protocol::PayloadEnvelopesByRange,
             ResponseTermination::PayloadEnvelopesByRoot => Protocol::PayloadEnvelopesByRoot,
+            ResponseTermination::ExecutionProofsByRange => Protocol::ExecutionProofsByRange,
+            ResponseTermination::ExecutionProofsByRoot => Protocol::ExecutionProofsByRoot,
             ResponseTermination::BlobsByRange => Protocol::BlobsByRange,
             ResponseTermination::BlobsByRoot => Protocol::BlobsByRoot,
             ResponseTermination::DataColumnsByRoot => Protocol::DataColumnsByRoot,
@@ -815,6 +899,8 @@ impl<E: EthSpec> RpcSuccessResponse<E> {
             RpcSuccessResponse::BlocksByHead(_) => Protocol::BlocksByHead,
             RpcSuccessResponse::PayloadEnvelopesByRange(_) => Protocol::PayloadEnvelopesByRange,
             RpcSuccessResponse::PayloadEnvelopesByRoot(_) => Protocol::PayloadEnvelopesByRoot,
+            RpcSuccessResponse::ExecutionProofsByRange(_) => Protocol::ExecutionProofsByRange,
+            RpcSuccessResponse::ExecutionProofsByRoot(_) => Protocol::ExecutionProofsByRoot,
             RpcSuccessResponse::BlobsByRange(_) => Protocol::BlobsByRange,
             RpcSuccessResponse::BlobsByRoot(_) => Protocol::BlobsByRoot,
             RpcSuccessResponse::DataColumnsByRoot(_) => Protocol::DataColumnsByRoot,
@@ -842,7 +928,12 @@ impl<E: EthSpec> RpcSuccessResponse<E> {
             Self::LightClientFinalityUpdate(r) => Some(r.get_attested_header_slot()),
             Self::LightClientOptimisticUpdate(r) => Some(r.get_slot()),
             Self::LightClientUpdatesByRange(r) => Some(r.attested_header_slot()),
-            Self::MetaData(_) | Self::Status(_) | Self::Pong(_) => None,
+            // An execution proof names a beacon block root, not a slot.
+            Self::ExecutionProofsByRange(_)
+            | Self::ExecutionProofsByRoot(_)
+            | Self::MetaData(_)
+            | Self::Status(_)
+            | Self::Pong(_) => None,
         }
     }
 }
@@ -901,6 +992,22 @@ impl<E: EthSpec> std::fmt::Display for RpcSuccessResponse<E> {
                     f,
                     "ExecutionPayloadEnvelopesByRoot: Envelope slot: {}",
                     envelope.slot()
+                )
+            }
+            RpcSuccessResponse::ExecutionProofsByRange(proof) => {
+                write!(
+                    f,
+                    "ExecutionProofsByRange: Block root: {}, proof type: {}",
+                    proof.beacon_block_root(),
+                    proof.proof_type()
+                )
+            }
+            RpcSuccessResponse::ExecutionProofsByRoot(proof) => {
+                write!(
+                    f,
+                    "ExecutionProofsByRoot: Block root: {}, proof type: {}",
+                    proof.beacon_block_root(),
+                    proof.proof_type()
                 )
             }
             RpcSuccessResponse::BlobsByRange(blob) => {

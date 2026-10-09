@@ -2,12 +2,19 @@ use crate::{ForkName, Hash256, SignedRoot};
 use bls::Signature;
 use context_deserialize::context_deserialize;
 use serde::{Deserialize, Serialize};
+use ssz::Encode;
 use ssz_derive::{Decode, Encode};
 use ssz_types::VariableList;
 use tree_hash_derive::TreeHash;
 
 /// Maximum size of `proof_data` in bytes (EIP-8025 `MAX_PROOF_SIZE`).
 pub const MAX_PROOF_SIZE: usize = 4_194_304;
+
+/// Proof types a single payload can be proven by (EIP-8025 `MAX_EXECUTION_PROOFS_PER_PAYLOAD`).
+///
+/// Used only to bound req/resp response counts. Which types a node serves is local
+/// configuration.
+pub const MAX_EXECUTION_PROOFS_PER_PAYLOAD: u64 = 4;
 
 /// SSZ bound for `proof_data`.
 pub type MaxProofSize = typenum::U4194304;
@@ -74,6 +81,41 @@ impl SignedExecutionProofEnvelope {
     pub fn proof_type(&self) -> ProofType {
         self.message.proof_type
     }
+
+    /// Returns the minimum SSZ-encoded size (`proof_data` empty).
+    pub fn min_size() -> usize {
+        Self {
+            message: ExecutionProofEnvelope {
+                proof_data: ProofData::empty(),
+                proof_type: 0,
+                beacon_block_root: Hash256::ZERO,
+            },
+            validator_index: 0,
+            signature: Signature::empty(),
+        }
+        .as_ssz_bytes()
+        .len()
+    }
+
+    /// Returns the maximum SSZ-encoded size.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn max_size() -> usize {
+        // `proof_data` is the only variable-length field.
+        Self::min_size() + MAX_PROOF_SIZE
+    }
+}
+
+/// Bound on the `proof_types` filter of a req/resp request: every distinct `ProofType`.
+///
+/// The set of types a node serves is local configuration rather than a spec constant, so the
+/// `u8` domain is the only bound that cannot go stale.
+pub type MaxProofTypes = typenum::U256;
+
+/// Names the proof types wanted for one beacon block in an `ExecutionProofsByRoot` request.
+#[derive(Encode, Decode, Clone, Debug, PartialEq)]
+pub struct ExecutionProofsByRootIdentifier {
+    pub block_root: Hash256,
+    pub proof_types: VariableList<ProofType, MaxProofTypes>,
 }
 
 #[cfg(test)]

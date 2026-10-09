@@ -10,7 +10,8 @@ use beacon_chain::{BeaconChainError, BeaconChainTypes, BlockProcessStatus, WhenS
 use itertools::{Itertools, process_results};
 use lighthouse_network::rpc::methods::{
     BlobsByRangeRequest, BlobsByRootRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
-    DataColumnsByRootRequest, PayloadEnvelopesByRangeRequest, PayloadEnvelopesByRootRequest,
+    DataColumnsByRootRequest, ExecutionProofsByRangeRequest, ExecutionProofsByRootRequest,
+    PayloadEnvelopesByRangeRequest, PayloadEnvelopesByRootRequest,
 };
 use lighthouse_network::rpc::*;
 use lighthouse_network::{PeerId, ReportSource, Response, SyncInfo};
@@ -1928,6 +1929,99 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
 
     /// Helper function to ensure streamed protocols with multiple responses always end with either
     /// a stream termination or an error
+    #[instrument(
+        name = "lh_handle_execution_proofs_by_root_request",
+        parent = None,
+        level = "debug",
+        skip_all,
+        fields(peer_id = %peer_id, client = tracing::field::Empty)
+    )]
+    pub async fn handle_execution_proofs_by_root_request(
+        self: Arc<Self>,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        request: ExecutionProofsByRootRequest,
+    ) {
+        let client = self.network_globals.client(&peer_id);
+        Span::current().record("client", field::display(client.kind));
+
+        self.terminate_response_stream(
+            peer_id,
+            inbound_request_id,
+            self.clone()
+                .handle_execution_proofs_by_root_request_inner(peer_id, request)
+                .await,
+            Response::ExecutionProofsByRoot,
+        );
+    }
+
+    /// Handle an `ExecutionProofsByRoot` request from the peer.
+    async fn handle_execution_proofs_by_root_request_inner(
+        self: Arc<Self>,
+        peer_id: PeerId,
+        request: ExecutionProofsByRootRequest,
+    ) -> Result<(), (RpcErrorResponse, &'static str)> {
+        debug!(
+            %peer_id,
+            requested = request.proof_ids.len(),
+            "Received ExecutionProofsByRoot Request"
+        );
+        self.execution_proof_serve_unavailable()
+    }
+
+    #[instrument(
+        name = "lh_handle_execution_proofs_by_range_request",
+        parent = None,
+        level = "debug",
+        skip_all,
+        fields(peer_id = %peer_id, client = tracing::field::Empty)
+    )]
+    pub async fn handle_execution_proofs_by_range_request(
+        self: Arc<Self>,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        request: ExecutionProofsByRangeRequest,
+    ) {
+        let client = self.network_globals.client(&peer_id);
+        Span::current().record("client", field::display(client.kind));
+
+        self.terminate_response_stream(
+            peer_id,
+            inbound_request_id,
+            self.clone()
+                .handle_execution_proofs_by_range_request_inner(peer_id, request)
+                .await,
+            Response::ExecutionProofsByRange,
+        );
+    }
+
+    /// Handle an `ExecutionProofsByRange` request from the peer.
+    async fn handle_execution_proofs_by_range_request_inner(
+        self: Arc<Self>,
+        peer_id: PeerId,
+        request: ExecutionProofsByRangeRequest,
+    ) -> Result<(), (RpcErrorResponse, &'static str)> {
+        debug!(
+            %peer_id,
+            start_slot = request.start_slot,
+            count = request.count,
+            proof_types = ?request.proof_types,
+            "Received ExecutionProofsByRange Request"
+        );
+        self.execution_proof_serve_unavailable()
+    }
+
+    /// A node that cannot answer a proof request declines it, per EIP-8025.
+    ///
+    /// TODO(9658): serve the proofs once they are retained. Verified proofs are not stored
+    /// today, so every request is declined, including on a node that verifies proofs itself.
+    fn execution_proof_serve_unavailable(&self) -> Result<(), (RpcErrorResponse, &'static str)> {
+        Err((
+            RpcErrorResponse::ResourceUnavailable,
+            "Execution proofs are not served",
+        ))
+    }
+
     fn terminate_response_stream<R, F: FnOnce(Option<R>) -> Response<T::EthSpec>>(
         &self,
         peer_id: PeerId,

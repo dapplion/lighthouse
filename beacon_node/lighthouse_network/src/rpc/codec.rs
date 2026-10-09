@@ -15,12 +15,13 @@ use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio_util::codec::{Decoder, Encoder};
-use types::SignedExecutionPayloadEnvelope;
 use types::{
-    BlobSidecar, ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier, EthSpec, ForkContext,
-    ForkName, ForkVersionDecode, Hash256, LightClientBootstrap, LightClientFinalityUpdate,
-    LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock, SignedBeaconBlockBase,
+    BlobSidecar, ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier, EthSpec,
+    ExecutionProofsByRootIdentifier, ForkContext, ForkName, ForkVersionDecode, Hash256,
+    LightClientBootstrap, LightClientFinalityUpdate, LightClientOptimisticUpdate,
+    LightClientUpdate, SignedBeaconBlock, SignedBeaconBlockBase,
 };
+use types::{SignedExecutionPayloadEnvelope, SignedExecutionProofEnvelope};
 use unsigned_varint::codec::Uvi;
 
 const CONTEXT_BYTES_LEN: usize = 4;
@@ -77,6 +78,8 @@ impl<E: EthSpec> SSZSnappyInboundCodec<E> {
                 RpcSuccessResponse::BlocksByHead(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::PayloadEnvelopesByRange(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::PayloadEnvelopesByRoot(res) => res.as_ssz_bytes(),
+                RpcSuccessResponse::ExecutionProofsByRange(res) => res.as_ssz_bytes(),
+                RpcSuccessResponse::ExecutionProofsByRoot(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::BlobsByRange(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::BlobsByRoot(res) => res.as_ssz_bytes(),
                 RpcSuccessResponse::DataColumnsByRoot(res) => res.as_ssz_bytes(),
@@ -360,6 +363,8 @@ impl<E: EthSpec> Encoder<RequestType<E>> for SSZSnappyOutboundCodec<E> {
             RequestType::BlocksByHead(req) => req.as_ssz_bytes(),
             RequestType::PayloadEnvelopesByRange(req) => req.as_ssz_bytes(),
             RequestType::PayloadEnvelopesByRoot(req) => req.beacon_block_roots.as_ssz_bytes(),
+            RequestType::ExecutionProofsByRange(req) => req.as_ssz_bytes(),
+            RequestType::ExecutionProofsByRoot(req) => req.proof_ids.as_ssz_bytes(),
             RequestType::BlobsByRange(req) => req.as_ssz_bytes(),
             RequestType::BlobsByRoot(req) => req.blob_ids.as_ssz_bytes(),
             RequestType::DataColumnsByRange(req) => req.as_ssz_bytes(),
@@ -568,6 +573,19 @@ fn handle_rpc_request<E: EthSpec>(
                 )?,
             }),
         )),
+        SupportedProtocol::ExecutionProofsByRangeV1 => {
+            Ok(Some(RequestType::ExecutionProofsByRange(
+                ExecutionProofsByRangeRequest::from_ssz_bytes(decoded_buffer)?,
+            )))
+        }
+        SupportedProtocol::ExecutionProofsByRootV1 => Ok(Some(RequestType::ExecutionProofsByRoot(
+            ExecutionProofsByRootRequest {
+                proof_ids: RuntimeVariableList::from_ssz_bytes(
+                    decoded_buffer,
+                    spec.max_request_payloads(),
+                )?,
+            },
+        ))),
         SupportedProtocol::BlobsByRangeV1 => Ok(Some(RequestType::BlobsByRange(
             BlobsByRangeRequest::from_ssz_bytes(decoded_buffer)?,
         ))),
@@ -701,6 +719,48 @@ fn handle_rpc_response<E: EthSpec>(
                     Err(RPCError::ErrorResponse(
                         RpcErrorResponse::InvalidRequest,
                         "Invalid fork name for payload envelopes by root".to_string(),
+                    ))
+                }
+            }
+            None => Err(RPCError::ErrorResponse(
+                RpcErrorResponse::InvalidRequest,
+                format!(
+                    "No context bytes provided for {:?} response",
+                    versioned_protocol
+                ),
+            )),
+        },
+        SupportedProtocol::ExecutionProofsByRangeV1 => match fork_name {
+            Some(fork_name) => {
+                if fork_name.gloas_enabled() {
+                    Ok(Some(RpcSuccessResponse::ExecutionProofsByRange(Arc::new(
+                        SignedExecutionProofEnvelope::from_ssz_bytes(decoded_buffer)?,
+                    ))))
+                } else {
+                    Err(RPCError::ErrorResponse(
+                        RpcErrorResponse::InvalidRequest,
+                        "Invalid fork name for execution proofs by range".to_string(),
+                    ))
+                }
+            }
+            None => Err(RPCError::ErrorResponse(
+                RpcErrorResponse::InvalidRequest,
+                format!(
+                    "No context bytes provided for {:?} response",
+                    versioned_protocol
+                ),
+            )),
+        },
+        SupportedProtocol::ExecutionProofsByRootV1 => match fork_name {
+            Some(fork_name) => {
+                if fork_name.gloas_enabled() {
+                    Ok(Some(RpcSuccessResponse::ExecutionProofsByRoot(Arc::new(
+                        SignedExecutionProofEnvelope::from_ssz_bytes(decoded_buffer)?,
+                    ))))
+                } else {
+                    Err(RPCError::ErrorResponse(
+                        RpcErrorResponse::InvalidRequest,
+                        "Invalid fork name for execution proofs by root".to_string(),
                     ))
                 }
             }
@@ -1096,6 +1156,27 @@ mod tests {
         }
     }
 
+    fn eprange_request() -> ExecutionProofsByRangeRequest {
+        ExecutionProofsByRangeRequest {
+            start_slot: 0,
+            count: 10,
+            proof_types: vec![1, 2, 3],
+        }
+    }
+
+    fn eproot_request(spec: &ChainSpec) -> ExecutionProofsByRootRequest {
+        ExecutionProofsByRootRequest {
+            proof_ids: RuntimeVariableList::new(
+                vec![ExecutionProofsByRootIdentifier {
+                    block_root: Hash256::zero(),
+                    proof_types: VariableList::try_from(vec![1, 2]).unwrap(),
+                }],
+                spec.max_request_payloads(),
+            )
+            .unwrap(),
+        }
+    }
+
     fn dcbroot_request(fork_name: ForkName, spec: &ChainSpec) -> DataColumnsByRootRequest<Spec> {
         DataColumnsByRootRequest {
             data_column_ids: RuntimeVariableList::new(
@@ -1281,6 +1362,12 @@ mod tests {
             }
             RequestType::PayloadEnvelopesByRoot(peroot) => {
                 assert_eq!(decoded, RequestType::PayloadEnvelopesByRoot(peroot))
+            }
+            RequestType::ExecutionProofsByRange(eprange) => {
+                assert_eq!(decoded, RequestType::ExecutionProofsByRange(eprange))
+            }
+            RequestType::ExecutionProofsByRoot(eproot) => {
+                assert_eq!(decoded, RequestType::ExecutionProofsByRoot(eproot))
             }
             RequestType::BlobsByRoot(bbroot) => {
                 assert_eq!(decoded, RequestType::BlobsByRoot(bbroot))
@@ -2054,6 +2141,8 @@ mod tests {
             RequestType::MetaData(MetadataRequest::new_v1()),
             RequestType::BlobsByRange(blbrange_request()),
             RequestType::DataColumnsByRange(dcbrange_request()),
+            RequestType::ExecutionProofsByRange(eprange_request()),
+            RequestType::ExecutionProofsByRoot(eproot_request(&chain_spec)),
             RequestType::MetaData(MetadataRequest::new_v2()),
             RequestType::BlocksByHead(BlocksByHeadRequest {
                 beacon_root: Hash256::zero(),

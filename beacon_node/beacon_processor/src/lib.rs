@@ -451,6 +451,8 @@ pub enum Work<E: EthSpec> {
     BlocksByHeadRequest(AsyncFn),
     PayloadEnvelopesByRangeRequest(AsyncFn),
     PayloadEnvelopesByRootRequest(AsyncFn),
+    ExecutionProofsByRangeRequest(AsyncFn),
+    ExecutionProofsByRootRequest(AsyncFn),
     BlobsByRangeRequest(BlockingFn),
     BlobsByRootsRequest(BlockingFn),
     DataColumnsByRootsRequest(BlockingFn),
@@ -515,6 +517,8 @@ pub enum WorkType {
     BlocksByHeadRequest,
     PayloadEnvelopesByRangeRequest,
     PayloadEnvelopesByRootRequest,
+    ExecutionProofsByRangeRequest,
+    ExecutionProofsByRootRequest,
     BlobsByRangeRequest,
     BlobsByRootsRequest,
     DataColumnsByRootsRequest,
@@ -582,6 +586,8 @@ impl<E: EthSpec> Work<E> {
             Work::BlocksByHeadRequest(_) => WorkType::BlocksByHeadRequest,
             Work::PayloadEnvelopesByRangeRequest(_) => WorkType::PayloadEnvelopesByRangeRequest,
             Work::PayloadEnvelopesByRootRequest(_) => WorkType::PayloadEnvelopesByRootRequest,
+            Work::ExecutionProofsByRangeRequest(_) => WorkType::ExecutionProofsByRangeRequest,
+            Work::ExecutionProofsByRootRequest(_) => WorkType::ExecutionProofsByRootRequest,
             Work::BlobsByRangeRequest(_) => WorkType::BlobsByRangeRequest,
             Work::BlobsByRootsRequest(_) => WorkType::BlobsByRootsRequest,
             Work::DataColumnsByRootsRequest(_) => WorkType::DataColumnsByRootsRequest,
@@ -1054,6 +1060,10 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         } else if let Some(item) = work_queues.payload_envelopes_broots_queue.pop()
                         {
                             Some(item)
+                        } else if let Some(item) = work_queues.execution_proofs_brange_queue.pop() {
+                            Some(item)
+                        } else if let Some(item) = work_queues.execution_proofs_broots_queue.pop() {
+                            Some(item)
                         // Check slashings after all other consensus messages so we prioritize
                         // following head.
                         //
@@ -1257,6 +1267,12 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             Work::PayloadEnvelopesByRootRequest { .. } => work_queues
                                 .payload_envelopes_broots_queue
                                 .push(work, work_id),
+                            Work::ExecutionProofsByRangeRequest { .. } => work_queues
+                                .execution_proofs_brange_queue
+                                .push(work, work_id),
+                            Work::ExecutionProofsByRootRequest { .. } => work_queues
+                                .execution_proofs_broots_queue
+                                .push(work, work_id),
                             Work::BlobsByRangeRequest { .. } => {
                                 work_queues.blob_brange_queue.push(work, work_id)
                             }
@@ -1397,6 +1413,12 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         }
                         WorkType::PayloadEnvelopesByRootRequest => {
                             work_queues.payload_envelopes_broots_queue.len()
+                        }
+                        WorkType::ExecutionProofsByRangeRequest => {
+                            work_queues.execution_proofs_brange_queue.len()
+                        }
+                        WorkType::ExecutionProofsByRootRequest => {
+                            work_queues.execution_proofs_broots_queue.len()
                         }
                         WorkType::BlobsByRangeRequest => work_queues.blob_brange_queue.len(),
                         WorkType::BlobsByRootsRequest => work_queues.blob_broots_queue.len(),
@@ -1603,7 +1625,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
             | Work::BlocksByRootsRequest(work)
             | Work::BlocksByHeadRequest(work)
             | Work::PayloadEnvelopesByRangeRequest(work)
-            | Work::PayloadEnvelopesByRootRequest(work) => task_spawner.spawn_async(work),
+            | Work::PayloadEnvelopesByRootRequest(work)
+            | Work::ExecutionProofsByRangeRequest(work)
+            | Work::ExecutionProofsByRootRequest(work) => task_spawner.spawn_async(work),
             Work::ChainSegmentBackfill(process_fn) => {
                 if self.config.enable_backfill_rate_limiting {
                     task_spawner.spawn_blocking_with_rayon(RayonPoolType::LowPriority, process_fn)

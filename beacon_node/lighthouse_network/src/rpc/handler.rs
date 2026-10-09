@@ -968,6 +968,36 @@ where
                     return;
                 }
             }
+            RequestType::ExecutionProofsByRange(request) => {
+                let max_requested = request.max_requested();
+                let max_allowed = spec.max_request_execution_proofs();
+                if max_requested > max_allowed {
+                    self.events_out.push(HandlerEvent::Err(HandlerErr::Inbound {
+                        id: self.current_inbound_substream_id,
+                        proto: Protocol::ExecutionProofsByRange,
+                        error: RPCError::InvalidData(format!(
+                            "requested exceeded limit. allowed: {}, requested: {}",
+                            max_allowed, max_requested
+                        )),
+                    }));
+                    return;
+                }
+            }
+            RequestType::ExecutionProofsByRoot(request) => {
+                let max_requested = request.max_requested();
+                let max_allowed = spec.max_request_execution_proofs();
+                if max_requested > max_allowed {
+                    self.events_out.push(HandlerEvent::Err(HandlerErr::Inbound {
+                        id: self.current_inbound_substream_id,
+                        proto: Protocol::ExecutionProofsByRoot,
+                        error: RPCError::InvalidData(format!(
+                            "requested exceeded limit. allowed: {}, requested: {}",
+                            max_allowed, max_requested
+                        )),
+                    }));
+                    return;
+                }
+            }
             RequestType::DataColumnsByRange(request) => {
                 let max_requested = request.max_requested::<E>();
                 let max_allowed = spec.max_request_data_column_sidecars;

@@ -269,6 +269,24 @@ impl<T: BeaconChainTypes> Router<T> {
                             request,
                         ),
                 ),
+            RequestType::ExecutionProofsByRoot(request) => self
+                .handle_beacon_processor_send_result(
+                    self.network_beacon_processor
+                        .send_execution_proofs_by_roots_request(
+                            peer_id,
+                            inbound_request_id,
+                            request,
+                        ),
+                ),
+            RequestType::ExecutionProofsByRange(request) => self
+                .handle_beacon_processor_send_result(
+                    self.network_beacon_processor
+                        .send_execution_proofs_by_range_request(
+                            peer_id,
+                            inbound_request_id,
+                            request,
+                        ),
+                ),
             RequestType::BlobsByRange(request) => self.handle_beacon_processor_send_result(
                 self.network_beacon_processor.send_blobs_by_range_request(
                     peer_id,
@@ -354,6 +372,10 @@ impl<T: BeaconChainTypes> Router<T> {
             }
             Response::PayloadEnvelopesByRange(envelope) => {
                 self.on_payload_envelopes_by_range_response(peer_id, app_request_id, envelope);
+            }
+            // TODO(9658): handle once sync requests execution proofs.
+            Response::ExecutionProofsByRoot(_) | Response::ExecutionProofsByRange(_) => {
+                debug!("Execution proof response received but not requested by lighthouse");
             }
             // Lighthouse currently only serves BlocksByHead and does not issue it as a client,
             // so receiving a response is unexpected. Drop it without crashing.

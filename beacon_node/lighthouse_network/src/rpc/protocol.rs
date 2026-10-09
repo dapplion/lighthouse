@@ -22,7 +22,7 @@ use types::{
     LightClientBootstrap, LightClientBootstrapAltair, LightClientFinalityUpdate,
     LightClientFinalityUpdateAltair, LightClientOptimisticUpdate,
     LightClientOptimisticUpdateAltair, LightClientUpdate, MainnetEthSpec, MinimalEthSpec,
-    SignedBeaconBlock, SignedExecutionPayloadEnvelope,
+    SignedBeaconBlock, SignedExecutionPayloadEnvelope, SignedExecutionProofEnvelope,
 };
 
 // Note: Hardcoding the `EthSpec` type for `SignedBeaconBlock` as min/max values is
@@ -70,6 +70,12 @@ pub static SIGNED_EXECUTION_PAYLOAD_ENVELOPE_MIN: LazyLock<usize> =
 
 pub static SIGNED_EXECUTION_PAYLOAD_ENVELOPE_MAX: LazyLock<usize> =
     LazyLock::new(SignedExecutionPayloadEnvelope::<MainnetEthSpec>::max_size);
+
+pub static SIGNED_EXECUTION_PROOF_ENVELOPE_MIN: LazyLock<usize> =
+    LazyLock::new(SignedExecutionProofEnvelope::min_size);
+
+pub static SIGNED_EXECUTION_PROOF_ENVELOPE_MAX: LazyLock<usize> =
+    LazyLock::new(SignedExecutionProofEnvelope::max_size);
 
 pub static BLOB_SIDECAR_SIZE: LazyLock<usize> =
     LazyLock::new(BlobSidecar::<MainnetEthSpec>::max_size);
@@ -168,6 +174,14 @@ pub fn rpc_payload_limits() -> RpcLimits {
     RpcLimits::new(
         *SIGNED_EXECUTION_PAYLOAD_ENVELOPE_MIN,
         *SIGNED_EXECUTION_PAYLOAD_ENVELOPE_MAX,
+    )
+}
+
+/// Returns the rpc limits for execution_proofs_by_range and execution_proofs_by_root responses.
+pub fn rpc_execution_proof_limits() -> RpcLimits {
+    RpcLimits::new(
+        *SIGNED_EXECUTION_PROOF_ENVELOPE_MIN,
+        *SIGNED_EXECUTION_PROOF_ENVELOPE_MAX,
     )
 }
 
@@ -275,6 +289,12 @@ pub enum Protocol {
     /// The `ExecutionPayloadEnvelopesByRange` protocol name.
     #[strum(serialize = "execution_payload_envelopes_by_range")]
     PayloadEnvelopesByRange,
+    /// The `ExecutionProofsByRoot` protocol name.
+    #[strum(serialize = "execution_proofs_by_root")]
+    ExecutionProofsByRoot,
+    /// The `ExecutionProofsByRange` protocol name.
+    #[strum(serialize = "execution_proofs_by_range")]
+    ExecutionProofsByRange,
     /// The `BlobsByRoot` protocol name.
     #[strum(serialize = "blob_sidecars_by_root")]
     BlobsByRoot,
@@ -313,6 +333,8 @@ impl Protocol {
             Protocol::BlocksByHead => Some(ResponseTermination::BlocksByHead),
             Protocol::PayloadEnvelopesByRange => Some(ResponseTermination::PayloadEnvelopesByRange),
             Protocol::PayloadEnvelopesByRoot => Some(ResponseTermination::PayloadEnvelopesByRoot),
+            Protocol::ExecutionProofsByRange => Some(ResponseTermination::ExecutionProofsByRange),
+            Protocol::ExecutionProofsByRoot => Some(ResponseTermination::ExecutionProofsByRoot),
             Protocol::BlobsByRange => Some(ResponseTermination::BlobsByRange),
             Protocol::BlobsByRoot => Some(ResponseTermination::BlobsByRoot),
             Protocol::DataColumnsByRoot => Some(ResponseTermination::DataColumnsByRoot),
@@ -348,6 +370,8 @@ pub enum SupportedProtocol {
     BlocksByHeadV1,
     PayloadEnvelopesByRangeV1,
     PayloadEnvelopesByRootV1,
+    ExecutionProofsByRangeV1,
+    ExecutionProofsByRootV1,
     BlobsByRangeV1,
     BlobsByRootV1,
     DataColumnsByRootV1,
@@ -372,6 +396,8 @@ impl SupportedProtocol {
             SupportedProtocol::BlocksByRangeV2 => "2",
             SupportedProtocol::PayloadEnvelopesByRangeV1 => "1",
             SupportedProtocol::PayloadEnvelopesByRootV1 => "1",
+            SupportedProtocol::ExecutionProofsByRangeV1 => "1",
+            SupportedProtocol::ExecutionProofsByRootV1 => "1",
             SupportedProtocol::BlocksByRootV1 => "1",
             SupportedProtocol::BlocksByRootV2 => "2",
             SupportedProtocol::BlocksByHeadV1 => "1",
@@ -402,6 +428,8 @@ impl SupportedProtocol {
             SupportedProtocol::BlocksByHeadV1 => Protocol::BlocksByHead,
             SupportedProtocol::PayloadEnvelopesByRangeV1 => Protocol::PayloadEnvelopesByRange,
             SupportedProtocol::PayloadEnvelopesByRootV1 => Protocol::PayloadEnvelopesByRoot,
+            SupportedProtocol::ExecutionProofsByRangeV1 => Protocol::ExecutionProofsByRange,
+            SupportedProtocol::ExecutionProofsByRootV1 => Protocol::ExecutionProofsByRoot,
             SupportedProtocol::BlobsByRangeV1 => Protocol::BlobsByRange,
             SupportedProtocol::BlobsByRootV1 => Protocol::BlobsByRoot,
             SupportedProtocol::DataColumnsByRootV1 => Protocol::DataColumnsByRoot,
@@ -464,6 +492,14 @@ impl SupportedProtocol {
                 ),
                 ProtocolId::new(
                     SupportedProtocol::PayloadEnvelopesByRootV1,
+                    Encoding::SSZSnappy,
+                ),
+                ProtocolId::new(
+                    SupportedProtocol::ExecutionProofsByRangeV1,
+                    Encoding::SSZSnappy,
+                ),
+                ProtocolId::new(
+                    SupportedProtocol::ExecutionProofsByRootV1,
                     Encoding::SSZSnappy,
                 ),
             ]);
@@ -592,6 +628,13 @@ impl ProtocolId {
             Protocol::PayloadEnvelopesByRoot => {
                 RpcLimits::new(0, spec.max_payload_envelopes_by_root_request)
             }
+            Protocol::ExecutionProofsByRange => RpcLimits::new(
+                ExecutionProofsByRangeRequest::ssz_min_len(),
+                ExecutionProofsByRangeRequest::ssz_max_len(),
+            ),
+            Protocol::ExecutionProofsByRoot => {
+                RpcLimits::new(0, spec.max_execution_proofs_by_root_request)
+            }
             Protocol::BlobsByRange => RpcLimits::new(
                 <BlobsByRangeRequest as Encode>::ssz_fixed_len(),
                 <BlobsByRangeRequest as Encode>::ssz_fixed_len(),
@@ -633,6 +676,8 @@ impl ProtocolId {
             Protocol::BlocksByHead => rpc_block_limits_by_fork(fork_context.current_fork_name()),
             Protocol::PayloadEnvelopesByRange => rpc_payload_limits(),
             Protocol::PayloadEnvelopesByRoot => rpc_payload_limits(),
+            Protocol::ExecutionProofsByRange => rpc_execution_proof_limits(),
+            Protocol::ExecutionProofsByRoot => rpc_execution_proof_limits(),
             Protocol::BlobsByRange => rpc_blob_limits::<E>(),
             Protocol::BlobsByRoot => rpc_blob_limits::<E>(),
             Protocol::DataColumnsByRoot => {
@@ -673,6 +718,8 @@ impl ProtocolId {
             | SupportedProtocol::BlocksByHeadV1
             | SupportedProtocol::PayloadEnvelopesByRangeV1
             | SupportedProtocol::PayloadEnvelopesByRootV1
+            | SupportedProtocol::ExecutionProofsByRangeV1
+            | SupportedProtocol::ExecutionProofsByRootV1
             | SupportedProtocol::BlobsByRangeV1
             | SupportedProtocol::BlobsByRootV1
             | SupportedProtocol::DataColumnsByRootV1
@@ -834,6 +881,8 @@ pub enum RequestType<E: EthSpec> {
     BlocksByHead(BlocksByHeadRequest),
     PayloadEnvelopesByRange(PayloadEnvelopesByRangeRequest),
     PayloadEnvelopesByRoot(PayloadEnvelopesByRootRequest),
+    ExecutionProofsByRange(ExecutionProofsByRangeRequest),
+    ExecutionProofsByRoot(ExecutionProofsByRootRequest),
     BlobsByRange(BlobsByRangeRequest),
     BlobsByRoot(BlobsByRootRequest),
     DataColumnsByRoot(DataColumnsByRootRequest<E>),
@@ -860,6 +909,8 @@ impl<E: EthSpec> RequestType<E> {
             RequestType::BlocksByHead(req) => req.count,
             RequestType::PayloadEnvelopesByRange(req) => req.count,
             RequestType::PayloadEnvelopesByRoot(req) => req.beacon_block_roots.len() as u64,
+            RequestType::ExecutionProofsByRange(req) => req.max_requested(),
+            RequestType::ExecutionProofsByRoot(req) => req.max_requested(),
             RequestType::BlobsByRange(req) => req.max_blobs_requested(digest_epoch, spec),
             RequestType::BlobsByRoot(req) => req.blob_ids.len() as u64,
             RequestType::DataColumnsByRoot(req) => req.max_requested() as u64,
@@ -892,6 +943,8 @@ impl<E: EthSpec> RequestType<E> {
             RequestType::BlocksByHead(_) => SupportedProtocol::BlocksByHeadV1,
             RequestType::PayloadEnvelopesByRange(_) => SupportedProtocol::PayloadEnvelopesByRangeV1,
             RequestType::PayloadEnvelopesByRoot(_) => SupportedProtocol::PayloadEnvelopesByRootV1,
+            RequestType::ExecutionProofsByRange(_) => SupportedProtocol::ExecutionProofsByRangeV1,
+            RequestType::ExecutionProofsByRoot(_) => SupportedProtocol::ExecutionProofsByRootV1,
             RequestType::BlobsByRange(_) => SupportedProtocol::BlobsByRangeV1,
             RequestType::BlobsByRoot(_) => SupportedProtocol::BlobsByRootV1,
             RequestType::DataColumnsByRoot(_) => SupportedProtocol::DataColumnsByRootV1,
@@ -926,6 +979,8 @@ impl<E: EthSpec> RequestType<E> {
             RequestType::BlocksByHead(_) => ResponseTermination::BlocksByHead,
             RequestType::PayloadEnvelopesByRange(_) => ResponseTermination::PayloadEnvelopesByRange,
             RequestType::PayloadEnvelopesByRoot(_) => ResponseTermination::PayloadEnvelopesByRoot,
+            RequestType::ExecutionProofsByRange(_) => ResponseTermination::ExecutionProofsByRange,
+            RequestType::ExecutionProofsByRoot(_) => ResponseTermination::ExecutionProofsByRoot,
             RequestType::BlobsByRange(_) => ResponseTermination::BlobsByRange,
             RequestType::BlobsByRoot(_) => ResponseTermination::BlobsByRoot,
             RequestType::DataColumnsByRoot(_) => ResponseTermination::DataColumnsByRoot,
@@ -972,6 +1027,14 @@ impl<E: EthSpec> RequestType<E> {
             )],
             RequestType::PayloadEnvelopesByRoot(_) => vec![ProtocolId::new(
                 SupportedProtocol::PayloadEnvelopesByRootV1,
+                Encoding::SSZSnappy,
+            )],
+            RequestType::ExecutionProofsByRange(_) => vec![ProtocolId::new(
+                SupportedProtocol::ExecutionProofsByRangeV1,
+                Encoding::SSZSnappy,
+            )],
+            RequestType::ExecutionProofsByRoot(_) => vec![ProtocolId::new(
+                SupportedProtocol::ExecutionProofsByRootV1,
                 Encoding::SSZSnappy,
             )],
             RequestType::BlobsByRange(_) => vec![ProtocolId::new(
@@ -1028,6 +1091,8 @@ impl<E: EthSpec> RequestType<E> {
             RequestType::BlobsByRange(_) => false,
             RequestType::PayloadEnvelopesByRange(_) => false,
             RequestType::PayloadEnvelopesByRoot(_) => false,
+            RequestType::ExecutionProofsByRange(_) => false,
+            RequestType::ExecutionProofsByRoot(_) => false,
             RequestType::BlobsByRoot(_) => false,
             RequestType::DataColumnsByRoot(_) => false,
             RequestType::DataColumnsByRange(_) => false,
@@ -1145,6 +1210,12 @@ impl<E: EthSpec> std::fmt::Display for RequestType<E> {
             RequestType::PayloadEnvelopesByRoot(req) => {
                 write!(f, "Payload envelopes by root: {:?}", req)
             }
+            RequestType::ExecutionProofsByRange(req) => {
+                write!(f, "Execution proofs by range: {:?}", req)
+            }
+            RequestType::ExecutionProofsByRoot(req) => {
+                write!(f, "Execution proofs by root: {:?}", req)
+            }
             RequestType::BlobsByRange(req) => write!(f, "Blobs by range: {:?}", req),
             RequestType::BlobsByRoot(req) => write!(f, "Blobs by root: {:?}", req),
             RequestType::DataColumnsByRoot(req) => write!(f, "Data columns by root: {:?}", req),
@@ -1209,9 +1280,10 @@ mod tests {
                 fork_context.spec.is_peer_das_scheduled()
             }
 
-            PayloadEnvelopesByRangeV1 | PayloadEnvelopesByRootV1 => {
-                fork_context.fork_exists(ForkName::Gloas)
-            }
+            PayloadEnvelopesByRangeV1
+            | PayloadEnvelopesByRootV1
+            | ExecutionProofsByRangeV1
+            | ExecutionProofsByRootV1 => fork_context.fork_exists(ForkName::Gloas),
 
             BlocksByHeadV1 => fork_context.fork_exists(ForkName::Fulu),
 
