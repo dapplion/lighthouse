@@ -126,6 +126,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             &metrics::EXECUTION_PROOF_PROMOTION_LAG,
             get_slot_delay_ms(timestamp_now(), block_slot, &self.slot_clock).as_secs_f64(),
         );
+        // The head stays on the EMPTY node until fork choice runs again.
+        self.recompute_head_at_current_slot().await;
         Ok(())
     }
 }
