@@ -5,6 +5,7 @@ use self::custody::{ActiveCustodyRequest, Error as CustodyRequestError};
 pub use self::requests::{
     BlocksByRootSingleRequest, DataColumnsByRootRequestParams, PayloadEnvelopesByRootSingleRequest,
 };
+use self::requests::{ExecutionProofsByRangeRequestItems, ExecutionProofsByRootRequestItems};
 use super::SyncMessage;
 use super::block_sidecar_coupling::RangeBlockComponentsRequest;
 use super::manager::BlockProcessType;
@@ -24,7 +25,8 @@ use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineStat
 use custody::CustodyRequestResult;
 use fnv::FnvHashMap;
 use lighthouse_network::rpc::methods::{
-    BlobsByRangeRequest, DataColumnsByRangeRequest, PayloadEnvelopesByRangeRequest,
+    BlobsByRangeRequest, DataColumnsByRangeRequest, ExecutionProofsByRangeRequest,
+    ExecutionProofsByRootRequest, PayloadEnvelopesByRangeRequest,
 };
 use lighthouse_network::rpc::{
     BlocksByRangeRequest, GoodbyeReason, MAX_CONCURRENT_REQUESTS, RPCError, RequestType,
@@ -34,8 +36,8 @@ use lighthouse_network::service::api_types::{
     AppRequestId, BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
     CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyId, CustodyRequester,
     DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
-    SyncRequestId,
+    DataColumnsByRootRequester, ExecutionProofsByRangeRequestId, ExecutionProofsByRootRequestId,
+    Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::{Client, NetworkGlobals, PeerAction, PeerId, ReportSource};
 use parking_lot::RwLock;
@@ -56,7 +58,8 @@ use tokio::sync::mpsc;
 use tracing::{Span, debug, debug_span, error, warn};
 use types::{
     BlobSidecar, ChainSpec, ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Epoch, EthSpec,
-    ForkContext, Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
+    ForkContext, Hash256, SignedBeaconBlock, SignedExecutionPayloadEnvelope,
+    SignedExecutionProofEnvelope, Slot,
 };
 
 pub mod custody;
@@ -239,6 +242,14 @@ pub struct SyncNetworkContext<T: BeaconChainTypes> {
     /// A mapping of active DataColumnsByRange requests
     data_columns_by_range_requests:
         ActiveRequests<DataColumnsByRangeRequestId, DataColumnsByRangeRequestItems<T::EthSpec>>,
+    /// A mapping of active ExecutionProofsByRoot requests
+    execution_proofs_by_root_requests:
+        ActiveRequests<ExecutionProofsByRootRequestId, ExecutionProofsByRootRequestItems>,
+
+    /// A mapping of active ExecutionProofsByRange requests
+    execution_proofs_by_range_requests:
+        ActiveRequests<ExecutionProofsByRangeRequestId, ExecutionProofsByRangeRequestItems>,
+
     /// A mapping of active PayloadEnvelopesByRange requests
     payload_envelopes_by_range_requests: ActiveRequests<
         PayloadEnvelopesByRangeRequestId,
@@ -334,6 +345,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             blobs_by_range_requests: ActiveRequests::new("blobs_by_range"),
             data_columns_by_range_requests: ActiveRequests::new("data_columns_by_range"),
             payload_envelopes_by_range_requests: ActiveRequests::new("payload_envelopes_by_range"),
+            execution_proofs_by_root_requests: ActiveRequests::new("execution_proofs_by_root"),
+            execution_proofs_by_range_requests: ActiveRequests::new("execution_proofs_by_range"),
             custody_by_root_requests: <_>::default(),
             components_by_range_requests: FnvHashMap::default(),
             custody_backfill_data_column_batch_requests: FnvHashMap::default(),
@@ -367,6 +380,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             blobs_by_range_requests,
             data_columns_by_range_requests,
             payload_envelopes_by_range_requests,
+            execution_proofs_by_root_requests,
+            execution_proofs_by_range_requests,
             // custody_by_root_requests is a meta request of data_columns_by_root_requests
             custody_by_root_requests: _,
             // components_by_range_requests is a meta request of various _by_range requests
@@ -406,6 +421,14 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .active_requests_of_peer(peer_id)
             .into_iter()
             .map(|req_id| SyncRequestId::PayloadEnvelopesByRange(*req_id));
+        let execution_proofs_by_root_ids = execution_proofs_by_root_requests
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|req_id| SyncRequestId::ExecutionProofsByRoot(*req_id));
+        let execution_proofs_by_range_ids = execution_proofs_by_range_requests
+            .active_requests_of_peer(peer_id)
+            .into_iter()
+            .map(|req_id| SyncRequestId::ExecutionProofsByRange(*req_id));
         blocks_by_root_ids
             .chain(payload_envelopes_by_root_ids)
             .chain(data_column_by_root_ids)
@@ -413,6 +436,8 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             .chain(blobs_by_range_ids)
             .chain(data_column_by_range_ids)
             .chain(payload_envelope_by_range_ids)
+            .chain(execution_proofs_by_root_ids)
+            .chain(execution_proofs_by_range_ids)
             .collect()
     }
 
@@ -1224,6 +1249,110 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         Ok(id)
     }
 
+    /// Request execution proofs for a set of block roots via `ExecutionProofsByRoot` RPC.
+    pub fn send_execution_proofs_by_root_request(
+        &mut self,
+        peer_id: PeerId,
+        request: ExecutionProofsByRootRequest,
+        request_span: Span,
+    ) -> Result<ExecutionProofsByRootRequestId, RpcRequestSendError> {
+        // A request that asks for nothing gets no response stream at all, so its entry would sit
+        // in `execution_proofs_by_root_requests` until the peer disconnects. A repeated
+        // `(block_root, proof_type)` is worse: the peer answers once per occurrence and our own
+        // accumulator would penalize it for the duplicate.
+        let mut requested = HashSet::new();
+        for proof_id in request.proof_ids.iter() {
+            for proof_type in proof_id.proof_types.iter() {
+                if !requested.insert((proof_id.block_root, *proof_type)) {
+                    return Err(RpcRequestSendError::InternalError(
+                        "duplicate execution proof requested".to_owned(),
+                    ));
+                }
+            }
+        }
+        if requested.is_empty() {
+            return Err(RpcRequestSendError::InternalError(
+                "no execution proofs requested".to_owned(),
+            ));
+        }
+
+        let id = ExecutionProofsByRootRequestId { id: self.next_id() };
+
+        self.send_network_msg(NetworkMessage::SendRequest {
+            peer_id,
+            request: RequestType::ExecutionProofsByRoot(request.clone()),
+            app_request_id: AppRequestId::Sync(SyncRequestId::ExecutionProofsByRoot(id)),
+        })
+        .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        debug!(
+            method = "ExecutionProofsByRoot",
+            roots = request.proof_ids.len(),
+            peer = %peer_id,
+            %id,
+            "Sync RPC request sent"
+        );
+
+        self.execution_proofs_by_root_requests.insert(
+            id,
+            peer_id,
+            false,
+            ExecutionProofsByRootRequestItems::new(&request),
+            request_span,
+        );
+        Ok(id)
+    }
+
+    /// Request execution proofs for a slot range via `ExecutionProofsByRange` RPC.
+    pub fn send_execution_proofs_by_range_request(
+        &mut self,
+        peer_id: PeerId,
+        request: ExecutionProofsByRangeRequest,
+        request_span: Span,
+    ) -> Result<ExecutionProofsByRangeRequestId, RpcRequestSendError> {
+        // See `send_execution_proofs_by_root_request`: an empty request is never answered, and a
+        // repeated proof type earns an honest peer a penalty.
+        let mut requested = HashSet::new();
+        for proof_type in request.proof_types.iter() {
+            if !requested.insert(*proof_type) {
+                return Err(RpcRequestSendError::InternalError(
+                    "duplicate execution proof type requested".to_owned(),
+                ));
+            }
+        }
+        if request.count == 0 || requested.is_empty() {
+            return Err(RpcRequestSendError::InternalError(
+                "no execution proofs requested".to_owned(),
+            ));
+        }
+
+        let id = ExecutionProofsByRangeRequestId { id: self.next_id() };
+
+        self.send_network_msg(NetworkMessage::SendRequest {
+            peer_id,
+            request: RequestType::ExecutionProofsByRange(request.clone()),
+            app_request_id: AppRequestId::Sync(SyncRequestId::ExecutionProofsByRange(id)),
+        })
+        .map_err(|_| RpcRequestSendError::InternalError("network send error".to_owned()))?;
+
+        debug!(
+            method = "ExecutionProofsByRange",
+            slots = request.count,
+            peer = %peer_id,
+            %id,
+            "Sync RPC request sent"
+        );
+
+        self.execution_proofs_by_range_requests.insert(
+            id,
+            peer_id,
+            false,
+            ExecutionProofsByRangeRequestItems::new(&request),
+            request_span,
+        );
+        Ok(id)
+    }
+
     pub fn is_execution_engine_online(&self) -> bool {
         self.execution_engine_state == EngineState::Online
     }
@@ -1448,6 +1577,30 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
     ) -> Option<RpcResponseResult<Vec<Arc<SignedExecutionPayloadEnvelope<T::EthSpec>>>>> {
         let resp = self
             .payload_envelopes_by_range_requests
+            .on_response(id, rpc_event);
+        self.on_rpc_response_result(resp, peer_id)
+    }
+
+    pub(crate) fn on_execution_proofs_by_root_response(
+        &mut self,
+        id: ExecutionProofsByRootRequestId,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<Arc<SignedExecutionProofEnvelope>>,
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedExecutionProofEnvelope>>>> {
+        let resp = self
+            .execution_proofs_by_root_requests
+            .on_response(id, rpc_event);
+        self.on_rpc_response_result(resp, peer_id)
+    }
+
+    pub(crate) fn on_execution_proofs_by_range_response(
+        &mut self,
+        id: ExecutionProofsByRangeRequestId,
+        peer_id: PeerId,
+        rpc_event: RpcEvent<Arc<SignedExecutionProofEnvelope>>,
+    ) -> Option<RpcResponseResult<Vec<Arc<SignedExecutionProofEnvelope>>>> {
+        let resp = self
+            .execution_proofs_by_range_requests
             .on_response(id, rpc_event);
         self.on_rpc_response_result(resp, peer_id)
     }

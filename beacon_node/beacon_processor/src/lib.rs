@@ -453,6 +453,7 @@ pub enum Work<E: EthSpec> {
     PayloadEnvelopesByRootRequest(AsyncFn),
     ExecutionProofsByRangeRequest(BlockingFn),
     ExecutionProofsByRootRequest(BlockingFn),
+    RpcExecutionProofs(AsyncFn),
     BlobsByRangeRequest(BlockingFn),
     BlobsByRootsRequest(BlockingFn),
     DataColumnsByRootsRequest(BlockingFn),
@@ -519,6 +520,7 @@ pub enum WorkType {
     PayloadEnvelopesByRootRequest,
     ExecutionProofsByRangeRequest,
     ExecutionProofsByRootRequest,
+    RpcExecutionProofs,
     BlobsByRangeRequest,
     BlobsByRootsRequest,
     DataColumnsByRootsRequest,
@@ -588,6 +590,7 @@ impl<E: EthSpec> Work<E> {
             Work::PayloadEnvelopesByRootRequest(_) => WorkType::PayloadEnvelopesByRootRequest,
             Work::ExecutionProofsByRangeRequest(_) => WorkType::ExecutionProofsByRangeRequest,
             Work::ExecutionProofsByRootRequest(_) => WorkType::ExecutionProofsByRootRequest,
+            Work::RpcExecutionProofs(_) => WorkType::RpcExecutionProofs,
             Work::BlobsByRangeRequest(_) => WorkType::BlobsByRangeRequest,
             Work::BlobsByRootsRequest(_) => WorkType::BlobsByRootsRequest,
             Work::DataColumnsByRootsRequest(_) => WorkType::DataColumnsByRootsRequest,
@@ -1064,6 +1067,8 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             Some(item)
                         } else if let Some(item) = work_queues.execution_proofs_broots_queue.pop() {
                             Some(item)
+                        } else if let Some(item) = work_queues.rpc_execution_proofs_queue.pop() {
+                            Some(item)
                         // Check slashings after all other consensus messages so we prioritize
                         // following head.
                         //
@@ -1273,6 +1278,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             Work::ExecutionProofsByRootRequest { .. } => work_queues
                                 .execution_proofs_broots_queue
                                 .push(work, work_id),
+                            Work::RpcExecutionProofs { .. } => {
+                                work_queues.rpc_execution_proofs_queue.push(work, work_id)
+                            }
                             Work::BlobsByRangeRequest { .. } => {
                                 work_queues.blob_brange_queue.push(work, work_id)
                             }
@@ -1419,6 +1427,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         }
                         WorkType::ExecutionProofsByRootRequest => {
                             work_queues.execution_proofs_broots_queue.len()
+                        }
+                        WorkType::RpcExecutionProofs => {
+                            work_queues.rpc_execution_proofs_queue.len()
                         }
                         WorkType::BlobsByRangeRequest => work_queues.blob_brange_queue.len(),
                         WorkType::BlobsByRootsRequest => work_queues.blob_broots_queue.len(),
@@ -1627,7 +1638,8 @@ impl<E: EthSpec> BeaconProcessor<E> {
             | Work::BlocksByRootsRequest(work)
             | Work::BlocksByHeadRequest(work)
             | Work::PayloadEnvelopesByRangeRequest(work)
-            | Work::PayloadEnvelopesByRootRequest(work) => task_spawner.spawn_async(work),
+            | Work::PayloadEnvelopesByRootRequest(work)
+            | Work::RpcExecutionProofs(work) => task_spawner.spawn_async(work),
             Work::ChainSegmentBackfill(process_fn) => {
                 if self.config.enable_backfill_rate_limiting {
                     task_spawner.spawn_blocking_with_rayon(RayonPoolType::LowPriority, process_fn)

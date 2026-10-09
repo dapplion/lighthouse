@@ -27,6 +27,7 @@ pub const REQUIRED_EXECUTION_PROOFS: usize = 2;
 pub enum ProofSource {
     Gossip,
     Http,
+    Rpc,
 }
 
 #[derive(Debug)]

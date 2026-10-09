@@ -26,7 +26,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, trace, warn};
 use types::{
     BlobSidecar, DataColumnSidecar, EthSpec, ForkContext, PartialDataColumn, SignedBeaconBlock,
-    SignedExecutionPayloadEnvelope,
+    SignedExecutionPayloadEnvelope, SignedExecutionProofEnvelope,
 };
 
 /// Handles messages from the network and routes them to the appropriate service to be handled.
@@ -373,9 +373,11 @@ impl<T: BeaconChainTypes> Router<T> {
             Response::PayloadEnvelopesByRange(envelope) => {
                 self.on_payload_envelopes_by_range_response(peer_id, app_request_id, envelope);
             }
-            // TODO(9658): handle once sync requests execution proofs.
-            Response::ExecutionProofsByRoot(_) | Response::ExecutionProofsByRange(_) => {
-                debug!("Execution proof response received but not requested by lighthouse");
+            Response::ExecutionProofsByRoot(proof) => {
+                self.on_execution_proofs_by_root_response(peer_id, app_request_id, proof);
+            }
+            Response::ExecutionProofsByRange(proof) => {
+                self.on_execution_proofs_by_range_response(peer_id, app_request_id, proof);
             }
             // Lighthouse currently only serves BlocksByHead and does not issue it as a client,
             // so receiving a response is unexpected. Drop it without crashing.
@@ -833,6 +835,50 @@ impl<T: BeaconChainTypes> Router<T> {
             sync_request_id,
             peer_id,
             envelope,
+        });
+    }
+
+    /// Handle an `ExecutionProofsByRoot` response from the peer.
+    pub fn on_execution_proofs_by_root_response(
+        &mut self,
+        peer_id: PeerId,
+        app_request_id: AppRequestId,
+        proof: Option<Arc<SignedExecutionProofEnvelope>>,
+    ) {
+        let sync_request_id = match app_request_id {
+            AppRequestId::Sync(id @ SyncRequestId::ExecutionProofsByRoot { .. }) => id,
+            other => {
+                crit!(request = ?other, %peer_id, "ExecutionProofsByRoot response on incorrect request");
+                return;
+            }
+        };
+
+        self.send_to_sync(SyncMessage::RpcExecutionProof {
+            sync_request_id,
+            peer_id,
+            proof,
+        });
+    }
+
+    /// Handle an `ExecutionProofsByRange` response from the peer.
+    pub fn on_execution_proofs_by_range_response(
+        &mut self,
+        peer_id: PeerId,
+        app_request_id: AppRequestId,
+        proof: Option<Arc<SignedExecutionProofEnvelope>>,
+    ) {
+        let sync_request_id = match app_request_id {
+            AppRequestId::Sync(id @ SyncRequestId::ExecutionProofsByRange { .. }) => id,
+            other => {
+                crit!(request = ?other, %peer_id, "ExecutionProofsByRange response on incorrect request");
+                return;
+            }
+        };
+
+        self.send_to_sync(SyncMessage::RpcExecutionProof {
+            sync_request_id,
+            peer_id,
+            proof,
         });
     }
 

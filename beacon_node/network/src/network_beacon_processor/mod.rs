@@ -5,6 +5,7 @@ use beacon_chain::block_verification_types::RangeSyncBlock;
 use beacon_chain::data_column_verification::{
     GossipDataColumnError, KzgVerifiedCustodyDataColumn, observe_gossip_data_column,
 };
+use beacon_chain::execution_proof_verification::Error as ExecutionProofError;
 use beacon_chain::fetch_blobs::{
     FetchEngineBlobError, PartialHeaderOrBid, fetch_and_process_engine_blobs,
 };
@@ -16,6 +17,7 @@ use beacon_processor::{
     BeaconProcessorSend, DuplicateCache, GossipAggregatePackage, GossipAttestationPackage, Work,
     WorkEvent as BeaconWorkEvent,
 };
+use lighthouse_network::PeerAction;
 use lighthouse_network::rpc::InboundRequestId;
 use lighthouse_network::rpc::methods::{
     BlobsByRangeRequest, BlobsByRootRequest, BlocksByHeadRequest, DataColumnsByRangeRequest,
@@ -77,6 +79,29 @@ pub struct NetworkBeaconProcessor<T: BeaconChainTypes> {
     pub network_globals: Arc<NetworkGlobals<T::EthSpec>>,
     pub invalid_block_storage: InvalidBlockStorage,
     pub executor: TaskExecutor,
+}
+
+/// The penalty for a peer whose execution proof failed verification, or `None` when the fault is
+/// not theirs. Gossip rejects exactly the errors that earn a penalty.
+pub(crate) fn execution_proof_peer_penalty(error: &ExecutionProofError) -> Option<PeerAction> {
+    match error {
+        ExecutionProofError::EmptyProofData
+        | ExecutionProofError::UnknownValidatorIndex(_)
+        | ExecutionProofError::ValidatorNotActive { .. }
+        | ExecutionProofError::InvalidSignature
+        | ExecutionProofError::InvalidProof => Some(PeerAction::LowToleranceError),
+        // Duplicates, and blocks we do not have or have already finalized.
+        ExecutionProofError::ProofAlreadySeen
+        | ExecutionProofError::ValidProofAlreadyKnown
+        | ExecutionProofError::DuplicateFromValidator { .. }
+        | ExecutionProofError::UnknownBlockRoot { .. }
+        | ExecutionProofError::PastFinalizedSlot { .. }
+        | ExecutionProofError::PayloadUnavailable { .. }
+        // Local faults: the proof engine is missing or unreachable.
+        | ExecutionProofError::ProofEngineMissing
+        | ExecutionProofError::ProofEngine(_)
+        | ExecutionProofError::BeaconChainError(_) => None,
+    }
 }
 
 impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
@@ -820,6 +845,25 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
             work: Work::ExecutionProofsByRangeRequest(Box::new(process_fn)),
+        })
+    }
+
+    /// Create a new work event to verify execution proofs fetched over the RPC network.
+    pub fn send_rpc_execution_proofs(
+        self: &Arc<Self>,
+        peer_id: PeerId,
+        proofs: Vec<Arc<SignedExecutionProofEnvelope>>,
+    ) -> Result<(), Error<T::EthSpec>> {
+        let processor = self.clone();
+        let process_fn = async move {
+            processor
+                .process_rpc_execution_proofs(peer_id, proofs)
+                .await;
+        };
+
+        self.try_send(BeaconWorkEvent {
+            drop_during_sync: false,
+            work: Work::RpcExecutionProofs(Box::pin(process_fn)),
         })
     }
 

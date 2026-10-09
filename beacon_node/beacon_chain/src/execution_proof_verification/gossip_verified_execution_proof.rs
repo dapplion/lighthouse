@@ -86,7 +86,7 @@ impl GossipVerifiedExecutionProof {
             // them. An HTTP resubmission is a retry and has to reach the engine again.
             ProofObservation::ProofAlreadySeen => match ctx.source {
                 ProofSource::Gossip => return Err(Error::ProofAlreadySeen),
-                ProofSource::Http => {}
+                ProofSource::Http | ProofSource::Rpc => {}
             },
             ProofObservation::ValidProofAlreadyKnown => return Err(Error::ValidProofAlreadyKnown),
             ProofObservation::DuplicateFromValidator => {
@@ -168,7 +168,7 @@ impl GossipVerifiedExecutionProof {
             // Lost a race against a concurrent copy of the same proof.
             match ctx.source {
                 ProofSource::Gossip => return Err(Error::ProofAlreadySeen),
-                ProofSource::Http => {}
+                ProofSource::Http | ProofSource::Rpc => {}
             }
         }
 

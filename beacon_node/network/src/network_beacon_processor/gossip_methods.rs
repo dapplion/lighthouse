@@ -1,6 +1,8 @@
 use crate::{
     metrics::{self, register_process_result_metrics},
-    network_beacon_processor::{InvalidBlockStorage, NetworkBeaconProcessor},
+    network_beacon_processor::{
+        InvalidBlockStorage, NetworkBeaconProcessor, execution_proof_peer_penalty,
+    },
     service::NetworkMessage,
     sync::SyncMessage,
 };
@@ -9,7 +11,7 @@ use beacon_chain::data_column_verification::{
     GossipDataColumnError, GossipPartialDataColumnError, GossipVerifiedDataColumn,
     GossipVerifiedPartialDataColumn, PartialColumnVerificationResult,
 };
-use beacon_chain::execution_proof_verification::{Error as ExecutionProofError, ProofSource};
+use beacon_chain::execution_proof_verification::ProofSource;
 use beacon_chain::fetch_blobs::PartialHeaderOrBid;
 use beacon_chain::partial_data_column_assembler::UpdatedPartials;
 use beacon_chain::payload_bid_verification::PayloadBidError;
@@ -4184,34 +4186,15 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             }
             Err(error) => {
                 debug!(%beacon_block_root, proof_type, ?error, "Could not verify execution proof");
-                let (acceptance, peer_action) = match &error {
-                    // IGNORE: duplicates, unknown or finalized blocks.
-                    ExecutionProofError::ProofAlreadySeen
-                    | ExecutionProofError::ValidProofAlreadyKnown
-                    | ExecutionProofError::DuplicateFromValidator { .. }
-                    | ExecutionProofError::UnknownBlockRoot { .. }
-                    | ExecutionProofError::PastFinalizedSlot { .. }
-                    | ExecutionProofError::PayloadUnavailable { .. } => {
-                        (MessageAcceptance::Ignore, None)
+                // REJECT exactly the errors the sender is at fault for, IGNORE the rest:
+                // duplicates, blocks we do not have, and local proof-engine faults.
+                let acceptance = match execution_proof_peer_penalty(&error) {
+                    Some(action) => {
+                        self.gossip_penalize_peer(peer_id, action, "invalid execution proof");
+                        MessageAcceptance::Reject
                     }
-                    // REJECT: the proof is invalid.
-                    ExecutionProofError::EmptyProofData
-                    | ExecutionProofError::UnknownValidatorIndex(_)
-                    | ExecutionProofError::ValidatorNotActive { .. }
-                    | ExecutionProofError::InvalidSignature
-                    | ExecutionProofError::InvalidProof => (
-                        MessageAcceptance::Reject,
-                        Some(PeerAction::LowToleranceError),
-                    ),
-                    // IGNORE without penalty: local faults (proof engine missing or
-                    // unreachable).
-                    ExecutionProofError::ProofEngineMissing
-                    | ExecutionProofError::ProofEngine(_)
-                    | ExecutionProofError::BeaconChainError(_) => (MessageAcceptance::Ignore, None),
+                    None => MessageAcceptance::Ignore,
                 };
-                if let Some(action) = peer_action {
-                    self.gossip_penalize_peer(peer_id, action, "invalid execution proof");
-                }
                 self.propagate_validation_result(message_id, peer_id, acceptance);
             }
         }

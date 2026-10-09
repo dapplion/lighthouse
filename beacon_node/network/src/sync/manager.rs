@@ -57,8 +57,8 @@ use lighthouse_network::service::api_types::{
     BlobsByRangeRequestId, BlocksByRangeRequestId, ComponentsByRangeRequestId,
     CustodyBackFillBatchRequestId, CustodyBackfillBatchId, CustodyRequester,
     DataColumnsByRangeRequestId, DataColumnsByRangeRequester, DataColumnsByRootRequestId,
-    DataColumnsByRootRequester, Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId,
-    SyncRequestId,
+    DataColumnsByRootRequester, ExecutionProofsByRangeRequestId, ExecutionProofsByRootRequestId,
+    Id, PayloadEnvelopesByRangeRequestId, SingleLookupReqId, SyncRequestId,
 };
 use lighthouse_network::types::{NetworkGlobals, SyncState};
 use lighthouse_network::{PeerAction, PeerId};
@@ -73,7 +73,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace};
 use types::{
     BlobSidecar, DataColumnSidecar, EthSpec, ExecutionBlockHash, ForkContext, Hash256,
-    SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
+    SignedBeaconBlock, SignedExecutionPayloadEnvelope, SignedExecutionProofEnvelope, Slot,
 };
 
 /// The number of slots ahead of us that is allowed before requesting a long-range (batch)  Sync
@@ -134,6 +134,13 @@ pub enum SyncMessage<E: EthSpec> {
         sync_request_id: SyncRequestId,
         peer_id: PeerId,
         envelope: Option<Arc<SignedExecutionPayloadEnvelope<E>>>,
+    },
+
+    /// An execution proof has been received from the RPC.
+    RpcExecutionProof {
+        sync_request_id: SyncRequestId,
+        peer_id: PeerId,
+        proof: Option<Arc<SignedExecutionProofEnvelope>>,
     },
 
     /// A block with an unknown parent has been received.
@@ -520,6 +527,10 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             }
             SyncRequestId::PayloadEnvelopesByRange(req_id) => self
                 .on_payload_envelopes_by_range_response(req_id, peer_id, RpcEvent::RPCError(error)),
+            SyncRequestId::ExecutionProofsByRoot(req_id) => self
+                .on_execution_proofs_by_root_response(req_id, peer_id, RpcEvent::RPCError(error)),
+            SyncRequestId::ExecutionProofsByRange(req_id) => self
+                .on_execution_proofs_by_range_response(req_id, peer_id, RpcEvent::RPCError(error)),
         }
     }
 
@@ -854,6 +865,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
                 peer_id,
                 envelope,
             } => self.rpc_payload_envelope_received(sync_request_id, peer_id, envelope),
+            SyncMessage::RpcExecutionProof {
+                sync_request_id,
+                peer_id,
+                proof,
+            } => self.rpc_execution_proof_received(sync_request_id, peer_id, proof),
             SyncMessage::UnknownParentBlock(peer_id, block, block_root) => {
                 let block_slot = block.slot();
                 let parent_root = block.parent_root();
@@ -1222,6 +1238,85 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             }
             _ => {
                 crit!(%peer_id, "bad request id for payload envelope");
+            }
+        }
+    }
+
+    fn rpc_execution_proof_received(
+        &mut self,
+        sync_request_id: SyncRequestId,
+        peer_id: PeerId,
+        proof: Option<Arc<SignedExecutionProofEnvelope>>,
+    ) {
+        match sync_request_id {
+            SyncRequestId::ExecutionProofsByRoot(req_id) => self
+                .on_execution_proofs_by_root_response(req_id, peer_id, RpcEvent::from_chunk(proof)),
+            SyncRequestId::ExecutionProofsByRange(req_id) => self
+                .on_execution_proofs_by_range_response(
+                    req_id,
+                    peer_id,
+                    RpcEvent::from_chunk(proof),
+                ),
+            SyncRequestId::SingleBlock { .. }
+            | SyncRequestId::SinglePayloadEnvelope { .. }
+            | SyncRequestId::DataColumnsByRoot(_)
+            | SyncRequestId::BlocksByRange(_)
+            | SyncRequestId::BlobsByRange(_)
+            | SyncRequestId::DataColumnsByRange(_)
+            | SyncRequestId::PayloadEnvelopesByRange(_) => {
+                crit!(%peer_id, "bad request id for execution proof");
+            }
+        }
+    }
+
+    fn on_execution_proofs_by_root_response(
+        &mut self,
+        id: ExecutionProofsByRootRequestId,
+        peer_id: PeerId,
+        proof: RpcEvent<Arc<SignedExecutionProofEnvelope>>,
+    ) {
+        if let Some(resp) = self
+            .network
+            .on_execution_proofs_by_root_response(id, peer_id, proof)
+        {
+            self.send_execution_proofs_for_processing(peer_id, resp);
+        }
+    }
+
+    fn on_execution_proofs_by_range_response(
+        &mut self,
+        id: ExecutionProofsByRangeRequestId,
+        peer_id: PeerId,
+        proof: RpcEvent<Arc<SignedExecutionProofEnvelope>>,
+    ) {
+        if let Some(resp) = self
+            .network
+            .on_execution_proofs_by_range_response(id, peer_id, proof)
+        {
+            self.send_execution_proofs_for_processing(peer_id, resp);
+        }
+    }
+
+    /// Nothing is waiting on these proofs, so a completed response goes straight to verification.
+    fn send_execution_proofs_for_processing(
+        &self,
+        peer_id: PeerId,
+        resp: RpcResponseResult<Vec<Arc<SignedExecutionProofEnvelope>>>,
+    ) {
+        match resp {
+            // Holding none of the proofs we asked for is the common case, not a failure.
+            Ok(proofs) if proofs.is_empty() => {}
+            Ok(proofs) => {
+                if let Err(e) = self
+                    .network
+                    .beacon_processor()
+                    .send_rpc_execution_proofs(peer_id, proofs)
+                {
+                    debug!(%peer_id, error = ?e, "Failed to send execution proofs for processing");
+                }
+            }
+            Err(e) => {
+                debug!(%peer_id, error = ?e, "Execution proofs request failed");
             }
         }
     }

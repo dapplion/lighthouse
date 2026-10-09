@@ -33,6 +33,10 @@ pub enum SyncRequestId {
     DataColumnsByRange(DataColumnsByRangeRequestId),
     /// Payload envelopes by range request
     PayloadEnvelopesByRange(PayloadEnvelopesByRangeRequestId),
+    /// Execution proofs by root request
+    ExecutionProofsByRoot(ExecutionProofsByRootRequestId),
+    /// Execution proofs by range request
+    ExecutionProofsByRange(ExecutionProofsByRangeRequestId),
 }
 
 /// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
@@ -63,6 +67,17 @@ pub struct BlobsByRangeRequestId {
 pub struct PayloadEnvelopesByRangeRequestId {
     pub id: Id,
     pub parent_request_id: ComponentsByRangeRequestId,
+}
+
+/// Execution proof requests have no parent: nothing is coupled to them.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct ExecutionProofsByRootRequestId {
+    pub id: Id,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct ExecutionProofsByRangeRequestId {
+    pub id: Id,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -287,6 +302,8 @@ impl_display!(
     id,
     parent_request_id
 );
+impl_display!(ExecutionProofsByRootRequestId, "{}", id);
+impl_display!(ExecutionProofsByRangeRequestId, "{}", id);
 impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
 impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);
