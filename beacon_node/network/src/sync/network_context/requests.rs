@@ -5,13 +5,15 @@ use fnv::FnvHashMap;
 use lighthouse_network::PeerId;
 use strum::IntoStaticStr;
 use tracing::{Span, debug};
-use types::{Hash256, Slot};
+use types::{Hash256, ProofType, Slot};
 
 pub use blobs_by_range::BlobsByRangeRequestItems;
 pub use blocks_by_range::BlocksByRangeRequestItems;
 pub use blocks_by_root::{BlocksByRootRequestItems, BlocksByRootSingleRequest};
 pub use data_columns_by_range::DataColumnsByRangeRequestItems;
 pub use data_columns_by_root::{DataColumnsByRootRequestItems, DataColumnsByRootRequestParams};
+pub use execution_proofs_by_range::ExecutionProofsByRangeRequestItems;
+pub use execution_proofs_by_root::ExecutionProofsByRootRequestItems;
 pub use payload_envelopes_by_range::PayloadEnvelopesByRangeRequestItems;
 pub use payload_envelopes_by_root::{
     PayloadEnvelopesByRootRequestItems, PayloadEnvelopesByRootSingleRequest,
@@ -26,6 +28,8 @@ mod blocks_by_range;
 mod blocks_by_root;
 mod data_columns_by_range;
 mod data_columns_by_root;
+mod execution_proofs_by_range;
+mod execution_proofs_by_root;
 mod payload_envelopes_by_range;
 mod payload_envelopes_by_root;
 
@@ -36,6 +40,7 @@ pub enum LookupVerifyError {
     UnrequestedBlockRoot(Hash256),
     UnrequestedIndex(u64),
     UnrequestedSlot(Slot),
+    DuplicatedProof(Hash256, ProofType),
     InvalidInclusionProof,
     DuplicatedData(Slot, u64),
     InternalError(String),

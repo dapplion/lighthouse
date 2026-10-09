@@ -8,7 +8,7 @@ use safe_arith::{ArithError, SafeArith};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_utils::quoted_u64::MaybeQuoted;
 use ssz::Encode;
-use ssz_types::RuntimeVariableList;
+use ssz_types::{RuntimeVariableList, typenum::Unsigned};
 use tracing::error;
 use tree_hash::TreeHash;
 
@@ -18,6 +18,7 @@ use crate::{
         APPLICATION_DOMAIN_BUILDER, Address, ApplicationDomain, EnrForkId, Epoch, EthSpec,
         EthSpecId, ExecutionBlockHash, Hash256, MainnetEthSpec, Slot, Uint256,
     },
+    execution::{MAX_EXECUTION_PROOFS_PER_PAYLOAD, MaxProofTypes},
     fork::{Fork, ForkData, ForkName},
 };
 
@@ -351,6 +352,7 @@ pub struct ChainSpec {
     pub max_blobs_by_root_request: usize,
     pub max_data_columns_by_root_request: usize,
     pub max_payload_envelopes_by_root_request: usize,
+    pub max_execution_proofs_by_root_request: usize,
 
     /*
      * Application params
@@ -779,6 +781,12 @@ impl ChainSpec {
         self.max_request_payloads as usize
     }
 
+    /// Maximum execution proofs in one response: every proof type of every requested payload.
+    pub fn max_request_execution_proofs(&self) -> u64 {
+        self.max_request_payloads
+            .saturating_mul(MAX_EXECUTION_PROOFS_PER_PAYLOAD)
+    }
+
     pub fn max_request_blob_sidecars(&self, fork_name: ForkName) -> usize {
         if fork_name.electra_enabled() {
             self.max_request_blob_sidecars_electra as usize
@@ -1157,6 +1165,8 @@ impl ChainSpec {
             max_data_columns_by_root_request_common::<E>(self.max_request_blocks_deneb);
         self.max_payload_envelopes_by_root_request =
             max_blocks_by_root_request_common(self.max_request_payloads);
+        self.max_execution_proofs_by_root_request =
+            max_execution_proofs_by_root_request_common(self.max_request_payloads);
 
         self
     }
@@ -1528,6 +1538,7 @@ impl ChainSpec {
                 default_min_epochs_for_data_column_sidecars_requests(),
             max_data_columns_by_root_request: default_data_columns_by_root_request(),
             max_payload_envelopes_by_root_request: default_max_payload_envelopes_by_root_request(),
+            max_execution_proofs_by_root_request: default_max_execution_proofs_by_root_request(),
 
             /*
              * Application specific
@@ -1976,6 +1987,7 @@ impl ChainSpec {
             min_epochs_for_data_column_sidecars_requests: 16384,
             max_data_columns_by_root_request: default_data_columns_by_root_request(),
             max_payload_envelopes_by_root_request: default_max_payload_envelopes_by_root_request(),
+            max_execution_proofs_by_root_request: default_max_execution_proofs_by_root_request(),
 
             /*
              * Application specific
@@ -2812,6 +2824,24 @@ pub(crate) fn max_data_columns_by_root_request_common<E: EthSpec>(
         .expect("should not overflow")
 }
 
+// Simplified function which precomputes the size of a `List` of
+// `ExecutionProofsByRootIdentifier`.
+pub(crate) fn max_execution_proofs_by_root_request_common(max_request_payloads: u64) -> usize {
+    // ExecutionProofsByRootIdentifier is a variable-size struct with two fields:
+    // - block_root: Hash256 (32 bytes)
+    // - proof_types: List<ProofType, MaxProofTypes> (4 byte offset + n × 1 byte)
+    // Since ExecutionProofsByRootIdentifier is variable-size, the outer List adds a
+    // 4-byte offset per element.
+    // Total per element: 4 (outer offset) + 32 (block_root) + 4 (proof_types offset) + n × 1
+    let identifier_ssz_size = MaxProofTypes::to_usize()
+        .safe_add(40)
+        .expect("should not overflow");
+
+    (max_request_payloads as usize)
+        .safe_mul(identifier_ssz_size)
+        .expect("should not overflow")
+}
+
 fn default_max_blocks_by_root_request() -> usize {
     max_blocks_by_root_request_common(default_max_request_blocks())
 }
@@ -2830,6 +2860,10 @@ fn default_data_columns_by_root_request() -> usize {
 
 fn default_max_payload_envelopes_by_root_request() -> usize {
     max_blocks_by_root_request_common(default_max_request_payloads())
+}
+
+fn default_max_execution_proofs_by_root_request() -> usize {
+    max_execution_proofs_by_root_request_common(default_max_request_payloads())
 }
 
 fn default_max_request_payloads() -> u64 {

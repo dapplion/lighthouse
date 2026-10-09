@@ -5,7 +5,7 @@ use std::sync::Arc;
 use types::{
     BlobSidecar, DataColumnSidecar, Epoch, EthSpec, LightClientBootstrap,
     LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock,
-    SignedExecutionPayloadEnvelope,
+    SignedExecutionPayloadEnvelope, SignedExecutionProofEnvelope,
 };
 
 pub type Id = u32;
@@ -33,6 +33,10 @@ pub enum SyncRequestId {
     DataColumnsByRange(DataColumnsByRangeRequestId),
     /// Payload envelopes by range request
     PayloadEnvelopesByRange(PayloadEnvelopesByRangeRequestId),
+    /// Execution proofs by root request
+    ExecutionProofsByRoot(ExecutionProofsByRootRequestId),
+    /// Execution proofs by range request
+    ExecutionProofsByRange(ExecutionProofsByRangeRequestId),
 }
 
 /// Request ID for data_columns_by_root requests. Block lookups do not issue this request directly.
@@ -63,6 +67,17 @@ pub struct BlobsByRangeRequestId {
 pub struct PayloadEnvelopesByRangeRequestId {
     pub id: Id,
     pub parent_request_id: ComponentsByRangeRequestId,
+}
+
+/// Execution proof requests have no parent: nothing is coupled to them.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct ExecutionProofsByRootRequestId {
+    pub id: Id,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub struct ExecutionProofsByRangeRequestId {
+    pub id: Id,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -178,6 +193,10 @@ pub enum Response<E: EthSpec> {
     PayloadEnvelopesByRoot(Option<Arc<SignedExecutionPayloadEnvelope<E>>>),
     /// A response to a get `EXECUTION_PAYLOAD_ENVELOPES_BY_RANGE` request.
     PayloadEnvelopesByRange(Option<Arc<SignedExecutionPayloadEnvelope<E>>>),
+    /// A response to a get `EXECUTION_PROOFS_BY_ROOT` request.
+    ExecutionProofsByRoot(Option<Arc<SignedExecutionProofEnvelope>>),
+    /// A response to a get `EXECUTION_PROOFS_BY_RANGE` request.
+    ExecutionProofsByRange(Option<Arc<SignedExecutionProofEnvelope>>),
     /// A response to a get BLOBS_BY_ROOT request.
     BlobsByRoot(Option<Arc<BlobSidecar<E>>>),
     /// A response to a get DATA_COLUMN_SIDECARS_BY_ROOT request.
@@ -216,6 +235,14 @@ impl<E: EthSpec> std::convert::From<Response<E>> for RpcResponse<E> {
                 None => {
                     RpcResponse::StreamTermination(ResponseTermination::PayloadEnvelopesByRange)
                 }
+            },
+            Response::ExecutionProofsByRoot(r) => match r {
+                Some(p) => RpcResponse::Success(RpcSuccessResponse::ExecutionProofsByRoot(p)),
+                None => RpcResponse::StreamTermination(ResponseTermination::ExecutionProofsByRoot),
+            },
+            Response::ExecutionProofsByRange(r) => match r {
+                Some(p) => RpcResponse::Success(RpcSuccessResponse::ExecutionProofsByRange(p)),
+                None => RpcResponse::StreamTermination(ResponseTermination::ExecutionProofsByRange),
             },
             Response::BlobsByRoot(r) => match r {
                 Some(b) => RpcResponse::Success(RpcSuccessResponse::BlobsByRoot(b)),
@@ -275,6 +302,8 @@ impl_display!(
     id,
     parent_request_id
 );
+impl_display!(ExecutionProofsByRootRequestId, "{}", id);
+impl_display!(ExecutionProofsByRangeRequestId, "{}", id);
 impl_display!(ComponentsByRangeRequestId, "{}/{}", id, requester);
 impl_display!(DataColumnsByRootRequestId, "{}/{}", id, requester);
 impl_display!(SingleLookupReqId, "{}/Lookup/{}", req_id, lookup_id);

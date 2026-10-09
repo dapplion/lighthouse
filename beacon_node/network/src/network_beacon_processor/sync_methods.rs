@@ -1,5 +1,8 @@
 use crate::metrics::{self, register_process_result_metrics};
-use crate::network_beacon_processor::{FUTURE_SLOT_TOLERANCE, NetworkBeaconProcessor};
+use crate::network_beacon_processor::{
+    FUTURE_SLOT_TOLERANCE, NetworkBeaconProcessor, execution_proof_peer_penalty,
+};
+use crate::service::NetworkMessage;
 use crate::sync::BatchProcessResult;
 use crate::sync::manager::CustodyBatchProcessResult;
 use crate::sync::{
@@ -11,6 +14,7 @@ use beacon_chain::block_verification_types::{AsBlock, RangeSyncBlock};
 use beacon_chain::data_availability_checker::{
     AvailabilityCheckError, AvailabilityCheckErrorCategory,
 };
+use beacon_chain::execution_proof_verification::{Error as ExecutionProofError, ProofSource};
 use beacon_chain::fetch_blobs::PartialHeaderOrBid;
 use beacon_chain::historical_data_columns::HistoricalDataColumnError;
 use beacon_chain::payload_envelope_verification::EnvelopeSource;
@@ -25,11 +29,15 @@ use beacon_processor::{
 use beacon_processor::{Work, WorkEvent};
 use lighthouse_network::PeerAction;
 use lighthouse_network::PeerId;
+use lighthouse_network::ReportSource;
 use lighthouse_network::service::api_types::CustodyBackfillBatchId;
 use logging::crit;
 use std::sync::Arc;
 use tracing::{debug, debug_span, error, info, instrument, warn};
-use types::{BlockImportSource, DataColumnSidecarList, Epoch, ExecutionBlockHash, Hash256};
+use types::{
+    BlockImportSource, DataColumnSidecarList, Epoch, ExecutionBlockHash, Hash256,
+    SignedExecutionProofEnvelope,
+};
 
 /// Id associated to a batch processing request, either a sync batch or a parent lookup.
 #[derive(Clone, Debug, PartialEq)]
@@ -358,6 +366,74 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             process_type,
             result: result.into(),
         });
+    }
+
+    /// Verify and import execution proofs fetched over the RPC network.
+    ///
+    /// Each proof stands alone, so one bad proof does not discard the rest.
+    #[instrument(
+        name = "lh_process_rpc_execution_proofs",
+        parent = None,
+        level = "debug",
+        skip_all,
+        fields(%peer_id),
+    )]
+    pub async fn process_rpc_execution_proofs(
+        self: Arc<NetworkBeaconProcessor<T>>,
+        peer_id: PeerId,
+        proofs: Vec<Arc<SignedExecutionProofEnvelope>>,
+    ) {
+        debug!(
+            %peer_id,
+            count = proofs.len(),
+            "Processing RPC execution proofs"
+        );
+
+        for proof in proofs {
+            let beacon_block_root = proof.beacon_block_root();
+            let proof_type = proof.proof_type();
+
+            // The gossip rules are the proof's whole validation, so they are reused here as they
+            // are for an HTTP submission.
+            match self
+                .chain
+                .clone()
+                .verify_execution_proof_for_gossip(proof, ProofSource::Rpc)
+                .await
+            {
+                Ok(verified) => {
+                    if let Err(error) = self.chain.import_execution_proof(verified).await {
+                        debug!(
+                            %beacon_block_root,
+                            proof_type,
+                            ?error,
+                            "Could not import execution proof from RPC"
+                        );
+                    }
+                }
+                // Not a failure: another source already supplied a verified proof of this type.
+                Err(ExecutionProofError::ValidProofAlreadyKnown) => {}
+                Err(error) => {
+                    debug!(
+                        %peer_id,
+                        %beacon_block_root,
+                        proof_type,
+                        ?error,
+                        "Could not verify execution proof from RPC"
+                    );
+                    // A peer that serves a proof failing verification pays for the engine round
+                    // trip it cost us, exactly as a gossip sender would.
+                    if let Some(action) = execution_proof_peer_penalty(&error) {
+                        self.send_network_message(NetworkMessage::ReportPeer {
+                            peer_id,
+                            action,
+                            source: ReportSource::SyncService,
+                            msg: "invalid execution proof",
+                        });
+                    }
+                }
+            }
+        }
     }
 
     pub fn process_historic_data_columns(

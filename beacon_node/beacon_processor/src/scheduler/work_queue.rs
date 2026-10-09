@@ -141,6 +141,9 @@ pub struct BeaconProcessorQueueLengths {
     dcbrange_queue: usize,
     payload_envelopes_brange_queue: usize,
     payload_envelopes_broots_queue: usize,
+    execution_proofs_brange_queue: usize,
+    execution_proofs_broots_queue: usize,
+    rpc_execution_proofs_queue: usize,
     gossip_bls_to_execution_change_queue: usize,
     gossip_execution_payload_queue: usize,
     gossip_execution_proof_queue: usize,
@@ -223,6 +226,9 @@ impl BeaconProcessorQueueLengths {
             dcbrange_queue: 1024,
             payload_envelopes_brange_queue: 1024,
             payload_envelopes_broots_queue: 1024,
+            execution_proofs_brange_queue: 1024,
+            execution_proofs_broots_queue: 1024,
+            rpc_execution_proofs_queue: 1024,
             gossip_bls_to_execution_change_queue: 16384,
             // TODO(EIP-7732): verify 1024 is preferable.
             gossip_execution_payload_queue: 1024,
@@ -281,6 +287,9 @@ pub struct WorkQueues<E: EthSpec> {
     pub block_bhead_queue: FifoQueue<Work<E>>,
     pub payload_envelopes_brange_queue: FifoQueue<Work<E>>,
     pub payload_envelopes_broots_queue: FifoQueue<Work<E>>,
+    pub execution_proofs_brange_queue: FifoQueue<Work<E>>,
+    pub execution_proofs_broots_queue: FifoQueue<Work<E>>,
+    pub rpc_execution_proofs_queue: FifoQueue<Work<E>>,
     pub blob_broots_queue: FifoQueue<Work<E>>,
     pub blob_brange_queue: FifoQueue<Work<E>>,
     pub dcbroots_queue: FifoQueue<Work<E>>,
@@ -364,6 +373,11 @@ impl<E: EthSpec> WorkQueues<E> {
             FifoQueue::new(queue_lengths.payload_envelopes_brange_queue);
         let payload_envelopes_broots_queue =
             FifoQueue::new(queue_lengths.payload_envelopes_broots_queue);
+        let execution_proofs_brange_queue =
+            FifoQueue::new(queue_lengths.execution_proofs_brange_queue);
+        let execution_proofs_broots_queue =
+            FifoQueue::new(queue_lengths.execution_proofs_broots_queue);
+        let rpc_execution_proofs_queue = FifoQueue::new(queue_lengths.rpc_execution_proofs_queue);
 
         let gossip_bls_to_execution_change_queue =
             FifoQueue::new(queue_lengths.gossip_bls_to_execution_change_queue);
@@ -432,6 +446,9 @@ impl<E: EthSpec> WorkQueues<E> {
             dcbrange_queue,
             payload_envelopes_brange_queue,
             payload_envelopes_broots_queue,
+            execution_proofs_brange_queue,
+            execution_proofs_broots_queue,
+            rpc_execution_proofs_queue,
             gossip_bls_to_execution_change_queue,
             gossip_execution_payload_queue,
             gossip_execution_proof_queue,

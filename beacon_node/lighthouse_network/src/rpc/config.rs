@@ -92,6 +92,8 @@ pub struct RateLimiterConfig {
     pub(super) blocks_by_head_quota: Quota,
     pub(super) payload_envelopes_by_range_quota: Quota,
     pub(super) payload_envelopes_by_root_quota: Quota,
+    pub(super) execution_proofs_by_range_quota: Quota,
+    pub(super) execution_proofs_by_root_quota: Quota,
     pub(super) blobs_by_range_quota: Quota,
     pub(super) blobs_by_root_quota: Quota,
     pub(super) data_columns_by_root_quota: Quota,
@@ -120,6 +122,12 @@ impl RateLimiterConfig {
         Quota::n_every(NonZeroU64::new(128).unwrap(), 10);
     pub const DEFAULT_PAYLOAD_ENVELOPES_BY_ROOT_QUOTA: Quota =
         Quota::n_every(NonZeroU64::new(128).unwrap(), 10);
+    // `DEFAULT_PAYLOAD_ENVELOPES_BY_*_QUOTA` * `MAX_EXECUTION_PROOFS_PER_PAYLOAD`: a payload can
+    // be proven by one proof of each type.
+    pub const DEFAULT_EXECUTION_PROOFS_BY_RANGE_QUOTA: Quota =
+        Quota::n_every(NonZeroU64::new(512).unwrap(), 10);
+    pub const DEFAULT_EXECUTION_PROOFS_BY_ROOT_QUOTA: Quota =
+        Quota::n_every(NonZeroU64::new(512).unwrap(), 10);
     // `DEFAULT_BLOCKS_BY_RANGE_QUOTA` * (target + 1) to account for high usage
     pub const DEFAULT_BLOBS_BY_RANGE_QUOTA: Quota =
         Quota::n_every(NonZeroU64::new(896).unwrap(), 10);
@@ -149,6 +157,8 @@ impl Default for RateLimiterConfig {
             blocks_by_head_quota: Self::DEFAULT_BLOCKS_BY_HEAD_QUOTA,
             payload_envelopes_by_range_quota: Self::DEFAULT_PAYLOAD_ENVELOPES_BY_RANGE_QUOTA,
             payload_envelopes_by_root_quota: Self::DEFAULT_PAYLOAD_ENVELOPES_BY_ROOT_QUOTA,
+            execution_proofs_by_range_quota: Self::DEFAULT_EXECUTION_PROOFS_BY_RANGE_QUOTA,
+            execution_proofs_by_root_quota: Self::DEFAULT_EXECUTION_PROOFS_BY_ROOT_QUOTA,
             blobs_by_range_quota: Self::DEFAULT_BLOBS_BY_RANGE_QUOTA,
             blobs_by_root_quota: Self::DEFAULT_BLOBS_BY_ROOT_QUOTA,
             data_columns_by_root_quota: Self::DEFAULT_DATA_COLUMNS_BY_ROOT_QUOTA,
@@ -190,6 +200,14 @@ impl Debug for RateLimiterConfig {
                 "payload_envelopes_by_root",
                 fmt_q!(&self.payload_envelopes_by_root_quota),
             )
+            .field(
+                "execution_proofs_by_range",
+                fmt_q!(&self.execution_proofs_by_range_quota),
+            )
+            .field(
+                "execution_proofs_by_root",
+                fmt_q!(&self.execution_proofs_by_root_quota),
+            )
             .field("blobs_by_range", fmt_q!(&self.blobs_by_range_quota))
             .field("blobs_by_root", fmt_q!(&self.blobs_by_root_quota))
             .field(
@@ -221,6 +239,8 @@ impl FromStr for RateLimiterConfig {
         let mut blocks_by_head_quota = None;
         let mut payload_envelopes_by_range_quota = None;
         let mut payload_envelopes_by_root_quota = None;
+        let mut execution_proofs_by_range_quota = None;
+        let mut execution_proofs_by_root_quota = None;
         let mut blobs_by_range_quota = None;
         let mut blobs_by_root_quota = None;
         let mut data_columns_by_root_quota = None;
@@ -244,6 +264,12 @@ impl FromStr for RateLimiterConfig {
                 }
                 Protocol::PayloadEnvelopesByRoot => {
                     payload_envelopes_by_root_quota = payload_envelopes_by_root_quota.or(quota)
+                }
+                Protocol::ExecutionProofsByRange => {
+                    execution_proofs_by_range_quota = execution_proofs_by_range_quota.or(quota)
+                }
+                Protocol::ExecutionProofsByRoot => {
+                    execution_proofs_by_root_quota = execution_proofs_by_root_quota.or(quota)
                 }
                 Protocol::BlobsByRange => blobs_by_range_quota = blobs_by_range_quota.or(quota),
                 Protocol::BlobsByRoot => blobs_by_root_quota = blobs_by_root_quota.or(quota),
@@ -287,6 +313,10 @@ impl FromStr for RateLimiterConfig {
                 .unwrap_or(Self::DEFAULT_PAYLOAD_ENVELOPES_BY_RANGE_QUOTA),
             payload_envelopes_by_root_quota: payload_envelopes_by_root_quota
                 .unwrap_or(Self::DEFAULT_PAYLOAD_ENVELOPES_BY_ROOT_QUOTA),
+            execution_proofs_by_range_quota: execution_proofs_by_range_quota
+                .unwrap_or(Self::DEFAULT_EXECUTION_PROOFS_BY_RANGE_QUOTA),
+            execution_proofs_by_root_quota: execution_proofs_by_root_quota
+                .unwrap_or(Self::DEFAULT_EXECUTION_PROOFS_BY_ROOT_QUOTA),
             blobs_by_range_quota: blobs_by_range_quota
                 .unwrap_or(Self::DEFAULT_BLOBS_BY_RANGE_QUOTA),
             blobs_by_root_quota: blobs_by_root_quota.unwrap_or(Self::DEFAULT_BLOBS_BY_ROOT_QUOTA),

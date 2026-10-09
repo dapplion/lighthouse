@@ -14,9 +14,9 @@ use crate::metadata::{
 use crate::state_cache::{PutStateOutcome, StateCache};
 use crate::{
     BlobSidecarListFromRoot, DBColumn, DatabaseBlock, Error, ItemStore, KeyValueStoreOp, StoreItem,
-    StoreOp, get_data_column_key,
+    StoreOp, get_data_column_key, get_execution_proof_key,
     metrics::{self, COLD_METRIC, HOT_METRIC},
-    parse_data_column_key,
+    parse_data_column_key, parse_execution_proof_key,
 };
 use fixed_bytes::FixedBytesExtended;
 use hashlink::lru_cache::LruCache;
@@ -1071,6 +1071,22 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
         }
     }
 
+    /// Prepare verified execution proofs for storage in the database.
+    pub fn execution_proofs_as_kv_store_ops(
+        &self,
+        block_root: &Hash256,
+        proofs: ExecutionProofEnvelopeList,
+        ops: &mut Vec<KeyValueStoreOp>,
+    ) {
+        for proof in proofs {
+            ops.push(KeyValueStoreOp::PutKeyValue(
+                DBColumn::ExecutionProof,
+                get_execution_proof_key(block_root, &proof.proof_type()),
+                proof.as_ssz_bytes(),
+            ));
+        }
+    }
+
     /// Prepare a signed execution payload envelope for storage in the database.
     pub fn payload_envelope_as_kv_store_ops(
         &self,
@@ -1384,6 +1400,14 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                     );
                 }
 
+                StoreOp::PutExecutionProofs(block_root, proofs) => {
+                    self.execution_proofs_as_kv_store_ops(
+                        &block_root,
+                        proofs,
+                        &mut key_value_batch,
+                    );
+                }
+
                 StoreOp::PutStateSummary(state_root, summary) => {
                     key_value_batch.push(summary.as_kv_store_op(state_root));
                 }
@@ -1407,6 +1431,15 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                         let key = get_data_column_key(&block_root, &index);
                         key_value_batch
                             .push(KeyValueStoreOp::DeleteKey(DBColumn::BeaconDataColumn, key));
+                    }
+                }
+
+                StoreOp::DeleteExecutionProofs(block_root) => {
+                    for proof_type in self.get_execution_proof_keys(block_root)? {
+                        key_value_batch.push(KeyValueStoreOp::DeleteKey(
+                            DBColumn::ExecutionProof,
+                            get_execution_proof_key(&block_root, &proof_type),
+                        ));
                     }
                 }
 
@@ -1518,9 +1551,12 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
     ) -> Result<(), Error> {
         let mut blobs_to_delete = Vec::new();
         let mut data_columns_to_delete = Vec::new();
+        let mut execution_proofs_to_delete = Vec::new();
         let (blobs_ops, hot_db_ops): (Vec<StoreOp<E>>, Vec<StoreOp<E>>) =
             batch.into_iter().partition(|store_op| match store_op {
-                StoreOp::PutBlobs(_, _) | StoreOp::PutDataColumns(_, _) => true,
+                StoreOp::PutBlobs(_, _)
+                | StoreOp::PutDataColumns(_, _)
+                | StoreOp::PutExecutionProofs(_, _) => true,
                 StoreOp::DeleteBlobs(block_root) => {
                     match self.get_blobs(block_root) {
                         Ok(BlobSidecarListFromRoot::Blobs(blob_sidecar_list)) => {
@@ -1557,6 +1593,23 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                                 %block_root,
                                 error = ?e,
                                 "Error getting data columns"
+                            );
+                        }
+                    }
+                    true
+                }
+                StoreOp::DeleteExecutionProofs(block_root) => {
+                    match self.get_execution_proofs(block_root) {
+                        Ok(proofs) => {
+                            // Must push one item per `DeleteExecutionProofs` op, or the rollback
+                            // below fails. Most pruned blocks have no proofs at all.
+                            execution_proofs_to_delete.push((*block_root, proofs));
+                        }
+                        Err(e) => {
+                            error!(
+                                %block_root,
+                                error = ?e,
+                                "Error getting execution proofs"
                             );
                         }
                     }
@@ -1626,6 +1679,15 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                         }
                         None => return Err(HotColdDBError::Rollback.into()),
                     },
+                    StoreOp::PutExecutionProofs(block_root, _) => {
+                        StoreOp::DeleteExecutionProofs(*block_root)
+                    }
+                    StoreOp::DeleteExecutionProofs(_) => match execution_proofs_to_delete.pop() {
+                        Some((block_root, proofs)) => {
+                            StoreOp::PutExecutionProofs(block_root, proofs)
+                        }
+                        None => return Err(HotColdDBError::Rollback.into()),
+                    },
                     _ => return Err(HotColdDBError::Rollback.into()),
                 };
                 *op = reverse_op;
@@ -1662,6 +1724,8 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
 
                     StoreOp::PutPayloadEnvelope(_, _) => (),
 
+                    StoreOp::PutExecutionProofs(_, _) => (),
+
                     StoreOp::PutState(_, _) => (),
 
                     StoreOp::PutStateSummary(_, _) => (),
@@ -1679,6 +1743,8 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                     StoreOp::DeleteBlobs(_) => (),
 
                     StoreOp::DeleteDataColumns(_, _, _) => (),
+
+                    StoreOp::DeleteExecutionProofs(_) => (),
 
                     StoreOp::DeleteExecutionPayload(_) => (),
 
@@ -2723,6 +2789,49 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
         }
     }
 
+    /// Fetch every execution proof stored for a given block.
+    pub fn get_execution_proofs(
+        &self,
+        block_root: &Hash256,
+    ) -> Result<ExecutionProofEnvelopeList, Error> {
+        self.get_execution_proof_keys(*block_root)?
+            .into_iter()
+            .filter_map(|proof_type| {
+                self.get_execution_proof(block_root, &proof_type)
+                    .transpose()
+            })
+            .collect()
+    }
+
+    /// Fetch all keys in the execution_proof column with prefix `block_root`
+    pub fn get_execution_proof_keys(&self, block_root: Hash256) -> Result<Vec<ProofType>, Error> {
+        self.blobs_db
+            .iter_column_from::<Vec<u8>>(DBColumn::ExecutionProof, block_root.as_slice())
+            .take_while(|res| {
+                res.as_ref()
+                    .is_ok_and(|(key, _)| key.starts_with(block_root.as_slice()))
+            })
+            .map(|key| key.and_then(|(key, _)| parse_execution_proof_key(key).map(|key| key.1)))
+            .collect()
+    }
+
+    /// Fetch a single execution proof for a given block from the store.
+    pub fn get_execution_proof(
+        &self,
+        block_root: &Hash256,
+        proof_type: &ProofType,
+    ) -> Result<Option<Arc<SignedExecutionProofEnvelope>>, Error> {
+        match self.blobs_db.get_bytes(
+            DBColumn::ExecutionProof,
+            &get_execution_proof_key(block_root, proof_type),
+        )? {
+            Some(ref proof_bytes) => Ok(Some(Arc::new(
+                SignedExecutionProofEnvelope::from_ssz_bytes(proof_bytes)?,
+            ))),
+            None => Ok(None),
+        }
+    }
+
     /// Fetch all keys in the data_column column with prefix `block_root`
     pub fn get_data_column_keys(&self, block_root: Hash256) -> Result<Vec<ColumnIndex>, Error> {
         self.blobs_db
@@ -3336,6 +3445,13 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                 if self.payload_body_exists(&block_root)? {
                     debug!(%slot, ?block_root, "Pruning payload envelope body");
                     ops.push(StoreOp::DeletePayload(block_root));
+                }
+
+                if self.spec.fork_name_at_slot::<E>(slot).gloas_enabled()
+                    && !self.get_execution_proof_keys(block_root)?.is_empty()
+                {
+                    debug!(%slot, ?block_root, "Pruning execution proofs");
+                    ops.push(StoreOp::DeleteExecutionProofs(block_root));
                 }
 
                 last_pruned_block_root = Some(block_root);

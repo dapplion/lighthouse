@@ -781,6 +781,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> BackgroundMigrator<E, Hot, Col
                     StoreOp::DeleteExecutionPayload(block_root),
                     StoreOp::DeleteBlobs(block_root),
                     StoreOp::DeletePayloadWithSummary(block_root),
+                    StoreOp::DeleteExecutionProofs(block_root),
                     StoreOp::DeleteSyncCommitteeBranch(block_root),
                 ]
             })
@@ -836,6 +837,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> BackgroundMigrator<E, Hot, Col
                     // EMPTY. Remove its summary as well, so by-range RPCs cannot reconstruct it.
                     // This applies even to nodes that retain canonical payload bodies.
                     hot_db_ops.push(StoreOp::DeletePayloadWithSummary(*block_root));
+                    hot_db_ops.push(StoreOp::DeleteExecutionProofs(*block_root));
                 }
 
                 if block.is_none() {
@@ -857,6 +859,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> BackgroundMigrator<E, Hot, Col
             if prune_payloads && *slot < new_finalized_slot {
                 hot_db_ops.push(StoreOp::DeleteExecutionPayload(*block_root));
                 hot_db_ops.push(StoreOp::DeletePayload(*block_root));
+                hot_db_ops.push(StoreOp::DeleteExecutionProofs(*block_root));
             }
         }
         Ok(())
