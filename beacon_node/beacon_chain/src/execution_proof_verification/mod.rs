@@ -105,22 +105,32 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             >= REQUIRED_EXECUTION_PROOFS
     }
 
-    /// Store a verified proof, then tell fork choice if its payload now has enough proofs.
+    /// Tell fork choice if the payload now has enough proofs, then retain the proof to serve on.
     pub async fn import_execution_proof(
         self: &Arc<Self>,
         verified_proof: GossipVerifiedExecutionProof,
     ) -> Result<(), BlockError> {
         let block_root = verified_proof.proof.beacon_block_root();
 
-        // Retained for the EIP-8025 serve range, and pruned with the payload it is about.
-        self.store
-            .do_atomically_with_block_and_blobs_cache(vec![StoreOp::PutExecutionProofs(
-                block_root,
-                vec![verified_proof.proof],
-            )])
-            .map_err(|e| BlockError::BeaconChainError(Box::new(e.into())))?;
+        // Promotion comes first. Verification has already counted this proof valid, so any later
+        // copy of it is ignored as a duplicate, and a failed write would strand the payload
+        // optimistic until a restart. The stored copy only exists to serve the proof to peers.
+        self.promote_payload_if_proven(block_root).await?;
 
-        self.promote_payload_if_proven(block_root).await
+        // Retained for the EIP-8025 serve range, and pruned with the payload it is about.
+        let store = self.store.clone();
+        self.spawn_blocking_handle(
+            move || {
+                store.do_atomically_with_block_and_blobs_cache(vec![StoreOp::PutExecutionProofs(
+                    block_root,
+                    vec![verified_proof.proof],
+                )])
+            },
+            "put_execution_proofs",
+        )
+        .await
+        .map_err(|e| BlockError::BeaconChainError(Box::new(e)))?
+        .map_err(|e| BlockError::BeaconChainError(Box::new(e.into())))
     }
 
     /// Tell fork choice `block_root`'s payload is valid.

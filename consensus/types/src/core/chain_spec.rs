@@ -2833,16 +2833,12 @@ pub(crate) fn max_execution_proofs_by_root_request_common(max_request_payloads: 
     // Since ExecutionProofsByRootIdentifier is variable-size, the outer List adds a
     // 4-byte offset per element.
     // Total per element: 4 (outer offset) + 32 (block_root) + 4 (proof_types offset) + n × 1
-    let proof_type_ssz_size = 1_usize;
-    let ssz_fixed_size = 40_usize;
-
-    let execution_proofs_by_root_identifier_ssz_size = proof_type_ssz_size
-        .safe_mul(MaxProofTypes::to_usize())
-        .and_then(|b| b.safe_add(ssz_fixed_size))
+    let identifier_ssz_size = MaxProofTypes::to_usize()
+        .safe_add(40)
         .expect("should not overflow");
 
     (max_request_payloads as usize)
-        .safe_mul(execution_proofs_by_root_identifier_ssz_size)
+        .safe_mul(identifier_ssz_size)
         .expect("should not overflow")
 }
 

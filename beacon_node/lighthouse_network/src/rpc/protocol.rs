@@ -289,12 +289,12 @@ pub enum Protocol {
     /// The `ExecutionPayloadEnvelopesByRange` protocol name.
     #[strum(serialize = "execution_payload_envelopes_by_range")]
     PayloadEnvelopesByRange,
-    /// The `ExecutionProofsByRoot` protocol name.
-    #[strum(serialize = "execution_proofs_by_root")]
-    ExecutionProofsByRoot,
     /// The `ExecutionProofsByRange` protocol name.
     #[strum(serialize = "execution_proofs_by_range")]
     ExecutionProofsByRange,
+    /// The `ExecutionProofsByRoot` protocol name.
+    #[strum(serialize = "execution_proofs_by_root")]
+    ExecutionProofsByRoot,
     /// The `BlobsByRoot` protocol name.
     #[strum(serialize = "blob_sidecars_by_root")]
     BlobsByRoot,
@@ -718,8 +718,6 @@ impl ProtocolId {
             | SupportedProtocol::BlocksByHeadV1
             | SupportedProtocol::PayloadEnvelopesByRangeV1
             | SupportedProtocol::PayloadEnvelopesByRootV1
-            | SupportedProtocol::ExecutionProofsByRangeV1
-            | SupportedProtocol::ExecutionProofsByRootV1
             | SupportedProtocol::BlobsByRangeV1
             | SupportedProtocol::BlobsByRootV1
             | SupportedProtocol::DataColumnsByRootV1
@@ -732,6 +730,9 @@ impl ProtocolId {
             | SupportedProtocol::StatusV2
             | SupportedProtocol::BlocksByRootV1
             | SupportedProtocol::BlocksByRangeV1
+            // A proof envelope is not fork-generic and has no slot to derive a fork digest from.
+            | SupportedProtocol::ExecutionProofsByRangeV1
+            | SupportedProtocol::ExecutionProofsByRootV1
             | SupportedProtocol::PingV1
             | SupportedProtocol::MetaDataV1
             | SupportedProtocol::MetaDataV2

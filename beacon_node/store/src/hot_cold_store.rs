@@ -1071,21 +1071,7 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
         }
     }
 
-    pub fn put_execution_proofs(
-        &self,
-        block_root: &Hash256,
-        proofs: ExecutionProofEnvelopeList,
-    ) -> Result<(), Error> {
-        for proof in proofs {
-            self.blobs_db.put_bytes(
-                DBColumn::ExecutionProof,
-                &get_execution_proof_key(block_root, &proof.proof_type()),
-                &proof.as_ssz_bytes(),
-            )?;
-        }
-        Ok(())
-    }
-
+    /// Prepare verified execution proofs for storage in the database.
     pub fn execution_proofs_as_kv_store_ops(
         &self,
         block_root: &Hash256,
@@ -1615,11 +1601,9 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                 StoreOp::DeleteExecutionProofs(block_root) => {
                     match self.get_execution_proofs(block_root) {
                         Ok(proofs) => {
-                            // Must push the same number of items as StoreOp::DeleteExecutionProofs
-                            // items to prevent a `HotColdDBError::Rollback` error below in case of
-                            // rollback. Most pruned blocks have no proofs at all.
-                            execution_proofs_to_delete
-                                .push((*block_root, proofs.unwrap_or_default()));
+                            // Must push one item per `DeleteExecutionProofs` op, or the rollback
+                            // below fails. Most pruned blocks have no proofs at all.
+                            execution_proofs_to_delete.push((*block_root, proofs));
                         }
                         Err(e) => {
                             error!(
@@ -2809,18 +2793,14 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
     pub fn get_execution_proofs(
         &self,
         block_root: &Hash256,
-    ) -> Result<Option<ExecutionProofEnvelopeList>, Error> {
-        let proof_types = self.get_execution_proof_keys(*block_root)?;
-
-        let proofs: ExecutionProofEnvelopeList = proof_types
+    ) -> Result<ExecutionProofEnvelopeList, Error> {
+        self.get_execution_proof_keys(*block_root)?
             .into_iter()
             .filter_map(|proof_type| {
                 self.get_execution_proof(block_root, &proof_type)
                     .transpose()
             })
-            .collect::<Result<_, _>>()?;
-
-        Ok((!proofs.is_empty()).then_some(proofs))
+            .collect()
     }
 
     /// Fetch all keys in the execution_proof column with prefix `block_root`
@@ -3465,6 +3445,13 @@ impl<E: EthSpec, Hot: ItemStore, Cold: ItemStore> HotColdDB<E, Hot, Cold> {
                 if self.payload_body_exists(&block_root)? {
                     debug!(%slot, ?block_root, "Pruning payload envelope body");
                     ops.push(StoreOp::DeletePayload(block_root));
+                }
+
+                if self.spec.fork_name_at_slot::<E>(slot).gloas_enabled()
+                    && !self.get_execution_proof_keys(block_root)?.is_empty()
+                {
+                    debug!(%slot, ?block_root, "Pruning execution proofs");
+                    ops.push(StoreOp::DeleteExecutionProofs(block_root));
                 }
 
                 last_pruned_block_root = Some(block_root);

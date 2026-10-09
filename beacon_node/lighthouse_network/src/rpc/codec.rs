@@ -729,48 +729,16 @@ fn handle_rpc_response<E: EthSpec>(
                 ),
             )),
         },
-        SupportedProtocol::ExecutionProofsByRangeV1 => match fork_name {
-            Some(fork_name) => {
-                if fork_name.gloas_enabled() {
-                    Ok(Some(RpcSuccessResponse::ExecutionProofsByRange(Arc::new(
-                        SignedExecutionProofEnvelope::from_ssz_bytes(decoded_buffer)?,
-                    ))))
-                } else {
-                    Err(RPCError::ErrorResponse(
-                        RpcErrorResponse::InvalidRequest,
-                        "Invalid fork name for execution proofs by range".to_string(),
-                    ))
-                }
-            }
-            None => Err(RPCError::ErrorResponse(
-                RpcErrorResponse::InvalidRequest,
-                format!(
-                    "No context bytes provided for {:?} response",
-                    versioned_protocol
-                ),
-            )),
-        },
-        SupportedProtocol::ExecutionProofsByRootV1 => match fork_name {
-            Some(fork_name) => {
-                if fork_name.gloas_enabled() {
-                    Ok(Some(RpcSuccessResponse::ExecutionProofsByRoot(Arc::new(
-                        SignedExecutionProofEnvelope::from_ssz_bytes(decoded_buffer)?,
-                    ))))
-                } else {
-                    Err(RPCError::ErrorResponse(
-                        RpcErrorResponse::InvalidRequest,
-                        "Invalid fork name for execution proofs by root".to_string(),
-                    ))
-                }
-            }
-            None => Err(RPCError::ErrorResponse(
-                RpcErrorResponse::InvalidRequest,
-                format!(
-                    "No context bytes provided for {:?} response",
-                    versioned_protocol
-                ),
-            )),
-        },
+        SupportedProtocol::ExecutionProofsByRangeV1 => {
+            Ok(Some(RpcSuccessResponse::ExecutionProofsByRange(Arc::new(
+                SignedExecutionProofEnvelope::from_ssz_bytes(decoded_buffer)?,
+            ))))
+        }
+        SupportedProtocol::ExecutionProofsByRootV1 => {
+            Ok(Some(RpcSuccessResponse::ExecutionProofsByRoot(Arc::new(
+                SignedExecutionProofEnvelope::from_ssz_bytes(decoded_buffer)?,
+            ))))
+        }
         SupportedProtocol::BlobsByRangeV1 => match fork_name {
             Some(fork_name) => {
                 if fork_name.deneb_enabled() {
@@ -993,8 +961,9 @@ mod tests {
     use fixed_bytes::FixedBytesExtended;
     use types::{
         BeaconBlock, BeaconBlockAltair, BeaconBlockBase, BeaconBlockBellatrix, BeaconBlockHeader,
-        DataColumnsByRootIdentifier, EmptyBlock, Epoch, ExecutionProofsByRootIdentifier,
-        FullPayload, KzgCommitment, KzgProof, SignedBeaconBlockHeader, Slot,
+        DataColumnsByRootIdentifier, EmptyBlock, Epoch, ExecutionProofEnvelope,
+        ExecutionProofsByRootIdentifier, FullPayload, KzgCommitment, KzgProof, ProofData,
+        SignedBeaconBlockHeader, Slot,
         data::{BlobIdentifier, Cell},
     };
     use types::{BlobSidecar, DataColumnSidecarFulu};
@@ -1697,6 +1666,47 @@ mod tests {
     }
 
     // Test RPCResponse encoding/decoding for V1 messages
+    fn execution_proof() -> SignedExecutionProofEnvelope {
+        SignedExecutionProofEnvelope {
+            message: ExecutionProofEnvelope {
+                proof_data: ProofData::new(vec![42; 32]).unwrap(),
+                proof_type: 1,
+                beacon_block_root: Hash256::repeat_byte(7),
+            },
+            validator_index: 9,
+            signature: Signature::empty(),
+        }
+    }
+
+    #[test]
+    fn test_encode_then_decode_execution_proofs() {
+        let chain_spec = spec_with_all_forks_enabled();
+
+        for (protocol, into_response) in [
+            (
+                SupportedProtocol::ExecutionProofsByRangeV1,
+                RpcSuccessResponse::ExecutionProofsByRange
+                    as fn(Arc<SignedExecutionProofEnvelope>) -> RpcSuccessResponse<Spec>,
+            ),
+            (
+                SupportedProtocol::ExecutionProofsByRootV1,
+                RpcSuccessResponse::ExecutionProofsByRoot,
+            ),
+        ] {
+            let response = into_response(Arc::new(execution_proof()));
+
+            assert_eq!(
+                encode_then_decode_response(
+                    protocol,
+                    RpcResponse::Success(response.clone()),
+                    ForkName::Gloas,
+                    &chain_spec,
+                ),
+                Ok(Some(response))
+            );
+        }
+    }
+
     #[test]
     fn test_encode_then_decode_v2() {
         let chain_spec = spec_with_all_forks_enabled();

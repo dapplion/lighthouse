@@ -161,10 +161,9 @@ pub fn parse_execution_proof_key(data: Vec<u8>) -> Result<(Hash256, ProofType), 
             data.len()
         )));
     }
-    // split_at panics if 32 < 33 which will never happen after the length check above
+    // The length check above guarantees 33 bytes, so the split cannot panic.
     let (block_root_bytes, proof_type_bytes) = data.split_at(32);
     let block_root = Hash256::from_slice(block_root_bytes);
-    // proof_type_bytes is asserted to be 1 byte after the length check above
     let proof_type = ProofType::from_le_bytes(
         proof_type_bytes
             .try_into()
@@ -287,11 +286,11 @@ pub enum DBColumn {
     BeaconBlob,
     #[strum(serialize = "bdc")]
     BeaconDataColumn,
+    #[strum(serialize = "bdi")]
+    BeaconDataColumnCustodyInfo,
     /// Verified EIP-8025 execution proofs, keyed by block root and proof type.
     #[strum(serialize = "epr")]
     ExecutionProof,
-    #[strum(serialize = "bdi")]
-    BeaconDataColumnCustodyInfo,
     /// For full `BeaconState`s in the hot database (finalized or fork-boundary states).
     ///
     /// DEPRECATED.

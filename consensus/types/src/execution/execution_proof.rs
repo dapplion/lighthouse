@@ -13,12 +13,15 @@ pub const MAX_PROOF_SIZE: usize = 4_194_304;
 
 /// Proof types a single payload can be proven by (EIP-8025 `MAX_EXECUTION_PROOFS_PER_PAYLOAD`).
 ///
-/// Used only to bound req/resp response counts. Which types a node serves is local
-/// configuration.
+/// Bounds req/resp response counts only; which types a node serves is local configuration.
 pub const MAX_EXECUTION_PROOFS_PER_PAYLOAD: u64 = 4;
 
 /// SSZ bound for `proof_data`.
 pub type MaxProofSize = typenum::U4194304;
+
+/// Bound on a request's `proof_types` filter: the whole `ProofType` domain, since which types a
+/// node serves is local configuration rather than a spec constant.
+pub type MaxProofTypes = typenum::U256;
 
 /// Spec type `ProofData`.
 pub type ProofData = VariableList<u8, MaxProofSize>;
@@ -108,12 +111,6 @@ impl SignedExecutionProofEnvelope {
 
 /// A block's verified execution proofs, at most one per `ProofType`.
 pub type ExecutionProofEnvelopeList = Vec<Arc<SignedExecutionProofEnvelope>>;
-
-/// Bound on the `proof_types` filter of a req/resp request: every distinct `ProofType`.
-///
-/// The set of types a node serves is local configuration rather than a spec constant, so the
-/// `u8` domain is the only bound that cannot go stale.
-pub type MaxProofTypes = typenum::U256;
 
 /// Names the proof types wanted for one beacon block in an `ExecutionProofsByRoot` request.
 #[derive(Encode, Decode, Clone, Debug, PartialEq)]

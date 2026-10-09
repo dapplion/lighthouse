@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio_stream::StreamExt;
 use tracing::{Span, debug, error, field, instrument, trace, warn};
 use types::data::BlobIdentifier;
-use types::{ColumnIndex, Epoch, EthSpec, Hash256, Slot};
+use types::{ColumnIndex, Epoch, EthSpec, Hash256, ProofType, SignedExecutionProofEnvelope, Slot};
 
 fn payload_envelope_unavailable(error: &BeaconChainError) -> bool {
     matches!(
@@ -1927,8 +1927,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         }
     }
 
-    /// Helper function to ensure streamed protocols with multiple responses always end with either
-    /// a stream termination or an error
     #[instrument(
         name = "lh_handle_execution_proofs_by_root_request",
         parent = None,
@@ -1951,7 +1949,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             self.handle_execution_proofs_by_root_request_inner(
                 peer_id,
                 inbound_request_id,
-                request,
+                &request,
             ),
             Response::ExecutionProofsByRoot,
         );
@@ -1962,55 +1960,35 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         &self,
         peer_id: PeerId,
         inbound_request_id: InboundRequestId,
-        request: ExecutionProofsByRootRequest,
+        request: &ExecutionProofsByRootRequest,
     ) -> Result<(), (RpcErrorResponse, &'static str)> {
-        let requested_proofs = request.max_requested();
         self.check_execution_proofs_served()?;
 
         let mut send_proof_count = 0;
         for proof_id in request.proof_ids.iter() {
             for proof_type in proof_id.proof_types.iter() {
-                match self
-                    .chain
-                    .store
-                    .get_execution_proof(&proof_id.block_root, proof_type)
-                {
-                    Ok(Some(proof)) => {
-                        self.send_response(
-                            peer_id,
-                            inbound_request_id,
-                            Response::ExecutionProofsByRoot(Some(proof)),
-                        );
-                        send_proof_count += 1;
-                    }
-                    Ok(None) => {
-                        debug!(
-                            %peer_id,
-                            request_root = ?proof_id.block_root,
-                            proof_type,
-                            "Peer requested unknown execution proof"
-                        );
-                    }
-                    Err(error) => {
-                        error!(
-                            %peer_id,
-                            request_root = ?proof_id.block_root,
-                            proof_type,
-                            ?error,
-                            "Error fetching execution proof for peer"
-                        );
-                        return Err((
-                            RpcErrorResponse::ServerError,
-                            "Failed fetching execution proofs",
-                        ));
-                    }
+                if self.send_execution_proof(
+                    peer_id,
+                    inbound_request_id,
+                    proof_id.block_root,
+                    *proof_type,
+                    Response::ExecutionProofsByRoot,
+                )? {
+                    send_proof_count += 1;
+                } else {
+                    debug!(
+                        %peer_id,
+                        request_root = ?proof_id.block_root,
+                        proof_type,
+                        "Peer requested unknown execution proof"
+                    );
                 }
             }
         }
 
         debug!(
             %peer_id,
-            requested = requested_proofs,
+            requested = request.max_requested(),
             returned = send_proof_count,
             "ExecutionProofsByRoot outgoing response processed"
         );
@@ -2040,7 +2018,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
             self.handle_execution_proofs_by_range_request_inner(
                 peer_id,
                 inbound_request_id,
-                request,
+                &request,
             ),
             Response::ExecutionProofsByRange,
         );
@@ -2051,7 +2029,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         &self,
         peer_id: PeerId,
         inbound_request_id: InboundRequestId,
-        request: ExecutionProofsByRangeRequest,
+        request: &ExecutionProofsByRangeRequest,
     ) -> Result<(), (RpcErrorResponse, &'static str)> {
         debug!(
             %peer_id,
@@ -2084,40 +2062,21 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         let mut send_proof_count = 0;
         for (block_root, _) in block_roots {
             for proof_type in request.proof_types.iter() {
-                match self
-                    .chain
-                    .store
-                    .get_execution_proof(&block_root, proof_type)
-                {
-                    Ok(Some(proof)) => {
-                        self.send_response(
-                            peer_id,
-                            inbound_request_id,
-                            Response::ExecutionProofsByRange(Some(proof)),
-                        );
-                        send_proof_count += 1;
-                    }
-                    Ok(None) => {
-                        trace!(
-                            %peer_id,
-                            request_root = ?block_root,
-                            proof_type,
-                            "No execution proof for block root"
-                        );
-                    }
-                    Err(error) => {
-                        error!(
-                            %peer_id,
-                            request_root = ?block_root,
-                            proof_type,
-                            ?error,
-                            "Error fetching execution proof for peer"
-                        );
-                        return Err((
-                            RpcErrorResponse::ServerError,
-                            "Failed fetching execution proofs",
-                        ));
-                    }
+                if self.send_execution_proof(
+                    peer_id,
+                    inbound_request_id,
+                    block_root,
+                    *proof_type,
+                    Response::ExecutionProofsByRange,
+                )? {
+                    send_proof_count += 1;
+                } else {
+                    trace!(
+                        %peer_id,
+                        request_root = ?block_root,
+                        proof_type,
+                        "No execution proof for block root"
+                    );
                 }
             }
         }
@@ -2133,8 +2092,43 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         Ok(())
     }
 
-    /// A node that verifies no proofs stores none, so it declines rather than answering with an
-    /// empty stream that a requester cannot tell apart from "this block has no proofs".
+    /// Send one stored proof, reporting whether the store had it.
+    fn send_execution_proof(
+        &self,
+        peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
+        block_root: Hash256,
+        proof_type: ProofType,
+        into_response: fn(Option<Arc<SignedExecutionProofEnvelope>>) -> Response<T::EthSpec>,
+    ) -> Result<bool, (RpcErrorResponse, &'static str)> {
+        match self
+            .chain
+            .store
+            .get_execution_proof(&block_root, &proof_type)
+        {
+            Ok(Some(proof)) => {
+                self.send_response(peer_id, inbound_request_id, into_response(Some(proof)));
+                Ok(true)
+            }
+            Ok(None) => Ok(false),
+            Err(error) => {
+                error!(
+                    %peer_id,
+                    ?block_root,
+                    proof_type,
+                    ?error,
+                    "Error fetching execution proof for peer"
+                );
+                Err((
+                    RpcErrorResponse::ServerError,
+                    "Failed fetching execution proofs",
+                ))
+            }
+        }
+    }
+
+    /// Declines rather than returning an empty stream, which a requester cannot tell apart from
+    /// "these blocks have no proofs". A node that verifies no proofs stores none.
     fn check_execution_proofs_served(&self) -> Result<(), (RpcErrorResponse, &'static str)> {
         if self.chain.execution_proofs_enabled() {
             Ok(())
@@ -2146,6 +2140,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         }
     }
 
+    /// Helper function to ensure streamed protocols with multiple responses always end with either
+    /// a stream termination or an error
     fn terminate_response_stream<R, F: FnOnce(Option<R>) -> Response<T::EthSpec>>(
         &self,
         peer_id: PeerId,

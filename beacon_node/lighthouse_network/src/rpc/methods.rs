@@ -393,10 +393,12 @@ impl ExecutionProofsByRangeRequest {
     }
 
     pub fn ssz_min_len() -> usize {
+        // An empty filter requests nothing, which is useless but legal, and matches what an
+        // empty per-identifier list means for `ExecutionProofsByRoot`.
         ExecutionProofsByRangeRequest {
             start_slot: 0,
             count: 0,
-            proof_types: vec![0],
+            proof_types: vec![],
         }
         .as_ssz_bytes()
         .len()
@@ -599,19 +601,6 @@ pub struct ExecutionProofsByRootRequest {
 }
 
 impl ExecutionProofsByRootRequest {
-    pub fn new(
-        proof_ids: Vec<ExecutionProofsByRootIdentifier>,
-        fork_context: &ForkContext,
-    ) -> Result<Self, String> {
-        // One identifier per payload, so the payload bound applies.
-        let max_request_payloads = fork_context.spec.max_request_payloads();
-
-        let proof_ids = RuntimeVariableList::new(proof_ids, max_request_payloads)
-            .map_err(|e| format!("ExecutionProofsByRootRequest too many proof IDs: {e:?}"))?;
-
-        Ok(Self { proof_ids })
-    }
-
     pub fn max_requested(&self) -> u64 {
         self.proof_ids
             .iter()
@@ -928,7 +917,8 @@ impl<E: EthSpec> RpcSuccessResponse<E> {
             Self::LightClientFinalityUpdate(r) => Some(r.get_attested_header_slot()),
             Self::LightClientOptimisticUpdate(r) => Some(r.get_slot()),
             Self::LightClientUpdatesByRange(r) => Some(r.attested_header_slot()),
-            // An execution proof names a beacon block root, not a slot.
+            // An execution proof names a beacon block root, not a slot. Its protocols carry no
+            // context bytes for that reason: `context_bytes` derives them from the slot.
             Self::ExecutionProofsByRange(_)
             | Self::ExecutionProofsByRoot(_)
             | Self::MetaData(_)
