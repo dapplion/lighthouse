@@ -3,6 +3,7 @@
 use crate::{BeaconChain, BeaconChainError, BeaconChainTypes, BlockError};
 use proof_engine::ProofEngineError;
 use std::sync::Arc;
+use store::StoreOp;
 use tracing::debug;
 use types::{Hash256, Slot};
 
@@ -104,8 +105,26 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             >= REQUIRED_EXECUTION_PROOFS
     }
 
+    /// Store a verified proof, then tell fork choice if its payload now has enough proofs.
+    pub async fn import_execution_proof(
+        self: &Arc<Self>,
+        verified_proof: GossipVerifiedExecutionProof,
+    ) -> Result<(), BlockError> {
+        let block_root = verified_proof.proof.beacon_block_root();
+
+        // Retained for the EIP-8025 serve range, and pruned with the payload it is about.
+        self.store
+            .do_atomically_with_block_and_blobs_cache(vec![StoreOp::PutExecutionProofs(
+                block_root,
+                vec![verified_proof.proof],
+            )])
+            .map_err(|e| BlockError::BeaconChainError(Box::new(e.into())))?;
+
+        self.promote_payload_if_proven(block_root).await
+    }
+
     /// Tell fork choice `block_root`'s payload is valid.
-    pub async fn promote_payload_if_proven(
+    async fn promote_payload_if_proven(
         self: &Arc<Self>,
         block_root: Hash256,
     ) -> Result<(), BlockError> {

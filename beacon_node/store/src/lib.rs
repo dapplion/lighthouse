@@ -39,6 +39,7 @@ use strum::{EnumIter, EnumString, IntoStaticStr};
 pub use types::*;
 
 const DATA_COLUMN_DB_KEY_SIZE: usize = 32 + 8;
+const EXECUTION_PROOF_DB_KEY_SIZE: usize = 32 + 1;
 
 pub type ColumnIter<'a, K> = Box<dyn Iterator<Item = Result<(K, Vec<u8>), Error>> + 'a>;
 pub type ColumnKeyIter<'a, K> = Box<dyn Iterator<Item = Result<K, Error>> + 'a>;
@@ -147,6 +148,31 @@ pub fn get_data_column_key(block_root: &Hash256, column_index: &ColumnIndex) -> 
     result
 }
 
+pub fn get_execution_proof_key(block_root: &Hash256, proof_type: &ProofType) -> Vec<u8> {
+    let mut result = block_root.as_slice().to_vec();
+    result.extend_from_slice(&proof_type.to_le_bytes());
+    result
+}
+
+pub fn parse_execution_proof_key(data: Vec<u8>) -> Result<(Hash256, ProofType), Error> {
+    if data.len() != DBColumn::ExecutionProof.key_size() {
+        return Err(Error::InvalidKey(format!(
+            "Unexpected ExecutionProof key len {}",
+            data.len()
+        )));
+    }
+    // split_at panics if 32 < 33 which will never happen after the length check above
+    let (block_root_bytes, proof_type_bytes) = data.split_at(32);
+    let block_root = Hash256::from_slice(block_root_bytes);
+    // proof_type_bytes is asserted to be 1 byte after the length check above
+    let proof_type = ProofType::from_le_bytes(
+        proof_type_bytes
+            .try_into()
+            .map_err(|e| Error::InvalidKey(format!("Invalid ProofType {e:?}")))?,
+    );
+    Ok((block_root, proof_type))
+}
+
 pub fn parse_data_column_key(data: Vec<u8>) -> Result<(Hash256, ColumnIndex), Error> {
     if data.len() != DBColumn::BeaconDataColumn.key_size() {
         return Err(Error::InvalidKey(format!(
@@ -230,10 +256,12 @@ pub enum StoreOp<'a, E: EthSpec> {
     PutBlobs(Hash256, BlobSidecarList<E>),
     PutDataColumns(Hash256, DataColumnSidecarList<E>),
     PutPayloadEnvelope(Hash256, Arc<SignedExecutionPayloadEnvelope<E>>),
+    PutExecutionProofs(Hash256, ExecutionProofEnvelopeList),
     PutStateSummary(Hash256, HotStateSummary),
     DeleteBlock(Hash256),
     DeleteBlobs(Hash256),
     DeleteDataColumns(Hash256, Vec<ColumnIndex>, ForkName),
+    DeleteExecutionProofs(Hash256),
     DeleteState(Hash256, Option<Slot>),
     DeleteExecutionPayload(Hash256),
     DeletePayloadWithSummary(Hash256),
@@ -259,6 +287,9 @@ pub enum DBColumn {
     BeaconBlob,
     #[strum(serialize = "bdc")]
     BeaconDataColumn,
+    /// Verified EIP-8025 execution proofs, keyed by block root and proof type.
+    #[strum(serialize = "epr")]
+    ExecutionProof,
     #[strum(serialize = "bdi")]
     BeaconDataColumnCustodyInfo,
     /// For full `BeaconState`s in the hot database (finalized or fork-boundary states).
@@ -444,6 +475,7 @@ impl DBColumn {
             | Self::LightClientUpdate
             | Self::Dummy => 8,
             Self::BeaconDataColumn => DATA_COLUMN_DB_KEY_SIZE,
+            Self::ExecutionProof => EXECUTION_PROOF_DB_KEY_SIZE,
         }
     }
 }

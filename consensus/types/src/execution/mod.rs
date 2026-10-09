@@ -37,9 +37,10 @@ pub use execution_payload_header::{
     ExecutionPayloadHeaderRef, ExecutionPayloadHeaderRefMut,
 };
 pub use execution_proof::{
-    ExecutionProof, ExecutionProofEnvelope, ExecutionProofsByRootIdentifier,
-    MAX_EXECUTION_PROOFS_PER_PAYLOAD, MAX_PROOF_SIZE, MaxProofSize, MaxProofTypes, ProofData,
-    ProofType, PublicInput, STATELESS_INPUT_SCHEMA_ID, SignedExecutionProofEnvelope,
+    ExecutionProof, ExecutionProofEnvelope, ExecutionProofEnvelopeList,
+    ExecutionProofsByRootIdentifier, MAX_EXECUTION_PROOFS_PER_PAYLOAD, MAX_PROOF_SIZE,
+    MaxProofSize, MaxProofTypes, ProofData, ProofType, PublicInput, STATELESS_INPUT_SCHEMA_ID,
+    SignedExecutionProofEnvelope,
 };
 pub use execution_requests::{
     BuilderDepositRequests, BuilderExitRequests, ConsolidationRequests, DepositRequests,

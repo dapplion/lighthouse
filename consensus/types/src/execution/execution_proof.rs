@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use ssz::Encode;
 use ssz_derive::{Decode, Encode};
 use ssz_types::VariableList;
+use std::sync::Arc;
 use tree_hash_derive::TreeHash;
 
 /// Maximum size of `proof_data` in bytes (EIP-8025 `MAX_PROOF_SIZE`).
@@ -104,6 +105,9 @@ impl SignedExecutionProofEnvelope {
         Self::min_size() + MAX_PROOF_SIZE
     }
 }
+
+/// A block's verified execution proofs, at most one per `ProofType`.
+pub type ExecutionProofEnvelopeList = Vec<Arc<SignedExecutionProofEnvelope>>;
 
 /// Bound on the `proof_types` filter of a req/resp request: every distinct `ProofType`.
 ///

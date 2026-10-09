@@ -4173,16 +4173,12 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Accept);
 
                 // This may be the proof the block's payload was waiting on.
-                if let Err(error) = self
-                    .chain
-                    .promote_payload_if_proven(verified.proof.beacon_block_root())
-                    .await
-                {
+                if let Err(error) = self.chain.import_execution_proof(verified).await {
                     debug!(
                         %beacon_block_root,
                         proof_type,
                         ?error,
-                        "Could not validate payload after execution proof"
+                        "Could not import execution proof"
                     );
                 }
             }

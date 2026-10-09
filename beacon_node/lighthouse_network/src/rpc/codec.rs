@@ -16,10 +16,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio_util::codec::{Decoder, Encoder};
 use types::{
-    BlobSidecar, ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier, EthSpec,
-    ExecutionProofsByRootIdentifier, ForkContext, ForkName, ForkVersionDecode, Hash256,
-    LightClientBootstrap, LightClientFinalityUpdate, LightClientOptimisticUpdate,
-    LightClientUpdate, SignedBeaconBlock, SignedBeaconBlockBase,
+    BlobSidecar, ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier, EthSpec, ForkContext,
+    ForkName, ForkVersionDecode, Hash256, LightClientBootstrap, LightClientFinalityUpdate,
+    LightClientOptimisticUpdate, LightClientUpdate, SignedBeaconBlock, SignedBeaconBlockBase,
 };
 use types::{SignedExecutionPayloadEnvelope, SignedExecutionProofEnvelope};
 use unsigned_varint::codec::Uvi;
@@ -994,8 +993,8 @@ mod tests {
     use fixed_bytes::FixedBytesExtended;
     use types::{
         BeaconBlock, BeaconBlockAltair, BeaconBlockBase, BeaconBlockBellatrix, BeaconBlockHeader,
-        DataColumnsByRootIdentifier, EmptyBlock, Epoch, FullPayload, KzgCommitment, KzgProof,
-        SignedBeaconBlockHeader, Slot,
+        DataColumnsByRootIdentifier, EmptyBlock, Epoch, ExecutionProofsByRootIdentifier,
+        FullPayload, KzgCommitment, KzgProof, SignedBeaconBlockHeader, Slot,
         data::{BlobIdentifier, Cell},
     };
     use types::{BlobSidecar, DataColumnSidecarFulu};
