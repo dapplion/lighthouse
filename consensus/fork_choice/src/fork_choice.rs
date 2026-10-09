@@ -419,6 +419,7 @@ where
     E: EthSpec,
 {
     /// Instantiates `Self` from an anchor (genesis or another finalized checkpoint).
+    #[allow(clippy::too_many_arguments)]
     pub fn from_anchor(
         fc_store: T,
         anchor_block_root: Hash256,
