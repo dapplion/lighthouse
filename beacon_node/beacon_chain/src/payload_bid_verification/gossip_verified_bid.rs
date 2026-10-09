@@ -244,12 +244,15 @@ pub(crate) fn is_bid_compatible_with_head<T: BeaconChainTypes>(
         return Ok(builds_on_head_payload);
     }
 
+    // Judge the bid against the parent the proposer would build on: within the configured depth
+    // that is the head's unproven payload, which the cached head reports as EMPTY.
+    let head_payload_status = fork_choice_read
+        .get_proposer_payload_status(&head_block_root, spec)
+        .map_err(|e| {
+            PayloadBidError::InternalError(format!("get_proposer_payload_status failed: {e:?}"))
+        })?;
     if fork_choice_read
-        .should_build_on_full(
-            &head_block_root,
-            cached_head.head_payload_status(),
-            bid.slot(),
-        )
+        .should_build_on_full(&head_block_root, head_payload_status, bid.slot())
         .map_err(|e| {
             PayloadBidError::InternalError(format!("should_build_on_full failed: {e:?}"))
         })?
