@@ -795,15 +795,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         request: ExecutionProofsByRootRequest,
     ) -> Result<(), Error<T::EthSpec>> {
         let processor = self.clone();
-        let process_fn = async move {
-            processor
-                .handle_execution_proofs_by_root_request(peer_id, inbound_request_id, request)
-                .await;
+        let process_fn = move || {
+            processor.handle_execution_proofs_by_root_request(peer_id, inbound_request_id, request)
         };
 
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
-            work: Work::ExecutionProofsByRootRequest(Box::pin(process_fn)),
+            work: Work::ExecutionProofsByRootRequest(Box::new(process_fn)),
         })
     }
 
@@ -815,15 +813,13 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         request: ExecutionProofsByRangeRequest,
     ) -> Result<(), Error<T::EthSpec>> {
         let processor = self.clone();
-        let process_fn = async move {
-            processor
-                .handle_execution_proofs_by_range_request(peer_id, inbound_request_id, request)
-                .await;
+        let process_fn = move || {
+            processor.handle_execution_proofs_by_range_request(peer_id, inbound_request_id, request)
         };
 
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
-            work: Work::ExecutionProofsByRangeRequest(Box::pin(process_fn)),
+            work: Work::ExecutionProofsByRangeRequest(Box::new(process_fn)),
         })
     }
 

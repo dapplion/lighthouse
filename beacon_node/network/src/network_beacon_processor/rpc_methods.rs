@@ -1936,7 +1936,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         skip_all,
         fields(peer_id = %peer_id, client = tracing::field::Empty)
     )]
-    pub async fn handle_execution_proofs_by_root_request(
+    pub fn handle_execution_proofs_by_root_request(
         self: Arc<Self>,
         peer_id: PeerId,
         inbound_request_id: InboundRequestId,
@@ -1948,25 +1948,74 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self.terminate_response_stream(
             peer_id,
             inbound_request_id,
-            self.clone()
-                .handle_execution_proofs_by_root_request_inner(peer_id, request)
-                .await,
+            self.handle_execution_proofs_by_root_request_inner(
+                peer_id,
+                inbound_request_id,
+                request,
+            ),
             Response::ExecutionProofsByRoot,
         );
     }
 
     /// Handle an `ExecutionProofsByRoot` request from the peer.
-    async fn handle_execution_proofs_by_root_request_inner(
-        self: Arc<Self>,
+    fn handle_execution_proofs_by_root_request_inner(
+        &self,
         peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
         request: ExecutionProofsByRootRequest,
     ) -> Result<(), (RpcErrorResponse, &'static str)> {
+        let requested_proofs = request.max_requested();
+        self.check_execution_proofs_served()?;
+
+        let mut send_proof_count = 0;
+        for proof_id in request.proof_ids.iter() {
+            for proof_type in proof_id.proof_types.iter() {
+                match self
+                    .chain
+                    .store
+                    .get_execution_proof(&proof_id.block_root, proof_type)
+                {
+                    Ok(Some(proof)) => {
+                        self.send_response(
+                            peer_id,
+                            inbound_request_id,
+                            Response::ExecutionProofsByRoot(Some(proof)),
+                        );
+                        send_proof_count += 1;
+                    }
+                    Ok(None) => {
+                        debug!(
+                            %peer_id,
+                            request_root = ?proof_id.block_root,
+                            proof_type,
+                            "Peer requested unknown execution proof"
+                        );
+                    }
+                    Err(error) => {
+                        error!(
+                            %peer_id,
+                            request_root = ?proof_id.block_root,
+                            proof_type,
+                            ?error,
+                            "Error fetching execution proof for peer"
+                        );
+                        return Err((
+                            RpcErrorResponse::ServerError,
+                            "Failed fetching execution proofs",
+                        ));
+                    }
+                }
+            }
+        }
+
         debug!(
             %peer_id,
-            requested = request.proof_ids.len(),
-            "Received ExecutionProofsByRoot Request"
+            requested = requested_proofs,
+            returned = send_proof_count,
+            "ExecutionProofsByRoot outgoing response processed"
         );
-        self.execution_proof_serve_unavailable()
+
+        Ok(())
     }
 
     #[instrument(
@@ -1976,7 +2025,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         skip_all,
         fields(peer_id = %peer_id, client = tracing::field::Empty)
     )]
-    pub async fn handle_execution_proofs_by_range_request(
+    pub fn handle_execution_proofs_by_range_request(
         self: Arc<Self>,
         peer_id: PeerId,
         inbound_request_id: InboundRequestId,
@@ -1988,38 +2037,113 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         self.terminate_response_stream(
             peer_id,
             inbound_request_id,
-            self.clone()
-                .handle_execution_proofs_by_range_request_inner(peer_id, request)
-                .await,
+            self.handle_execution_proofs_by_range_request_inner(
+                peer_id,
+                inbound_request_id,
+                request,
+            ),
             Response::ExecutionProofsByRange,
         );
     }
 
     /// Handle an `ExecutionProofsByRange` request from the peer.
-    async fn handle_execution_proofs_by_range_request_inner(
-        self: Arc<Self>,
+    fn handle_execution_proofs_by_range_request_inner(
+        &self,
         peer_id: PeerId,
+        inbound_request_id: InboundRequestId,
         request: ExecutionProofsByRangeRequest,
     ) -> Result<(), (RpcErrorResponse, &'static str)> {
         debug!(
             %peer_id,
-            start_slot = request.start_slot,
             count = request.count,
+            start_slot = request.start_slot,
             proof_types = ?request.proof_types,
             "Received ExecutionProofsByRange Request"
         );
-        self.execution_proof_serve_unavailable()
+        self.check_execution_proofs_served()?;
+
+        let request_start_slot = Slot::from(request.start_slot);
+        if !self
+            .chain
+            .spec
+            .fork_name_at_slot::<T::EthSpec>(request_start_slot)
+            .gloas_enabled()
+        {
+            return Err((
+                RpcErrorResponse::InvalidRequest,
+                "Requested execution proofs for pre-gloas slots",
+            ));
+        }
+
+        let block_roots = self.get_block_roots_for_slot_range(
+            request.start_slot,
+            request.count,
+            "ExecutionProofsByRange",
+        )?;
+
+        let mut send_proof_count = 0;
+        for (block_root, _) in block_roots {
+            for proof_type in request.proof_types.iter() {
+                match self
+                    .chain
+                    .store
+                    .get_execution_proof(&block_root, proof_type)
+                {
+                    Ok(Some(proof)) => {
+                        self.send_response(
+                            peer_id,
+                            inbound_request_id,
+                            Response::ExecutionProofsByRange(Some(proof)),
+                        );
+                        send_proof_count += 1;
+                    }
+                    Ok(None) => {
+                        trace!(
+                            %peer_id,
+                            request_root = ?block_root,
+                            proof_type,
+                            "No execution proof for block root"
+                        );
+                    }
+                    Err(error) => {
+                        error!(
+                            %peer_id,
+                            request_root = ?block_root,
+                            proof_type,
+                            ?error,
+                            "Error fetching execution proof for peer"
+                        );
+                        return Err((
+                            RpcErrorResponse::ServerError,
+                            "Failed fetching execution proofs",
+                        ));
+                    }
+                }
+            }
+        }
+
+        debug!(
+            %peer_id,
+            start_slot = %request_start_slot,
+            requested = request.max_requested(),
+            returned = send_proof_count,
+            "ExecutionProofsByRange outgoing response processed"
+        );
+
+        Ok(())
     }
 
-    /// A node that cannot answer a proof request declines it, per EIP-8025.
-    ///
-    /// TODO(9658): serve the proofs once they are retained. Verified proofs are not stored
-    /// today, so every request is declined, including on a node that verifies proofs itself.
-    fn execution_proof_serve_unavailable(&self) -> Result<(), (RpcErrorResponse, &'static str)> {
-        Err((
-            RpcErrorResponse::ResourceUnavailable,
-            "Execution proofs are not served",
-        ))
+    /// A node that verifies no proofs stores none, so it declines rather than answering with an
+    /// empty stream that a requester cannot tell apart from "this block has no proofs".
+    fn check_execution_proofs_served(&self) -> Result<(), (RpcErrorResponse, &'static str)> {
+        if self.chain.execution_proofs_enabled() {
+            Ok(())
+        } else {
+            Err((
+                RpcErrorResponse::ResourceUnavailable,
+                "Execution proofs are not served",
+            ))
+        }
     }
 
     fn terminate_response_stream<R, F: FnOnce(Option<R>) -> Response<T::EthSpec>>(

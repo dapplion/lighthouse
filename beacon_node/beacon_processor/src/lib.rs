@@ -451,8 +451,8 @@ pub enum Work<E: EthSpec> {
     BlocksByHeadRequest(AsyncFn),
     PayloadEnvelopesByRangeRequest(AsyncFn),
     PayloadEnvelopesByRootRequest(AsyncFn),
-    ExecutionProofsByRangeRequest(AsyncFn),
-    ExecutionProofsByRootRequest(AsyncFn),
+    ExecutionProofsByRangeRequest(BlockingFn),
+    ExecutionProofsByRootRequest(BlockingFn),
     BlobsByRangeRequest(BlockingFn),
     BlobsByRootsRequest(BlockingFn),
     DataColumnsByRootsRequest(BlockingFn),
@@ -1618,16 +1618,16 @@ impl<E: EthSpec> BeaconProcessor<E> {
             Work::BlobsByRangeRequest(process_fn)
             | Work::BlobsByRootsRequest(process_fn)
             | Work::DataColumnsByRootsRequest(process_fn)
-            | Work::DataColumnsByRangeRequest(process_fn) => {
+            | Work::DataColumnsByRangeRequest(process_fn)
+            | Work::ExecutionProofsByRangeRequest(process_fn)
+            | Work::ExecutionProofsByRootRequest(process_fn) => {
                 task_spawner.spawn_blocking(process_fn)
             }
             Work::BlocksByRangeRequest(work)
             | Work::BlocksByRootsRequest(work)
             | Work::BlocksByHeadRequest(work)
             | Work::PayloadEnvelopesByRangeRequest(work)
-            | Work::PayloadEnvelopesByRootRequest(work)
-            | Work::ExecutionProofsByRangeRequest(work)
-            | Work::ExecutionProofsByRootRequest(work) => task_spawner.spawn_async(work),
+            | Work::PayloadEnvelopesByRootRequest(work) => task_spawner.spawn_async(work),
             Work::ChainSegmentBackfill(process_fn) => {
                 if self.config.enable_backfill_rate_limiting {
                     task_spawner.spawn_blocking_with_rayon(RayonPoolType::LowPriority, process_fn)
