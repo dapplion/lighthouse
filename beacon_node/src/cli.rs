@@ -1091,6 +1091,18 @@ pub fn cli_app() -> Command {
                 .action(ArgAction::Set)
                 .display_order(0)
         )
+        .arg(
+            Arg::new("proposer-optimistic-payload-depth")
+                .long("proposer-optimistic-payload-depth")
+                .help(
+                    "Propose on top of up to this many unproven execution payloads when \
+                    --proof-engine-endpoint keeps them out of the head. The block then builds on a \
+                    payload this node has not verified. Default 0."
+                )
+                .value_name("COUNT")
+                .action(ArgAction::Set)
+                .display_order(0)
+        )
         /*
          * Slasher.
          */

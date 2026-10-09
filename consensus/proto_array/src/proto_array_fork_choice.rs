@@ -584,6 +584,9 @@ pub enum OptimisticPayloads {
     Eligible,
     /// EIP-8025: an unproven payload has no `FULL` node.
     Filtered,
+    /// EIP-8025 proposer: an unproven payload keeps its `FULL` node while at most `depth` unproven
+    /// payloads lead to it, itself included.
+    Tolerated { depth: usize },
 }
 
 #[derive(PartialEq)]

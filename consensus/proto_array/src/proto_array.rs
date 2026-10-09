@@ -1628,7 +1628,47 @@ impl ProtoArray {
                     | ExecutionStatus::Irrelevant(_)
                     | ExecutionStatus::NotYetRevealed(_) => true,
                 },
+                OptimisticPayloads::Tolerated { depth } => match proto_node.execution_status() {
+                    ExecutionStatus::Optimistic(_) => self.unproven_run(proto_node) <= depth,
+                    ExecutionStatus::Valid(_)
+                    | ExecutionStatus::Invalid(_)
+                    | ExecutionStatus::Irrelevant(_)
+                    | ExecutionStatus::NotYetRevealed(_) => true,
+                },
             }
+    }
+
+    /// Consecutive unproven payloads on the executed chain, counting back from `proto_node`'s own.
+    fn unproven_run(&self, proto_node: &ProtoNode) -> usize {
+        let mut run: usize = 0;
+        let mut node = proto_node;
+        loop {
+            match node.execution_status() {
+                ExecutionStatus::Optimistic(_) => run = run.saturating_add(1),
+                ExecutionStatus::Valid(_)
+                | ExecutionStatus::Invalid(_)
+                | ExecutionStatus::Irrelevant(_)
+                | ExecutionStatus::NotYetRevealed(_) => return run,
+            }
+            // The next executed payload: a block built on EMPTY did not execute its parent's.
+            let mut parent_payload_status = node.get_parent_payload_status();
+            let mut index = node.parent();
+            loop {
+                let Some(parent) = index.and_then(|i| self.nodes.get(i)) else {
+                    return run;
+                };
+                match parent_payload_status {
+                    ParentPayloadStatus::Full | ParentPayloadStatus::PreGloas => {
+                        node = parent;
+                        break;
+                    }
+                    ParentPayloadStatus::Empty => {
+                        parent_payload_status = parent.get_parent_payload_status();
+                        index = parent.parent();
+                    }
+                }
+            }
+        }
     }
 
     /// Returns the canonical payload status of a block, matching the decision
