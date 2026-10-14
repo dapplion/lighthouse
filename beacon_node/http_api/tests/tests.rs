@@ -39,6 +39,7 @@ use operation_pool::attestation_storage::CheckpointKey;
 use proto_array::{ExecutionStatus, PayloadBlockHash, core::ProtoNode};
 use reqwest::{RequestBuilder, Response, StatusCode};
 use sensitive_url::SensitiveUrl;
+use serde_utils::quoted_u64::Quoted;
 use slot_clock::SlotClock;
 use ssz::{BitList, Decode};
 use state_processing::GloasVerificationContext;
@@ -52,14 +53,16 @@ use tokio::time::Duration;
 use tree_hash::TreeHash;
 use types::ApplicationDomain;
 use types::{
-    Address, Builder, Domain, EthSpec, ExecutionBlockHash, ExecutionPayloadBid, Hash256,
-    MainnetEthSpec, ProposerPreferences, RelativeEpoch, SelectionProof, SignedExecutionPayloadBid,
+    Address, Builder, Domain, EthSpec, ExecutionBlockHash, ExecutionPayloadBidGloas,
+    ExecutionPayloadBidHeze, Hash256, ProposerPreferences, RelativeEpoch, SelectionProof,
+    SignedExecutionPayloadBid, SignedExecutionPayloadBidGloas, SignedExecutionPayloadBidHeze,
     SignedExecutionPayloadEnvelope, SignedProposerPreferences, SignedRoot, SingleAttestation, Slot,
+    Spec,
     attestation::AttestationBase,
     consts::gloas::{BUILDER_INDEX_SELF_BUILD, PAYLOAD_BUILDER_VERSION},
 };
 
-type E = MainnetEthSpec;
+type E = Spec;
 
 const SLOT_DURATION_MS: u64 = 12_000;
 const SLOTS_PER_EPOCH: u64 = 32;
@@ -146,7 +149,7 @@ impl ApiTester {
     pub async fn new_from_config(config: ApiTesterConfig) -> Self {
         let spec = Arc::new(config.spec);
 
-        let mut harness = BeaconChainHarness::builder(MainnetEthSpec)
+        let mut harness = BeaconChainHarness::builder(E::default())
             .spec(spec.clone())
             .chain_config(ChainConfig {
                 archive: config.retain_historic_states,
@@ -349,7 +352,7 @@ impl ApiTester {
 
     pub async fn new_from_genesis() -> Self {
         let harness = Arc::new(
-            BeaconChainHarness::builder(MainnetEthSpec)
+            BeaconChainHarness::builder(E::default())
                 .default_spec()
                 .deterministic_keypairs(VALIDATOR_COUNT)
                 .deterministic_withdrawal_keypairs(VALIDATOR_COUNT)
@@ -695,7 +698,7 @@ impl ApiTester {
             // now that we know the block is valid, we can unwrap() everything we need
             let result = self
                 .client
-                .get_beacon_blocks::<MainnetEthSpec>(block_id.0)
+                .get_beacon_blocks::<E>(block_id.0)
                 .await
                 .unwrap()
                 .unwrap()
@@ -732,7 +735,7 @@ impl ApiTester {
             // now that we know the block is valid, we can unwrap() everything we need
             let result = self
                 .client
-                .get_beacon_blinded_blocks::<MainnetEthSpec>(block_id.0)
+                .get_beacon_blinded_blocks::<E>(block_id.0)
                 .await
                 .unwrap()
                 .unwrap()
@@ -770,7 +773,7 @@ impl ApiTester {
             // now that we know the state is valid, we can unwrap() everything we need
             let result = self
                 .client
-                .get_debug_beacon_states::<MainnetEthSpec>(state_id.0)
+                .get_debug_beacon_states::<E>(state_id.0)
                 .await
                 .unwrap()
                 .unwrap()
@@ -2333,6 +2336,53 @@ impl ApiTester {
         self
     }
 
+    pub async fn test_get_blobs_follow_commitment_order(self) -> Self {
+        let block_id = BlockId(CoreBlockId::Head);
+        let (block_root, _, _) = block_id.root(&self.chain).unwrap();
+        let (block, _, _) = block_id.full_block(&self.chain).await.unwrap();
+
+        let versioned_hashes: Vec<Hash256> = block
+            .message()
+            .blob_kzg_commitments()
+            .unwrap()
+            .iter()
+            .map(|commitment| commitment.calculate_versioned_hash())
+            .collect();
+        let num_blobs = versioned_hashes.len();
+        assert!(num_blobs >= 2, "test block must contain at least two blobs");
+
+        // The unfiltered response is in commitment order
+        let all_blobs = self
+            .client
+            .get_blobs::<E>(CoreBlockId::Root(block_root), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data();
+        assert_eq!(all_blobs.len(), num_blobs);
+
+        // Every hash in reverse order
+        let request: Vec<Hash256> = versioned_hashes.iter().rev().copied().collect();
+
+        let result = self
+            .client
+            .get_blobs::<E>(CoreBlockId::Root(block_root), Some(&request))
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data();
+
+        assert_eq!(result.len(), num_blobs);
+        for (index, (returned, expected)) in result.iter().zip(&all_blobs).enumerate() {
+            assert_eq!(
+                returned.blob, expected.blob,
+                "blob at position {index} does not follow commitment order"
+            );
+        }
+
+        self
+    }
+
     pub async fn test_get_blobs_post_fulu_full_node(self, versioned_hashes: bool) -> Self {
         let block_id = BlockId(CoreBlockId::Head);
         let (block_root, _, _) = block_id.root(&self.chain).unwrap();
@@ -2380,7 +2430,7 @@ impl ApiTester {
             .try_prune_blobs(force_prune, split_epoch)
             .unwrap();
 
-        let oldest_blob_slot = store.get_blob_info().oldest_blob_slot.unwrap();
+        let oldest_blob_slot = store.get_data_info().oldest_data_slot;
 
         assert_ne!(
             oldest_blob_slot, 0,
@@ -2426,7 +2476,7 @@ impl ApiTester {
     }
 
     pub async fn test_get_blob_sidecars_pre_deneb(self) -> Self {
-        let oldest_blob_slot = self.chain.store.get_blob_info().oldest_blob_slot.unwrap();
+        let oldest_blob_slot = self.chain.store.get_data_info().oldest_data_slot;
         assert_ne!(
             oldest_blob_slot, 0,
             "oldest_blob_slot should be non-zero and post-Deneb"
@@ -3424,24 +3474,44 @@ impl ApiTester {
         let slot = self.chain.slot().unwrap();
         let fork_name = self.chain.spec.fork_name_at_slot::<E>(slot);
 
-        let bid = ExecutionPayloadBid {
-            parent_block_hash: ExecutionBlockHash::zero(),
-            parent_block_root: head.head_block_root(),
-            block_hash: ExecutionBlockHash::zero(),
-            prev_randao: Hash256::zero(),
-            fee_recipient: Address::zero(),
-            gas_limit: 30_000_000,
-            builder_index: 0,
-            slot,
-            value: 100,
-            execution_payment: 0,
-            blob_kzg_commitments: Default::default(),
-            execution_requests_root: Hash256::zero(),
-        };
-
-        let signed = SignedExecutionPayloadBid {
-            message: bid,
-            signature: bls::Signature::empty(),
+        let signature = bls::Signature::empty();
+        let signed = if fork_name.heze_enabled() {
+            SignedExecutionPayloadBid::Heze(SignedExecutionPayloadBidHeze {
+                message: ExecutionPayloadBidHeze {
+                    parent_block_hash: ExecutionBlockHash::zero(),
+                    parent_block_root: head.head_block_root(),
+                    block_hash: ExecutionBlockHash::zero(),
+                    prev_randao: Hash256::zero(),
+                    fee_recipient: Address::zero(),
+                    gas_limit: 30_000_000,
+                    builder_index: 0,
+                    slot,
+                    value: 100,
+                    execution_payment: 0,
+                    blob_kzg_commitments: Default::default(),
+                    execution_requests_root: Hash256::zero(),
+                    inclusion_list_bits: Default::default(),
+                },
+                signature,
+            })
+        } else {
+            SignedExecutionPayloadBid::Gloas(SignedExecutionPayloadBidGloas {
+                message: ExecutionPayloadBidGloas {
+                    parent_block_hash: ExecutionBlockHash::zero(),
+                    parent_block_root: head.head_block_root(),
+                    block_hash: ExecutionBlockHash::zero(),
+                    prev_randao: Hash256::zero(),
+                    fee_recipient: Address::zero(),
+                    gas_limit: 30_000_000,
+                    builder_index: 0,
+                    slot,
+                    value: 100,
+                    execution_payment: 0,
+                    blob_kzg_commitments: Default::default(),
+                    execution_requests_root: Hash256::zero(),
+                },
+                signature,
+            })
         };
 
         (signed, fork_name)
@@ -8867,6 +8937,8 @@ impl ApiTester {
             block: block_root,
             slot: next_slot,
             execution_optimistic: false,
+            builder_index: None,
+            block_hash: None,
         });
 
         let expected_head = EventKind::Head(SseHead {
@@ -9157,19 +9229,29 @@ impl ApiTester {
             .await
             .unwrap();
 
-        let block_root = self.next_block.signed_block().canonical_root();
-        let next_slot = self.next_block.signed_block().slot();
+        let signed_block = self.next_block.signed_block();
+        let block_root = signed_block.canonical_root();
+        let next_slot = signed_block.slot();
+        let bid = signed_block
+            .message()
+            .body()
+            .signed_execution_payload_bid()
+            .ok();
 
         let expected_block = EventKind::Block(SseBlock {
             block: block_root,
             slot: next_slot,
             execution_optimistic: false,
+            builder_index: bid.as_ref().map(|bid| Quoted {
+                value: bid.message().builder_index(),
+            }),
+            block_hash: bid.map(|bid| bid.message().block_hash()),
         });
 
         let expected_head = EventKind::Head(SseHead {
             block: block_root,
             slot: next_slot,
-            state: self.next_block.signed_block().state_root(),
+            state: signed_block.state_root(),
             current_duty_dependent_root: self.chain.genesis_block_root,
             previous_duty_dependent_root: self.chain.genesis_block_root,
             epoch_transition: false,
@@ -9246,12 +9328,16 @@ impl ApiTester {
             .unwrap()
             .data;
 
+        let signed_bid = block.body().signed_execution_payload_bid().unwrap();
+        let expected_builder_index = signed_bid.message().builder_index();
+        let expected_block_hash = signed_bid.message().block_hash();
+        assert_eq!(expected_builder_index, BUILDER_INDEX_SELF_BUILD);
         let signed_block = block.sign(&sk, &fork, genesis_validators_root, &self.chain.spec);
         let block_root = signed_block.canonical_root();
         let state_root = signed_block.state_root();
         let signed_block_request = PublishBlockRequest::try_from(Arc::new(signed_block)).unwrap();
 
-        let topics = vec![EventTopic::HeadV2];
+        let topics = vec![EventTopic::HeadV2, EventTopic::Block];
         let mut events_future = self
             .client
             .get_events::<E>(topics.as_slice())
@@ -9263,8 +9349,22 @@ impl ApiTester {
             .await
             .unwrap();
 
-        let head_v2_events_first_emission =
-            poll_events(&mut events_future, 1, Duration::from_millis(10000)).await;
+        let initial_events = poll_events(&mut events_future, 2, Duration::from_millis(10000)).await;
+
+        let block_event = initial_events
+            .iter()
+            .find_map(|event| match event {
+                EventKind::Block(data) => Some(data),
+                _ => None,
+            })
+            .expect("Gloas block event");
+        assert_eq!(block_event.block, block_root);
+        assert_eq!(block_event.slot, slot);
+        assert_eq!(
+            block_event.builder_index.as_ref().map(|index| index.value),
+            Some(expected_builder_index)
+        );
+        assert_eq!(block_event.block_hash, Some(expected_block_hash));
 
         let expected_fork_name = self.chain.spec.fork_name_at_slot::<E>(slot);
 
@@ -9284,14 +9384,14 @@ impl ApiTester {
             },
         }));
 
-        assert_eq!(
-            head_v2_events_first_emission.as_slice(),
-            &[expected_head_v2]
-        );
+        assert!(initial_events.contains(&expected_head_v2));
 
-        let result_fork_name = match &head_v2_events_first_emission[0] {
+        let result_fork_name = match initial_events
+            .iter()
+            .find(|event| matches!(event, EventKind::HeadV2(_)))
+        {
             // head_v2 event should have a version field
-            EventKind::HeadV2(result) => result.version,
+            Some(EventKind::HeadV2(result)) => result.version,
             _ => panic!("Should have a version in response"),
         };
 
@@ -11003,6 +11103,8 @@ async fn get_blob_sidecars() {
         .test_get_blobs(false)
         .await
         .test_get_blobs(true)
+        .await
+        .test_get_blobs_follow_commitment_order()
         .await;
 }
 
@@ -11029,6 +11131,8 @@ async fn get_blobs_post_fulu_supernode() {
         .test_get_blobs(false)
         .await
         .test_get_blobs(true)
+        .await
+        .test_get_blobs_follow_commitment_order()
         .await;
 }
 
