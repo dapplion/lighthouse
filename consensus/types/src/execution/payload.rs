@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
-use ssz_types::VariableList;
+use ssz_types::{ProgressiveVariableList, VariableList};
 use std::{borrow::Cow, fmt::Debug, hash::Hash};
 use superstruct::superstruct;
 use tree_hash::TreeHash;
@@ -1113,13 +1113,19 @@ pub enum BlockProductionVersion {
 }
 
 /// Spec type `VersionedHashes`.
-pub type VersionedHashes<E> = VariableList<Hash256, <E as EthSpec>::MaxBlobCommitmentsPerBlock>;
+///
+/// [DEVIATION] The spec declares a plain `List`; zkboost and Prysm hash a progressive list, and
+/// `new_payload_request_root` must match theirs.
+pub type VersionedHashes<E> =
+    ProgressiveVariableList<Hash256, <E as EthSpec>::MaxBlobCommitmentsPerBlock>;
 
 /// Spec type `NewPayloadRequest`.
+///
+/// [DEVIATION] The spec declares a `ProgressiveContainer`; zkboost and Prysm hash a plain
+/// container, and `new_payload_request_root` must match theirs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode, TreeHash)]
 #[serde(bound = "E: EthSpec")]
 #[context_deserialize(ForkName)]
-#[tree_hash(struct_behaviour = "progressive_container", active_fields(1, 1, 1, 1))]
 pub struct NewPayloadRequest<E: EthSpec> {
     pub execution_payload: ExecutionPayloadGloas<E>,
     pub versioned_hashes: VersionedHashes<E>,
