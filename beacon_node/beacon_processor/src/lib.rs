@@ -617,9 +617,13 @@ impl<E: EthSpec> Work<E> {
     }
 }
 
-/// RPC rejection is a cheap sync notification, not another unit of limited work.
+/// Count ignored RPC block work and notify sync without queuing another task.
 fn notify_ignored_rpc_block<E: EthSpec>(work: Work<E>) {
     if let Work::RpcBlock { ignore_fn, .. } = work {
+        metrics::inc_counter_vec(
+            &metrics::BEACON_PROCESSOR_WORK_EVENTS_IGNORED_COUNT,
+            &["rpc_block"],
+        );
         ignore_fn();
     }
 }
@@ -903,7 +907,12 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         // required to verify some attestations.
                         } else if let Some(item) = work_queues.gossip_block_queue.pop(
                             |peer_id| is_connected(&self.network_globals, peer_id),
-                            drop, // drop the work if we failed to process it
+                            |work| {
+                                metrics::inc_counter_vec(
+                                    &metrics::BEACON_PROCESSOR_WORK_EVENTS_IGNORED_COUNT,
+                                    &[work.str_id()],
+                                );
+                            },
                         ) {
                             Some(item)
                         } else if let Some(item) = work_queues.gossip_execution_payload_queue.pop()
@@ -1221,11 +1230,23 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                         self.spawn_worker(work, created_timestamp, idle_tx);
                                     }
                                     Ok(None) => {}
-                                    Err(_) => {}
+                                    Err(_) => metrics::inc_counter_vec(
+                                        &metrics::BEACON_PROCESSOR_WORK_EVENTS_IGNORED_COUNT,
+                                        &[work_id],
+                                    ),
                                 }
                             }
                             Work::GossipBlock { peer_id, .. } => {
-                                let _ = work_queues.gossip_block_queue.push(peer_id, work, work_id);
+                                if work_queues
+                                    .gossip_block_queue
+                                    .push(peer_id, work, work_id)
+                                    .is_err()
+                                {
+                                    metrics::inc_counter_vec(
+                                        &metrics::BEACON_PROCESSOR_WORK_EVENTS_IGNORED_COUNT,
+                                        &[work_id],
+                                    );
+                                }
                             }
                             // If we can spawn and the task can be dispatched, dispatch immediately
                             Work::RpcBlock { peer_id, .. } if can_spawn => {
