@@ -129,9 +129,6 @@ where
             .finalized_epoch
             .start_slot(T::EthSpec::slots_per_epoch());
 
-        // NOTE: A peer that has been re-status'd may now exist in multiple finalized chains. This
-        // is OK since we since only one finalized chain at a time.
-
         // determine which kind of sync to perform and set up the chains
         match RangeSyncType::new(self.beacon_chain.as_ref(), &local_info, &remote_info) {
             RangeSyncType::Finalized => {
@@ -152,6 +149,24 @@ where
                 // finalized slot in order to finalize the chain locally.
                 let target_head_slot =
                     remote_finalized_slot + (2 * T::EthSpec::slots_per_epoch()) + 1;
+
+                // This status supersedes the peer's previous claims. Without this, one peer
+                // sending statuses with fabricated finalized roots creates chains without bound.
+                for (removed_chain, remove_reason) in
+                    self.chains.remove_peer_from_other_finalized_chains(
+                        &peer_id,
+                        target_head_slot,
+                        remote_info.finalized_root,
+                    )
+                {
+                    self.on_chain_removed(
+                        removed_chain,
+                        RangeSyncType::Finalized,
+                        remove_reason,
+                        network,
+                        "peer re-status'd",
+                    );
+                }
 
                 // Note: We keep current head chains. These can continue syncing whilst we complete
                 // this new finalized chain.

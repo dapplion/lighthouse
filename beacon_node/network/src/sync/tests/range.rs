@@ -42,6 +42,9 @@ use types::{DataColumnSubnetId, Epoch, EthSpec, ForkName, Hash256, MinimalEthSpe
 /// MinimalEthSpec has 8 slots per epoch
 const SLOTS_PER_EPOCH: usize = 8;
 
+/// Enough re-statuses that one chain per status would stand out from a bounded count.
+const STATUSES: usize = 64;
+
 impl TestRig {
     fn add_head_peer(&mut self) -> PeerId {
         let local_info = self.local_info();
@@ -101,6 +104,10 @@ impl TestRig {
         }
     }
 
+    fn status_peer(&mut self, peer: PeerId, remote_info: SyncInfo) {
+        self.send_sync_message(SyncMessage::AddPeer(peer, remote_info));
+    }
+
     fn assert_state(&self, state: RangeSyncType) {
         assert_eq!(
             self.sync_manager
@@ -117,6 +124,15 @@ impl TestRig {
         if let Some(chain) = self.sync_manager.get_range_sync_chains().unwrap() {
             panic!("There still exists a chain {chain:?}");
         }
+    }
+
+    fn assert_range_sync_chains(&self, added: usize, removed: usize) {
+        let metrics = self.sync_manager.range_sync().metrics();
+        assert_eq!(
+            (metrics.chains_added, metrics.chains_removed),
+            (added, removed),
+            "not expected (added, removed) range sync chain counts"
+        );
     }
 
     fn assert_no_failed_chains(&mut self) {
@@ -850,4 +866,29 @@ async fn custody_backfill_selects_peers_by_request_columns_not_sampling() {
         return;
     }
     r.assert_custody_backfill_selects_peers_by_request_columns_not_sampling();
+}
+
+/// A peer re-sending `Status` with a fresh finalized root each time holds two finalized chains:
+/// the one being synced and its latest claim.
+#[tokio::test]
+async fn re_statusing_peer_does_not_create_finalized_chains_without_bound() {
+    let mut r = TestRig::default();
+    let peer = r.new_connected_peer();
+    for _ in 0..STATUSES {
+        let remote_info = r.finalized_remote_info_advanced_by(Epoch::new(2));
+        r.status_peer(peer, remote_info);
+    }
+    r.assert_range_sync_chains(STATUSES, STATUSES - 2);
+}
+
+/// A peer re-sending the same `Status` stays in the chain it already belongs to.
+#[tokio::test]
+async fn re_statusing_peer_with_an_unchanged_status_keeps_its_chain() {
+    let mut r = TestRig::default();
+    let peer = r.new_connected_peer();
+    let remote_info = r.finalized_remote_info_advanced_by(Epoch::new(2));
+    for _ in 0..STATUSES {
+        r.status_peer(peer, remote_info.clone());
+    }
+    r.assert_range_sync_chains(1, 0);
 }

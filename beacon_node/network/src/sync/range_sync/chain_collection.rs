@@ -170,6 +170,37 @@ impl<T: BeaconChainTypes> ChainCollection<T> {
         results
     }
 
+    /// Removes `peer` from the finalized chains that are neither syncing nor the given target,
+    /// returning the chains left without peers.
+    ///
+    /// The syncing chain keeps the peer so that a re-status does not tear down a sync in progress;
+    /// the peer migrates to its new chain when that one completes.
+    pub fn remove_peer_from_other_finalized_chains(
+        &mut self,
+        peer: &PeerId,
+        target_head_slot: Slot,
+        target_head_root: Hash256,
+    ) -> Vec<(SyncingChain<T>, RemoveChain)> {
+        let mut to_remove = Vec::new();
+
+        for (id, chain) in self.finalized_chains.iter_mut() {
+            if chain.is_syncing() || chain.has_same_target(target_head_slot, target_head_root) {
+                continue;
+            }
+            if let Err(remove_reason) = chain.remove_peer(peer) {
+                to_remove.push((*id, remove_reason));
+            }
+        }
+
+        let mut results = Vec::with_capacity(to_remove.len());
+        for (id, reason) in to_remove.into_iter() {
+            let chain = self.finalized_chains.remove(&id).expect("Chain exists");
+            self.on_chain_removed(&id, chain.is_syncing(), RangeSyncType::Finalized);
+            results.push((chain, reason));
+        }
+        results
+    }
+
     /// Executes a function on the chain with the given id.
     ///
     /// If the function returns `ProcessingResult::RemoveChain`, the chain is removed and returned.
