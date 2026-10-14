@@ -78,12 +78,13 @@ pub fn validate_full_data_columns<'a, E: EthSpec>(
         }
 
         // In Gloas, commitments come from the block's ExecutionPayloadBid, not the sidecar.
-        // This function requires Fulu sidecars with embedded commitments.
+        // This function requires Fulu sidecars with embedded commitments, so calling it on a Gloas
+        // column is our own error and must not be attributed to the peer that served it.
         let kzg_commitments = match data_column.as_ref() {
             DataColumnSidecar::Fulu(dc) => &dc.kzg_commitments,
             DataColumnSidecar::Gloas(_) => {
                 return Err((
-                    Some(col_index),
+                    None,
                     KzgError::InconsistentArrayLength(
                         "Gloas data columns require commitments from block".to_string(),
                     ),
@@ -1055,6 +1056,11 @@ mod test {
         let result =
             validate_data_columns_with_commitments(kzg, column_sidecars.iter(), &bad_commitments);
         assert!(result.is_err());
+
+        // Gloas columns carry no commitments, so the failure is ours and names no column.
+        let (faulty_column, _) = validate_full_data_columns(kzg, column_sidecars.iter())
+            .expect_err("gloas columns cannot be verified without commitments");
+        assert_eq!(faulty_column, None);
     }
 
     #[track_caller]

@@ -17,7 +17,7 @@ use crate::status::ToStatusMessage;
 use crate::sync::batch::ByRangeRequestType;
 use crate::sync::block_lookups::{DownloadResult, SingleLookupId};
 use crate::sync::block_sidecar_coupling::CouplingError;
-use crate::sync::range_data_column_batch_request::RangeDataColumnBatchRequest;
+use crate::sync::range_data_column_batch_request::{ColumnPeers, RangeDataColumnBatchRequest};
 use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::block_verification_types::{AsBlock, RangeSyncBlock};
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
@@ -94,6 +94,10 @@ pub type RpcResponseResult<T> = Result<T, RpcResponseError>;
 
 pub type CustodyByRootResult<T> =
     Result<DownloadResult<DataColumnSidecarList<T>>, RpcResponseError>;
+
+/// The data columns of a custody backfill batch, with the peer that served each one.
+pub type CustodyBackfillBatchResult<T> =
+    Result<(DataColumnSidecarList<T>, ColumnPeers), RpcResponseError>;
 
 /// Per-peer count of active requests for a single protocol, to keep peer selection within
 /// `MAX_CONCURRENT_REQUESTS` concurrent requests per protocol ID.
@@ -1660,7 +1664,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         // matching again.
         req_id: DataColumnsByRangeRequestId,
         data_columns: RpcResponseResult<DataColumnSidecarList<T::EthSpec>>,
-    ) -> Option<Result<DataColumnSidecarList<T::EthSpec>, RpcResponseError>> {
+    ) -> Option<CustodyBackfillBatchResult<T::EthSpec>> {
         // Remove first so a failed request is not left in the map.
         let Some(mut request) = self
             .custody_backfill_data_column_batch_requests
@@ -1683,10 +1687,13 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             return Some(Err(e));
         }
 
+        let column_peers = request.column_to_peer_id();
         match request.responses() {
-            Some(data_column_result) => {
-                Some(data_column_result.map_err(RpcResponseError::BlockComponentCouplingError))
-            }
+            Some(data_column_result) => Some(
+                data_column_result
+                    .map(|data_columns| (data_columns, column_peers))
+                    .map_err(RpcResponseError::BlockComponentCouplingError),
+            ),
             None => {
                 self.custody_backfill_data_column_batch_requests
                     .insert(custody_sync_request_id, request);

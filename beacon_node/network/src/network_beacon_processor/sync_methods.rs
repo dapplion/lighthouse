@@ -393,10 +393,29 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 metrics::inc_counter(
                     &metrics::BEACON_PROCESSOR_CUSTODY_BACKFILL_BATCH_FAILED_TOTAL,
                 );
+                // The columns to penalize the serving peers for.
+                let faulty_columns = match &e {
+                    HistoricalDataColumnError::NoBlockFound { column_index, .. } => {
+                        vec![*column_index]
+                    }
+                    HistoricalDataColumnError::InvalidKzg { faulty_column } => {
+                        faulty_column.iter().copied().collect()
+                    }
+                    HistoricalDataColumnError::MissingDataColumns {
+                        missing_slots_and_data_columns,
+                    } => missing_slots_and_data_columns
+                        .iter()
+                        .map(|(_, column_index)| *column_index)
+                        .collect(),
+                    HistoricalDataColumnError::IndexOutOfBounds
+                    | HistoricalDataColumnError::StoreError(_)
+                    | HistoricalDataColumnError::BeaconChainError(_) => vec![],
+                };
                 let peer_action: Option<PeerAction> = match &e {
                     HistoricalDataColumnError::NoBlockFound {
                         data_column_block_root,
                         expected_block_root,
+                        ..
                     } => {
                         debug!(
                             error = "no_block_found",
@@ -416,7 +435,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         // that they advertised as available.
                         Some(PeerAction::LowToleranceError)
                     }
-                    HistoricalDataColumnError::InvalidKzg => {
+                    HistoricalDataColumnError::InvalidKzg { .. } => {
                         warn!(
                             error = ?e,
                             "Custody backfill batch processing error",
@@ -453,7 +472,10 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         None
                     }
                 };
-                CustodyBatchProcessResult::Error { peer_action }
+                CustodyBatchProcessResult::Error {
+                    peer_action,
+                    faulty_columns,
+                }
             }
         };
         self.send_sync_message(SyncMessage::CustodyBatchProcessed { result, batch_id });

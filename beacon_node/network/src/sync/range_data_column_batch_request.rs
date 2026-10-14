@@ -8,6 +8,9 @@ use lighthouse_network::service::api_types::DataColumnsByRangeRequestId;
 use std::sync::Arc;
 use types::{ColumnIndex, DataColumnSidecar, DataColumnSidecarList, Epoch, EthSpec, Slot};
 
+/// The peer that served each column of a batch.
+pub type ColumnPeers = HashMap<ColumnIndex, PeerId>;
+
 pub struct RangeDataColumnBatchRequest<T: BeaconChainTypes> {
     requests: HashMap<
         DataColumnsByRangeRequestId,
@@ -62,12 +65,21 @@ impl<T: BeaconChainTypes> RangeDataColumnBatchRequest<T> {
         req.finish(req_id, columns)
     }
 
+    /// Note: this assumes that only 1 peer is responsible for a column
+    /// with a batch.
+    pub fn column_to_peer_id(&self) -> ColumnPeers {
+        self.column_peers
+            .iter()
+            .flat_map(|(id, columns)| columns.iter().map(move |column| (*column, id.peer)))
+            .collect()
+    }
+
     pub fn responses(
         &mut self,
     ) -> Option<Result<DataColumnSidecarList<T::EthSpec>, CouplingError>> {
         let mut received_columns_for_slot: HashMap<Slot, DataColumnSidecarList<T::EthSpec>> =
             HashMap::new();
-        let mut column_to_peer_id: HashMap<u64, PeerId> = HashMap::new();
+        let column_to_peer_id = self.column_to_peer_id();
 
         for req in self.requests.values() {
             let Some(columns) = req.to_finished() else {
@@ -79,14 +91,6 @@ impl<T: BeaconChainTypes> RangeDataColumnBatchRequest<T> {
                     .entry(column.slot())
                     .or_default()
                     .push(column.clone());
-            }
-        }
-
-        // Note: this assumes that only 1 peer is responsible for a column
-        // with a batch.
-        for (id, columns) in self.column_peers.iter() {
-            for column in columns {
-                column_to_peer_id.insert(*column, id.peer);
             }
         }
 

@@ -14,6 +14,7 @@ pub enum HistoricalDataColumnError {
     NoBlockFound {
         data_column_block_root: Hash256,
         expected_block_root: Hash256,
+        column_index: ColumnIndex,
     },
 
     /// Logic error: should never occur.
@@ -25,7 +26,7 @@ pub enum HistoricalDataColumnError {
     },
 
     /// The provided data column sidecar list contains at least one column with an invalid kzg commitment.
-    InvalidKzg,
+    InvalidKzg { faulty_column: Option<ColumnIndex> },
 
     /// Internal store error
     StoreError(StoreError),
@@ -111,6 +112,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         return Err(HistoricalDataColumnError::NoBlockFound {
                             data_column_block_root: data_column.block_root(),
                             expected_block_root: block_root,
+                            column_index,
                         });
                     }
                     self.store.data_column_as_kv_store_ops(
@@ -133,7 +135,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             }
         } else {
             verify_kzg_for_data_column_list(historical_data_column_sidecar_list.iter(), &self.kzg)
-                .map_err(|_| HistoricalDataColumnError::InvalidKzg)?;
+                .map_err(|(faulty_column, _)| HistoricalDataColumnError::InvalidKzg {
+                    faulty_column,
+                })?;
 
             self.store.blobs_db.do_atomically(ops)?;
         }

@@ -25,7 +25,8 @@ use crate::sync::{
     },
     block_sidecar_coupling::CouplingError,
     manager::CustodyBatchProcessResult,
-    network_context::{RpcResponseError, SyncNetworkContext},
+    network_context::{CustodyBackfillBatchResult, RpcResponseError, SyncNetworkContext},
+    range_data_column_batch_request::ColumnPeers,
 };
 
 /// The maximum number of batches to queue before requesting more.
@@ -105,6 +106,9 @@ pub struct CustodyBackFillSync<T: BeaconChainTypes> {
     /// Sorted map of batches undergoing some kind of processing.
     batches: CustodyBackFillBatches<T::EthSpec>,
 
+    /// The peer each column of a downloaded batch was served by.
+    column_peers: BTreeMap<BatchId, ColumnPeers>,
+
     /// The current processing batch, if any.
     current_processing_batch: Option<BatchId>,
 
@@ -139,6 +143,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
             to_be_downloaded: Epoch::new(0),
             last_batch_downloaded: false,
             batches: BTreeMap::new(),
+            column_peers: BTreeMap::new(),
             skipped_batches: HashSet::new(),
             current_processing_batch: None,
             validated_batches: 0,
@@ -529,7 +534,10 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                     epoch: batch_id,
                     run_id: self.run_id,
                 },
-                &CustodyBatchProcessResult::Error { peer_action: None },
+                &CustodyBatchProcessResult::Error {
+                    peer_action: None,
+                    faulty_columns: vec![],
+                },
             )
         } else {
             Ok(ProcessResult::Successful)
@@ -547,7 +555,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
         network: &mut SyncNetworkContext<T>,
         req_id: CustodyBackFillBatchRequestId,
         peer_id: &PeerId,
-        resp: Result<DataColumnSidecarList<T::EthSpec>, RpcResponseError>,
+        resp: CustodyBackfillBatchResult<T::EthSpec>,
     ) -> Result<ProcessResult, CustodyBackfillError> {
         if req_id.batch_id.run_id != self.run_id {
             debug!(%req_id, "Ignoring custody backfill download response from different run_id");
@@ -573,11 +581,16 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
         }
 
         match resp {
-            Ok(data_columns) => {
+            Ok((data_columns, column_peers)) => {
                 let received = data_columns.len();
 
                 match batch.download_completed(data_columns, *peer_id) {
                     Ok(_) => {
+                        self.column_peers.insert(batch_id, column_peers);
+                        // Batches are removed on many paths, so prune to the live ones rather than
+                        // mirroring every removal.
+                        self.column_peers
+                            .retain(|epoch, _| self.batches.contains_key(epoch));
                         let awaiting_batches = self.processing_target.saturating_sub(batch_id)
                             / CUSTODY_BACKFILL_EPOCHS_PER_BATCH;
                         debug!(
@@ -767,10 +780,32 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                     self.process_completed_batches(network)
                 }
             }
-            CustodyBatchProcessResult::Error { peer_action } => {
+            CustodyBatchProcessResult::Error {
+                peer_action,
+                faulty_columns,
+            } => {
                 match peer_action {
                     // Faulty failure
                     Some(peer_action) => {
+                        // Penalize only the peers that served the columns the import failed on.
+                        let faulty_peers = self
+                            .column_peers
+                            .get(&batch_id)
+                            .into_iter()
+                            .flat_map(|column_peers| {
+                                faulty_columns
+                                    .iter()
+                                    .filter_map(|column| column_peers.get(column).copied())
+                            })
+                            .collect::<HashSet<_>>();
+                        for faulty_peer in faulty_peers {
+                            network.report_peer(
+                                faulty_peer,
+                                *peer_action,
+                                "custody_backfill_faulty_column",
+                            );
+                        }
+
                         match batch.processing_completed(BatchProcessingResult::FaultyFailure) {
                             Err(e) => {
                                 // Batch was in the wrong state
@@ -1140,6 +1175,32 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
     /// Updates the global network state indicating the current state of a backfill sync.
     pub fn set_state(&self, state: CustodyBackFillState) {
         *self.network_globals.custody_sync_state.write() = state;
+    }
+
+    /// Puts a batch for `epoch` in the `Downloading` state and marks custody backfill as syncing.
+    #[cfg(test)]
+    pub(crate) fn set_test_batch_downloading(
+        &mut self,
+        epoch: Epoch,
+        request_id: u32,
+        columns: HashSet<types::ColumnIndex>,
+    ) -> CustodyBackfillBatchId {
+        self.set_state(CustodyBackFillState::Syncing);
+        self.set_cgc();
+        self.processing_target = epoch;
+        self.to_be_downloaded = epoch;
+        self.last_batch_downloaded = true;
+        let mut batch = BatchInfo::new(
+            &epoch,
+            CUSTODY_BACKFILL_EPOCHS_PER_BATCH,
+            ByRangeRequestType::Columns(columns),
+        );
+        batch.start_downloading(request_id).unwrap();
+        self.batches.insert(epoch, batch);
+        CustodyBackfillBatchId {
+            epoch,
+            run_id: self.run_id,
+        }
     }
 
     pub fn register_metrics(&self) {
