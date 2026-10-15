@@ -1007,6 +1007,13 @@ async fn status_finalized_checkpoint_relevance() {
     let mut ahead = conflicting.clone();
     ahead.finalized_epoch += 1;
 
+    // Allow the ahead checkpoint to have finalized without advancing our local finality.
+    rig.chain.slot_clock.set_slot(
+        (ahead.finalized_epoch + 2)
+            .start_slot(E::slots_per_epoch())
+            .as_u64(),
+    );
+
     let mut wrong_fork = local.clone();
     wrong_fork.fork_digest[0] ^= 1;
 
