@@ -17,7 +17,7 @@ use crate::status::ToStatusMessage;
 use crate::sync::batch::ByRangeRequestType;
 use crate::sync::block_lookups::{DownloadResult, SingleLookupId};
 use crate::sync::block_sidecar_coupling::CouplingError;
-use crate::sync::range_data_column_batch_request::{ColumnPeers, RangeDataColumnBatchRequest};
+use crate::sync::range_data_column_batch_request::RangeDataColumnBatchRequest;
 use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::block_verification_types::{AsBlock, RangeSyncBlock};
 use beacon_chain::{BeaconChain, BeaconChainTypes, BlockProcessStatus, EngineState};
@@ -95,9 +95,9 @@ pub type RpcResponseResult<T> = Result<T, RpcResponseError>;
 pub type CustodyByRootResult<T> =
     Result<DownloadResult<DataColumnSidecarList<T>>, RpcResponseError>;
 
-/// The data columns of a custody backfill batch, with the peer that served each one.
+/// The data columns of a custody backfill batch, with the peers that served them.
 pub type CustodyBackfillBatchResult<T> =
-    Result<(DataColumnSidecarList<T>, ColumnPeers), RpcResponseError>;
+    Result<(DataColumnSidecarList<T>, PeerGroup), RpcResponseError>;
 
 /// Per-peer count of active requests for a single protocol, to keep peer selection within
 /// `MAX_CONCURRENT_REQUESTS` concurrent requests per protocol ID.
@@ -1687,11 +1687,11 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             return Some(Err(e));
         }
 
-        let column_peers = request.column_to_peer_id();
+        let column_peer_group = request.column_peer_group();
         match request.responses() {
             Some(data_column_result) => Some(
                 data_column_result
-                    .map(|data_columns| (data_columns, column_peers))
+                    .map(|data_columns| (data_columns, column_peer_group))
                     .map_err(RpcResponseError::BlockComponentCouplingError),
             ),
             None => {

@@ -40,6 +40,7 @@ use super::network_context::{
 };
 use super::peer_sync_info::{PeerSyncType, remote_sync_type};
 use super::range_sync::{EPOCHS_PER_BATCH, RangeSync, RangeSyncType};
+use crate::network_beacon_processor::sync_methods::WhichPeerToPenalize;
 use crate::network_beacon_processor::{
     BlockProcessingResult, ChainSegmentProcessId, NetworkBeaconProcessor,
 };
@@ -72,7 +73,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace};
 use types::{
-    BlobSidecar, ColumnIndex, DataColumnSidecar, EthSpec, ExecutionBlockHash, ForkContext, Hash256,
+    BlobSidecar, DataColumnSidecar, EthSpec, ExecutionBlockHash, ForkContext, Hash256,
     SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot,
 };
 
@@ -232,7 +233,7 @@ pub enum CustodyBatchProcessResult {
     /// The custody batch processing failed.
     Error {
         peer_action: Option<PeerAction>,
-        faulty_columns: Vec<ColumnIndex>,
+        to_penalize: Vec<WhichPeerToPenalize>,
     },
 }
 
@@ -376,7 +377,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         &mut self,
         epoch: types::Epoch,
         request_id: u32,
-        columns: std::collections::HashSet<ColumnIndex>,
+        columns: std::collections::HashSet<types::ColumnIndex>,
     ) -> CustodyBackfillBatchId {
         self.custody_backfill_sync
             .set_test_batch_downloading(epoch, request_id, columns)
