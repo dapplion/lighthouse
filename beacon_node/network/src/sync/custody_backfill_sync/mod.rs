@@ -535,10 +535,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                     epoch: batch_id,
                     run_id: self.run_id,
                 },
-                &CustodyBatchProcessResult::Error {
-                    peer_action: None,
-                    to_penalize: vec![],
-                },
+                &CustodyBatchProcessResult::Error { peer_action: None },
             )
         } else {
             Ok(ProcessResult::Successful)
@@ -781,13 +778,10 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
                     self.process_completed_batches(network)
                 }
             }
-            CustodyBatchProcessResult::Error {
-                peer_action,
-                to_penalize,
-            } => {
+            CustodyBatchProcessResult::Error { peer_action } => {
                 match peer_action {
                     // Faulty failure
-                    Some(peer_action) => {
+                    Some((peer_action, to_penalize)) => {
                         if let Some(peer_group) = self.peer_groups.get(&batch_id) {
                             for which_peer in to_penalize {
                                 which_peer.apply(

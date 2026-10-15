@@ -393,7 +393,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 metrics::inc_counter(
                     &metrics::BEACON_PROCESSOR_CUSTODY_BACKFILL_BATCH_FAILED_TOTAL,
                 );
-                let (peer_action, to_penalize) = match &e {
+                let peer_action = match &e {
                     HistoricalDataColumnError::NoBlockFound {
                         data_column_block_root,
                         expected_block_root,
@@ -406,10 +406,10 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             "Custody backfill batch processing error"
                         );
                         // The peer is faulty if they send blocks with bad roots.
-                        (
-                            Some(PeerAction::LowToleranceError),
+                        Some((
+                            PeerAction::LowToleranceError,
                             vec![WhichPeerToPenalize::CustodyPeerForColumn(*column_index)],
-                        )
+                        ))
                     }
                     HistoricalDataColumnError::MissingDataColumns {
                         missing_slots_and_data_columns,
@@ -420,15 +420,15 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         );
                         // The peer is faulty if they don't return data columns
                         // that they advertised as available.
-                        (
-                            Some(PeerAction::LowToleranceError),
+                        Some((
+                            PeerAction::LowToleranceError,
                             missing_slots_and_data_columns
                                 .iter()
                                 .map(|(_, column_index)| {
                                     WhichPeerToPenalize::CustodyPeerForColumn(*column_index)
                                 })
                                 .collect(),
-                        )
+                        ))
                     }
                     HistoricalDataColumnError::InvalidKzg { faulty_column } => {
                         warn!(
@@ -437,15 +437,15 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         );
                         // The peer is faulty if they don't return data columns
                         // with valid kzg commitments.
-                        (
-                            Some(PeerAction::LowToleranceError),
+                        Some((
+                            PeerAction::LowToleranceError,
                             faulty_column
                                 .iter()
                                 .map(|column_index| {
                                     WhichPeerToPenalize::CustodyPeerForColumn(*column_index)
                                 })
                                 .collect(),
-                        )
+                        ))
                     }
                     HistoricalDataColumnError::BeaconChainError(e) => {
                         match &**e {
@@ -459,7 +459,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                         }
 
                         // This is an interal error, don't penalize the peer
-                        (None, vec![])
+                        None
                     }
                     HistoricalDataColumnError::IndexOutOfBounds => {
                         error!(
@@ -467,18 +467,15 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             "Custody backfill batch out of bounds error"
                         );
                         // This should never occur, don't penalize the peer.
-                        (None, vec![])
+                        None
                     }
                     HistoricalDataColumnError::StoreError(e) => {
                         warn!(error = ?e, "Custody backfill batch processing error");
                         // This is an internal error, don't penalize the peer.
-                        (None, vec![])
+                        None
                     }
                 };
-                CustodyBatchProcessResult::Error {
-                    peer_action,
-                    to_penalize,
-                }
+                CustodyBatchProcessResult::Error { peer_action }
             }
         };
         self.send_sync_message(SyncMessage::CustodyBatchProcessed { result, batch_id });

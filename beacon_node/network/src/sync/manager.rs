@@ -232,8 +232,7 @@ pub enum CustodyBatchProcessResult {
     },
     /// The custody batch processing failed.
     Error {
-        peer_action: Option<PeerAction>,
-        to_penalize: Vec<WhichPeerToPenalize>,
+        peer_action: Option<(PeerAction, Vec<WhichPeerToPenalize>)>,
     },
 }
 
