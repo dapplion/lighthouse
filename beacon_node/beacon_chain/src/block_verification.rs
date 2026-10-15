@@ -800,7 +800,7 @@ impl<T: BeaconChainTypes> IntoGossipVerifiedBlock<T> for Arc<SignedBeaconBlock<T
         self,
         chain: &BeaconChain<T>,
     ) -> Result<GossipVerifiedBlock<T>, BlockError> {
-        GossipVerifiedBlock::new(self, chain)
+        GossipVerifiedBlock::new(self, chain).map_err(BlockErrorWithRoot::into_block_error)
     }
 
     fn inner_block(&self) -> Arc<SignedBeaconBlock<T::EthSpec>> {
@@ -876,13 +876,6 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
     /// Returns an error if the block is invalid, or if the block was unable to be verified.
     #[instrument(name = "verify_gossip_block", skip_all, fields(block_root = tracing::field::Empty))]
     pub fn new(
-        block: Arc<SignedBeaconBlock<T::EthSpec>>,
-        chain: &BeaconChain<T>,
-    ) -> Result<Self, BlockError> {
-        Self::new_with_error_root(block, chain).map_err(|error| *error.error)
-    }
-
-    pub(crate) fn new_with_error_root(
         block: Arc<SignedBeaconBlock<T::EthSpec>>,
         chain: &BeaconChain<T>,
     ) -> Result<Self, BlockErrorWithRoot> {
