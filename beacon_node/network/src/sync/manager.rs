@@ -373,33 +373,6 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_test_custody_backfill_batch_downloading(
-        &mut self,
-        epoch: types::Epoch,
-        request_id: u32,
-        columns: std::collections::HashSet<types::ColumnIndex>,
-    ) -> CustodyBackfillBatchId {
-        self.custody_backfill_sync
-            .set_test_batch_downloading(epoch, request_id, columns)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_custody_backfill_columns_response(
-        &mut self,
-        custody_sync_request_id: CustodyBackFillBatchRequestId,
-        req_id: DataColumnsByRangeRequestId,
-        peer_id: PeerId,
-        data_columns: Vec<Arc<DataColumnSidecar<T::EthSpec>>>,
-    ) {
-        self.on_custody_backfill_columns_response(
-            custody_sync_request_id,
-            req_id,
-            peer_id,
-            Ok(data_columns),
-        );
-    }
-
-    #[cfg(test)]
     pub(crate) fn get_ignored_chains(&mut self) -> Vec<Hash256> {
         self.block_lookups.get_ignored_chains()
     }

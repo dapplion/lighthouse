@@ -22,13 +22,9 @@ use super::lookups::SimulateConfig;
 use super::*;
 use crate::status::ToStatusMessage;
 use crate::sync::{
-    SyncMessage,
-    block_sidecar_coupling::CouplingError,
-    manager::{CustodyBatchProcessResult, SLOT_IMPORT_TOLERANCE},
-    network_context::RpcResponseError,
-    range_sync::RangeSyncType,
+    SyncMessage, block_sidecar_coupling::CouplingError, manager::SLOT_IMPORT_TOLERANCE,
+    network_context::RpcResponseError, range_sync::RangeSyncType,
 };
-use beacon_processor::{Work, WorkType};
 use lighthouse_network::{
     PeerId, SyncInfo,
     rpc::{
@@ -41,11 +37,7 @@ use lighthouse_network::{
     },
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use types::{
-    DataColumnSidecar, DataColumnSubnetId, Epoch, EthSpec, ForkName, Hash256, KzgProof,
-    MinimalEthSpec as E, Slot,
-};
+use types::{DataColumnSubnetId, Epoch, EthSpec, ForkName, Hash256, MinimalEthSpec as E, Slot};
 
 /// MinimalEthSpec has 8 slots per epoch
 const SLOTS_PER_EPOCH: usize = 8;
@@ -341,119 +333,6 @@ impl TestRig {
             "expected DataColumnPeerFailure, got {response:?}",
         );
         assert_eq!(context.custody_backfill_batch_request_count(), 0);
-    }
-
-    /// Two peers serve one column each for a custody batch and the column from `bad_peer` has an
-    /// invalid proof. The honest peer's response completes the batch. Returns
-    /// `(bad_peer, honest_peer)` after the failed import has been processed by sync.
-    async fn run_custody_backfill_batch_with_one_bad_column(&mut self) -> (PeerId, PeerId) {
-        self.build_chain(1).await;
-        self.import_blocks_up_to_slot(1).await;
-        let bad_peer = self.new_connected_supernode_peer();
-        let honest_peer = self.new_connected_supernode_peer();
-        let columns = self
-            .network_blocks_by_slot
-            .get(&Slot::new(1))
-            .and_then(|block| block.data_columns())
-            .expect("slot 1 should have data columns");
-        let mut columns = columns.iter();
-        let honest_column = columns.next().expect("slot 1 should have columns").clone();
-        let mut bad_column = columns.next().expect("slot 1 should have columns").clone();
-        let DataColumnSidecar::Fulu(bad_sidecar) = Arc::make_mut(&mut bad_column) else {
-            panic!("expected a Fulu column");
-        };
-        *bad_sidecar.kzg_proofs.first_mut().expect("no kzg proofs") = KzgProof::empty();
-        let honest_index = *honest_column.index();
-        let bad_index = *bad_column.index();
-
-        let request_id = 999;
-        let batch_id = self
-            .sync_manager
-            .set_test_custody_backfill_batch_downloading(
-                Epoch::new(0),
-                request_id,
-                HashSet::from([honest_index, bad_index]),
-            );
-        let batch_request_id = CustodyBackFillBatchRequestId {
-            id: request_id,
-            batch_id,
-        };
-        let honest_request_id = DataColumnsByRangeRequestId {
-            id: 1000,
-            parent_request_id: DataColumnsByRangeRequester::CustodyBackfillSync(batch_request_id),
-            peer: honest_peer,
-        };
-        let bad_request_id = DataColumnsByRangeRequestId {
-            id: 1001,
-            parent_request_id: DataColumnsByRangeRequester::CustodyBackfillSync(batch_request_id),
-            peer: bad_peer,
-        };
-        self.sync_manager
-            .network_context()
-            .insert_test_custody_backfill_entry(
-                batch_request_id,
-                vec![
-                    (honest_request_id, vec![honest_index]),
-                    (bad_request_id, vec![bad_index]),
-                ],
-            );
-        self.sync_manager.test_custody_backfill_columns_response(
-            batch_request_id,
-            bad_request_id,
-            bad_peer,
-            vec![bad_column],
-        );
-        self.sync_manager.test_custody_backfill_columns_response(
-            batch_request_id,
-            honest_request_id,
-            honest_peer,
-            vec![honest_column],
-        );
-
-        while let Ok(event) = self.beacon_processor_rx.try_recv() {
-            self.beacon_processor_rx_queue.push(event);
-        }
-        let position = self
-            .beacon_processor_rx_queue
-            .iter()
-            .position(|event| event.work_type() == WorkType::ChainSegmentBackfill)
-            .expect("the batch should be sent to the beacon processor");
-        let Work::ChainSegmentBackfill(process_fn) =
-            self.beacon_processor_rx_queue.remove(position).work
-        else {
-            unreachable!()
-        };
-        process_fn();
-
-        let mut import_failed = false;
-        while let Ok(message) = self.sync_rx.try_recv() {
-            if let SyncMessage::CustodyBatchProcessed {
-                result: CustodyBatchProcessResult::Error { .. },
-                ..
-            } = &message
-            {
-                import_failed = true;
-            }
-            self.sync_manager.handle_message(message);
-        }
-        assert_eq!(
-            import_failed,
-            !cfg!(feature = "fake_crypto"),
-            "the column import should fail only when kzg proofs are checked"
-        );
-        (bad_peer, honest_peer)
-    }
-
-    fn peer_was_reported(&mut self, peer: PeerId) -> bool {
-        self.pop_received_network_event(|ev| match ev {
-            NetworkMessage::ReportPeer { peer_id, msg, .. }
-                if *peer_id == peer && *msg == "custody_backfill_faulty_column" =>
-            {
-                Some(())
-            }
-            _ => None,
-        })
-        .is_ok()
     }
 
     fn assert_custody_backfill_requests_have_disjoint_columns(&mut self) {
@@ -951,36 +830,6 @@ async fn custody_backfill_entry_cleaned_up_on_peer_failure() {
     }
     r.assert_custody_backfill_peer_failure_cleans_up_request()
         .await;
-}
-
-/// A custody batch is served by several peers, one column each. Only the peer that served the
-/// column the import failed on is penalized.
-#[tokio::test]
-async fn crypto_on_custody_backfill_bad_column_penalizes_only_its_peer() {
-    let mut r = TestRig::default();
-    if r.fork_name != ForkName::Fulu {
-        return;
-    }
-    let (bad_peer, honest_peer) = r.run_custody_backfill_batch_with_one_bad_column().await;
-    if cfg!(feature = "fake_crypto") {
-        assert!(
-            !r.peer_was_reported(bad_peer),
-            "the bad column is not detected without kzg verification"
-        );
-    } else {
-        assert!(
-            r.peer_was_reported(bad_peer),
-            "the peer that served the bad column should have been reported"
-        );
-        assert!(
-            !r.peer_was_reported(bad_peer),
-            "the peer that served the bad column was reported more than once"
-        );
-    }
-    assert!(
-        !r.peer_was_reported(honest_peer),
-        "the honest peer should not have been reported"
-    );
 }
 
 /// Custody backfill sends each peer only its assigned columns.

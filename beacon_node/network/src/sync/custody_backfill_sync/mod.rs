@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet, btree_map::Entry},
+    collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
     marker::PhantomData,
     sync::Arc,
 };
@@ -108,7 +108,7 @@ pub struct CustodyBackFillSync<T: BeaconChainTypes> {
     batches: CustodyBackFillBatches<T::EthSpec>,
 
     /// The peers that served each downloaded batch, grouped by the columns each of them served.
-    peer_groups: BTreeMap<BatchId, PeerGroup>,
+    peer_groups: HashMap<BatchId, PeerGroup>,
 
     /// The current processing batch, if any.
     current_processing_batch: Option<BatchId>,
@@ -144,7 +144,7 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
             to_be_downloaded: Epoch::new(0),
             last_batch_downloaded: false,
             batches: BTreeMap::new(),
-            peer_groups: BTreeMap::new(),
+            peer_groups: HashMap::new(),
             skipped_batches: HashSet::new(),
             current_processing_batch: None,
             validated_batches: 0,
@@ -1168,32 +1168,6 @@ impl<T: BeaconChainTypes> CustodyBackFillSync<T> {
     /// Updates the global network state indicating the current state of a backfill sync.
     pub fn set_state(&self, state: CustodyBackFillState) {
         *self.network_globals.custody_sync_state.write() = state;
-    }
-
-    /// Puts a batch for `epoch` in the `Downloading` state and marks custody backfill as syncing.
-    #[cfg(test)]
-    pub(crate) fn set_test_batch_downloading(
-        &mut self,
-        epoch: Epoch,
-        request_id: u32,
-        columns: HashSet<types::ColumnIndex>,
-    ) -> CustodyBackfillBatchId {
-        self.set_state(CustodyBackFillState::Syncing);
-        self.set_cgc();
-        self.processing_target = epoch;
-        self.to_be_downloaded = epoch;
-        self.last_batch_downloaded = true;
-        let mut batch = BatchInfo::new(
-            &epoch,
-            CUSTODY_BACKFILL_EPOCHS_PER_BATCH,
-            ByRangeRequestType::Columns(columns),
-        );
-        batch.start_downloading(request_id).unwrap();
-        self.batches.insert(epoch, batch);
-        CustodyBackfillBatchId {
-            epoch,
-            run_id: self.run_id,
-        }
     }
 
     pub fn register_metrics(&self) {
