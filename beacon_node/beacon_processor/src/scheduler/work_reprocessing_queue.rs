@@ -150,6 +150,30 @@ pub enum ReprocessQueueMessage {
     DelayColumnReconstruction(QueuedColumnReconstruction),
 }
 
+impl ReprocessQueueMessage {
+    /// Notify the originator that this message will never be processed.
+    pub fn notify_dropped(self) {
+        match self {
+            Self::RpcBlock(block) => (block.ignore_fn)(),
+            Self::EarlyBlock(_)
+            | Self::UnknownBlockForEnvelope(_)
+            | Self::EarlyEnvelope(_)
+            | Self::BlockImported { .. }
+            | Self::PayloadEnvelopeImported { .. }
+            | Self::NewLightClientOptimisticUpdate { .. }
+            | Self::UnknownBlockUnaggregate(_)
+            | Self::UnknownBlockAggregate(_)
+            | Self::UnknownBlockPayloadAttestation(_)
+            | Self::UnknownPayloadUnaggregate(_)
+            | Self::UnknownPayloadAggregate(_)
+            | Self::UnknownLightClientOptimisticUpdate(_)
+            | Self::BackfillSync(_)
+            | Self::UnknownBlockDataColumn(_)
+            | Self::DelayColumnReconstruction(_) => {}
+        }
+    }
+}
+
 /// Events sent by the scheduler once they are ready for re-processing.
 pub enum ReadyWork {
     Block(QueuedGossipBlock),
@@ -163,6 +187,25 @@ pub enum ReadyWork {
     BackfillSync(QueuedBackfillBatch),
     ColumnReconstruction(QueuedColumnReconstruction),
     DataColumn(QueuedGossipDataColumn),
+}
+
+impl ReadyWork {
+    /// Notify the originator that this work will never be processed.
+    pub fn notify_dropped(self) {
+        match self {
+            Self::RpcBlock(block) => (block.ignore_fn)(),
+            Self::IgnoredRpcBlock(block) => (block.process_fn)(),
+            Self::Block(_)
+            | Self::Envelope(_)
+            | Self::Unaggregate(_)
+            | Self::Aggregate(_)
+            | Self::PayloadAttestation(_)
+            | Self::LightClientUpdate(_)
+            | Self::BackfillSync(_)
+            | Self::ColumnReconstruction(_)
+            | Self::DataColumn(_) => {}
+        }
+    }
 }
 
 /// An Attestation for which the corresponding block was not seen while processing, queued for
@@ -831,9 +874,7 @@ impl<S: SlotClock> ReprocessQueue<S> {
                     .try_send(ReadyWork::RpcBlock(queued_rpc_block))
                 {
                     error!("Failed to send rpc block to beacon processor");
-                    if let ReadyWork::RpcBlock(block) = error.into_inner() {
-                        (block.ignore_fn)();
-                    }
+                    error.into_inner().notify_dropped();
                 }
             }
             InboundEvent::Msg(UnknownBlockAggregate(queued_aggregate)) => self
