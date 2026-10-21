@@ -4,7 +4,7 @@ use itertools::process_results;
 use parking_lot::Mutex;
 use std::time::Duration;
 use tracing::debug;
-use types::Hash256;
+use types::{EthSpec, Hash256};
 
 const BLOCK_ROOT_CACHE_LIMIT: usize = 512;
 const LOOKUP_LIMIT: usize = 8;
@@ -44,6 +44,19 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Return `true` if the attestation to this block should be rejected outright,
     /// return `false` if more information is needed from a single-block-lookup.
     pub fn is_pre_finalization_block(&self, block_root: Hash256) -> Result<bool, BeaconChainError> {
+        // Read fork choice once, before locking the cache, so that both facts come from the same
+        // view and the cache lock stays innermost.
+        let (known_to_fork_choice, finalized_slot) = {
+            let fork_choice = self.canonical_head.fork_choice_read_lock();
+            (
+                fork_choice.proto_array().contains_block(&block_root),
+                fork_choice
+                    .finalized_checkpoint()
+                    .epoch
+                    .start_slot(T::EthSpec::slots_per_epoch()),
+            )
+        };
+
         let mut cache = self.pre_finalization_block_cache.cache.lock();
 
         // Check the cache to see if we already know this pre-finalization block root.
@@ -55,6 +68,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // Sync will take care of de-duplicating the single block lookups.
         if cache.in_progress_lookups.contains_key(&block_root) {
             return Ok(false);
+        }
+
+        // Fork choice has a node for this block, so per the assumption above it has already ruled
+        // the block out. No lookup can change that.
+        if known_to_fork_choice {
+            cache.block_roots.insert(block_root, ());
+            return Ok(true);
         }
 
         // 1. Check memory for a recent pre-finalization block.
@@ -70,8 +90,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(true);
         }
 
-        // 2. Check on disk.
-        if self.store.get_blinded_block(&block_root)?.is_some() {
+        // 2. Check on disk. Blocks from after finalization can be in the store but missing from
+        //    fork choice, which is not persisted on every block, so they are worth looking up
+        //    rather than rejecting.
+        if self
+            .store
+            .get_blinded_block(&block_root)?
+            .is_some_and(|block| block.slot() <= finalized_slot)
+        {
             cache.block_roots.insert(block_root, ());
             return Ok(true);
         }
