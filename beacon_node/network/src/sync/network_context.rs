@@ -94,6 +94,10 @@ pub type RpcResponseResult<T> = Result<T, RpcResponseError>;
 pub type CustodyByRootResult<T> =
     Result<DownloadResult<DataColumnSidecarList<T>>, RpcResponseError>;
 
+/// The data columns of a custody backfill batch, with the peers that served them.
+pub type CustodyBackfillBatchResult<T> =
+    Result<(DataColumnSidecarList<T>, PeerGroup), RpcResponseError>;
+
 /// Per-peer count of active requests for a single protocol, to keep peer selection within
 /// `MAX_CONCURRENT_REQUESTS` concurrent requests per protocol ID.
 struct ActiveRequestsPerPeer {
@@ -1660,7 +1664,7 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
         // matching again.
         req_id: DataColumnsByRangeRequestId,
         data_columns: RpcResponseResult<DataColumnSidecarList<T::EthSpec>>,
-    ) -> Option<Result<DataColumnSidecarList<T::EthSpec>, RpcResponseError>> {
+    ) -> Option<CustodyBackfillBatchResult<T::EthSpec>> {
         // Remove first so a failed request is not left in the map.
         let Some(mut request) = self
             .custody_backfill_data_column_batch_requests
@@ -1683,10 +1687,13 @@ impl<T: BeaconChainTypes> SyncNetworkContext<T> {
             return Some(Err(e));
         }
 
+        let column_peer_group = request.column_peer_group();
         match request.responses() {
-            Some(data_column_result) => {
-                Some(data_column_result.map_err(RpcResponseError::BlockComponentCouplingError))
-            }
+            Some(data_column_result) => Some(
+                data_column_result
+                    .map(|data_columns| (data_columns, column_peer_group))
+                    .map_err(RpcResponseError::BlockComponentCouplingError),
+            ),
             None => {
                 self.custody_backfill_data_column_batch_requests
                     .insert(custody_sync_request_id, request);

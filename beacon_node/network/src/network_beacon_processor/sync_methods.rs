@@ -402,10 +402,11 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 metrics::inc_counter(
                     &metrics::BEACON_PROCESSOR_CUSTODY_BACKFILL_BATCH_FAILED_TOTAL,
                 );
-                let peer_action: Option<PeerAction> = match &e {
+                let peer_action = match &e {
                     HistoricalDataColumnError::NoBlockFound {
                         data_column_block_root,
                         expected_block_root,
+                        column_index,
                     } => {
                         debug!(
                             error = "no_block_found",
@@ -414,25 +415,49 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                             "Custody backfill batch processing error"
                         );
                         // The peer is faulty if they send blocks with bad roots.
-                        Some(PeerAction::LowToleranceError)
+                        Some((
+                            PeerAction::LowToleranceError,
+                            vec![WhichPeerToPenalize::CustodyPeerForColumn(*column_index)],
+                        ))
                     }
-                    HistoricalDataColumnError::MissingDataColumns { .. } => {
+                    HistoricalDataColumnError::MissingDataColumns {
+                        missing_slots_and_data_columns,
+                    } => {
                         warn!(
                             error = ?e,
                             "Custody backfill batch processing error",
                         );
                         // The peer is faulty if they don't return data columns
                         // that they advertised as available.
-                        Some(PeerAction::LowToleranceError)
+                        Some((
+                            PeerAction::LowToleranceError,
+                            missing_slots_and_data_columns
+                                .iter()
+                                .map(|(_, column_index)| {
+                                    WhichPeerToPenalize::CustodyPeerForColumn(*column_index)
+                                })
+                                .collect(),
+                        ))
                     }
-                    HistoricalDataColumnError::InvalidKzg { .. } => {
+                    HistoricalDataColumnError::InvalidKzg {
+                        column_index,
+                        error: _,
+                    } => {
                         warn!(
                             error = ?e,
                             "Custody backfill batch processing error",
                         );
                         // The peer is faulty if they don't return data columns
                         // with valid kzg proofs.
-                        Some(PeerAction::LowToleranceError)
+                        Some((
+                            PeerAction::LowToleranceError,
+                            column_index
+                                .iter()
+                                .map(|column_index| {
+                                    WhichPeerToPenalize::CustodyPeerForColumn(*column_index)
+                                })
+                                .collect(),
+                        ))
                     }
                     HistoricalDataColumnError::BeaconChainError(e) => {
                         match &**e {

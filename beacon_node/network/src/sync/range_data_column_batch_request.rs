@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::sync::block_sidecar_coupling::{ByRangeRequest, CouplingError};
+use crate::sync::network_context::PeerGroup;
 use beacon_chain::{BeaconChain, BeaconChainTypes};
 use itertools::Itertools;
 use lighthouse_network::PeerId;
@@ -60,6 +61,18 @@ impl<T: BeaconChainTypes> RangeDataColumnBatchRequest<T> {
             .get_mut(&req_id)
             .ok_or(format!("unknown data columns by range req_id {req_id}"))?;
         req.finish(req_id, columns)
+    }
+
+    /// The peers that served this batch, grouped by the column indices each of them served.
+    pub fn column_peer_group(&self) -> PeerGroup {
+        let mut peers: HashMap<PeerId, Vec<usize>> = HashMap::new();
+        for (id, columns) in self.column_peers.iter() {
+            peers
+                .entry(id.peer)
+                .or_default()
+                .extend(columns.iter().map(|column| *column as usize));
+        }
+        PeerGroup::from_set(peers)
     }
 
     pub fn responses(

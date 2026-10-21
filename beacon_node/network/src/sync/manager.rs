@@ -40,6 +40,7 @@ use super::network_context::{
 };
 use super::peer_sync_info::{PeerSyncType, remote_sync_type};
 use super::range_sync::{EPOCHS_PER_BATCH, RangeSync, RangeSyncType};
+use crate::network_beacon_processor::sync_methods::WhichPeerToPenalize;
 use crate::network_beacon_processor::{
     BlockProcessingResult, ChainSegmentProcessId, NetworkBeaconProcessor,
 };
@@ -240,7 +241,9 @@ pub enum CustodyBatchProcessResult {
         imported_columns: usize,
     },
     /// The custody batch processing failed.
-    Error { peer_action: Option<PeerAction> },
+    Error {
+        peer_action: Option<(PeerAction, Vec<WhichPeerToPenalize>)>,
+    },
 }
 
 /// The primary object for handling and driving all the current syncing logic. It maintains the

@@ -16,6 +16,7 @@ pub enum HistoricalDataColumnError {
     NoBlockFound {
         data_column_block_root: Hash256,
         expected_block_root: Hash256,
+        column_index: ColumnIndex,
     },
 
     /// Logic error: should never occur.
@@ -116,6 +117,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                         return Err(HistoricalDataColumnError::NoBlockFound {
                             data_column_block_root: data_column.block_root(),
                             expected_block_root: block_root,
+                            column_index,
                         });
                     }
                     self.store.data_column_as_kv_store_ops(
