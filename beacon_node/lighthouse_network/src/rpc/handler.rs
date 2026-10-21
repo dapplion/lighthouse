@@ -424,17 +424,41 @@ where
                     id: *inbound_id.get_ref(),
                 }));
 
-                if info
-                    .pending_items
-                    .back()
-                    .map(|response| !response.close_after())
-                    .unwrap_or(true)
-                {
-                    // If there is no response that closes the stream, append an error.
-                    info.pending_items.push_back(RpcResponse::Error(
-                        RpcErrorResponse::ServerError,
-                        "Request timed out".into(),
-                    ));
+                // The timeout is only reset once a chunk has been written, so a send still in
+                // flight has not completed one for the whole timeout. The requester arms the
+                // same timeout at negotiation, no later than we do, so it has given up too.
+                let send_in_flight = match info.state {
+                    InboundState::Busy(_) => true,
+                    InboundState::Idle(_) => false,
+                    // Only held while the substream is driven below, never across a poll.
+                    InboundState::Poisoned => false,
+                };
+
+                if send_in_flight {
+                    // An error queued here could only be written after the chunks the peer is
+                    // not reading, so drop the substream and release them instead.
+                    self.inbound_substreams.remove(inbound_id.get_ref());
+                    self.events_out
+                        .push(HandlerEvent::InboundStreamClosed(*inbound_id.get_ref()));
+                } else {
+                    if info
+                        .pending_items
+                        .back()
+                        .map(|response| !response.close_after())
+                        .unwrap_or(true)
+                    {
+                        // If there is no response that closes the stream, append an error.
+                        info.pending_items.push_back(RpcResponse::Error(
+                            RpcErrorResponse::ServerError,
+                            "Request timed out".into(),
+                        ));
+                    }
+                    // Keep a timeout armed, so that an error the peer will not read either is
+                    // reclaimed on the next expiry rather than held forever.
+                    info.delay_key = Some(
+                        self.inbound_substreams_delay
+                            .insert(*inbound_id.get_ref(), RESP_TIMEOUT),
+                    );
                 }
             }
         }
@@ -1183,5 +1207,122 @@ async fn send_message_to_inbound_substream<E: EthSpec>(
         }
         // Everything worked as expected return the result.
         send_result.map(|_| (substream, false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::future;
+    use std::marker::PhantomData;
+    use types::{Hash256, MainnetEthSpec};
+
+    /// The expiry is what matters here, not how long `RESP_TIMEOUT` is.
+    const TEST_TIMEOUT: Duration = Duration::from_millis(10);
+
+    fn test_handler() -> RPCHandler<usize, MainnetEthSpec> {
+        let fork_context = Arc::new(ForkContext::new::<MainnetEthSpec>(
+            Slot::new(0),
+            Hash256::ZERO,
+            &MainnetEthSpec::default_spec(),
+        ));
+        let listen_protocol = SubstreamProtocol::new(
+            RPCProtocol {
+                fork_context: fork_context.clone(),
+                max_rpc_size: 0,
+                enable_light_client_server: false,
+                phantom: PhantomData,
+            },
+            (),
+        );
+        RPCHandler::new(
+            listen_protocol,
+            fork_context,
+            PeerId::random(),
+            ConnectionId::new_unchecked(0),
+        )
+    }
+
+    /// Registers an inbound request whose first chunk is mid-send and never completes, standing
+    /// in for a peer that has stopped reading its responses.
+    fn insert_stalled_substream(handler: &mut RPCHandler<usize, MainnetEthSpec>) -> SubstreamId {
+        let substream_id = handler.current_inbound_substream_id;
+        handler.current_inbound_substream_id.0 += 1;
+        let delay_key = handler
+            .inbound_substreams_delay
+            .insert(substream_id, TEST_TIMEOUT);
+        handler.inbound_substreams.insert(
+            substream_id,
+            InboundInfo {
+                state: InboundState::Busy(Box::pin(future::pending())),
+                pending_items: VecDeque::new(),
+                protocol: Protocol::Status,
+                max_remaining_chunks: 1,
+                request_start_time: Instant::now(),
+                delay_key: Some(delay_key),
+            },
+        );
+        substream_id
+    }
+
+    /// Polls the handler, returning every event it reports to the behaviour. The poll that
+    /// processes an expiry queues its events rather than returning them, so one is not enough.
+    fn poll_handler(
+        handler: &mut RPCHandler<usize, MainnetEthSpec>,
+    ) -> Vec<HandlerEvent<usize, MainnetEthSpec>> {
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        let mut events = vec![];
+        for _ in 0..8 {
+            match handler.poll(&mut cx) {
+                Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(event)) => events.push(event),
+                // `ConnectionHandlerEvent` is `#[non_exhaustive]`, so the variants carrying
+                // outbound substream requests and protocol reports cannot be named here.
+                Poll::Ready(_) => {}
+                Poll::Pending => {}
+            }
+        }
+        events
+    }
+
+    fn is_inbound_timeout(event: &HandlerEvent<usize, MainnetEthSpec>, id: SubstreamId) -> bool {
+        match event {
+            HandlerEvent::Err(HandlerErr::Inbound {
+                error: RPCError::StreamTimeout,
+                id: event_id,
+                ..
+            }) => *event_id == id,
+            HandlerEvent::Err(HandlerErr::Inbound { .. }) => false,
+            HandlerEvent::Err(HandlerErr::Outbound { .. }) => false,
+            HandlerEvent::Ok(_) => false,
+            HandlerEvent::InboundStreamClosed(_) => false,
+            HandlerEvent::Close(_) => false,
+        }
+    }
+
+    fn is_stream_closed(event: &HandlerEvent<usize, MainnetEthSpec>, id: SubstreamId) -> bool {
+        match event {
+            HandlerEvent::InboundStreamClosed(event_id) => *event_id == id,
+            HandlerEvent::Err(_) => false,
+            HandlerEvent::Ok(_) => false,
+            HandlerEvent::Close(_) => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_timeout_reclaims_substream_with_send_in_flight() {
+        let mut handler = test_handler();
+        let substream_id = insert_stalled_substream(&mut handler);
+
+        tokio::time::sleep(TEST_TIMEOUT * 2).await;
+        let events = poll_handler(&mut handler);
+
+        assert!(
+            handler.inbound_substreams.is_empty(),
+            "a timed out substream whose send is still in flight must be reclaimed, so that its \
+             queued responses are released"
+        );
+        assert_eq!(events.len(), 2);
+        assert!(is_inbound_timeout(&events[0], substream_id));
+        assert!(is_stream_closed(&events[1], substream_id));
     }
 }
