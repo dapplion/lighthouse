@@ -2322,3 +2322,73 @@ async fn unaggregated_attestation_bogus_attester_index_not_sent_to_slasher() {
         "slasher queue length must not change — bogus attestation must not be forwarded"
     );
 }
+
+/// Fork choice is not persisted on every block, so a node killed between persists restarts with
+/// blocks in its store that fork choice knows nothing about. An attestation to one of those blocks
+/// is for an unknown head, not for a finalized one.
+#[tokio::test]
+async fn attestation_to_block_in_store_but_not_fork_choice() {
+    let harness = get_harness(VALIDATOR_COUNT);
+
+    // Two slots past the boundary, so the last two blocks are only ever written to the store.
+    harness
+        .extend_chain(
+            E::slots_per_epoch() as usize + 2,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+
+    let head = harness.chain.head_snapshot();
+    let head_root = head.beacon_block_root;
+    let (attestation, subnet_id) = harness
+        .get_single_attestations(
+            &AttestationStrategy::AllValidators,
+            &head.beacon_state,
+            head.beacon_state_root(),
+            head_root,
+            head.beacon_state.slot(),
+        )
+        .first()
+        .expect("should have at least one committee")
+        .first()
+        .cloned()
+        .expect("should have at least one attestation in committee");
+
+    // Resume from the same store with `harness` still alive: dropping it would persist fork
+    // choice, which is what an ungraceful shutdown skips.
+    let store = harness.chain.store.clone();
+    let resumed = BeaconChainHarness::builder(Spec::default())
+        .spec(store.get_chain_spec().clone())
+        .keypairs(KEYPAIRS[0..VALIDATOR_COUNT].to_vec())
+        .resumed_ephemeral_store(store)
+        .mock_execution_layer()
+        .testing_slot_clock(harness.chain.slot_clock.clone())
+        .build();
+
+    assert!(
+        resumed.chain.store.block_exists(&head_root).unwrap(),
+        "the restored store should hold the pre-crash head"
+    );
+    assert!(
+        !resumed
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .proto_array()
+            .contains_block(&head_root),
+        "the restored fork choice should trail the store"
+    );
+
+    // The head is a block we are missing from fork choice, not a block we have finalized past.
+    match resumed
+        .chain
+        .verify_unaggregated_attestation_for_gossip(&attestation, Some(subnet_id))
+    {
+        Err(AttnError::UnknownHeadBlock { beacon_block_root }) => {
+            assert_eq!(beacon_block_root, head_root)
+        }
+        Err(other) => panic!("expected UnknownHeadBlock, got {other:?}"),
+        Ok(_) => panic!("expected UnknownHeadBlock, got a verified attestation"),
+    }
+}
