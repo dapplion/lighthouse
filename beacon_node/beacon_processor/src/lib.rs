@@ -617,6 +617,38 @@ impl<E: EthSpec> Work<E> {
     }
 }
 
+/// Retry RPC block work that hit a queue limit, after a delay.
+///
+/// Sync counts an ignored block against the lookup's few processing attempts, so local
+/// backpressure must not reach it.
+fn requeue_rpc_block<E: EthSpec>(
+    work: Work<E>,
+    reprocess_work_tx: &mpsc::Sender<ReprocessQueueMessage>,
+) {
+    let Work::RpcBlock {
+        peer_id,
+        beacon_block_root,
+        process_fn,
+        ignore_fn,
+    } = work
+    else {
+        return;
+    };
+
+    if let Err(e) = reprocess_work_tx.try_send(ReprocessQueueMessage::RpcBlock(QueuedRpcBlock {
+        peer_id,
+        beacon_block_root,
+        process_fn,
+        ignore_fn,
+    })) {
+        metrics::inc_counter_vec(
+            &metrics::BEACON_PROCESSOR_WORK_EVENTS_IGNORED_COUNT,
+            &["rpc_block"],
+        );
+        e.into_inner().notify_dropped();
+    }
+}
+
 /// Count ignored RPC block work and notify sync without queuing another task.
 fn notify_ignored_rpc_block<E: EthSpec>(work: Work<E>) {
     if let Work::RpcBlock { ignore_fn, .. } = work {
@@ -1215,9 +1247,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                         error = ?e,
                                         "Failed to reprocess work event"
                                     );
-                                    if let ReprocessQueueMessage::RpcBlock(block) = e.into_inner() {
-                                        (block.ignore_fn)();
-                                    }
+                                    e.into_inner().notify_dropped();
                                 }
                             }
                             // If we can spawn and the task can be dispatched, dispatch immediately
@@ -1258,14 +1288,14 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                         self.spawn_worker(work, created_timestamp, idle_tx)
                                     }
                                     Ok(None) => {}
-                                    Err(work) => notify_ignored_rpc_block(work),
+                                    Err(work) => requeue_rpc_block(work, &reprocess_work_tx),
                                 }
                             }
                             Work::RpcBlock { peer_id, .. } => {
                                 if let Err(work) =
                                     work_queues.rpc_block_queue.push(peer_id, work, work_id)
                                 {
-                                    notify_ignored_rpc_block(work);
+                                    requeue_rpc_block(work, &reprocess_work_tx);
                                 }
                             }
                             Work::IgnoredRpcBlock { process_fn } => {
