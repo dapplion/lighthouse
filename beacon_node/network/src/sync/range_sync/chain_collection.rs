@@ -192,13 +192,14 @@ impl<T: BeaconChainTypes> ChainCollection<T> {
             }
         }
 
-        let mut results = Vec::with_capacity(to_remove.len());
-        for (id, reason) in to_remove.into_iter() {
-            let chain = self.finalized_chains.remove(&id).expect("Chain exists");
-            self.on_chain_removed(&id, chain.is_syncing(), RangeSyncType::Finalized);
-            results.push((chain, reason));
-        }
-        results
+        to_remove
+            .into_iter()
+            .map(|(id, reason)| {
+                let chain = self.finalized_chains.remove(&id).expect("Chain exists");
+                self.on_chain_removed(&id, chain.is_syncing(), RangeSyncType::Finalized);
+                (chain, reason)
+            })
+            .collect()
     }
 
     /// Executes a function on the chain with the given id.
