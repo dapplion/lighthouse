@@ -145,10 +145,8 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                 work: Work::Reprocess(reprocess_msg),
             }) {
                 // The reprocessing queue never took ownership, so complete this attempt here.
-                if let Work::Reprocess(ReprocessQueueMessage::RpcBlock(block)) =
-                    error.into_inner().work
-                {
-                    (block.ignore_fn)();
+                if let Work::Reprocess(msg) = error.into_inner().work {
+                    msg.notify_dropped();
                 }
                 error!(source = "rpc", %block_root,"Failed to inform block import")
             };
