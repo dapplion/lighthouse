@@ -3549,3 +3549,61 @@ async fn process_chain_segment_rejects_envelope_with_invalid_columns() {
         _ => panic!("chain segment should fail with invalid column KZG proof"),
     }
 }
+
+/// Fork choice is not persisted on every block, so a node killed between persists restarts with
+/// blocks in its store that fork choice knows nothing about. A block building on one of those is
+/// unknown to us, not a conflict with finalization.
+#[tokio::test]
+async fn gossip_block_with_parent_in_store_but_not_fork_choice() {
+    let slots_per_epoch = E::slots_per_epoch();
+    let harness = get_harness(VALIDATOR_COUNT, NodeCustodyType::Fullnode);
+
+    // Two slots past the boundary, so the last two blocks are only ever written to the store.
+    harness
+        .extend_chain(
+            slots_per_epoch as usize + 2,
+            BlockStrategy::OnCanonicalHead,
+            AttestationStrategy::AllValidators,
+        )
+        .await;
+
+    let parent_root = harness.chain.head_snapshot().beacon_block_root;
+    let block_slot = Slot::new(slots_per_epoch + 3);
+    harness.chain.slot_clock.set_slot(block_slot.as_u64());
+    let ((block, _), _) = harness
+        .make_block(harness.get_current_state(), block_slot)
+        .await;
+
+    // Resume from the same store with `harness` still alive: dropping it would persist fork
+    // choice, which is what an ungraceful shutdown skips.
+    let resumed = BeaconChainHarness::builder(Spec::default())
+        .default_spec()
+        .keypairs(KEYPAIRS[0..VALIDATOR_COUNT].to_vec())
+        .resumed_ephemeral_store(harness.chain.store.clone())
+        .mock_execution_layer()
+        .testing_slot_clock(harness.chain.slot_clock.clone())
+        .build();
+
+    assert!(
+        resumed.chain.store.block_exists(&parent_root).unwrap(),
+        "the restored store should hold the pre-crash head"
+    );
+    assert!(
+        !resumed
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .proto_array()
+            .contains_block(&parent_root),
+        "the restored fork choice should trail the store"
+    );
+
+    // A block whose parent fork choice cannot place is unknown, not a finality conflict.
+    match unwrap_err(resumed.chain.verify_block_for_gossip(block).await).into_block_error() {
+        BlockError::ParentUnknown {
+            parent_root: unknown_root,
+            ..
+        } => assert_eq!(unknown_root, parent_root),
+        other => panic!("expected ParentUnknown, got {other:?}"),
+    }
+}
