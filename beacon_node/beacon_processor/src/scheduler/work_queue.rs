@@ -2,7 +2,7 @@ use crate::Work;
 use lighthouse_network::PeerId;
 use logging::TimeLatch;
 use std::collections::{HashMap, VecDeque};
-use tracing::error;
+use tracing::{debug, error};
 use types::{BeaconState, ChainSpec, EthSpec, RelativeEpoch};
 
 /// Over-provision queues based on active validator count by some factor. The beacon chain has
@@ -145,7 +145,8 @@ impl<T> PeerWorkQueue<T> {
 
         let peer_work = self.peers.entry(peer_id).or_default();
         if peer_work.queue.len() >= self.max_queued_per_peer {
-            error!(
+            // Any peer can reach this limit, so it is not an error.
+            debug!(
                 queue = item_desc,
                 peer = %peer_id,
                 queue_len = peer_work.queue.len(),
@@ -203,6 +204,9 @@ impl<T> PeerWorkQueue<T> {
                     for item in peer_work.queue.drain(..) {
                         cleanup(item);
                     }
+                    // Forget the peer; a later `worker_finished` is a no-op. Keeping the entry
+                    // would let a lost completion block the peer for good once it reconnects.
+                    return false;
                 }
             }
             !peer_work.is_empty()
@@ -699,15 +703,19 @@ mod tests {
         assert_eq!(discarded, vec![1, 2]);
         assert!(queue.is_empty());
 
-        // Active work is still tracked after the peer's pending work is discarded.
+        // Disconnecting forgets the peer even while it has active work, so a lost
+        // `worker_finished` cannot block it once it reconnects.
         assert_eq!(queue.push(peer, 3, "test"), Ok(()));
         assert_eq!(queue.pop(|_| true, drop), Some(3));
         assert_eq!(queue.push(peer, 4, "test"), Ok(()));
         assert_eq!(queue.pop(|_| false, |item| discarded.push(item)), None);
         assert_eq!(discarded, vec![1, 2, 4]);
         assert!(queue.is_empty());
-        queue.worker_finished(&peer);
         assert!(queue.peers.is_empty());
+
+        // The reconnected peer gets a fresh active slot without `worker_finished`.
+        queue.worker_finished(&peer);
+        assert_eq!(queue.push_and_pop(peer, 5, "test"), Ok(Some(5)));
     }
 
     #[test]
