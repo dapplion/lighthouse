@@ -1048,10 +1048,13 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             return;
         };
 
-        if !self
+        if self
             .block_lookups
             .search_unknown_block(block_root, &peers, &mut self.network)
         {
+            // Drop the corroborating peers only once a lookup exists to retry on.
+            self.pending_unknown_roots.pop(&block_root);
+        } else {
             debug!(?block_root, "No lookup created for unknown block");
         }
     }
@@ -1061,6 +1064,7 @@ impl<T: BeaconChainTypes> SyncManager<T> {
     fn record_unknown_root(&mut self, block_root: Hash256, peer_id: PeerId) -> Option<Vec<PeerId>> {
         let now = Instant::now();
         let ttl = Duration::from_secs(NOTIFIED_UNKNOWN_ROOT_EXPIRY_SECONDS);
+        let min_peers = self.unknown_root_min_peers;
 
         // Evicts the least recently reported root when full.
         let pending = self
@@ -1078,12 +1082,18 @@ impl<T: BeaconChainTypes> SyncManager<T> {
             return None;
         }
         pending.peers.push(peer_id);
-        if pending.peers.len() < self.unknown_root_min_peers {
+        if pending.peers.len() < min_peers {
+            debug!(
+                ?block_root,
+                ?peer_id,
+                peers = pending.peers.len(),
+                min_peers,
+                "Received unknown block hash message, waiting for more peers"
+            );
             return None;
         }
-        self.pending_unknown_roots
-            .pop(&block_root)
-            .map(|pending| pending.peers)
+        // Left in the cache until the caller confirms a lookup was created.
+        Some(pending.peers.clone())
     }
 
     fn prune_pending_unknown_roots(&mut self) {
