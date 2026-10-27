@@ -982,6 +982,7 @@ impl<T: BeaconChainTypes> GossipVerifiedBlock<T> {
             chain,
             &fork_choice_read_lock,
             block,
+            block_root,
         )?;
 
         let block_epoch = block.slot().epoch(T::EthSpec::slots_per_epoch());
@@ -1861,6 +1862,7 @@ pub fn check_block_is_finalized_checkpoint_or_descendant<
     chain: &BeaconChain<T>,
     fork_choice: &BeaconForkChoice<T>,
     block: B,
+    block_root: Hash256,
 ) -> Result<B, BlockError> {
     // If we have a split block newer than finalization then we also ban blocks which are not
     // descended from that split block. It's important not to try checking `is_descendant` if
@@ -1896,6 +1898,7 @@ pub fn check_block_is_finalized_checkpoint_or_descendant<
                 .pre_finalization_block_cache
                 .contains(block.parent_root())
         {
+            chain.pre_finalization_block_rejected(block_root);
             Err(BlockError::NotFinalizedDescendant {
                 block_parent_root: block.parent_root(),
             })

@@ -4510,8 +4510,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let mut fork_choice = fork_choice_reader.upgrade();
 
         // Do not import a block that doesn't descend from the finalized root.
-        let signed_block =
-            check_block_is_finalized_checkpoint_or_descendant(self, &fork_choice, signed_block)?;
+        let signed_block = check_block_is_finalized_checkpoint_or_descendant(
+            self,
+            &fork_choice,
+            signed_block,
+            block_root,
+        )?;
         let block = signed_block.message();
 
         // Register the new block with the fork choice service.

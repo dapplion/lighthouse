@@ -229,10 +229,6 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     )
                 }
             }
-            // `WouldRevertFinalizedSlot` is recorded by the chain itself.
-            Err(BlockError::NotFinalizedDescendant { .. }) => {
-                self.chain.pre_finalization_block_rejected(block_root);
-            }
             _ => {}
         }
 
