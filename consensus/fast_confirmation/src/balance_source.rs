@@ -161,6 +161,24 @@ mod tests {
 
     type E = MinimalEthSpec;
 
+    #[test]
+    fn unslashed_total_excludes_slashed_validators() {
+        let (mut state, spec) = genesis_state::<E>(32);
+        for index in 0..8 {
+            state.get_validator_mut(index).unwrap().slashed = true;
+        }
+
+        let balance_source = BalanceSourceData::new(&state, Hash256::ZERO, &spec).unwrap();
+        assert_eq!(
+            balance_source.total_active_balance,
+            32 * spec.max_effective_balance
+        );
+        assert_eq!(
+            balance_source.total_unslashed_active_balance,
+            24 * spec.max_effective_balance
+        );
+    }
+
     /// Spec: `get_total_balance` floors every total at `EFFECTIVE_BALANCE_INCREMENT`.
     #[test]
     fn totals_floored_at_effective_balance_increment() {

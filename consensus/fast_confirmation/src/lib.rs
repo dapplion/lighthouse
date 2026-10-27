@@ -1578,7 +1578,7 @@ fn estimate_committee_weight_between_slots<E: EthSpec>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{advance_state, genesis_state};
+    use crate::test_utils::{advance_state, genesis_and_child_proto_array, genesis_state};
     use types::MainnetEthSpec;
 
     type E = MainnetEthSpec;
@@ -1727,6 +1727,33 @@ mod tests {
                 spec.proposer_score_boost
             )
             .unwrap()
+        );
+
+        // Only the proposer score differs between the two sources, so the threshold drops by
+        // half the proposer score difference.
+        let balance_source = &fcr.head_balance_source;
+        let pre_5679_balance_source = BalanceSourceData {
+            total_unslashed_active_balance: balance_source.total_active_balance,
+            ..balance_source.clone()
+        };
+        let (proto_array, block_root) = genesis_and_child_proto_array::<E>(root, &spec);
+        let safety_threshold = |balance_source: &BalanceSourceData| {
+            fcr.compute_safety_threshold::<E>(
+                balance_source,
+                block_root,
+                Slot::new(2),
+                &proto_array,
+                &[],
+                &BTreeSet::new(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            safety_threshold(&pre_5679_balance_source) - safety_threshold(balance_source),
+            (fcr.compute_proposer_score::<E>(&pre_5679_balance_source)
+                .unwrap()
+                - fcr.compute_proposer_score::<E>(balance_source).unwrap())
+                / 2
         );
     }
 
