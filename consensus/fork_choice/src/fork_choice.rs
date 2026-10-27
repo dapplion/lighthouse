@@ -306,19 +306,32 @@ impl<'a, E: EthSpec> From<IndexedAttestationRef<'a, E>> for QueuedAttestation {
     }
 }
 
+/// Cap on the total attesting indices held in `AttestationsAwaitingPayload`. A rough bound of
+/// about one index per active validator on mainnet, not an exact count.
+const MAX_INDICES_AWAITING_PAYLOAD: usize = 1_000_000;
+
 /// Block-carried `payload_present` attestations awaiting a payload envelope, keyed by the block
 /// root they attest to. Bounded by a cap on the total number of attesting indices.
-#[derive(Default, PartialEq)]
+#[derive(PartialEq)]
 pub struct AttestationsAwaitingPayload {
     by_root: HashMap<Hash256, Vec<QueuedAttestation>>,
     /// Sum of `attesting_indices.len()` over all entries in `by_root`.
     num_indices: usize,
+    cap: usize,
 }
 
 impl AttestationsAwaitingPayload {
-    /// Parks `attestation`. If the total number of attesting indices exceeds `cap`, evicts the
-    /// lowest-slot attestations until it is at most 90% of `cap`.
-    pub fn insert(&mut self, attestation: QueuedAttestation, cap: usize) {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            by_root: HashMap::new(),
+            num_indices: 0,
+            cap,
+        }
+    }
+
+    /// Parks `attestation`. If the total number of attesting indices exceeds the cap, evicts the
+    /// lowest-slot attestations until it is at most 90% of the cap.
+    pub fn insert(&mut self, attestation: QueuedAttestation) {
         self.num_indices = self
             .num_indices
             .saturating_add(attestation.attesting_indices.len());
@@ -327,8 +340,8 @@ impl AttestationsAwaitingPayload {
             .or_default()
             .push(attestation);
 
-        if self.num_indices > cap {
-            self.evict_oldest(cap / 10 * 9);
+        if self.num_indices > self.cap {
+            self.evict_oldest(self.cap / 10 * 9);
         }
     }
 
@@ -560,7 +573,9 @@ where
             fc_store,
             proto_array,
             queued_attestations: BTreeMap::new(),
-            attestations_awaiting_payload: AttestationsAwaitingPayload::default(),
+            attestations_awaiting_payload: AttestationsAwaitingPayload::new(
+                MAX_INDICES_AWAITING_PAYLOAD,
+            ),
             spec_test_mode: false,
             // This will be updated during the next call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
@@ -1452,12 +1467,10 @@ where
             Ok(()) => (),
             Err(invalid @ InvalidAttestation::PayloadNotReceived { .. }) => {
                 match is_from_block {
-                    // Defer until `on_payload_envelope_received`, capped at one attesting index
-                    // per active validator.
+                    // Defer until `on_payload_envelope_received`.
                     AttestationFromBlock::True => {
-                        let cap = self.fc_store.justified_balances().num_active_validators as usize;
                         self.attestations_awaiting_payload
-                            .insert(QueuedAttestation::from(attestation), cap);
+                            .insert(QueuedAttestation::from(attestation));
                         return Ok(());
                     }
                     AttestationFromBlock::False => return Err(invalid.into()),
@@ -2180,7 +2193,9 @@ where
             fc_store,
             proto_array,
             queued_attestations: BTreeMap::new(),
-            attestations_awaiting_payload: AttestationsAwaitingPayload::default(),
+            attestations_awaiting_payload: AttestationsAwaitingPayload::new(
+                MAX_INDICES_AWAITING_PAYLOAD,
+            ),
             spec_test_mode: false,
             // Will be updated in the following call to `Self::get_head`.
             forkchoice_update_parameters: ForkchoiceUpdateParameters {
@@ -2387,10 +2402,10 @@ mod tests {
 
     #[test]
     fn awaiting_payload_take_and_retain_track_num_indices() {
-        let mut awaiting = AttestationsAwaitingPayload::default();
-        awaiting.insert(awaiting_payload_attestation(1, 1, 3), 100);
-        awaiting.insert(awaiting_payload_attestation(2, 1, 4), 100);
-        awaiting.insert(awaiting_payload_attestation(2, 2, 5), 100);
+        let mut awaiting = AttestationsAwaitingPayload::new(100);
+        awaiting.insert(awaiting_payload_attestation(1, 1, 3));
+        awaiting.insert(awaiting_payload_attestation(2, 1, 4));
+        awaiting.insert(awaiting_payload_attestation(2, 2, 5));
         assert_eq!(awaiting.num_indices(), 12);
 
         assert_eq!(awaiting.take(&Hash256::from_low_u64_be(1)).len(), 2);
@@ -2404,15 +2419,15 @@ mod tests {
 
     #[test]
     fn awaiting_payload_evicts_oldest_past_cap() {
-        let mut awaiting = AttestationsAwaitingPayload::default();
+        let mut awaiting = AttestationsAwaitingPayload::new(100);
         // Slots 1..=10, 10 indices each, alternating between two roots. Cap 100 is not exceeded.
         for slot in 1..=10 {
-            awaiting.insert(awaiting_payload_attestation(slot, slot % 2, 10), 100);
+            awaiting.insert(awaiting_payload_attestation(slot, slot % 2, 10));
         }
         assert_eq!(awaiting.num_indices(), 100);
 
         // Exceeding the cap evicts down to 90 indices, oldest slots first.
-        awaiting.insert(awaiting_payload_attestation(11, 1, 10), 100);
+        awaiting.insert(awaiting_payload_attestation(11, 1, 10));
         assert_eq!(awaiting.num_indices(), 90);
 
         let mut slots = [0, 1]
