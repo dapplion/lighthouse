@@ -105,6 +105,13 @@ impl<T> PeerWork<T> {
     }
 }
 
+/// The queues that limit work per peer. Workers report back to the queue their work came from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PeerQueue {
+    GossipBlock,
+    RpcBlock,
+}
+
 /// A bounded queue that limits how much work a single peer can have in progress at once, so that
 /// one peer cannot occupy every worker.
 ///
@@ -632,6 +639,13 @@ impl<E: EthSpec> WorkQueues<E> {
             lc_update_range_queue,
             api_request_p0_queue,
             api_request_p1_queue,
+        }
+    }
+
+    pub fn peer_queue(&mut self, queue: PeerQueue) -> &mut PeerWorkQueue<Work<E>> {
+        match queue {
+            PeerQueue::GossipBlock => &mut self.gossip_block_queue,
+            PeerQueue::RpcBlock => &mut self.rpc_block_queue,
         }
     }
 }
