@@ -179,7 +179,6 @@ pub enum ReadyWork {
     Block(QueuedGossipBlock),
     Envelope(QueuedGossipEnvelope),
     RpcBlock(QueuedRpcBlock),
-    IgnoredRpcBlock(IgnoredRpcBlock),
     Unaggregate(QueuedUnaggregate),
     Aggregate(QueuedAggregate),
     PayloadAttestation(QueuedPayloadAttestation),
@@ -194,7 +193,6 @@ impl ReadyWork {
     pub fn notify_dropped(self) {
         match self {
             Self::RpcBlock(block) => (block.ignore_fn)(),
-            Self::IgnoredRpcBlock(block) => (block.process_fn)(),
             Self::Block(_)
             | Self::Envelope(_)
             | Self::Unaggregate(_)
@@ -259,12 +257,6 @@ pub struct QueuedRpcBlock {
     pub process_fn: AsyncFn,
     /// Ignores the block.
     pub ignore_fn: BlockingFn,
-}
-
-/// A block that arrived for processing when the same block was being imported over gossip.
-/// It is queued for later import.
-pub struct IgnoredRpcBlock {
-    pub process_fn: BlockingFn,
 }
 
 /// A backfill batch work that has been queued for processing later.
@@ -1589,9 +1581,9 @@ mod tests {
 
         // Send some random work to `ready_work_tx` to fill up the capacity first.
         ready_work_tx
-            .try_send(ReadyWork::IgnoredRpcBlock(IgnoredRpcBlock {
-                process_fn: Box::new(|| {}),
-            }))
+            .try_send(ReadyWork::BackfillSync(QueuedBackfillBatch(Box::new(
+                || {},
+            ))))
             .unwrap();
 
         // Now queue a backfill sync batch.
@@ -1610,10 +1602,7 @@ mod tests {
         advance_time(&slot_clock, duration_to_next_event.add(one_ms)).await;
 
         // Now drain the `ready_work` channel.
-        assert!(matches!(
-            ready_work_rx.try_recv(),
-            Ok(ReadyWork::IgnoredRpcBlock { .. })
-        ));
+        assert!(ready_work_rx.try_recv().is_ok());
         assert!(ready_work_rx.try_recv().is_err());
 
         // Advance time again, and assert that the re-scheduled batch is successfully sent.
@@ -1864,9 +1853,9 @@ mod tests {
         let mut queue = test_queue();
         let (ready_tx, ready_rx) = mpsc::channel(1);
         ready_tx
-            .try_send(ReadyWork::IgnoredRpcBlock(IgnoredRpcBlock {
-                process_fn: Box::new(|| {}),
-            }))
+            .try_send(ReadyWork::BackfillSync(QueuedBackfillBatch(Box::new(
+                || {},
+            ))))
             .unwrap();
         queue.ready_work_tx = ready_tx;
         let counter = Arc::new(AtomicUsize::new(0));

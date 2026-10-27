@@ -39,7 +39,7 @@
 //! task.
 
 pub use crate::scheduler::BeaconProcessorQueueLengths;
-use crate::scheduler::work_queue::WorkQueues;
+use crate::scheduler::work_queue::{PeerQueue, WorkQueues};
 use crate::work_reprocessing_queue::{
     QueuedBackfillBatch, QueuedColumnReconstruction, QueuedGossipBlock, QueuedGossipDataColumn,
     QueuedGossipEnvelope, ReprocessQueueMessage,
@@ -66,7 +66,6 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, error, trace, warn};
 use types::{EthSpec, Hash256, SignedAggregateAndProof, SingleAttestation, Slot, SubnetId};
-use work_reprocessing_queue::IgnoredRpcBlock;
 use work_reprocessing_queue::{
     QueuedAggregate, QueuedLightClientUpdate, QueuedPayloadAttestation, QueuedRpcBlock,
     QueuedUnaggregate, ReadyWork, spawn_reprocess_scheduler,
@@ -269,10 +268,6 @@ impl<E: EthSpec> From<ReadyWork> for WorkEvent<E> {
                     ignore_fn,
                 },
             },
-            ReadyWork::IgnoredRpcBlock(IgnoredRpcBlock { process_fn }) => Self {
-                drop_during_sync: false,
-                work: Work::IgnoredRpcBlock { process_fn },
-            },
             ReadyWork::Unaggregate(QueuedUnaggregate {
                 beacon_block_root: _,
                 process_fn,
@@ -447,9 +442,6 @@ pub enum Work<E: EthSpec> {
     RpcCustodyColumn(AsyncFn),
     RpcEnvelope(AsyncFn),
     ColumnReconstruction(AsyncFn),
-    IgnoredRpcBlock {
-        process_fn: BlockingFn,
-    },
     ChainSegment {
         process_fn: AsyncFn,
         /// (chain_id, batch_epoch) for test observability
@@ -517,7 +509,6 @@ pub enum WorkType {
     RpcCustodyColumn,
     RpcEnvelope,
     ColumnReconstruction,
-    IgnoredRpcBlock,
     ChainSegment,
     ChainSegmentBackfill,
     Status,
@@ -584,7 +575,6 @@ impl<E: EthSpec> Work<E> {
             Work::RpcCustodyColumn { .. } => WorkType::RpcCustodyColumn,
             Work::RpcEnvelope(_) => WorkType::RpcEnvelope,
             Work::ColumnReconstruction(_) => WorkType::ColumnReconstruction,
-            Work::IgnoredRpcBlock { .. } => WorkType::IgnoredRpcBlock,
             Work::ChainSegment { .. } => WorkType::ChainSegment,
             Work::ChainSegmentBackfill(_) => WorkType::ChainSegmentBackfill,
             Work::Status(_) => WorkType::Status,
@@ -663,7 +653,7 @@ fn notify_ignored_rpc_block<E: EthSpec>(work: Work<E>) {
 #[derive(Clone)]
 struct WorkerCompletion {
     work_type: WorkType,
-    peer_id: Option<PeerId>,
+    peer: Option<(PeerQueue, PeerId)>,
 }
 
 /// Returns true if the `peer_id` is connected and false otherwise.
@@ -811,12 +801,8 @@ impl<E: EthSpec> BeaconProcessor<E> {
                 let (work_event, created_timestamp) = match inbound_events.next().await {
                     Some(InboundEvent::WorkerFinished(completion)) => {
                         self.current_workers = self.current_workers.saturating_sub(1);
-                        if let Some(peer_id) = completion.peer_id {
-                            if completion.work_type == WorkType::GossipBlock {
-                                work_queues.gossip_block_queue.worker_finished(&peer_id)
-                            } else if completion.work_type == WorkType::RpcBlock {
-                                work_queues.rpc_block_queue.worker_finished(&peer_id)
-                            }
+                        if let Some((queue, peer_id)) = completion.peer {
+                            work_queues.peer_queue(queue).worker_finished(&peer_id)
                         }
                         (None, Instant::now())
                     }
@@ -1298,10 +1284,6 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                     requeue_rpc_block(work, &reprocess_work_tx);
                                 }
                             }
-                            Work::IgnoredRpcBlock { process_fn } => {
-                                // Notifications must not wait behind the work they release.
-                                process_fn();
-                            }
                             _ if can_spawn => self.spawn_worker(work, created_timestamp, idle_tx),
                             Work::GossipAttestation { .. } => {
                                 work_queues.attestation_queue.push(work)
@@ -1510,7 +1492,6 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         }
                         WorkType::RpcBlock => work_queues.rpc_block_queue.len(),
                         WorkType::RpcBlobs => work_queues.rpc_blob_queue.len(),
-                        WorkType::IgnoredRpcBlock => 0, // Notification only, never queued.
                         WorkType::RpcEnvelope => work_queues.rpc_envelope_queue.len(),
                         WorkType::RpcCustodyColumn => work_queues.rpc_custody_column_queue.len(),
                         WorkType::ColumnReconstruction => {
@@ -1613,8 +1594,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
     ) {
         let work_id = work.str_id();
         let work_type = work.to_type();
-        let peer_id = match &work {
-            Work::GossipBlock { peer_id, .. } | Work::RpcBlock { peer_id, .. } => Some(*peer_id),
+        let peer = match &work {
+            Work::GossipBlock { peer_id, .. } => Some((PeerQueue::GossipBlock, *peer_id)),
+            Work::RpcBlock { peer_id, .. } => Some((PeerQueue::RpcBlock, *peer_id)),
             _ => None,
         };
 
@@ -1644,7 +1626,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
         // As such, this instantiation should happen as early in the function as possible.
         let send_idle_on_drop = SendOnDrop {
             tx: idle_tx,
-            completion: WorkerCompletion { work_type, peer_id },
+            completion: WorkerCompletion { work_type, peer },
             _worker_timer: worker_timer,
         };
 
@@ -1716,7 +1698,6 @@ impl<E: EthSpec> BeaconProcessor<E> {
             | Work::RpcCustodyColumn(process_fn)
             | Work::RpcEnvelope(process_fn)
             | Work::ColumnReconstruction(process_fn) => task_spawner.spawn_async(process_fn),
-            Work::IgnoredRpcBlock { process_fn } => task_spawner.spawn_blocking(process_fn),
             Work::GossipBlock {
                 peer_id: _,
                 process_fn: work,
@@ -1865,7 +1846,7 @@ impl Drop for SendOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::work_queue::PeerWorkQueue;
+    use crate::scheduler::work_queue::{PeerQueue, PeerWorkQueue};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use types::MainnetEthSpec;
 
@@ -1938,7 +1919,7 @@ mod tests {
                 tx,
                 completion: WorkerCompletion {
                     work_type: WorkType::RpcBlock,
-                    peer_id: Some(peer),
+                    peer: Some((PeerQueue::RpcBlock, peer)),
                 },
                 _worker_timer: None,
             };
@@ -1946,7 +1927,7 @@ mod tests {
         });
         assert!(result.is_err());
         let completion = rx.try_recv().unwrap();
-        assert_eq!(completion.peer_id, Some(peer));
+        assert_eq!(completion.peer, Some((PeerQueue::RpcBlock, peer)));
         assert_eq!(completion.work_type, WorkType::RpcBlock);
         assert!(rx.try_recv().is_err());
     }
