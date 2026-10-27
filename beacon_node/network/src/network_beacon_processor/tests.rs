@@ -1014,6 +1014,10 @@ async fn status_finalized_checkpoint_relevance() {
             .as_u64(),
     );
 
+    // Finalized one epoch later than the clock allows.
+    let mut too_recent = ahead.clone();
+    too_recent.finalized_epoch += 1;
+
     let mut wrong_fork = local.clone();
     wrong_fork.fork_digest[0] ^= 1;
 
@@ -1022,6 +1026,7 @@ async fn status_finalized_checkpoint_relevance() {
         (conflicting, false),
         (genesis, true),
         (ahead, true),
+        (too_recent, false),
         (wrong_fork, false),
     ] {
         let status = StatusMessage::V2(status);
