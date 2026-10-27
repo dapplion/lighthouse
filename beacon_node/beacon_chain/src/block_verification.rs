@@ -715,10 +715,30 @@ pub fn signature_verify_chain_segment<T: BeaconChainTypes>(
 
     // verify signatures
     let pubkey_cache = get_validator_pubkey_cache(chain)?;
+    // Authenticate every proposer before building the body signature sets, which can be large.
+    let mut proposal_verifier = get_signature_verifier(&state, &pubkey_cache, &chain.spec);
+    for svb in &mut signature_verified_blocks {
+        proposal_verifier.include_block_proposal(
+            svb.block.as_block(),
+            Some(svb.block_root),
+            Some(
+                svb.consensus_context
+                    .get_proposer_index_from_epoch_state(&state, &chain.spec)
+                    .map_err(BlockSignatureVerifierError::from)?,
+            ),
+        )?;
+    }
+
+    if proposal_verifier.verify().is_err() {
+        return Err(BlockError::InvalidSignature(InvalidSignature::Unknown));
+    }
+
     let mut signature_verifier = get_signature_verifier(&state, &pubkey_cache, &chain.spec);
     for svb in &mut signature_verified_blocks {
-        signature_verifier
-            .include_all_signatures(svb.block.as_block(), &mut svb.consensus_context)?;
+        signature_verifier.include_all_signatures_except_proposal(
+            svb.block.as_block(),
+            &mut svb.consensus_context,
+        )?;
     }
 
     if signature_verifier.verify().is_err() {

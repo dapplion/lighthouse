@@ -872,6 +872,78 @@ async fn invalid_signature_block_proposal() {
     }
 }
 
+/// The proposer slashing names an unknown validator, so building the body signature sets fails.
+/// The segment must be rejected on the proposer signature before that happens.
+#[tokio::test]
+async fn invalid_signature_block_proposal_checked_before_body() {
+    let (chain_segment, ref_blobs) = get_chain_segment().await;
+    let mut chain_segment_blobs = ref_blobs.clone();
+    for &block_index in BLOCK_INDICES {
+        let harness = get_invalid_sigs_harness(chain_segment).await;
+        let mut snapshots = chain_segment.clone();
+        let (mut block, signature) = snapshots[block_index]
+            .beacon_block
+            .as_ref()
+            .clone()
+            .deconstruct();
+        let mut header = block.block_header();
+        header.proposer_index = u64::MAX;
+        block
+            .body_mut()
+            .proposer_slashings_push(ProposerSlashing {
+                signed_header_1: SignedBeaconBlockHeader {
+                    message: header.clone(),
+                    signature: junk_signature(),
+                },
+                signed_header_2: SignedBeaconBlockHeader {
+                    message: header,
+                    signature: junk_signature(),
+                },
+            })
+            .expect("should update proposer slashing");
+        snapshots[block_index].beacon_block =
+            Arc::new(SignedBeaconBlock::from_block(block, signature));
+        update_envelope_block_root(&mut snapshots[block_index]);
+        update_parent_roots(&mut snapshots, &mut chain_segment_blobs);
+        update_proposal_signatures(&mut snapshots, &harness);
+        snapshots[block_index].beacon_block = Arc::new(SignedBeaconBlock::from_block(
+            snapshots[block_index]
+                .beacon_block
+                .as_ref()
+                .clone()
+                .deconstruct()
+                .0,
+            junk_signature(),
+        ));
+        match harness
+            .chain
+            .process_chain_segment(
+                snapshots
+                    .iter()
+                    .zip(chain_segment_blobs.iter())
+                    .map(|(snapshot, blobs)| {
+                        build_range_sync_block(
+                            snapshot.beacon_block.clone(),
+                            snapshot.execution_envelope.clone(),
+                            blobs,
+                            harness.chain.clone(),
+                        )
+                    })
+                    .collect(),
+                NotifyExecutionLayer::Yes,
+            )
+            .await
+            .into_block_error()
+        {
+            Err(BlockError::InvalidSignature(InvalidSignature::Unknown)) => {}
+            other => panic!(
+                "should reject the proposer signature before building body signature sets, got: {:?}",
+                other
+            ),
+        }
+    }
+}
+
 #[tokio::test]
 async fn invalid_signature_randao_reveal() {
     let (chain_segment, ref_blobs) = get_chain_segment().await;
