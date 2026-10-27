@@ -208,13 +208,13 @@ mod tests {
 
     #[test]
     fn builds_from_genesis_state() {
-        let (state, spec) = genesis_state::<E>(64);
+        let (state, spec) = genesis_state(64);
         SlotAssignments::new::<E>(&state, &spec, None).expect("builds from genesis state");
     }
 
     #[test]
     fn every_validator_attests_once_in_current_epoch() {
-        let (mut state, spec) = genesis_state::<E>(64);
+        let (mut state, spec) = genesis_state(64);
         let spe = E::slots_per_epoch();
         let start = Slot::new(spe * 2);
         advance_state(&mut state, start, &spec);
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn is_in_range_returns_false_for_uncovered_epochs() {
-        let (state, spec) = genesis_state::<E>(64);
+        let (state, spec) = genesis_state(64);
         let sa = SlotAssignments::new::<E>(&state, &spec, None).expect("build");
         let far = Slot::new(E::slots_per_epoch() * 5);
         for val_idx in 0..state.validators().len() {

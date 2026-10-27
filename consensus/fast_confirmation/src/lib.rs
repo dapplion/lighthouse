@@ -1578,6 +1578,7 @@ fn estimate_committee_weight_between_slots<E: EthSpec>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{advance_state, genesis_state};
     use types::MainnetEthSpec;
 
     type E = MainnetEthSpec;
@@ -1691,14 +1692,12 @@ mod tests {
         );
     }
 
-    /// FCR's proposer score matches fork choice's, which counts only unslashed active validators
-    /// (consensus-specs#5679) and is covered by the `proposer_boost_excludes_slashed_validators`
-    /// EF fork choice test.
+    /// Fork choice's proposer score is EF-tested against consensus-specs#5679; FCR's must match it.
     #[test]
     fn proposer_score_matches_fork_choice_with_slashed_validators() {
         use proto_array::{JustifiedBalances, calculate_committee_fraction};
 
-        let (mut state, spec) = crate::test_utils::genesis_state::<E>(32);
+        let (mut state, spec) = genesis_state::<E>(32);
         for index in 0..8 {
             state.get_validator_mut(index).unwrap().slashed = true;
         }
@@ -1720,12 +1719,14 @@ mod tests {
         )
         .unwrap();
 
-        let balance_source = BalanceSourceData::new(&state, root, &spec).unwrap();
-        let justified_balances = JustifiedBalances::from_justified_state(&state).unwrap();
         assert_eq!(
-            fcr.compute_proposer_score::<E>(&balance_source).unwrap(),
-            calculate_committee_fraction::<E>(&justified_balances, spec.proposer_score_boost)
-                .unwrap()
+            fcr.compute_proposer_score::<E>(&fcr.head_balance_source)
+                .unwrap(),
+            calculate_committee_fraction::<E>(
+                &JustifiedBalances::from_justified_state(&state).unwrap(),
+                spec.proposer_score_boost
+            )
+            .unwrap()
         );
     }
 
@@ -1734,7 +1735,6 @@ mod tests {
     /// of the unrealized-checkpoints bug fixed in sigp/lighthouse#9471).
     #[test]
     fn head_balance_source_rebuilt_after_intra_epoch_slashing() {
-        use crate::test_utils::{advance_state, genesis_state};
         use types::MinimalEthSpec;
         type E = MinimalEthSpec;
 
