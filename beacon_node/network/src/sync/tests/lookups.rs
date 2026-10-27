@@ -2430,6 +2430,53 @@ async fn test_single_block_lookup_ignored_response() {
 }
 
 #[tokio::test]
+/// Assert that an unknown root is requested only once enough distinct peers report it.
+async fn unknown_block_root_waits_for_min_peers() {
+    let mut r = TestRig::default();
+    r.sync_manager.set_unknown_root_min_peers(3);
+    let block_root = r.build_chain(1).await;
+    let peers: Vec<_> = (0..3).map(|_| r.new_connected_supernode_peer()).collect();
+
+    r.trigger_unknown_block_from_attestation(block_root, peers[0]);
+    // A repeated report from the same peer does not count.
+    r.trigger_unknown_block_from_attestation(block_root, peers[0]);
+    r.trigger_unknown_block_from_attestation(block_root, peers[1]);
+    r.assert_single_lookups_count(0);
+
+    r.trigger_unknown_block_from_attestation(block_root, peers[2]);
+    r.assert_single_lookups_count(1);
+}
+
+#[tokio::test]
+/// Assert that a disconnected peer no longer counts towards the unknown root quorum.
+async fn unknown_block_root_forgets_disconnected_peer() {
+    let mut r = TestRig::default();
+    r.sync_manager.set_unknown_root_min_peers(2);
+    let block_root = r.build_chain(1).await;
+    let peers: Vec<_> = (0..3).map(|_| r.new_connected_supernode_peer()).collect();
+
+    r.trigger_unknown_block_from_attestation(block_root, peers[0]);
+    r.peer_disconnected(peers[0]);
+    r.trigger_unknown_block_from_attestation(block_root, peers[1]);
+    r.assert_single_lookups_count(0);
+
+    r.trigger_unknown_block_from_attestation(block_root, peers[2]);
+    r.assert_single_lookups_count(1);
+}
+
+#[tokio::test]
+/// Assert that an unknown parent is still looked up from a single peer, so a network with fewer
+/// peers than `unknown_root_min_peers` still recovers a missed block.
+async fn unknown_parent_ignores_min_peers() {
+    let mut r = TestRig::default();
+    r.sync_manager.set_unknown_root_min_peers(3);
+    r.build_chain(2).await;
+    r.trigger_with_last_unknown_block_parent();
+    r.simulate(SimulateConfig::happy_path()).await;
+    r.assert_successful_lookup_sync();
+}
+
+#[tokio::test]
 /// Assert that if the beacon processor returns DuplicateFullyImported, the lookup completes successfully
 async fn test_single_block_lookup_duplicate_response() {
     let mut r = TestRig::default();

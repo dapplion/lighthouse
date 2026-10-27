@@ -400,6 +400,11 @@ impl<T: BeaconChainTypes> SyncManager<T> {
         self.handle_new_execution_engine_state(state);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_unknown_root_min_peers(&mut self, min_peers: usize) {
+        self.unknown_root_min_peers = min_peers;
+    }
+
     fn network_globals(&self) -> &NetworkGlobals<T::EthSpec> {
         self.network.network_globals()
     }
