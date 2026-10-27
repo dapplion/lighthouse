@@ -184,6 +184,11 @@ impl EnvelopeTimesCache {
             .and_then(|entry| entry.timestamps.observed)
     }
 
+    /// Forget every timestamp recorded for `block_root`.
+    pub fn remove(&mut self, block_root: BlockRoot) {
+        self.cache.remove(&block_root);
+    }
+
     pub fn get_envelope_delays(
         &self,
         block_root: BlockRoot,

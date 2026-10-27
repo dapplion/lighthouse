@@ -22,6 +22,7 @@ use crate::{
     BeaconChainError, BeaconChainTypes, BeaconStore, BlockError, CustodyContext,
     ExecutionPayloadError, PayloadVerificationError, PayloadVerificationOutcome,
 };
+use execution_layer::PayloadStatus;
 use state_processing::envelope_processing::EnvelopeProcessingError;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -298,6 +299,60 @@ impl EnvelopeError {
             | EnvelopeError::EnvelopeProcessingError(_) => true,
             EnvelopeError::ExecutionPayloadError(e) => e.penalize_peer(),
             EnvelopeError::BlockRootUnknown { .. }
+            | EnvelopeError::EnvelopeAlreadySeen { .. }
+            | EnvelopeError::PriorToFinalization { .. }
+            | EnvelopeError::BeaconChainError(_)
+            | EnvelopeError::BeaconStateError(_)
+            | EnvelopeError::BlockRootNotInForkChoice(_)
+            | EnvelopeError::InternalError(_) => false,
+        }
+    }
+
+    /// Whether the error proves the envelope signed by the bid's builder is invalid.
+    pub fn is_builder_fault(&self) -> bool {
+        match self {
+            EnvelopeError::SlotMismatch { .. }
+            | EnvelopeError::BlockHashMismatch { .. }
+            | EnvelopeError::ParentBeaconBlockRootMismatch { .. }
+            | EnvelopeError::InvalidPayloadHash(_)
+            | EnvelopeError::ExecutionRequestsRootMismatch { .. }
+            | EnvelopeError::OperationListTooLong { .. } => true,
+            EnvelopeError::EnvelopeProcessingError(e) => match e {
+                EnvelopeProcessingError::LatestBlockHeaderMismatch { .. }
+                | EnvelopeProcessingError::ParentBeaconBlockRootMismatch { .. }
+                | EnvelopeProcessingError::SlotMismatch { .. }
+                | EnvelopeProcessingError::WithdrawalsRootMismatch { .. }
+                | EnvelopeProcessingError::GasLimitMismatch { .. }
+                | EnvelopeProcessingError::BlockHashMismatch { .. }
+                | EnvelopeProcessingError::ParentHashMismatch { .. }
+                | EnvelopeProcessingError::PrevRandaoMismatch { .. }
+                | EnvelopeProcessingError::TimestampMismatch { .. }
+                | EnvelopeProcessingError::ExecutionRequestsRootMismatch { .. }
+                | EnvelopeProcessingError::ExecutionInvalid => true,
+                // A mismatched builder index means the bid's builder did not sign the envelope.
+                EnvelopeProcessingError::BuilderIndexMismatch { .. }
+                | EnvelopeProcessingError::BadSignature
+                | EnvelopeProcessingError::BeaconStateError(_)
+                | EnvelopeProcessingError::ArithError(_) => false,
+            },
+            EnvelopeError::ExecutionPayloadError(e) => match e {
+                ExecutionPayloadError::RejectedByExecutionEngine { status } => match status {
+                    PayloadStatus::Invalid { .. } | PayloadStatus::InvalidBlockHash { .. } => true,
+                    PayloadStatus::Valid | PayloadStatus::Syncing | PayloadStatus::Accepted => {
+                        false
+                    }
+                },
+                ExecutionPayloadError::NoExecutionConnection
+                | ExecutionPayloadError::RequestFailed(_)
+                | ExecutionPayloadError::InvalidPayloadTimestamp { .. }
+                | ExecutionPayloadError::InvalidActivationEpoch { .. }
+                | ExecutionPayloadError::UnverifiedNonOptimisticCandidate => false,
+            },
+            EnvelopeError::BuilderIndexMismatch { .. }
+            | EnvelopeError::BadSignature
+            | EnvelopeError::UnknownValidator { .. }
+            | EnvelopeError::IncorrectBlockProposer { .. }
+            | EnvelopeError::BlockRootUnknown { .. }
             | EnvelopeError::EnvelopeAlreadySeen { .. }
             | EnvelopeError::PriorToFinalization { .. }
             | EnvelopeError::BeaconChainError(_)

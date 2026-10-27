@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use eth2::types::{EventKind, SseExecutionPayload, SseExecutionPayloadAvailable};
-use execution_layer::PayloadStatus;
 use fork_choice::PayloadVerificationStatus;
 use slot_clock::SlotClock;
 use state_processing::{VerifySignatures, envelope_processing::verify_execution_payload_envelope};
@@ -10,7 +9,7 @@ use store::StoreOp;
 use tracing::{debug, error, info, info_span, instrument, warn};
 use types::{
     BlockImportSource, Hash256, SignedBeaconBlock, SignedExecutionPayloadBid,
-    SignedExecutionPayloadEnvelope,
+    SignedExecutionPayloadEnvelope, Slot,
 };
 
 use super::{
@@ -19,7 +18,7 @@ use super::{
 };
 use crate::{
     AvailabilityProcessingStatus, BeaconChain, BeaconChainError, BeaconChainTypes, BlockError,
-    ExecutionPayloadError, NotifyExecutionLayer,
+    NotifyExecutionLayer,
     block_verification_types::AvailableBlockData,
     metrics,
     payload_envelope_verification::{
@@ -66,10 +65,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 .clone_as_signed_execution_payload_bid(),
         );
         let builder_index = bid.message().builder_index();
+        let envelope_signature = unverified_envelope.signed_envelope.signature.clone();
 
         // Set observed time if not already set. Usually this should be set by gossip or RPC,
         // but just in case we set it again here (useful for tests).
-        if let Some(seen_timestamp) = self.slot_clock.now_duration() {
+        let seen_timestamp = self.slot_clock.now_duration();
+        if let Some(seen_timestamp) = seen_timestamp {
             self.envelope_times_cache.write().set_time_observed(
                 block_root,
                 block_slot,
@@ -132,6 +133,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
                 // TODO(gloas) do we need to send a `PayloadImported` event to the reprocess queue?
 
+                self.restore_time_observed(block_root, block_slot, seen_timestamp);
+
                 metrics::inc_counter(&metrics::ENVELOPE_PROCESSING_SUCCESSES);
 
                 Ok(status)
@@ -139,21 +142,33 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             Ok(status @ AvailabilityProcessingStatus::MissingComponents(slot, block_root)) => {
                 debug!(?block_root, %slot, "Payload envelope awaiting blobs");
 
+                self.restore_time_observed(block_root, block_slot, seen_timestamp);
+
                 Ok(status)
             }
             Err(err) => {
-                // A definitive EL rejection is attributable to the builder: the envelope's
-                // signature was verified at gossip and its payload is hash-bound to the committed
-                // bid, so no peer could have forged it and no other payload satisfies the bid.
-                // Transient failures (EL unreachable, syncing) never take this error path.
+                // A definitive rejection is attributable to the builder: the envelope's signature
+                // was verified at gossip, so no peer could have forged it. Transient failures (EL
+                // unreachable, syncing) are not builder faults.
                 if let BlockError::EnvelopeError(envelope_error) = &err
-                    && let EnvelopeError::ExecutionPayloadError(
-                        ExecutionPayloadError::RejectedByExecutionEngine {
-                            status:
-                                PayloadStatus::Invalid { .. } | PayloadStatus::InvalidBlockHash { .. },
-                        },
-                    ) = envelope_error.as_ref()
+                    && envelope_error.is_builder_fault()
                 {
+                    // Gossip marked this envelope seen and timely before full verification. Undo
+                    // both so a later valid envelope gets through and the PTC does not vote present,
+                    // unless a valid envelope was imported meanwhile. The fork choice lock keeps
+                    // that import from landing between the check and the undo.
+                    let fork_choice = self.canonical_head.fork_choice_read_lock();
+                    if !fork_choice.is_payload_received(&block_root)
+                        && self.observed_payload_envelopes.forget_envelope(
+                            block_slot,
+                            block_root,
+                            builder_index,
+                            &envelope_signature,
+                        )
+                    {
+                        self.envelope_times_cache.write().remove(block_root);
+                    }
+                    drop(fork_choice);
                     self.record_builder_ban_for_invalid_payload(
                         builder_index,
                         block_root,
@@ -166,6 +181,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 );
                 Err(err)
             }
+        }
+    }
+
+    /// Record the arrival of an envelope that passed verification again, in case an invalid
+    /// envelope for the same block failed meanwhile and removed it.
+    fn restore_time_observed(
+        &self,
+        block_root: Hash256,
+        block_slot: Slot,
+        seen_timestamp: Option<Duration>,
+    ) {
+        if let Some(seen_timestamp) = seen_timestamp {
+            self.envelope_times_cache.write().set_time_observed(
+                block_root,
+                block_slot,
+                seen_timestamp,
+                None,
+            );
         }
     }
 

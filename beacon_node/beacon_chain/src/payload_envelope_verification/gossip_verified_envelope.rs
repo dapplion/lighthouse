@@ -208,6 +208,8 @@ impl<T: BeaconChainTypes> GossipVerifiedEnvelope<T> {
             .message();
 
         verify_envelope_consistency(envelope, &block, execution_bid, latest_finalized_slot)?;
+        // The payload's gas limit is only checked against the bid at import.
+        let committed_gas_limit = execution_bid.gas_limit();
 
         // Verify the envelope signature.
         //
@@ -309,7 +311,7 @@ impl<T: BeaconChainTypes> GossipVerifiedEnvelope<T> {
         if !envelope_already_seen {
             let payload = &gossip_verified_envelope.signed_envelope.message.payload;
             ctx.observed_execution_payloads
-                .insert(payload.block_hash, payload.gas_limit);
+                .insert(payload.block_hash, committed_gas_limit);
 
             // Emit the SSE event once for the first observation from any source.
             if let Some(event_handler) = ctx.event_handler.as_ref()

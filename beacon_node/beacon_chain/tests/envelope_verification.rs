@@ -9,8 +9,8 @@ use eth2::types::EventKind;
 use proto_array::ExecutionStatus;
 use std::sync::Arc;
 use types::{
-    Address, BlockImportSource, Epoch, ExecPayload, ForkName, Hash256, Slot, Spec,
-    WithdrawalRequest,
+    Address, BlockImportSource, Domain, Epoch, EthSpec, ExecPayload, ForkName, Hash256,
+    SignedExecutionPayloadEnvelope, SignedRoot, Slot, Spec, WithdrawalRequest,
 };
 
 type E = Spec;
@@ -734,4 +734,171 @@ fn is_valid_and_post_bellatrix(status: ExecutionStatus) -> bool {
 
 fn is_optimistic(status: ExecutionStatus) -> bool {
     matches!(status, ExecutionStatus::Optimistic(_))
+}
+
+/// A signed envelope that passes gossip but fails the consensus checks must not keep the
+/// `(block_root, builder_index)` pair seen, nor leave an observed time for the PTC to vote on. The
+/// rollback must also not erase the record of a valid envelope that arrived first.
+#[tokio::test]
+async fn invalid_envelope_does_not_poison_dedup_or_ptc() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+    let harness = gloas_harness();
+    harness.extend_to_slot(Slot::new(1)).await;
+
+    let target_slot = Slot::new(2);
+    let (block_root, valid, invalid) =
+        block_with_valid_and_invalid_envelope(&harness, target_slot).await;
+
+    let payload_present = || {
+        harness
+            .chain
+            .produce_payload_attestation_data(target_slot)
+            .expect("should produce payload attestation data")
+            .payload_present
+    };
+
+    // The invalid envelope arrives first and fails import.
+    verify_and_import_envelope(
+        &harness,
+        block_root,
+        invalid.clone(),
+        EnvelopeSource::Gossip,
+    )
+    .await
+    .expect_err("wrong-parent envelope should fail import");
+    assert!(!payload_present());
+
+    // The valid envelope is still accepted on gossip, and imports.
+    match verify_and_import_envelope(&harness, block_root, valid.clone(), EnvelopeSource::Gossip)
+        .await
+    {
+        Ok(Imported(..)) => {}
+        result => panic!("valid envelope should import, got {result:?}"),
+    }
+    assert!(payload_present());
+
+    // A later invalid envelope must not erase the record of the valid one.
+    verify_and_import_envelope(&harness, block_root, invalid, EnvelopeSource::Http)
+        .await
+        .expect_err("wrong-parent envelope should fail import");
+    assert!(payload_present());
+    match harness
+        .chain
+        .verify_envelope_for_gossip(valid, EnvelopeSource::Gossip)
+        .await
+    {
+        Err(EnvelopeError::EnvelopeAlreadySeen { .. }) => {}
+        result => panic!("valid envelope should stay seen, got {result:?}"),
+    }
+}
+
+/// Helper: verify `envelope` for gossip, which must pass, and import it.
+async fn verify_and_import_envelope(
+    harness: &BeaconChainHarness<beacon_chain::test_utils::EphemeralHarnessType<E>>,
+    block_root: Hash256,
+    envelope: Arc<SignedExecutionPayloadEnvelope<E>>,
+    source: EnvelopeSource,
+) -> Result<beacon_chain::AvailabilityProcessingStatus, beacon_chain::BlockError> {
+    let gossip_verified = harness
+        .chain
+        .verify_envelope_for_gossip(envelope, source)
+        .await
+        .expect("envelope should pass gossip verification");
+    harness
+        .chain
+        .process_execution_payload_envelope(
+            block_root,
+            gossip_verified,
+            NotifyExecutionLayer::Yes,
+            BlockImportSource::Gossip,
+            #[allow(clippy::result_large_err)]
+            || Ok(()),
+        )
+        .await
+}
+
+/// The invalid envelope holds the seen entry while the valid one imports over HTTP. Its later
+/// failure must not erase the valid envelope's observed time.
+#[tokio::test]
+async fn invalid_envelope_failing_after_valid_import_keeps_ptc() {
+    if !fork_name_from_env().is_some_and(|f| f.gloas_enabled()) {
+        return;
+    }
+    let harness = gloas_harness();
+    harness.extend_to_slot(Slot::new(1)).await;
+    let target_slot = Slot::new(2);
+    let (block_root, valid, invalid) =
+        block_with_valid_and_invalid_envelope(&harness, target_slot).await;
+
+    let invalid_gossip_verified = harness
+        .chain
+        .verify_envelope_for_gossip(invalid, EnvelopeSource::Gossip)
+        .await
+        .expect("wrong-parent envelope should pass gossip verification");
+    match verify_and_import_envelope(&harness, block_root, valid, EnvelopeSource::Http).await {
+        Ok(Imported(..)) => {}
+        result => panic!("valid envelope should import, got {result:?}"),
+    }
+    harness
+        .chain
+        .process_execution_payload_envelope(
+            block_root,
+            invalid_gossip_verified,
+            NotifyExecutionLayer::Yes,
+            BlockImportSource::Gossip,
+            #[allow(clippy::result_large_err)]
+            || Ok(()),
+        )
+        .await
+        .expect_err("wrong-parent envelope should fail import");
+
+    assert!(
+        harness
+            .chain
+            .produce_payload_attestation_data(target_slot)
+            .expect("should produce payload attestation data")
+            .payload_present
+    );
+}
+
+/// Helper: import the block for `target_slot` with its columns, and return its root, its envelope, and
+/// the same envelope with a wrong parent root, re-signed with the same key.
+async fn block_with_valid_and_invalid_envelope(
+    harness: &BeaconChainHarness<beacon_chain::test_utils::EphemeralHarnessType<E>>,
+    target_slot: Slot,
+) -> (
+    Hash256,
+    Arc<SignedExecutionPayloadEnvelope<E>>,
+    Arc<SignedExecutionPayloadEnvelope<E>>,
+) {
+    let state = harness.get_current_state();
+    harness.advance_slot();
+    let (block_contents, opt_envelope, post_state) =
+        harness.make_block_with_envelope(state, target_slot).await;
+    let block = block_contents.0.clone();
+    let block_root = block.canonical_root();
+    harness
+        .process_block(target_slot, block_root, block_contents)
+        .await
+        .expect("block should be processed");
+    harness.process_gossip_columns(&block, None).await;
+
+    let valid = Arc::new(opt_envelope.expect("Gloas block should produce an envelope"));
+
+    let mut message = valid.message.clone();
+    message.parent_beacon_block_root = Hash256::repeat_byte(0x42);
+    let keypair = &harness.validator_keypairs[block.message().proposer_index() as usize];
+    let epoch = target_slot.epoch(E::slots_per_epoch());
+    let domain = harness.spec.get_domain(
+        epoch,
+        Domain::BeaconBuilder,
+        &harness.spec.fork_at_epoch(epoch),
+        post_state.genesis_validators_root(),
+    );
+    let signature = keypair.sk.sign(message.signing_root(domain));
+    let invalid = Arc::new(SignedExecutionPayloadEnvelope { message, signature });
+
+    (block_root, valid, invalid)
 }

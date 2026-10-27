@@ -8103,12 +8103,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         Ok(())
     }
 
-    /// Post-Gloas: record a ban for an external builder whose revealed envelope was rejected by
-    /// the execution engine as definitively invalid (`Invalid` / `InvalidBlockHash`).
+    /// Post-Gloas: record a ban for an external builder whose revealed envelope was definitively
+    /// invalid, either by the consensus checks or by the execution engine (`Invalid` /
+    /// `InvalidBlockHash`).
     ///
     /// Unlike a missed reveal, no attestation-weight or PTC gating applies: the envelope's
-    /// signature was verified at gossip and its payload is hash-bound to the committed bid, so an
-    /// EL-invalid verdict is attributable to the builder alone.
+    /// signature was verified at gossip, so an invalid verdict is attributable to the builder
+    /// alone.
     pub(crate) fn record_builder_ban_for_invalid_payload(
         &self,
         builder_index: u64,
@@ -8144,7 +8145,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 %block_slot,
                 ?block_root,
                 ban_slots = self.circuit_breaker.config().ban_slots,
-                "Banning builder that revealed an execution-invalid payload"
+                "Banning builder that revealed an invalid envelope"
             );
             metrics::inc_counter_vec(&metrics::BUILDER_CIRCUIT_BREAKER_BANS, &["invalid_payload"]);
             metrics::set_gauge(

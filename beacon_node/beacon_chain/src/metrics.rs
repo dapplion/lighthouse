@@ -37,7 +37,7 @@ pub static BUILDER_CIRCUIT_BREAKER_BANS: LazyLock<Result<IntCounterVec>> = LazyL
     try_create_int_counter_vec(
         "beacon_builder_circuit_breaker_bans_total",
         "Count of builder bans recorded, by reason: a missed payload reveal or an \
-         execution-invalid payload (post-Gloas)",
+         invalid envelope (post-Gloas)",
         &["reason"],
     )
 });
