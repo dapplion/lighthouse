@@ -1883,21 +1883,18 @@ pub fn check_block_is_finalized_checkpoint_or_descendant<
         // If fork choice does *not* consider the parent to be a descendant of the finalized block,
         // then there are two more cases:
         //
-        // 1. Fork choice knows the parent, or we have it stored at or before the finalized slot.
-        //    Either way the parent is pre-finalization or conflicting with finalization, and
-        //    downloading it cannot change that.
-        // 2. The parent is unknown to fork choice and newer than finalization, we probably want to
-        //    download it since it might actually descend from the finalized root. A stored block
-        //    can land here because fork choice is not persisted on every block, so it trails the
-        //    store after a crash.
+        // 1. Fork choice knows the parent, or an earlier import proved it conflicts with
+        //    finalization. Either way downloading it cannot change that.
+        // 2. The parent is unknown to us, we probably want to download it since it might actually
+        //    descend from the finalized root. Having the parent in the store proves nothing: fork
+        //    choice is not persisted on every block, so after a crash the store holds descendants
+        //    of the finalized root that fork choice has never seen.
         if fork_choice
             .proto_array()
             .contains_block(&block.parent_root())
             || chain
-                .store
-                .get_blinded_block(&block.parent_root())
-                .map_err(|e| BlockError::BeaconChainError(Box::new(e.into())))?
-                .is_some_and(|parent| parent.slot() <= finalized_slot)
+                .pre_finalization_block_cache
+                .contains(block.parent_root())
         {
             Err(BlockError::NotFinalizedDescendant {
                 block_parent_root: block.parent_root(),

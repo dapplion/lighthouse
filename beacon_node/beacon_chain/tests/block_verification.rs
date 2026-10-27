@@ -3599,11 +3599,31 @@ async fn gossip_block_with_parent_in_store_but_not_fork_choice() {
     );
 
     // A block whose parent fork choice cannot place is unknown, not a finality conflict.
-    match unwrap_err(resumed.chain.verify_block_for_gossip(block).await).into_block_error() {
+    match unwrap_err(resumed.chain.verify_block_for_gossip(block.clone()).await).into_block_error()
+    {
         BlockError::ParentUnknown {
             parent_root: unknown_root,
             ..
         } => assert_eq!(unknown_root, parent_root),
         other => panic!("expected ParentUnknown, got {other:?}"),
     }
+
+    // Seed the cache as if an import had proven the parent conflicts with finalization: its
+    // children are then rejected without another lookup.
+    resumed.chain.pre_finalization_block_rejected(parent_root);
+    match unwrap_err(resumed.chain.verify_block_for_gossip(block).await).into_block_error() {
+        BlockError::NotFinalizedDescendant { block_parent_root } => {
+            assert_eq!(block_parent_root, parent_root)
+        }
+        other => panic!("expected NotFinalizedDescendant, got {other:?}"),
+    }
+    assert!(resumed.chain.is_known_finality_conflict(parent_root));
+
+    // A cached block that fork choice holds as a finalized descendant is not a conflict: it can
+    // land in the cache when it is imported while an attestation to it is being verified.
+    let fork_choice_head = resumed.chain.head_snapshot().beacon_block_root;
+    resumed
+        .chain
+        .pre_finalization_block_rejected(fork_choice_head);
+    assert!(!resumed.chain.is_known_finality_conflict(fork_choice_head));
 }

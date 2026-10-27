@@ -4,7 +4,7 @@ use itertools::process_results;
 use parking_lot::Mutex;
 use std::time::Duration;
 use tracing::debug;
-use types::{EthSpec, Hash256};
+use types::Hash256;
 
 const BLOCK_ROOT_CACHE_LIMIT: usize = 512;
 const LOOKUP_LIMIT: usize = 8;
@@ -44,17 +44,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
     /// Return `true` if the attestation to this block should be rejected outright,
     /// return `false` if more information is needed from a single-block-lookup.
     pub fn is_pre_finalization_block(&self, block_root: Hash256) -> Result<bool, BeaconChainError> {
-        // Read fork choice once, before locking the cache, so that both facts come from the same
-        // view and the cache lock stays innermost.
-        let (known_to_fork_choice, finalized_slot) = {
+        // Read fork choice before locking the cache, so the cache lock stays innermost. Re-check
+        // descent: the block may have been imported since the caller looked.
+        let conflicts_in_fork_choice = {
             let fork_choice = self.canonical_head.fork_choice_read_lock();
-            (
-                fork_choice.proto_array().contains_block(&block_root),
-                fork_choice
-                    .finalized_checkpoint()
-                    .epoch
-                    .start_slot(T::EthSpec::slots_per_epoch()),
-            )
+            fork_choice.proto_array().contains_block(&block_root)
+                && !fork_choice.is_finalized_checkpoint_or_descendant(block_root)
         };
 
         let mut cache = self.pre_finalization_block_cache.cache.lock();
@@ -64,15 +59,14 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(true);
         }
 
-        // Avoid repeating the disk lookup for blocks that are already subject to a network lookup.
+        // Avoid repeating the checks below for blocks that are already subject to a network lookup.
         // Sync will take care of de-duplicating the single block lookups.
         if cache.in_progress_lookups.contains_key(&block_root) {
             return Ok(false);
         }
 
-        // Fork choice has a node for this block, so per the assumption above it has already ruled
-        // the block out. No lookup can change that.
-        if known_to_fork_choice {
+        // Fork choice holds this block and knows it does not descend from finalization.
+        if conflicts_in_fork_choice {
             cache.block_roots.insert(block_root, ());
             return Ok(true);
         }
@@ -90,19 +84,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(true);
         }
 
-        // 2. Check on disk. Blocks from after finalization can be in the store but missing from
-        //    fork choice, which is not persisted on every block, so they are worth looking up
-        //    rather than rejecting.
-        if self
-            .store
-            .get_blinded_block(&block_root)?
-            .is_some_and(|block| block.slot() <= finalized_slot)
-        {
-            cache.block_roots.insert(block_root, ());
-            return Ok(true);
-        }
-
-        // 3. Check the network with a single block lookup.
+        // 2. Check the network with a single block lookup.
         cache.in_progress_lookups.insert(block_root, ());
         if cache.in_progress_lookups.len() == LOOKUP_LIMIT {
             // NOTE: we expect this to occur sometimes if a lot of blocks that we look up fail to be
@@ -114,6 +96,18 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             debug!("Pre-finalization lookup cache is full");
         }
         Ok(false)
+    }
+
+    /// Return `true` if an earlier import proved `block_root` conflicts with finalization.
+    ///
+    /// The cache can also hold valid blocks that were imported while an attestation to them was
+    /// being verified, so fork choice has the final word.
+    pub fn is_known_finality_conflict(&self, block_root: Hash256) -> bool {
+        self.pre_finalization_block_cache.contains(block_root)
+            && !self
+                .canonical_head
+                .fork_choice_read_lock()
+                .is_finalized_checkpoint_or_descendant(block_root)
     }
 
     pub fn pre_finalization_block_rejected(&self, block_root: Hash256) {

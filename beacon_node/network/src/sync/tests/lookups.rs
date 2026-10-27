@@ -2621,6 +2621,27 @@ async fn test_skip_creating_ignored_parent_lookup() {
 }
 
 #[tokio::test]
+async fn test_skip_creating_parent_lookup_known_to_conflict_with_finality() {
+    let mut r = TestRig::default();
+    r.build_chain(2).await;
+    r.harness
+        .chain
+        .pre_finalization_block_rejected(r.block_root_at_slot(1));
+    r.trigger_with_last_block();
+    r.simulate(SimulateConfig::happy_path()).await;
+    r.assert_no_penalties();
+    // Only the trigger's lookup is created; its parent is never looked up.
+    assert_eq!(r.created_lookups(), 1);
+    r.assert_no_active_lookups();
+    // The child of a known conflict is remembered as one, so it is not fetched again either.
+    assert!(
+        r.harness
+            .chain
+            .is_known_finality_conflict(r.block_root_at_slot(2))
+    );
+}
+
+#[tokio::test]
 /// Assert that if the oldest block in a chain is already imported (DuplicateFullyImported),
 /// the remaining blocks in the chain are still processed successfully. This tests a race
 /// condition where a block gets imported elsewhere while the lookup is processing.

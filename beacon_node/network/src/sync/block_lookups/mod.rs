@@ -371,6 +371,14 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
             return false;
         }
 
+        if cx.chain.is_known_finality_conflict(block_root) {
+            debug!(
+                ?block_root,
+                "Dropping lookup for block known to conflict with finality"
+            );
+            return false;
+        }
+
         // Do not re-request a block that is already being requested
         if let Some((&lookup_id, lookup)) = self
             .single_block_lookups
@@ -655,6 +663,11 @@ impl<T: BeaconChainTypes> BlockLookups<T> {
                 block_root,
                 peers,
             }) => {
+                // A child of a known finality conflict is one too: remember it, so it is never
+                // fetched again.
+                if cx.chain.is_known_finality_conflict(parent_root) {
+                    cx.chain.pre_finalization_block_rejected(block_root);
+                }
                 if self.search_parent_of_child(
                     parent_root,
                     &PeerType::new(parent_block_hash),
