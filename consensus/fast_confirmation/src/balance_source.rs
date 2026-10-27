@@ -152,3 +152,63 @@ fn get_epoch_boundary_root<E: EthSpec>(state: &BeaconState<E>) -> Result<Hash256
         .get_block_root(slot)
         .map_err(|e| Error::BlockRootsOutOfBounds(format!("{e:?}")))?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::genesis_state;
+    use types::MinimalEthSpec;
+
+    type E = MinimalEthSpec;
+
+    #[test]
+    fn unslashed_total_excludes_slashed_validators() {
+        let (mut state, spec) = genesis_state::<E>(32);
+        for index in 0..8 {
+            state.get_validator_mut(index).unwrap().slashed = true;
+        }
+
+        let balance_source = BalanceSourceData::new(&state, Hash256::ZERO, &spec).unwrap();
+        assert_eq!(
+            balance_source.total_active_balance,
+            32 * spec.max_effective_balance
+        );
+        assert_eq!(
+            balance_source.total_unslashed_active_balance,
+            24 * spec.max_effective_balance
+        );
+    }
+
+    /// Spec: `get_total_balance` floors every total at `EFFECTIVE_BALANCE_INCREMENT`.
+    #[test]
+    fn totals_floored_at_effective_balance_increment() {
+        let (mut state, spec) = genesis_state::<E>(4);
+        for index in 0..4 {
+            state.get_validator_mut(index).unwrap().activation_epoch = spec.far_future_epoch;
+        }
+        let balance_source = BalanceSourceData::new(&state, Hash256::ZERO, &spec).unwrap();
+        assert_eq!(
+            balance_source.total_active_balance,
+            spec.effective_balance_increment
+        );
+        assert_eq!(
+            balance_source.total_unslashed_active_balance,
+            spec.effective_balance_increment
+        );
+
+        // Every active validator is slashed: only the unslashed total is floored.
+        let (mut state, spec) = genesis_state::<E>(4);
+        for index in 0..4 {
+            state.get_validator_mut(index).unwrap().slashed = true;
+        }
+        let balance_source = BalanceSourceData::new(&state, Hash256::ZERO, &spec).unwrap();
+        assert_eq!(
+            balance_source.total_active_balance,
+            4 * spec.max_effective_balance
+        );
+        assert_eq!(
+            balance_source.total_unslashed_active_balance,
+            spec.effective_balance_increment
+        );
+    }
+}

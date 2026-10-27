@@ -41,6 +41,8 @@ mod balance_source;
 pub mod metrics;
 pub mod optimizations;
 mod slot_assignments;
+#[cfg(test)]
+mod test_utils;
 
 pub use balance_source::{BalanceSourceData, BalanceSourceKey};
 pub use optimizations::CheckpointAndBalance;
@@ -1689,120 +1691,25 @@ mod tests {
         );
     }
 
-    /// An active validator with the maximum effective balance.
-    fn active_validator(spec: &ChainSpec, slashed: bool) -> types::Validator {
-        types::Validator {
-            effective_balance: spec.max_effective_balance,
-            slashed,
-            activation_epoch: Epoch::new(0),
-            exit_epoch: spec.far_future_epoch,
-            withdrawable_epoch: spec.far_future_epoch,
-            ..Default::default()
-        }
-    }
-
-    /// A genesis state holding `validators`, without committee caches.
-    fn state_with_validators(
-        validators: Vec<types::Validator>,
-        spec: &ChainSpec,
-    ) -> BeaconState<E> {
-        let mut state: BeaconState<E> = BeaconState::new(0, Default::default(), spec);
-        for validator in validators {
-            let balance = validator.effective_balance;
-            state.validators_mut().push(validator).unwrap();
-            state.balances_mut().push(balance).unwrap();
-        }
-        state
-    }
-
-    /// A proto-array holding a genesis block and its child at slot 1. Returns the child's root.
-    fn genesis_and_child_proto_array(
-        genesis_root: Hash256,
-        spec: &ChainSpec,
-    ) -> (ProtoArray, Hash256) {
-        use proto_array::{Block, ExecutionStatus, ProtoArrayForkChoice};
-        use std::time::Duration;
-        use types::AttestationShufflingId;
-
-        let child_root = Hash256::repeat_byte(2);
-        let checkpoint = Checkpoint {
-            epoch: Epoch::new(0),
-            root: genesis_root,
-        };
-        let shuffling_id = AttestationShufflingId::from_components(Epoch::new(0), genesis_root);
-        let mut fork_choice = ProtoArrayForkChoice::new::<E>(
-            Slot::new(0),
-            Slot::new(0),
-            Hash256::ZERO,
-            checkpoint,
-            checkpoint,
-            shuffling_id.clone(),
-            shuffling_id.clone(),
-            ExecutionStatus::irrelevant(),
-            None,
-            None,
-            0,
-            spec,
-        )
-        .unwrap();
-        fork_choice
-            .process_block::<E>(
-                Block {
-                    slot: Slot::new(1),
-                    root: child_root,
-                    parent_root: Some(genesis_root),
-                    state_root: Hash256::ZERO,
-                    target_root: genesis_root,
-                    current_epoch_shuffling_id: shuffling_id.clone(),
-                    next_epoch_shuffling_id: shuffling_id,
-                    justified_checkpoint: checkpoint,
-                    finalized_checkpoint: checkpoint,
-                    execution_status: ExecutionStatus::irrelevant(),
-                    unrealized_justified_checkpoint: Some(checkpoint),
-                    unrealized_finalized_checkpoint: Some(checkpoint),
-                    execution_payload_parent_hash: None,
-                    execution_payload_block_hash: None,
-                    proposer_index: Some(0),
-                    payload_received: false,
-                },
-                Slot::new(1),
-                spec,
-                Duration::from_secs(0),
-            )
-            .unwrap();
-        (fork_choice.core_proto_array().clone(), child_root)
-    }
-
-    /// The proposer score counts only unslashed active validators (consensus-specs#5679), while
-    /// the rest of the safety threshold still uses the total active balance.
+    /// FCR's proposer score matches fork choice's, which counts only unslashed active validators
+    /// (consensus-specs#5679) and is covered by the `proposer_boost_excludes_slashed_validators`
+    /// EF fork choice test.
     #[test]
-    fn proposer_score_excludes_slashed_validators() {
-        let spec = E::default_spec();
-        let num_validators = 32;
-        let num_slashed = 8;
-        let validators = (0..num_validators)
-            .map(|i| active_validator(&spec, i < num_slashed))
-            .collect();
-        let mut state = state_with_validators(validators, &spec);
-        state.build_all_committee_caches(&spec).unwrap();
+    fn proposer_score_matches_fork_choice_with_slashed_validators() {
+        use proto_array::{JustifiedBalances, calculate_committee_fraction};
 
-        let genesis_root = Hash256::repeat_byte(1);
-        let balance_source = BalanceSourceData::new(&state, genesis_root, &spec).unwrap();
-        let total_active_balance = num_validators * spec.max_effective_balance;
-        let total_unslashed_active_balance =
-            (num_validators - num_slashed) * spec.max_effective_balance;
-        assert_eq!(balance_source.total_active_balance, total_active_balance);
-        assert_eq!(
-            balance_source.total_unslashed_active_balance,
-            total_unslashed_active_balance
-        );
+        let (mut state, spec) = crate::test_utils::genesis_state::<E>(32);
+        for index in 0..8 {
+            state.get_validator_mut(index).unwrap().slashed = true;
+        }
 
+        let root = Hash256::repeat_byte(1);
         let checkpoint = Checkpoint {
             epoch: Epoch::new(0),
-            root: genesis_root,
+            root,
         };
         let fcr = FastConfirmationRule::new::<E>(
-            genesis_root,
+            root,
             &state,
             checkpoint,
             &state,
@@ -1813,77 +1720,12 @@ mod tests {
         )
         .unwrap();
 
-        let proposer_score = fcr.compute_proposer_score::<E>(&balance_source).unwrap();
-        let pre_5679_proposer_score =
-            total_active_balance / E::slots_per_epoch() * spec.proposer_score_boost / 100;
+        let balance_source = BalanceSourceData::new(&state, root, &spec).unwrap();
+        let justified_balances = JustifiedBalances::from_justified_state(&state).unwrap();
         assert_eq!(
-            proposer_score,
-            total_unslashed_active_balance / E::slots_per_epoch() * spec.proposer_score_boost / 100
-        );
-        assert!(proposer_score < pre_5679_proposer_score);
-
-        // A balance source whose unslashed total includes the slashed validators reproduces the
-        // pre-#5679 proposer score.
-        let pre_5679_balance_source = BalanceSourceData {
-            total_unslashed_active_balance: total_active_balance,
-            ..balance_source.clone()
-        };
-        assert_eq!(
-            fcr.compute_proposer_score::<E>(&pre_5679_balance_source)
-                .unwrap(),
-            pre_5679_proposer_score
-        );
-
-        // Only the proposer score differs between the two sources, so the threshold drops by
-        // half the proposer score difference.
-        let (proto_array, block_root) = genesis_and_child_proto_array(genesis_root, &spec);
-        let safety_threshold = |balance_source: &BalanceSourceData| {
-            fcr.compute_safety_threshold::<E>(
-                balance_source,
-                block_root,
-                Slot::new(2),
-                &proto_array,
-                &[],
-                &BTreeSet::new(),
-            )
-            .unwrap()
-        };
-        assert_eq!(
-            safety_threshold(&pre_5679_balance_source) - safety_threshold(&balance_source),
-            (pre_5679_proposer_score - proposer_score) / 2
-        );
-    }
-
-    /// Spec: `get_total_balance` floors every total at `EFFECTIVE_BALANCE_INCREMENT`.
-    #[test]
-    fn balance_source_totals_floored_at_effective_balance_increment() {
-        let spec = E::default_spec();
-
-        let inactive_validator = types::Validator {
-            activation_epoch: spec.far_future_epoch,
-            ..active_validator(&spec, false)
-        };
-        let state = state_with_validators(vec![inactive_validator; 4], &spec);
-        let balance_source = BalanceSourceData::new(&state, Hash256::ZERO, &spec).unwrap();
-        assert_eq!(
-            balance_source.total_active_balance,
-            spec.effective_balance_increment
-        );
-        assert_eq!(
-            balance_source.total_unslashed_active_balance,
-            spec.effective_balance_increment
-        );
-
-        // Every active validator is slashed: only the unslashed total is floored.
-        let state = state_with_validators(vec![active_validator(&spec, true); 4], &spec);
-        let balance_source = BalanceSourceData::new(&state, Hash256::ZERO, &spec).unwrap();
-        assert_eq!(
-            balance_source.total_active_balance,
-            4 * spec.max_effective_balance
-        );
-        assert_eq!(
-            balance_source.total_unslashed_active_balance,
-            spec.effective_balance_increment
+            fcr.compute_proposer_score::<E>(&balance_source).unwrap(),
+            calculate_committee_fraction::<E>(&justified_balances, spec.proposer_score_boost)
+                .unwrap()
         );
     }
 
@@ -1892,48 +1734,15 @@ mod tests {
     /// of the unrealized-checkpoints bug fixed in sigp/lighthouse#9471).
     #[test]
     fn head_balance_source_rebuilt_after_intra_epoch_slashing() {
-        use state_processing::{GloasVerificationContext, per_slot_processing};
+        use crate::test_utils::{advance_state, genesis_state};
         use types::MinimalEthSpec;
         type E = MinimalEthSpec;
 
-        let spec = E::default_spec();
-        let mut state: BeaconState<E> = BeaconState::new(0, Default::default(), &spec);
-        for _ in 0..32 {
-            let validator = types::Validator {
-                effective_balance: spec.max_effective_balance,
-                activation_epoch: Epoch::new(0),
-                exit_epoch: spec.far_future_epoch,
-                withdrawable_epoch: spec.far_future_epoch,
-                ..Default::default()
-            };
-            state
-                .validators_mut()
-                .push(validator)
-                .expect("push validator");
-            state
-                .balances_mut()
-                .push(spec.max_effective_balance)
-                .expect("push balance");
-        }
-        state
-            .build_all_committee_caches(&spec)
-            .expect("committee caches");
+        let (mut state, spec) = genesis_state::<E>(32);
 
         // Advance to a mid-epoch slot: at an epoch start the dependent root changes and would
         // rebuild the source regardless, masking the bug.
-        let mid_epoch_slot = Slot::new(E::slots_per_epoch() + 4);
-        while state.slot() < mid_epoch_slot {
-            per_slot_processing(
-                &mut state,
-                None,
-                GloasVerificationContext::FullVerification,
-                &spec,
-            )
-            .expect("should advance slot");
-        }
-        state
-            .build_all_committee_caches(&spec)
-            .expect("committee caches");
+        advance_state(&mut state, Slot::new(E::slots_per_epoch() + 4), &spec);
 
         let checkpoint = Checkpoint {
             epoch: state.current_epoch(),
