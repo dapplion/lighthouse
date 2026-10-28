@@ -17,7 +17,8 @@
 //! `slot u64 LE | length | payload` so an offset pointing at another slot's record fails the check.
 //!
 //! `column.conf`: `b"LHSF" | version u32 LE | highest_slot u64 LE (u64::MAX =
-//! empty) | current_data_len u64 LE | crc32 of the preceding 24 bytes u32 LE`.
+//! empty) | current_data_len u64 LE`. No crc: rewritten atomically every
+//! batch, so rot is unlikely.
 //! Atomic update: write `.tmp`, fsync, rename, fsync dir.
 //!
 //! # Put contract
@@ -50,8 +51,6 @@ const OFFSET_SIZE: u64 = 8;
 const OFFSET_FILE_LEN: u64 = SLOTS_PER_FILE * OFFSET_SIZE;
 /// Record header: `length[4] | crc32[4]`.
 const RECORD_HEADER_SIZE: u64 = 8;
-/// `column.conf` length: 24 bytes of fields plus a trailing crc32.
-const CONFIG_LEN: usize = 28;
 const CONFIG_FILE: &str = "column.conf";
 const CONFIG_TMP_FILE: &str = "column.conf.tmp";
 const DATA_FILE_PREFIX: &str = "data_";
@@ -565,23 +564,18 @@ impl StaticFile {
 
 /// Pack the `column.conf` marker.
 fn serialize_on_disk_config(committed: CommittedState) -> Vec<u8> {
-    let mut bytes = vec![0u8; CONFIG_LEN];
+    let mut bytes = vec![0u8; 24];
     bytes[0..4].copy_from_slice(CONFIG_MAGIC);
     bytes[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
     bytes[8..16].copy_from_slice(&committed.highest_slot.unwrap_or(EMPTY_SLOT).to_le_bytes());
     bytes[16..24].copy_from_slice(&committed.data_len.to_le_bytes());
-    let checksum = crc32fast::hash(&bytes[0..24]);
-    bytes[24..28].copy_from_slice(&checksum.to_le_bytes());
     bytes
 }
 
 /// Parse the `column.conf` marker.
 fn deserialize_on_disk_config(bytes: &[u8]) -> Result<CommittedState, Error> {
-    if bytes.len() != CONFIG_LEN {
+    if bytes.len() != 24 {
         return Err(Error::Corrupt("invalid config length".into()));
-    }
-    if crc32fast::hash(&bytes[0..24]).to_le_bytes() != bytes[24..28] {
-        return Err(Error::Corrupt("config checksum mismatch".into()));
     }
     if &bytes[0..4] != CONFIG_MAGIC {
         return Err(Error::Corrupt("invalid config magic".into()));
@@ -861,7 +855,6 @@ mod tests {
         open(&dir).put(0, b"a").unwrap();
         let conf_path = dir.path().join("column.conf");
         let good = fs::read(&conf_path).unwrap();
-        let data_len = fs::metadata(dir.path().join("data_00000")).unwrap().len();
 
         for bad in [
             {
@@ -875,11 +868,6 @@ mod tests {
                 b
             },
             good[..good.len() - 1].to_vec(), // length
-            {
-                let mut b = good.clone();
-                b[16..24].copy_from_slice(&(data_len - 1).to_le_bytes()); // would truncate without the crc
-                b
-            },
         ] {
             fs::write(&conf_path, &bad).unwrap();
             assert!(matches!(
