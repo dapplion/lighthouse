@@ -15,6 +15,7 @@
 //! Data file: `b"LHSF"`, then records appended as
 //! `length[4 LE] | crc32[4 LE] | payload`, where the crc covers
 //! `slot u64 LE | length | payload` so an offset pointing at another slot's record fails the check.
+//! The header is never validated, by design: it only keeps offset 0 free to mean "no record".
 //!
 //! `column.conf`: `b"LHSF" | version u32 LE | highest_slot u64 LE (u64::MAX =
 //! empty) | current_data_len u64 LE`. No crc: rewritten atomically every
@@ -63,7 +64,8 @@ const CONFIG_MAGIC: &[u8; 4] = b"LHSF";
 const FORMAT_VERSION: u32 = 1;
 /// Empty-store sentinel for `highest_written_slot` in the per-file config.
 const EMPTY_SLOT: u64 = u64::MAX;
-/// Header marker, written once at the start of each data file.
+/// Header marker, written once at the start of each data file. Never checked,
+/// by design: it only keeps records off offset 0, the `.off` "no record" value.
 const DATA_FILE_HEADER: [u8; 4] = *b"LHSF";
 
 /// Last durable `column.conf` marker.
@@ -118,7 +120,8 @@ impl From<io::Error> for Error {
 #[derive(Debug)]
 pub struct StaticFile {
     root_dir: PathBuf,
-    /// Max record size, an OOM guard on reads.
+    /// Max record size, an OOM guard on reads. Deliberately not persisted: a
+    /// stored record above a lowered cap reads as `Invalid`, not `Corrupt`.
     max_value_bytes: u64,
     /// Writer-only; held across put_batch's fsyncs.
     state: Mutex<State>,
@@ -142,10 +145,17 @@ impl StaticFile {
     /// Open or create a `StaticFile` rooted at `root_dir`. `max_value_bytes` is
     /// a runtime-only read OOM cap. The column is identified by its directory.
     pub fn open(root_dir: PathBuf, max_value_bytes: u64) -> Result<Self, Error> {
+        let missing_dirs: Vec<PathBuf> = root_dir
+            .ancestors()
+            .take_while(|dir| !dir.exists())
+            .map(Path::to_path_buf)
+            .collect();
         fs::create_dir_all(&root_dir)?;
-        // Make the column dir's own dirent durable; fsyncs inside it don't.
-        if let Some(parent) = root_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
-            sync_dir(parent)?;
+        // Make every dirent create_dir_all added durable; fsyncs inside them don't.
+        for dir in &missing_dirs {
+            if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+                sync_dir(parent)?;
+            }
         }
 
         // Lock before touching anything: a second handle would heal
@@ -279,7 +289,14 @@ impl StaticFile {
             }
         }
 
-        if let Err(e) = self.write_config(Some(*last_slot), last_data_len) {
+        // New data files' dirents must be durable before the marker points into them.
+        let commit = if state.committed.highest_slot.map(file_id) != Some(file_id(*last_slot)) {
+            sync_dir(&self.root_dir)
+        } else {
+            Ok(())
+        }
+        .and_then(|()| self.write_config(Some(*last_slot), last_data_len));
+        if let Err(e) = commit {
             state.poisoned = true;
             return Err(e);
         }
@@ -317,13 +334,14 @@ impl StaticFile {
         let mut start = 0;
         while start < items.len() && items[start].0 <= highest {
             let (slot, value) = &items[start];
-            let existing = self.read_record(*slot)?.ok_or_else(|| {
+            // The crc binds slot, length and payload; no need to read the payload back.
+            let (_, _, stored_crc) = self.read_record_header(*slot)?.ok_or_else(|| {
                 Error::Invalid(format!(
                     "re-put at slot {slot} <= highest {highest} but no record exists; \
                      cannot fill a previously-skipped slot"
                 ))
             })?;
-            if existing.as_slice() != *value {
+            if stored_crc != record_checksum(*slot, value) {
                 return Err(Error::Invalid(format!(
                     "re-put at slot {slot} with mismatched value"
                 )));
@@ -416,6 +434,26 @@ impl StaticFile {
 
     /// Read the record at `slot`; lock-free — committed bytes are immutable.
     fn read_record(&self, slot: u64) -> Result<Option<Vec<u8>>, Error> {
+        let Some((mut data_file, len, crc)) = self.read_record_header(slot)? else {
+            return Ok(None);
+        };
+        if u64::from(len) > self.max_value_bytes {
+            return Err(Error::Invalid(format!(
+                "record at slot {slot} exceeds max_value_bytes"
+            )));
+        }
+
+        let mut payload = vec![0; len as usize];
+        read_record_bytes(&mut data_file, &mut payload, slot)?;
+        if record_checksum(slot, &payload) != crc {
+            return Err(Error::Corrupt(format!("checksum mismatch at slot {slot}")));
+        }
+        Ok(Some(payload))
+    }
+
+    /// Read the header of the record at `slot`, leaving the data file at its
+    /// payload. Handles are reopened per read on purpose: not worth optimizing now.
+    fn read_record_header(&self, slot: u64) -> Result<Option<(File, u32, u32)>, Error> {
         let file_id = file_id(slot);
         let offset = self.read_offset(file_id, slot)?;
         if offset == 0 {
@@ -429,17 +467,8 @@ impl StaticFile {
         let mut header = [0; RECORD_HEADER_SIZE as usize];
         read_record_bytes(&mut data_file, &mut header, slot)?;
         let len = u32::from_le_bytes(header[0..4].try_into().expect("slice length checked"));
-        if u64::from(len) > self.max_value_bytes {
-            return Err(Error::Corrupt("record exceeds size limit".into()));
-        }
-
-        let len = len as usize;
-        let mut payload = vec![0; len];
-        read_record_bytes(&mut data_file, &mut payload, slot)?;
-        if record_checksum(slot, &payload).to_le_bytes() != header[4..8] {
-            return Err(Error::Corrupt(format!("checksum mismatch at slot {slot}")));
-        }
-        Ok(Some(payload))
+        let crc = u32::from_le_bytes(header[4..8].try_into().expect("slice length checked"));
+        Ok(Some((data_file, len, crc)))
     }
 
     /// Restore files to the committed marker and remove future crash leftovers.
@@ -953,6 +982,35 @@ mod tests {
             let read = rx.recv_timeout(std::time::Duration::from_secs(5));
             assert_eq!(read, Ok(Some(b"a".to_vec())));
         });
+    }
+
+    #[test]
+    fn reads_see_committed_records_during_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(&dir);
+        let last_slot = 2 * SLOTS_PER_FILE;
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for slot in (0..=last_slot).step_by(512) {
+                    store.put(slot, &slot.to_le_bytes()).unwrap();
+                }
+            });
+            while store.highest_written_slot() != Some(last_slot) {
+                if let Some(slot) = store.highest_written_slot() {
+                    assert_eq!(store.get(slot).unwrap(), Some(slot.to_le_bytes().to_vec()));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn record_above_lowered_cap_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        open(&dir).put(0, b"abcd").unwrap();
+
+        let store = StaticFile::open(dir.path().to_path_buf(), 2).unwrap();
+        assert!(matches!(store.get(0), Err(Error::Invalid(_))));
     }
 
     #[test]
