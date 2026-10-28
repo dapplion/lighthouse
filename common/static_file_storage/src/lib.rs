@@ -148,13 +148,8 @@ impl StaticFile {
         // Make the column dir's own dirent durable, plus any parent
         // create_dir_all added; fsyncs inside them don't.
         for dir in root_dir.ancestors().take(missing_dirs.max(1)) {
-            // A relative path's top dir lives in the cwd, which `parent()` gives as "".
-            if let Some(parent) = dir.parent() {
-                if parent.as_os_str().is_empty() {
-                    sync_dir(Path::new("."))?;
-                } else {
-                    sync_dir(parent)?;
-                }
+            if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+                sync_dir(parent)?;
             }
         }
 
