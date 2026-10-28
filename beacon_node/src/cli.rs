@@ -954,7 +954,7 @@ pub fn cli_app() -> Command {
                 .help("Enable the Fast Confirmation Rule (FCR). When enabled, \
                     FCR provides faster block confirmation (typically within 1-2 slots of \
                     the head) by computing a confirmed root that is fed into the execution \
-                    layer's safe_block_hash.")
+                    layer's confirmed_block_hash.")
                 .action(ArgAction::SetTrue)
                 .help_heading(FLAG_HEADER)
                 .display_order(0)

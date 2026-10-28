@@ -304,6 +304,7 @@ pub struct CachedHead<E: EthSpec> {
     justified_hash: Option<ExecutionBlockHash>,
     /// The `execution_payload.block_hash` of the finalized block. Set to `None` before Bellatrix.
     finalized_hash: Option<ExecutionBlockHash>,
+    confirmed_hash: Option<ExecutionBlockHash>,
 }
 
 impl<E: EthSpec> CachedHead<E> {
@@ -426,6 +427,7 @@ impl<E: EthSpec> CachedHead<E> {
             head_hash: self.head_hash,
             justified_hash: self.justified_hash,
             finalized_hash: self.finalized_hash,
+            confirmed_hash: self.confirmed_hash,
         }
     }
 
@@ -480,7 +482,7 @@ pub struct BeaconFastConfirmationRule {
     pub roots: FastConfirmationRoots,
 }
 
-/// The roots this node has sent its EL as the FCU safe block hash.
+/// The roots this node has sent its EL as the FCU confirmed block hash.
 #[derive(Clone, Copy, Encode, Decode)]
 pub struct FastConfirmationRoots {
     pub announced_root: Hash256,
@@ -527,7 +529,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             None
         };
 
-        let justified_hash = if let Some(fcr) = &fcr {
+        let confirmed_hash = fcr.as_ref().and_then(|fcr| {
             let announced_root = fcr.lock().roots.announced_root;
             fork_choice
                 .get_block(&announced_root)
@@ -536,9 +538,7 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
                     PayloadBlockHash::PreMerge => None,
                 })
                 .or(forkchoice_update_params.finalized_hash)
-        } else {
-            forkchoice_update_params.justified_hash
-        };
+        });
 
         let cached_head = CachedHead {
             snapshot,
@@ -546,8 +546,9 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
             finalized_checkpoint: fork_choice_view.finalized_checkpoint,
             head_node,
             head_hash: forkchoice_update_params.head_hash,
-            justified_hash,
+            justified_hash: forkchoice_update_params.justified_hash,
             finalized_hash: forkchoice_update_params.finalized_hash,
+            confirmed_hash,
         };
 
         Ok(Self {
@@ -918,7 +919,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
 
         // Get the parameters to update the execution layer since either the head or some finality
         // parameters have changed. Snapshot the pre-FCR value so the early-return below can detect
-        // a moved safe block hash even when the head/checkpoints are unchanged.
+        // a moved confirmed block hash even when the head/checkpoints are unchanged.
         let mut new_forkchoice_update_parameters =
             fork_choice_read_lock.get_forkchoice_update_parameters();
 
@@ -933,7 +934,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         if let Some(ref fcr_mutex) = self.canonical_head.fast_confirmation {
             let mut fcr_guard = fcr_mutex.lock();
             let BeaconFastConfirmationRule { fcr, roots } = &mut *fcr_guard;
-            // The safe block hash is FCR's confirmed root, or the finalized block when it has
+            // The confirmed block hash is FCR's confirmed root, or the finalized block when it has
             // none to give. Never the justified one.
             let finalized = (
                 new_view.finalized_checkpoint.root,
@@ -999,7 +1000,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 finalized
             };
 
-            new_forkchoice_update_parameters.justified_hash = confirmed_block_hash;
+            new_forkchoice_update_parameters.confirmed_hash = confirmed_block_hash;
 
             // The root this run sends, not the last one FCR confirmed.
             if let Some(announced_slot) = fork_choice_read_lock
@@ -1046,7 +1047,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     previous_deepest = ?old_deepest,
                     ?confirmed_root,
                     %current_slot,
-                    "Sent two safe block hashes on different branches"
+                    "Sent two confirmed block hashes on different branches"
                 );
                 metrics::inc_counter(&fcr_metrics::FAST_CONFIRMATION_ROOT_REORGS);
                 confirmed_root
@@ -1076,13 +1077,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                     ?confirmed_root,
                     %current_slot,
                     ?reorg_distance,
-                    "Safe block sent to the EL was reorged out"
+                    "Confirmed block sent to the EL was reorged out"
                 );
             }
         }
 
         // Exit early if nothing changed — unless FCR advanced `confirmed_root`, in which case we
-        // proceed so the new `safe_block_hash` reaches the EL now instead of at the next head
+        // proceed so the new `confirmed_block_hash` reaches the EL now instead of at the next head
         // change. The head-unchanged path below handles this (reuses the snapshot, skips
         // `after_new_head`).
         if new_view == old_view
@@ -1157,6 +1158,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 head_hash: new_forkchoice_update_parameters.head_hash,
                 justified_hash: new_forkchoice_update_parameters.justified_hash,
                 finalized_hash: new_forkchoice_update_parameters.finalized_hash,
+                confirmed_hash: new_forkchoice_update_parameters.confirmed_hash,
             };
 
             let new_head = {
@@ -1185,6 +1187,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 head_hash: new_forkchoice_update_parameters.head_hash,
                 justified_hash: new_forkchoice_update_parameters.justified_hash,
                 finalized_hash: new_forkchoice_update_parameters.finalized_hash,
+                confirmed_hash: new_forkchoice_update_parameters.confirmed_hash,
             };
 
             let mut cached_head_write_lock = self.canonical_head.cached_head_write_lock();
@@ -1395,7 +1398,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             .get_block(&confirmed_root)
             .ok_or(FastConfirmationError::NodeNotFound(confirmed_root))?;
 
-        // The EL `safe_block_hash`. This MUST be the parent block hash for Gloas, per the spec.
+        // The EL `confirmed_block_hash`. This MUST be the parent block hash for Gloas.
         let confirmed_block_hash = match confirmed_node.checkpoint_payload_block_hash() {
             PayloadBlockHash::Hash(hash) => hash,
             PayloadBlockHash::PreMerge => {

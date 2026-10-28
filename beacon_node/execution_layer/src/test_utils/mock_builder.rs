@@ -972,6 +972,7 @@ impl<E: EthSpec> MockBuilder<E> {
             head_hash: Some(head_execution_hash),
             finalized_hash: Some(finalized_execution_hash),
             justified_hash: Some(justified_execution_hash),
+            confirmed_hash: None,
             head_root: head_block_root,
         };
 
@@ -981,6 +982,7 @@ impl<E: EthSpec> MockBuilder<E> {
                 head_execution_hash,
                 justified_execution_hash,
                 finalized_execution_hash,
+                None,
                 slot - 1,
                 head_block_root,
                 head_payload_status,

@@ -342,6 +342,7 @@ pub struct ForkchoiceUpdateParameters {
     pub head_hash: Option<ExecutionBlockHash>,
     pub justified_hash: Option<ExecutionBlockHash>,
     pub finalized_hash: Option<ExecutionBlockHash>,
+    pub confirmed_hash: Option<ExecutionBlockHash>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -474,6 +475,7 @@ where
                 head_hash: None,
                 justified_hash: None,
                 finalized_hash: None,
+                confirmed_hash: None,
                 // This will be updated during the next call to `Self::get_head`.
                 head_root: Hash256::zero(),
             },
@@ -614,6 +616,7 @@ where
             head_hash,
             justified_hash,
             finalized_hash,
+            confirmed_hash: None,
         };
 
         Ok(head_node)
@@ -2037,6 +2040,7 @@ where
                 head_hash: None,
                 justified_hash: None,
                 finalized_hash: None,
+                confirmed_hash: None,
                 // Will be updated in the following call to `Self::get_head`.
                 head_root: Hash256::zero(),
             },

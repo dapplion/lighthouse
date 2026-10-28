@@ -99,6 +99,7 @@ impl<E: EthSpec> MockExecutionLayer<E> {
             head_hash: Some(parent_hash),
             justified_hash: None,
             finalized_hash: None,
+            confirmed_hash: None,
         };
         let payload_attributes = PayloadAttributes::new(
             timestamp,
@@ -129,6 +130,7 @@ impl<E: EthSpec> MockExecutionLayer<E> {
                 parent_hash,
                 ExecutionBlockHash::zero(),
                 ExecutionBlockHash::zero(),
+                None,
                 slot,
                 head_block_root,
                 head_payload_status,
@@ -304,6 +306,7 @@ impl<E: EthSpec> MockExecutionLayer<E> {
                 block_hash,
                 ExecutionBlockHash::zero(),
                 ExecutionBlockHash::zero(),
+                None,
                 slot,
                 head_block_root,
                 fork_choice::PayloadStatus::Pending,

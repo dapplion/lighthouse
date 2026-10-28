@@ -115,7 +115,7 @@ pub struct ChainConfig {
     /// The node's custody type, determining how many data columns to custody and sample.
     pub node_custody_type: NodeCustodyType,
     /// Whether the Fast Confirmation Rule (FCR), which feeds `confirmed_root` into the
-    /// EL's `safe_block_hash` for faster block confirmation, is enabled.
+    /// EL's `confirmed_block_hash` for faster block confirmation, is enabled.
     pub fast_confirmation: FastConfirmationMode,
     /// Disable proposer re-org
     pub disable_proposer_reorg: bool,
@@ -131,9 +131,9 @@ pub struct ChainConfig {
 /// clearly, matching how other optional fork-choice features are configured.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Deserialize, Serialize)]
 pub enum FastConfirmationMode {
-    /// FCR runs and overrides the EL `safe_block_hash` with the confirmed root.
+    /// FCR runs and sends the confirmed root to the EL as `confirmed_block_hash`.
     Enabled,
-    /// FCR is disabled; `safe_block_hash` falls back to the justified block.
+    /// FCR is disabled; no `confirmed_block_hash` is sent.
     #[default]
     Disabled,
 }

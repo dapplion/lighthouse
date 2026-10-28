@@ -2660,6 +2660,7 @@ async fn payload_attribute_withdrawals_use_summary_after_body_pruning() {
         head_hash: Some(parent_block.payload_bid_block_hash().unwrap()),
         justified_hash: None,
         finalized_hash: None,
+        confirmed_hash: None,
     };
     let proposal_slot = head.beacon_block.slot() + 1;
     let expected = rig
@@ -2703,6 +2704,7 @@ async fn payload_attribute_withdrawals_use_head_summary_after_restart() {
         head_hash: Some(head.beacon_block.payload_bid_block_hash().unwrap()),
         justified_hash: None,
         finalized_hash: None,
+        confirmed_hash: None,
     };
     let proposal_slot = head.beacon_block.slot() + 1;
     let expected = rig

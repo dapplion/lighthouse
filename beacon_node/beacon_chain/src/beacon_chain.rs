@@ -178,7 +178,7 @@ type HashBlockTuple<E> = (Hash256, RangeSyncBlock<E>);
 pub const BEACON_CHAIN_DB_KEY: Hash256 = Hash256::ZERO;
 pub const OP_POOL_DB_KEY: Hash256 = Hash256::ZERO;
 pub const FORK_CHOICE_DB_KEY: Hash256 = Hash256::ZERO;
-/// The roots sent as the FCU safe block hash. Shares the `ForkChoice` column, so not zero.
+/// The roots sent as the FCU confirmed block hash. Shares the `ForkChoice` column, so not zero.
 pub const FAST_CONFIRMATION_DB_KEY: Hash256 = Hash256::repeat_byte(1);
 
 /// Defines how old a block can be before it's no longer a candidate for the early attester cache.
@@ -5682,6 +5682,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             head_hash: parent_head_hash,
             justified_hash: canonical_forkchoice_params.justified_hash,
             finalized_hash: canonical_forkchoice_params.finalized_hash,
+            confirmed_hash: canonical_forkchoice_params.confirmed_hash,
         };
 
         debug!(
@@ -7196,6 +7197,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 head_hash,
                 justified_hash,
                 finalized_hash,
+                params.confirmed_hash,
                 current_slot,
                 head_block_root,
                 head_payload_status,

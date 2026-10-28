@@ -1364,6 +1364,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
                         finalized_block_hash: forkchoice_update_params
                             .finalized_hash
                             .unwrap_or_else(ExecutionBlockHash::zero),
+                        confirmed_block_hash: forkchoice_update_params.confirmed_hash,
                     };
 
                     let response = engine
@@ -1556,6 +1557,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
         head_block_hash: ExecutionBlockHash,
         justified_block_hash: ExecutionBlockHash,
         finalized_block_hash: ExecutionBlockHash,
+        confirmed_block_hash: Option<ExecutionBlockHash>,
         current_slot: Slot,
         head_block_root: Hash256,
         head_payload_status: fork_choice::PayloadStatus,
@@ -1569,6 +1571,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
         debug!(
             ?finalized_block_hash,
             ?justified_block_hash,
+            ?confirmed_block_hash,
             ?head_block_hash,
             ?head_block_root,
             ?current_slot,
@@ -1599,6 +1602,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
             head_block_hash,
             safe_block_hash: justified_block_hash,
             finalized_block_hash,
+            confirmed_block_hash,
         };
 
         self.engine()
@@ -2161,6 +2165,7 @@ mod test {
                     head_block_hash: block_hash,
                     safe_block_hash: block_hash,
                     finalized_block_hash: block_hash,
+                    confirmed_block_hash: None,
                 },
                 None,
             )

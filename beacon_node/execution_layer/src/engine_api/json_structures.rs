@@ -1118,6 +1118,9 @@ pub struct JsonForkchoiceStateV1 {
     pub safe_block_hash: ExecutionBlockHash,
 
     pub finalized_block_hash: ExecutionBlockHash,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_block_hash: Option<ExecutionBlockHash>,
 }
 
 impl From<ForkchoiceState> for JsonForkchoiceStateV1 {
@@ -1127,12 +1130,14 @@ impl From<ForkchoiceState> for JsonForkchoiceStateV1 {
             head_block_hash,
             safe_block_hash,
             finalized_block_hash,
+            confirmed_block_hash,
         } = f;
 
         Self {
             head_block_hash,
             safe_block_hash,
             finalized_block_hash,
+            confirmed_block_hash,
         }
     }
 }
@@ -1144,12 +1149,14 @@ impl From<JsonForkchoiceStateV1> for ForkchoiceState {
             head_block_hash,
             safe_block_hash,
             finalized_block_hash,
+            confirmed_block_hash,
         } = j;
 
         Self {
             head_block_hash,
             safe_block_hash,
             finalized_block_hash,
+            confirmed_block_hash,
         }
     }
 }
@@ -2067,6 +2074,20 @@ mod payload_status_tests {
         assert_eq!(
             PayloadStatusV1::from(status).inclusion_list_satisfied,
             Some(true)
+        );
+    }
+
+    #[test]
+    fn forkchoice_state_serializes_confirmed_block_hash() {
+        let state = JsonForkchoiceStateV1 {
+            head_block_hash: ExecutionBlockHash::zero(),
+            safe_block_hash: ExecutionBlockHash::zero(),
+            finalized_block_hash: ExecutionBlockHash::zero(),
+            confirmed_block_hash: Some(ExecutionBlockHash::repeat_byte(1)),
+        };
+        assert_eq!(
+            serde_json::to_value(state).unwrap()["confirmedBlockHash"],
+            serde_json::to_value(ExecutionBlockHash::repeat_byte(1)).unwrap()
         );
     }
 }

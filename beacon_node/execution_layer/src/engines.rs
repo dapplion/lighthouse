@@ -103,6 +103,7 @@ pub struct ForkchoiceState {
     pub head_block_hash: ExecutionBlockHash,
     pub safe_block_hash: ExecutionBlockHash,
     pub finalized_block_hash: ExecutionBlockHash,
+    pub confirmed_block_hash: Option<ExecutionBlockHash>,
 }
 
 #[derive(Hash, PartialEq, std::cmp::Eq)]

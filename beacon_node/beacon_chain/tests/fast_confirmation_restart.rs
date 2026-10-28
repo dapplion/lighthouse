@@ -693,7 +693,7 @@ async fn restart_after_warmup(warmup_slots: u64, slots_of_downtime: u64) -> Rest
     }
 }
 
-/// The next `forkchoiceUpdated` names that root, so the EL's safe block hash does not regress
+/// The next `forkchoiceUpdated` names that root, so the EL's confirmed block hash does not regress
 /// either, even though the rule itself has gone back to the finalized block.
 #[tokio::test]
 async fn the_confirmed_root_reaches_the_execution_layer() {
@@ -708,13 +708,13 @@ async fn the_confirmed_root_reaches_the_execution_layer() {
         "the root confirmed before the restart should still hold"
     );
 
-    let safe_block_hash = rig
+    let confirmed_block_hash = rig
         .node
         .chain
         .canonical_head
         .cached_head()
         .forkchoice_update_parameters()
-        .justified_hash;
+        .confirmed_hash;
     let expected_hash = match rig
         .node
         .chain
@@ -727,11 +727,11 @@ async fn the_confirmed_root_reaches_the_execution_layer() {
         PayloadBlockHash::Hash(hash) => Some(hash),
         PayloadBlockHash::PreMerge => None,
     };
-    assert_eq!(safe_block_hash, expected_hash);
+    assert_eq!(confirmed_block_hash, expected_hash);
 }
 
 /// The startup `forkchoiceUpdated` is sent from the cached head, before any recompute runs, so the
-/// root from before the restart has to be in there already or the EL's safe block hash regresses.
+/// root from before the restart has to be in there already or the EL's confirmed block hash regresses.
 #[tokio::test]
 async fn the_startup_update_sends_the_restored_root() {
     if pre_bellatrix() {
@@ -771,7 +771,7 @@ async fn the_startup_update_sends_the_restored_root() {
             .canonical_head
             .cached_head()
             .forkchoice_update_parameters()
-            .justified_hash,
+            .confirmed_hash,
         expected_hash
     );
 }

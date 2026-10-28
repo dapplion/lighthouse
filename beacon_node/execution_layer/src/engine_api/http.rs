@@ -1988,6 +1988,7 @@ mod test {
                                 head_block_hash: ExecutionBlockHash::repeat_byte(1),
                                 safe_block_hash: ExecutionBlockHash::repeat_byte(1),
                                 finalized_block_hash: ExecutionBlockHash::zero(),
+                                confirmed_block_hash: None,
                             },
                             Some(PayloadAttributes::V1(PayloadAttributesV1 {
                                 timestamp: 5,
@@ -2023,6 +2024,7 @@ mod test {
                             head_block_hash: ExecutionBlockHash::repeat_byte(1),
                             safe_block_hash: ExecutionBlockHash::repeat_byte(1),
                             finalized_block_hash: ExecutionBlockHash::zero(),
+                            confirmed_block_hash: None,
                         },
                         Some(PayloadAttributes::V1(PayloadAttributesV1 {
                             timestamp: 5,
@@ -2065,6 +2067,7 @@ mod test {
                                 head_block_hash: ExecutionBlockHash::repeat_byte(1),
                                 safe_block_hash: ExecutionBlockHash::repeat_byte(1),
                                 finalized_block_hash: ExecutionBlockHash::zero(),
+                                confirmed_block_hash: None,
                             },
                             payload_attributes(),
                             Some(&custody_columns),
@@ -2116,6 +2119,7 @@ mod test {
                                 head_block_hash: ExecutionBlockHash::repeat_byte(1),
                                 safe_block_hash: ExecutionBlockHash::repeat_byte(1),
                                 finalized_block_hash: ExecutionBlockHash::zero(),
+                                confirmed_block_hash: None,
                             },
                             payload_attributes(),
                             None,
@@ -2146,6 +2150,7 @@ mod test {
                             head_block_hash: ExecutionBlockHash::repeat_byte(1),
                             safe_block_hash: ExecutionBlockHash::repeat_byte(1),
                             finalized_block_hash: ExecutionBlockHash::zero(),
+                            confirmed_block_hash: None,
                         },
                         payload_attributes(),
                         None,
@@ -2265,6 +2270,7 @@ mod test {
                                 head_block_hash: ExecutionBlockHash::repeat_byte(0),
                                 safe_block_hash: ExecutionBlockHash::repeat_byte(0),
                                 finalized_block_hash: ExecutionBlockHash::repeat_byte(1),
+                                confirmed_block_hash: None,
                             },
                             None,
                         )
@@ -2291,6 +2297,7 @@ mod test {
                             head_block_hash: ExecutionBlockHash::repeat_byte(0),
                             safe_block_hash: ExecutionBlockHash::repeat_byte(0),
                             finalized_block_hash: ExecutionBlockHash::repeat_byte(1),
+                            confirmed_block_hash: None,
                         },
                         None,
                     )
@@ -2330,6 +2337,7 @@ mod test {
                                 head_block_hash: ExecutionBlockHash::from_str("0x3b8fb240d288781d4aac94d3fd16809ee413bc99294a085798a589dae51ddd4a").unwrap(),
                                 safe_block_hash: ExecutionBlockHash::from_str("0x3b8fb240d288781d4aac94d3fd16809ee413bc99294a085798a589dae51ddd4a").unwrap(),
                                 finalized_block_hash: ExecutionBlockHash::zero(),
+                                confirmed_block_hash: None,
                             },
                             Some(PayloadAttributes::V1(PayloadAttributesV1 {
                                 timestamp: 5,
@@ -2377,6 +2385,7 @@ mod test {
                                 head_block_hash: ExecutionBlockHash::from_str("0x3b8fb240d288781d4aac94d3fd16809ee413bc99294a085798a589dae51ddd4a").unwrap(),
                                 safe_block_hash: ExecutionBlockHash::from_str("0x3b8fb240d288781d4aac94d3fd16809ee413bc99294a085798a589dae51ddd4a").unwrap(),
                                 finalized_block_hash: ExecutionBlockHash::zero(),
+                                confirmed_block_hash: None,
                             },
                             Some(PayloadAttributes::V1(PayloadAttributesV1 {
                                 timestamp: 5,
@@ -2546,6 +2555,7 @@ mod test {
                                 head_block_hash: ExecutionBlockHash::from_str("0x3559e851470f6e7bbed1db474980683e8c315bfce99b2a6ef47c057c04de7858").unwrap(),
                                 safe_block_hash: ExecutionBlockHash::from_str("0x3559e851470f6e7bbed1db474980683e8c315bfce99b2a6ef47c057c04de7858").unwrap(),
                                 finalized_block_hash: ExecutionBlockHash::from_str("0x3b8fb240d288781d4aac94d3fd16809ee413bc99294a085798a589dae51ddd4a").unwrap(),
+                                confirmed_block_hash: None,
                             },
                             None,
                         )
@@ -2585,6 +2595,7 @@ mod test {
                                 head_block_hash: ExecutionBlockHash::from_str("0x3559e851470f6e7bbed1db474980683e8c315bfce99b2a6ef47c057c04de7858").unwrap(),
                                 safe_block_hash: ExecutionBlockHash::from_str("0x3559e851470f6e7bbed1db474980683e8c315bfce99b2a6ef47c057c04de7858").unwrap(),
                                 finalized_block_hash: ExecutionBlockHash::from_str("0x3b8fb240d288781d4aac94d3fd16809ee413bc99294a085798a589dae51ddd4a").unwrap(),
+                                confirmed_block_hash: None,
                             },
                             None,
                         )
