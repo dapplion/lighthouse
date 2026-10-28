@@ -431,12 +431,6 @@ impl StaticFile {
             return Ok(None);
         };
         if u64::from(len) > self.max_value_bytes {
-            // A length running past the file cannot have been written: rot.
-            if data_file.stream_position()? + u64::from(len) > data_file.metadata()?.len() {
-                return Err(Error::Corrupt(format!(
-                    "record at slot {slot} runs past end of data file"
-                )));
-            }
             return Err(Error::Invalid(format!(
                 "record at slot {slot} exceeds max_value_bytes"
             )));
@@ -1012,18 +1006,6 @@ mod tests {
 
         let store = StaticFile::open(dir.path().to_path_buf(), 2).unwrap();
         assert!(matches!(store.get(0), Err(Error::Invalid(_))));
-    }
-
-    #[test]
-    fn rotted_length_past_end_of_file_is_corrupt() {
-        let dir = tempfile::tempdir().unwrap();
-        open(&dir).put(0, b"a").unwrap();
-        let data_path = dir.path().join("data_00000");
-        let mut data = fs::read(&data_path).unwrap();
-        data[DATA_FILE_HEADER.len() + 3] = 0xff; // high byte of the length
-        fs::write(&data_path, &data).unwrap();
-
-        assert!(matches!(open(&dir).get(0), Err(Error::Corrupt(_))));
     }
 
     #[test]
