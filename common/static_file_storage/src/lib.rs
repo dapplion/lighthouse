@@ -145,16 +145,18 @@ impl StaticFile {
     /// Open or create a `StaticFile` rooted at `root_dir`. `max_value_bytes` is
     /// a runtime-only read OOM cap. The column is identified by its directory.
     pub fn open(root_dir: PathBuf, max_value_bytes: u64) -> Result<Self, Error> {
-        let missing_dirs: Vec<PathBuf> = root_dir
-            .ancestors()
-            .take_while(|dir| !dir.exists())
-            .map(Path::to_path_buf)
-            .collect();
+        let missing_dirs = root_dir.ancestors().take_while(|dir| !dir.exists()).count();
         fs::create_dir_all(&root_dir)?;
-        // Make every dirent create_dir_all added durable; fsyncs inside them don't.
-        for dir in &missing_dirs {
-            if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
-                sync_dir(parent)?;
+        // Make the column dir's own dirent durable, plus any parent
+        // create_dir_all added; fsyncs inside them don't.
+        for dir in root_dir.ancestors().take(missing_dirs.max(1)) {
+            // A relative path's top dir lives in the cwd, which `parent()` gives as "".
+            if let Some(parent) = dir.parent() {
+                if parent.as_os_str().is_empty() {
+                    sync_dir(Path::new("."))?;
+                } else {
+                    sync_dir(parent)?;
+                }
             }
         }
 
@@ -438,6 +440,12 @@ impl StaticFile {
             return Ok(None);
         };
         if u64::from(len) > self.max_value_bytes {
+            // A length running past the file cannot have been written: rot.
+            if data_file.stream_position()? + u64::from(len) > data_file.metadata()?.len() {
+                return Err(Error::Corrupt(format!(
+                    "record at slot {slot} runs past end of data file"
+                )));
+            }
             return Err(Error::Invalid(format!(
                 "record at slot {slot} exceeds max_value_bytes"
             )));
@@ -991,17 +999,19 @@ mod tests {
         let last_slot = 2 * SLOTS_PER_FILE;
 
         std::thread::scope(|scope| {
-            scope.spawn(|| {
+            let writer = scope.spawn(|| {
                 for slot in (0..=last_slot).step_by(512) {
                     store.put(slot, &slot.to_le_bytes()).unwrap();
                 }
             });
-            while store.highest_written_slot() != Some(last_slot) {
+            // Loop on the thread, not the slot, so a panicking writer fails the test instead of hanging it.
+            while !writer.is_finished() {
                 if let Some(slot) = store.highest_written_slot() {
                     assert_eq!(store.get(slot).unwrap(), Some(slot.to_le_bytes().to_vec()));
                 }
             }
         });
+        assert_eq!(store.highest_written_slot(), Some(last_slot));
     }
 
     #[test]
@@ -1011,6 +1021,18 @@ mod tests {
 
         let store = StaticFile::open(dir.path().to_path_buf(), 2).unwrap();
         assert!(matches!(store.get(0), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn rotted_length_past_end_of_file_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        open(&dir).put(0, b"a").unwrap();
+        let data_path = dir.path().join("data_00000");
+        let mut data = fs::read(&data_path).unwrap();
+        data[DATA_FILE_HEADER.len() + 3] = 0xff; // high byte of the length
+        fs::write(&data_path, &data).unwrap();
+
+        assert!(matches!(open(&dir).get(0), Err(Error::Corrupt(_))));
     }
 
     #[test]
