@@ -18,8 +18,7 @@
 //! The header is never validated, by design: it only keeps offset 0 free to mean "no record".
 //!
 //! `column.conf`: `b"LHSF" | version u32 LE | highest_slot u64 LE (u64::MAX =
-//! empty) | current_data_len u64 LE | crc32 u32 LE`. The crc covers the
-//! preceding bytes: healing truncates to this marker, so it must not rot.
+//! empty) | current_data_len u64 LE | crc32 u32 LE`.
 //! Atomic update: write `.tmp`, fsync, rename, fsync dir.
 //!
 //! # Put contract
