@@ -323,14 +323,14 @@ impl StaticFile {
         let mut start = 0;
         while start < items.len() && items[start].0 <= highest {
             let (slot, value) = &items[start];
-            // The crc binds slot, length and payload; no need to read the payload back.
-            let (_, _, stored_crc) = self.read_record_header(*slot)?.ok_or_else(|| {
+            let existing = self.read_record(*slot)?.ok_or_else(|| {
                 Error::Invalid(format!(
                     "re-put at slot {slot} <= highest {highest} but no record exists; \
                      cannot fill a previously-skipped slot"
                 ))
             })?;
-            if stored_crc != record_checksum(*slot, value) {
+            // Full byte compare on purpose: retries are rare, a CRC-only shortcut is not worth it.
+            if existing.as_slice() != *value {
                 return Err(Error::Invalid(format!(
                     "re-put at slot {slot} with mismatched value"
                 )));
@@ -426,27 +426,8 @@ impl StaticFile {
     }
 
     /// Read the record at `slot`; lock-free — committed bytes are immutable.
+    /// Handles are reopened per read on purpose: not worth optimizing now.
     fn read_record(&self, slot: u64) -> Result<Option<Vec<u8>>, Error> {
-        let Some((mut data_file, len, crc)) = self.read_record_header(slot)? else {
-            return Ok(None);
-        };
-        if u64::from(len) > self.max_value_bytes {
-            return Err(Error::Invalid(format!(
-                "record at slot {slot} exceeds max_value_bytes"
-            )));
-        }
-
-        let mut payload = vec![0; len as usize];
-        read_record_bytes(&mut data_file, &mut payload, slot)?;
-        if record_checksum(slot, &payload) != crc {
-            return Err(Error::Corrupt(format!("checksum mismatch at slot {slot}")));
-        }
-        Ok(Some(payload))
-    }
-
-    /// Read the header of the record at `slot`, leaving the data file at its
-    /// payload. Handles are reopened per read on purpose: not worth optimizing now.
-    fn read_record_header(&self, slot: u64) -> Result<Option<(File, u32, u32)>, Error> {
         let file_id = file_id(slot);
         let offset = self.read_offset(file_id, slot)?;
         if offset == 0 {
@@ -460,8 +441,19 @@ impl StaticFile {
         let mut header = [0; RECORD_HEADER_SIZE as usize];
         read_record_bytes(&mut data_file, &mut header, slot)?;
         let len = u32::from_le_bytes(header[0..4].try_into().expect("slice length checked"));
-        let crc = u32::from_le_bytes(header[4..8].try_into().expect("slice length checked"));
-        Ok(Some((data_file, len, crc)))
+        if u64::from(len) > self.max_value_bytes {
+            return Err(Error::Invalid(format!(
+                "record at slot {slot} exceeds max_value_bytes"
+            )));
+        }
+
+        let len = len as usize;
+        let mut payload = vec![0; len];
+        read_record_bytes(&mut data_file, &mut payload, slot)?;
+        if record_checksum(slot, &payload).to_le_bytes() != header[4..8] {
+            return Err(Error::Corrupt(format!("checksum mismatch at slot {slot}")));
+        }
+        Ok(Some(payload))
     }
 
     /// Restore files to the committed marker and remove future crash leftovers.
