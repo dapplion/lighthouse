@@ -64,8 +64,7 @@ const CONFIG_MAGIC: &[u8; 4] = b"LHSF";
 const FORMAT_VERSION: u32 = 1;
 /// Empty-store sentinel for `highest_written_slot` in the per-file config.
 const EMPTY_SLOT: u64 = u64::MAX;
-/// Header marker, written once at the start of each data file. Never checked,
-/// by design: it only keeps records off offset 0, the `.off` "no record" value.
+/// Header marker, written once at the start of each data file.
 const DATA_FILE_HEADER: [u8; 4] = *b"LHSF";
 
 /// Last durable `column.conf` marker.
