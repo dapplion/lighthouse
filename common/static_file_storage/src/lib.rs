@@ -285,14 +285,7 @@ impl StaticFile {
             }
         }
 
-        // New data files' dirents must be durable before the marker points into them.
-        let commit = if state.committed.highest_slot.map(file_id) != Some(file_id(*last_slot)) {
-            sync_dir(&self.root_dir)
-        } else {
-            Ok(())
-        }
-        .and_then(|()| self.write_config(Some(*last_slot), last_data_len));
-        if let Err(e) = commit {
+        if let Err(e) = self.write_config(Some(*last_slot), last_data_len) {
             state.poisoned = true;
             return Err(e);
         }
@@ -366,10 +359,10 @@ impl StaticFile {
             .create(true)
             .truncate(false) // keep committed records; we seek + overwrite
             .open(&data_path)?;
-        let cursor = if committed
+        let appending = committed
             .highest_slot
-            .is_some_and(|slot| file_id(slot) == target_file_id)
-        {
+            .is_some_and(|slot| file_id(slot) == target_file_id);
+        let cursor = if appending {
             committed.data_len
         } else {
             // new file: plant header at offset 0, start just past it
@@ -424,6 +417,10 @@ impl StaticFile {
             off_file.write_all(&offset.to_le_bytes())?;
         }
         sync_file(&off_file)?;
+        if !appending {
+            // Both dirents must be durable before the marker points into this file.
+            sync_dir(&self.root_dir)?;
+        }
 
         Ok(data_len)
     }
