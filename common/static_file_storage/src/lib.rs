@@ -12,10 +12,12 @@
 //!
 //! # File format
 //!
-//! Data file: `b"LHSF"`, then records appended as `length[4 LE] | payload`.
+//! Data file: `b"LHSF"`, then records appended as
+//! `length[4 LE] | crc32[4 LE] | payload`, where the crc covers
+//! `slot u64 LE | length | payload` so an offset pointing at another slot's record fails the check.
 //!
 //! `column.conf`: `b"LHSF" | version u32 LE | highest_slot u64 LE (u64::MAX =
-//! empty) | current_data_len u64 LE`.
+//! empty) | current_data_len u64 LE | crc32 of the preceding 24 bytes u32 LE`.
 //! Atomic update: write `.tmp`, fsync, rename, fsync dir.
 //!
 //! # Put contract
@@ -46,6 +48,10 @@ type SlotGroup<'a> = (u64, Vec<(u64, &'a [u8])>);
 
 const OFFSET_SIZE: u64 = 8;
 const OFFSET_FILE_LEN: u64 = SLOTS_PER_FILE * OFFSET_SIZE;
+/// Record header: `length[4] | crc32[4]`.
+const RECORD_HEADER_SIZE: u64 = 8;
+/// `column.conf` length: 24 bytes of fields plus a trailing crc32.
+const CONFIG_LEN: usize = 28;
 const CONFIG_FILE: &str = "column.conf";
 const CONFIG_TMP_FILE: &str = "column.conf.tmp";
 const DATA_FILE_PREFIX: &str = "data_";
@@ -369,7 +375,8 @@ impl StaticFile {
                     .map_err(|_| Error::Invalid("record too large".into()))?;
                 offsets.push((slot, next_offset));
                 writer.write_all(&payload_len.to_le_bytes())?; // len[4]
-                next_offset += 4;
+                writer.write_all(&record_checksum(slot, value).to_le_bytes())?; // crc[4]
+                next_offset += RECORD_HEADER_SIZE;
                 writer.write_all(value)?; // payload
                 next_offset += value.len() as u64;
             }
@@ -410,9 +417,9 @@ impl StaticFile {
         let mut data_file = File::open(&data_path)?;
         data_file.seek(SeekFrom::Start(offset))?;
 
-        let mut header = [0; 4];
+        let mut header = [0; RECORD_HEADER_SIZE as usize];
         data_file.read_exact(&mut header)?;
-        let len = u32::from_le_bytes(header);
+        let len = u32::from_le_bytes(header[0..4].try_into().expect("slice length checked"));
         if u64::from(len) > self.max_value_bytes {
             return Err(Error::Corrupt("record exceeds size limit".into()));
         }
@@ -420,6 +427,9 @@ impl StaticFile {
         let len = len as usize;
         let mut payload = vec![0; len];
         data_file.read_exact(&mut payload)?;
+        if record_checksum(slot, &payload).to_le_bytes() != header[4..8] {
+            return Err(Error::Corrupt(format!("checksum mismatch at slot {slot}")));
+        }
         Ok(Some(payload))
     }
 
@@ -555,18 +565,23 @@ impl StaticFile {
 
 /// Pack the `column.conf` marker.
 fn serialize_on_disk_config(committed: CommittedState) -> Vec<u8> {
-    let mut bytes = vec![0u8; 24];
+    let mut bytes = vec![0u8; CONFIG_LEN];
     bytes[0..4].copy_from_slice(CONFIG_MAGIC);
     bytes[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
     bytes[8..16].copy_from_slice(&committed.highest_slot.unwrap_or(EMPTY_SLOT).to_le_bytes());
     bytes[16..24].copy_from_slice(&committed.data_len.to_le_bytes());
+    let checksum = crc32fast::hash(&bytes[0..24]);
+    bytes[24..28].copy_from_slice(&checksum.to_le_bytes());
     bytes
 }
 
 /// Parse the `column.conf` marker.
 fn deserialize_on_disk_config(bytes: &[u8]) -> Result<CommittedState, Error> {
-    if bytes.len() != 24 {
+    if bytes.len() != CONFIG_LEN {
         return Err(Error::Corrupt("invalid config length".into()));
+    }
+    if crc32fast::hash(&bytes[0..24]).to_le_bytes() != bytes[24..28] {
+        return Err(Error::Corrupt("config checksum mismatch".into()));
     }
     if &bytes[0..4] != CONFIG_MAGIC {
         return Err(Error::Corrupt("invalid config magic".into()));
@@ -607,6 +622,15 @@ fn atomic_write_config(
 
     fs::rename(tmp_path, config_path)?;
     sync_dir(root_dir)
+}
+
+/// Checksum binding a record to its slot: `crc32(slot | length | payload)`.
+fn record_checksum(slot: u64, payload: &[u8]) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&slot.to_le_bytes());
+    hasher.update(&(payload.len() as u32).to_le_bytes());
+    hasher.update(payload);
+    hasher.finalize()
 }
 
 fn file_id(slot: u64) -> u64 {
@@ -837,6 +861,7 @@ mod tests {
         open(&dir).put(0, b"a").unwrap();
         let conf_path = dir.path().join("column.conf");
         let good = fs::read(&conf_path).unwrap();
+        let data_len = fs::metadata(dir.path().join("data_00000")).unwrap().len();
 
         for bad in [
             {
@@ -850,6 +875,11 @@ mod tests {
                 b
             },
             good[..good.len() - 1].to_vec(), // length
+            {
+                let mut b = good.clone();
+                b[16..24].copy_from_slice(&(data_len - 1).to_le_bytes()); // would truncate without the crc
+                b
+            },
         ] {
             fs::write(&conf_path, &bad).unwrap();
             assert!(matches!(
@@ -860,6 +890,36 @@ mod tests {
 
         fs::write(&conf_path, &good).unwrap();
         assert_eq!(open(&dir).get(0).unwrap(), Some(b"a".to_vec()));
+    }
+
+    #[test]
+    fn flipped_payload_byte_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        open(&dir).put_batch(&[(0, b"a"), (1, b"b")]).unwrap();
+        let data_path = dir.path().join("data_00000");
+        let mut data = fs::read(&data_path).unwrap();
+        *data.last_mut().unwrap() ^= 0xff;
+        fs::write(&data_path, &data).unwrap();
+
+        let store = open(&dir);
+        assert_eq!(store.get(0).unwrap(), Some(b"a".to_vec()));
+        assert!(matches!(store.get(1), Err(Error::Corrupt(_))));
+    }
+
+    // Equal payloads, so only the slot binding in the crc can reject slot 1's
+    // offset pointing at slot 0's record.
+    #[test]
+    fn misdirected_offset_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        open(&dir).put_batch(&[(0, b"a"), (1, b"a")]).unwrap();
+        let off_path = dir.path().join("data_00000.off");
+        let mut offsets = fs::read(&off_path).unwrap();
+        offsets.copy_within(0..8, 8);
+        fs::write(&off_path, &offsets).unwrap();
+
+        let store = open(&dir);
+        assert_eq!(store.get(0).unwrap(), Some(b"a".to_vec()));
+        assert!(matches!(store.get(1), Err(Error::Corrupt(_))));
     }
 
     #[test]
@@ -902,6 +962,8 @@ mod tests {
         let off = dir.path().join(format!("data_{file_id:05}.off"));
         let mut d = OpenOptions::new().append(true).open(&data).unwrap();
         d.write_all(&(value.len() as u32).to_le_bytes()).unwrap();
+        d.write_all(&record_checksum(slot, value).to_le_bytes())
+            .unwrap();
         d.write_all(value).unwrap();
         let mut o = OpenOptions::new().write(true).open(&off).unwrap();
         o.seek(SeekFrom::Start(offset_position(slot))).unwrap();
