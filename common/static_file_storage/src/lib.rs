@@ -119,8 +119,7 @@ impl From<io::Error> for Error {
 #[derive(Debug)]
 pub struct StaticFile {
     root_dir: PathBuf,
-    /// Max record size, an OOM guard on reads. Deliberately not persisted: a
-    /// stored record above a lowered cap reads as `Invalid`, not `Corrupt`.
+    /// Max record size, an OOM guard on reads. Deliberately not persisted.
     max_value_bytes: u64,
     /// Writer-only; held across put_batch's fsyncs.
     state: Mutex<State>,
