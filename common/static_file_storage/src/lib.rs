@@ -80,7 +80,7 @@ pub enum Error {
     Io(io::Error),
     /// Another handle holds the column lock.
     AlreadyOpen(PathBuf),
-    /// Caller contract violation, or on-disk state failed validation.
+    /// Bad input or bad on-disk data.
     Invalid(String),
 }
 
