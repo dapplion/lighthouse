@@ -148,6 +148,7 @@ impl StaticFile {
         // Make the column dir's own dirent durable, plus any parent
         // create_dir_all added; fsyncs inside them don't.
         for dir in root_dir.ancestors().take(missing_dirs.max(1)) {
+            // Not syncing cwd is intentional.
             if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
                 sync_dir(parent)?;
             }
