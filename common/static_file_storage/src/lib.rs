@@ -30,7 +30,7 @@
 //! poisons the handle: the next write first heals to the on-disk marker;
 //! reads stay live.
 //!
-//! # Recovery on open
+//! # Recovery on open, and on the next write after a failure
 //!
 //! Data file truncated to `current_data_len`; `.off` entries beyond
 //! `highest_slot` cleared; files beyond the committed file removed. The
@@ -381,8 +381,7 @@ impl StaticFile {
             let mut next_offset = cursor;
             for &(slot, value) in group {
                 // Sizes pre-validated by put_batch.
-                let payload_len = u32::try_from(value.len())
-                    .map_err(|_| Error::Invalid("record too large".into()))?;
+                let payload_len = value.len() as u32;
                 offsets.push((slot, next_offset));
                 writer.write_all(&payload_len.to_le_bytes())?; // len[4]
                 writer.write_all(&record_checksum(slot, value).to_le_bytes())?; // crc[4]
@@ -428,7 +427,7 @@ impl StaticFile {
         data_file.seek(SeekFrom::Start(offset))?;
 
         let mut header = [0; RECORD_HEADER_SIZE as usize];
-        data_file.read_exact(&mut header)?;
+        read_record_bytes(&mut data_file, &mut header, slot)?;
         let len = u32::from_le_bytes(header[0..4].try_into().expect("slice length checked"));
         if u64::from(len) > self.max_value_bytes {
             return Err(Error::Corrupt("record exceeds size limit".into()));
@@ -436,7 +435,7 @@ impl StaticFile {
 
         let len = len as usize;
         let mut payload = vec![0; len];
-        data_file.read_exact(&mut payload)?;
+        read_record_bytes(&mut data_file, &mut payload, slot)?;
         if record_checksum(slot, &payload).to_le_bytes() != header[4..8] {
             return Err(Error::Corrupt(format!("checksum mismatch at slot {slot}")));
         }
@@ -451,18 +450,19 @@ impl StaticFile {
     ) -> Result<(), Error> {
         if let Some(slot) = highest_written_slot {
             self.heal_current_file(slot, current_data_len)?;
-            self.remove_uncommitted_files(Some(file_id(slot)))
+            self.remove_uncommitted_files(Some(file_id(slot)))?;
         } else {
-            self.remove_uncommitted_files(None)
+            self.remove_uncommitted_files(None)?;
         }
+        // The marker may come from a rename whose dir fsync failed; redo it.
+        sync_dir(&self.root_dir)
     }
 
     /// Heal to the marker on disk, not in memory: a failed write may have
-    /// landed the rename before its dir fsync failed, so redo that fsync.
+    /// landed the rename before its dir fsync failed.
     fn heal_from_disk(&self) -> Result<CommittedState, Error> {
         let committed = deserialize_on_disk_config(&fs::read(self.config_path())?)?;
         self.heal_to_marker(committed.highest_slot, committed.data_len)?;
-        sync_dir(&self.root_dir)?;
         Ok(committed)
     }
 
@@ -511,7 +511,6 @@ impl StaticFile {
     /// Remove data/offset files newer than the committed file id.
     /// `None` means the store is empty, so every data/offset file is removed.
     fn remove_uncommitted_files(&self, max_file_id: Option<u64>) -> Result<(), Error> {
-        let mut removed = false;
         for entry in fs::read_dir(&self.root_dir)? {
             let entry = entry?;
             let file_name = entry.file_name();
@@ -530,11 +529,7 @@ impl StaticFile {
                     )));
                 }
                 fs::remove_file(entry.path())?;
-                removed = true;
             }
-        }
-        if removed {
-            sync_dir(&self.root_dir)?;
         }
         Ok(())
     }
@@ -636,6 +631,17 @@ fn atomic_write_config(
 
     fs::rename(tmp_path, config_path)?;
     sync_dir(root_dir)
+}
+
+/// `read_exact`, but a record running past the end of its data file is `Corrupt`.
+fn read_record_bytes(data_file: &mut File, buf: &mut [u8], slot: u64) -> Result<(), Error> {
+    data_file.read_exact(buf).map_err(|e| {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            Error::Corrupt(format!("record at slot {slot} runs past end of data file"))
+        } else {
+            e.into()
+        }
+    })
 }
 
 /// Checksum binding a record to its slot: `crc32(slot | length | payload)`.
@@ -947,6 +953,18 @@ mod tests {
             let read = rx.recv_timeout(std::time::Duration::from_secs(5));
             assert_eq!(read, Ok(Some(b"a".to_vec())));
         });
+    }
+
+    #[test]
+    fn offset_past_end_of_file_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        open(&dir).put(0, b"a").unwrap();
+        let off_path = dir.path().join("data_00000.off");
+        let mut offsets = fs::read(&off_path).unwrap();
+        offsets[0..8].copy_from_slice(&1_000_000u64.to_le_bytes());
+        fs::write(&off_path, &offsets).unwrap();
+
+        assert!(matches!(open(&dir).get(0), Err(Error::Corrupt(_))));
     }
 
     #[test]
