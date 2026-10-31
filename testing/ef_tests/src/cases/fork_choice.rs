@@ -1857,9 +1857,11 @@ impl<E: EthSpec> Tester<E> {
             .map_err(|e| {
                 Error::InternalError(format!("Failed to get inclusion list transactions: {e:?}"))
             })?;
-        let payload_transactions = &signed_envelope.message.payload.transactions;
         let inclusion_list_satisfaction = if inclusion_list_transactions.iter().all(|transaction| {
-            payload_transactions
+            signed_envelope
+                .message
+                .payload
+                .transactions
                 .iter()
                 .any(|payload_transaction| payload_transaction[..] == transaction[..])
         }) {

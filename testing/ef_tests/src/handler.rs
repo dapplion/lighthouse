@@ -693,6 +693,11 @@ impl<E: EthSpec> ForkChoiceHandler<E> {
             _phantom: PhantomData,
         }
     }
+
+    fn is_inclusion_list_handler(&self) -> bool {
+        self.handler_name == "inclusion_list_satisfaction"
+            || self.handler_name == "on_inclusion_list"
+    }
 }
 
 impl<E: EthSpec + TypeName> Handler for ForkChoiceHandler<E> {
@@ -754,7 +759,7 @@ impl<E: EthSpec + TypeName> Handler for ForkChoiceHandler<E> {
         }
 
         // Inclusion list tests exist only for Heze and later.
-        if self.has_heze_vectors() && !fork_name.heze_enabled() {
+        if self.is_inclusion_list_handler() && !fork_name.heze_enabled() {
             return false;
         }
 
@@ -764,8 +769,9 @@ impl<E: EthSpec + TypeName> Handler for ForkChoiceHandler<E> {
     }
 
     fn has_heze_vectors(&self) -> bool {
-        self.handler_name == "inclusion_list_satisfaction"
-            || self.handler_name == "on_inclusion_list"
+        // TODO(heze): the inclusion list vectors are not in a consensus-spec-tests release yet.
+        // https://github.com/sigp/lighthouse/issues/10485
+        self.is_inclusion_list_handler() && self.handler_path(&ForkName::Heze.to_string()).exists()
     }
 
     fn disabled_forks(&self) -> Vec<ForkName> {

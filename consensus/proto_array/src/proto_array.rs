@@ -29,8 +29,8 @@ four_byte_option_impl!(four_byte_option_checkpoint, Checkpoint);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
 #[ssz(enum_behaviour = "tag")]
 pub enum InclusionListSatisfaction {
-    /// The EL found the payload `VALID` and satisfying the inclusion lists. Also the value for
-    /// blocks without inclusion lists, as the spec seeds the anchor.
+    /// The EL found the payload `VALID` and satisfying the inclusion lists. Also the default for
+    /// payloads that were never checked, such as the anchor's.
     #[default]
     Satisfied,
     /// The EL found the payload `VALID` but not satisfying the inclusion lists.
