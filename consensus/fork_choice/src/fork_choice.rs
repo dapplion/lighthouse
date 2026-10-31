@@ -3,9 +3,9 @@ use crate::{ForkChoiceStore, InvalidationOperation};
 use fixed_bytes::FixedBytesExtended;
 use logging::crit;
 use proto_array::{
-    Block as ProtoBlock, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, JustifiedBalances,
-    LatestMessage, PayloadBlockHash, PayloadStatus, ProposerHeadError, ProposerHeadInfo,
-    ProtoArrayForkChoice,
+    Block as ProtoBlock, ExecutionStatus, ExecutionVerdict, ForkChoiceNode,
+    InclusionListSatisfaction, JustifiedBalances, LatestMessage, PayloadBlockHash, PayloadStatus,
+    ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice,
 };
 use ssz_derive::{Decode, Encode};
 use state_processing::{
@@ -729,6 +729,19 @@ where
             .map_err(Error::FailedToProcessValidExecutionPayload)?;
 
         Ok(())
+    }
+
+    /// Record whether the payload of `block_root` satisfied the timely inclusion lists.
+    ///
+    /// Equivalent to the end of spec's `record_payload_inclusion_list_satisfaction`.
+    pub fn on_payload_inclusion_list_satisfaction(
+        &mut self,
+        block_root: Hash256,
+        inclusion_list_satisfaction: InclusionListSatisfaction,
+    ) -> Result<(), Error<T::Error>> {
+        self.proto_array
+            .on_payload_inclusion_list_satisfaction(block_root, inclusion_list_satisfaction)
+            .map_err(Error::ProtoArrayStringError)
     }
 
     /// Mark the payload `block_hash` valid, as judged by a forkchoiceUpdated.
@@ -1629,6 +1642,16 @@ where
     pub fn is_payload_received(&self, block_root: &Hash256) -> bool {
         self.proto_array.is_payload_received(block_root)
             && self.is_finalized_checkpoint_or_descendant(*block_root)
+    }
+
+    /// Returns the inclusion list satisfaction recorded for the payload of `block_root`.
+    ///
+    /// Returns `None` for unknown blocks and pre-Gloas nodes.
+    pub fn inclusion_list_satisfaction(
+        &self,
+        block_root: &Hash256,
+    ) -> Option<InclusionListSatisfaction> {
+        self.proto_array.inclusion_list_satisfaction(block_root)
     }
 
     /// Returns `true` if the PTC majority voted that the payload for `block_root` was timely,

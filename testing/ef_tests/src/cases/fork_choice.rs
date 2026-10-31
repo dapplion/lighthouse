@@ -2,7 +2,8 @@ use super::common::{load_config, testing_spec_with_config};
 use super::*;
 use crate::decode::{ssz_decode_file, ssz_decode_file_with, ssz_decode_state, yaml_decode_file};
 use ::fork_choice::{
-    AttestationFromBlock, ForkChoiceStore, PayloadStatus as FcPayloadStatus, ProposerHeadError,
+    AttestationFromBlock, ForkChoiceStore, InclusionListSatisfaction,
+    PayloadStatus as FcPayloadStatus, ProposerHeadError,
 };
 use beacon_chain::beacon_proposer_cache::compute_proposer_duties_from_head;
 use beacon_chain::block_verification_types::LookupBlock;
@@ -1414,6 +1415,8 @@ impl<E: EthSpec> Tester<E> {
                         block_root, e
                     ))
                 })?;
+
+            self.record_payload_inclusion_list_satisfaction(signed_envelope)?;
         } else if verification_result.is_ok() {
             return Err(Error::DidntFail(format!(
                 "on_execution_payload envelope for block root {} should have failed",
@@ -1829,17 +1832,75 @@ impl<E: EthSpec> Tester<E> {
         )
     }
 
+    /// Simulate the EL's inclusion list check for a valid envelope: the payload satisfies the
+    /// timely inclusion lists if and only if it contains all of their transactions.
+    fn record_payload_inclusion_list_satisfaction(
+        &self,
+        signed_envelope: &SignedExecutionPayloadEnvelope<E>,
+    ) -> Result<(), Error> {
+        let block_root = signed_envelope.message.beacon_block_root;
+        let chain = &self.harness.chain;
+        let block = chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .get_block(&block_root)
+            .ok_or_else(|| Error::InternalError(format!("Block not found for {block_root:?}")))?;
+        if !chain.spec.fork_name_at_slot::<E>(block.slot).heze_enabled() {
+            return Ok(());
+        }
+        let parent_root = block
+            .parent_root
+            .ok_or_else(|| Error::InternalError(format!("Block {block_root:?} has no parent")))?;
+
+        let inclusion_list_transactions = chain
+            .get_inclusion_list_transactions(parent_root, block.slot.saturating_sub(1u64), true)
+            .map_err(|e| {
+                Error::InternalError(format!("Failed to get inclusion list transactions: {e:?}"))
+            })?;
+        let payload_transactions = &signed_envelope.message.payload.transactions;
+        let inclusion_list_satisfaction = if inclusion_list_transactions.iter().all(|transaction| {
+            payload_transactions
+                .iter()
+                .any(|payload_transaction| payload_transaction[..] == transaction[..])
+        }) {
+            InclusionListSatisfaction::Satisfied
+        } else {
+            InclusionListSatisfaction::Unsatisfied
+        };
+
+        chain
+            .canonical_head
+            .fork_choice_write_lock()
+            .on_payload_inclusion_list_satisfaction(block_root, inclusion_list_satisfaction)
+            .map_err(|e| {
+                Error::InternalError(format!(
+                    "Failed to record inclusion list satisfaction for {block_root:?}: {e:?}"
+                ))
+            })
+    }
+
     pub fn check_payload_inclusion_list_satisfaction(
         &self,
         expected: PayloadInclusionListSatisfactionCheck,
     ) -> Result<(), Error> {
-        // TODO(heze): query fork choice once it records payload inclusion list satisfaction.
-        // https://github.com/sigp/lighthouse/issues/10485
-        Err(Error::InternalError(format!(
-            "not implemented: Lighthouse does not record payload_inclusion_list_satisfaction \
-             (block_root {:?}, expected satisfied: {})",
-            expected.block_root, expected.satisfied
-        )))
+        let satisfied = self
+            .harness
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .inclusion_list_satisfaction(&expected.block_root)
+            .ok_or_else(|| {
+                Error::InternalError(format!(
+                    "No inclusion list satisfaction for {:?}",
+                    expected.block_root
+                ))
+            })?
+            .is_satisfied();
+        check_equal(
+            "payload_inclusion_list_satisfaction",
+            satisfied,
+            expected.satisfied,
+        )
     }
 
     pub fn check_payload_timeliness_vote(&self, expected: &PayloadVoteCheck) -> Result<(), Error> {

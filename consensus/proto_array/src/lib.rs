@@ -7,7 +7,8 @@ mod ssz_container;
 
 pub use crate::justified_balances::JustifiedBalances;
 pub use crate::proto_array::{
-    InvalidationOperation, ParentPayloadStatus, calculate_committee_fraction,
+    InclusionListSatisfaction, InvalidationOperation, ParentPayloadStatus,
+    calculate_committee_fraction,
 };
 pub use crate::proto_array_fork_choice::{
     Block, DoNotReOrg, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, LatestMessage,

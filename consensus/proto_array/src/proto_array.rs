@@ -23,6 +23,32 @@ use types::{
 four_byte_option_impl!(four_byte_option_usize, usize);
 four_byte_option_impl!(four_byte_option_checkpoint, Checkpoint);
 
+/// Whether a block's execution payload satisfied the timely inclusion lists of the previous slot.
+///
+/// Equivalent to spec's `store.payload_inclusion_list_satisfaction[root]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InclusionListSatisfaction {
+    /// The EL found the payload `VALID` and satisfying the inclusion lists. Also the value for
+    /// blocks without inclusion lists, as the spec seeds the anchor.
+    #[default]
+    Satisfied,
+    /// The EL found the payload `VALID` but not satisfying the inclusion lists.
+    Unsatisfied,
+    /// The EL has not validated the payload yet. Counts as satisfied.
+    Optimistic,
+}
+
+impl InclusionListSatisfaction {
+    /// Equivalent to spec's `store.payload_inclusion_list_satisfaction[root]`.
+    pub fn is_satisfied(self) -> bool {
+        match self {
+            InclusionListSatisfaction::Satisfied => true,
+            InclusionListSatisfaction::Optimistic => true,
+            InclusionListSatisfaction::Unsatisfied => false,
+        }
+    }
+}
+
 /// Defines an operation which may invalidate the `execution_status` of some nodes.
 ///
 /// The EL judges payloads, so an operation names payloads by their execution block hash. Fork
@@ -169,6 +195,12 @@ pub struct ProtoNode {
     /// Maps to `root in store.payload_states` in the spec.
     #[superstruct(only(V29), partial_getter(copy))]
     pub payload_received: bool,
+    /// Whether the execution payload satisfied the inclusion lists. Only read in the slot after
+    /// this block, by `should_extend_payload`.
+    // TODO(heze): persist with a schema migration https://github.com/sigp/lighthouse/issues/10485
+    #[superstruct(only(V29), partial_getter(copy))]
+    #[ssz(skip_serializing, skip_deserializing)]
+    pub inclusion_list_satisfaction: InclusionListSatisfaction,
     /// The proposer index for this block, used by `should_apply_proposer_boost`
     /// to detect equivocations at the parent's slot.
     #[superstruct(only(V29), partial_getter(copy))]
@@ -723,6 +755,7 @@ impl ProtoArray {
                 payload_data_availability_votes: BitVector::default(),
                 ptc_participation: BitVector::default(),
                 payload_received: false,
+                inclusion_list_satisfaction: InclusionListSatisfaction::Satisfied,
                 proposer_index,
                 // Spec: `record_block_timeliness` + `get_forkchoice_store`.
                 // Anchor gets [True, True]. Others computed from time_into_slot.
@@ -935,6 +968,27 @@ impl ProtoArray {
                 "envelope carries no EL verdict: {execution_status:?}"
             ))),
         }
+    }
+
+    /// Record whether the payload of `block_root` satisfied the inclusion lists.
+    pub fn on_payload_inclusion_list_satisfaction(
+        &mut self,
+        block_root: Hash256,
+        inclusion_list_satisfaction: InclusionListSatisfaction,
+    ) -> Result<(), Error> {
+        let index = *self
+            .indices
+            .get(&block_root)
+            .ok_or(Error::NodeUnknown(block_root))?;
+        let node = self
+            .nodes
+            .get_mut(index)
+            .ok_or(Error::InvalidNodeIndex(index))?;
+        let v29 = node
+            .as_v29_mut()
+            .map_err(|_| Error::InvalidNodeVariant { block_root })?;
+        v29.inclusion_list_satisfaction = inclusion_list_satisfaction;
+        Ok(())
     }
 
     /// Promotes the payload of `block_root` and every payload its branch executed to `Valid`.
@@ -2024,6 +2078,11 @@ impl ProtoArray {
 
         // Spec equivalent to `if not is_payload_verified(store, root): return False`
         if !node.payload_received {
+            return Ok(false);
+        }
+
+        // Spec equivalent to `if not is_payload_inclusion_list_satisfied(store, root): return False`
+        if !node.inclusion_list_satisfaction.is_satisfied() {
             return Ok(false);
         }
 
