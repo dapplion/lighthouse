@@ -43,11 +43,16 @@ pub trait Handler {
         Self::Case::is_enabled_for_feature(feature_name)
     }
 
+    /// Whether this handler runs Heze despite the Heze skip in `run`.
+    fn has_heze_vectors(&self) -> bool {
+        false
+    }
+
     fn run(&self) {
         for fork_name in ForkName::list_all() {
             // TODO(heze): remove this skip once Heze spec test vectors are published in
             // consensus-spec-tests.
-            if fork_name == ForkName::Heze {
+            if fork_name == ForkName::Heze && !self.has_heze_vectors() {
                 continue;
             }
             if !self.disabled_forks().contains(&fork_name) && self.is_enabled_for_fork(fork_name) {
@@ -748,9 +753,19 @@ impl<E: EthSpec + TypeName> Handler for ForkChoiceHandler<E> {
             return false;
         }
 
+        // Inclusion list tests exist only for Heze and later.
+        if self.has_heze_vectors() && !fork_name.heze_enabled() {
+            return false;
+        }
+
         // These tests check block validity (which may include signatures) and there is no need to
         // run them with fake crypto.
         cfg!(not(feature = "fake_crypto"))
+    }
+
+    fn has_heze_vectors(&self) -> bool {
+        self.handler_name == "inclusion_list_satisfaction"
+            || self.handler_name == "on_inclusion_list"
     }
 
     fn disabled_forks(&self) -> Vec<ForkName> {

@@ -146,6 +146,21 @@ impl<E: EthSpec> InclusionListStore<E> {
             .is_some_and(|equivocators| equivocators.contains(&validator_index))
     }
 
+    /// The timeliness recorded when the validator's inclusion list for `(slot, dependent_root)`
+    /// was first stored, or `None` if no inclusion list from it is stored.
+    pub fn is_timely(
+        &self,
+        slot: Slot,
+        dependent_root: DependentRoot,
+        validator_index: u64,
+    ) -> Option<bool> {
+        self.slots
+            .get(&slot)
+            .and_then(|entry| entry.by_dependent_root.get(&dependent_root))
+            .and_then(|by_validator| by_validator.get(&validator_index))
+            .map(|(_, is_timely)| *is_timely)
+    }
+
     /// Validator indices that submitted a valid, non-equivocating inclusion list for
     /// `(slot, dependent_root)`, timely-filtered when `only_timely` is set.
     fn submitted_validators(
