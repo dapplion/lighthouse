@@ -52,6 +52,10 @@ pub enum Error {
     InvalidNodeVariant {
         block_root: Hash256,
     },
+    InvalidInclusionListSatisfactionLength {
+        nodes: usize,
+        inclusion_list_satisfaction: usize,
+    },
     BrokenBlock {
         block_root: Hash256,
     },

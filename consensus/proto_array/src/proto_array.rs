@@ -26,7 +26,8 @@ four_byte_option_impl!(four_byte_option_checkpoint, Checkpoint);
 /// Whether a block's execution payload satisfied the timely inclusion lists of the previous slot.
 ///
 /// Equivalent to spec's `store.payload_inclusion_list_satisfaction[root]`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Encode, Decode, Serialize, Deserialize)]
+#[ssz(enum_behaviour = "tag")]
 pub enum InclusionListSatisfaction {
     /// The EL found the payload `VALID` and satisfying the inclusion lists. Also the value for
     /// blocks without inclusion lists, as the spec seeds the anchor.
@@ -197,7 +198,7 @@ pub struct ProtoNode {
     pub payload_received: bool,
     /// Whether the execution payload satisfied the inclusion lists. Only read in the slot after
     /// this block, by `should_extend_payload`.
-    // TODO(heze): persist with a schema migration https://github.com/sigp/lighthouse/issues/10485
+    // Persisted in `SszContainerV33` rather than in the node, so the node encoding is unchanged.
     #[superstruct(only(V29), partial_getter(copy))]
     #[ssz(skip_serializing, skip_deserializing)]
     pub inclusion_list_satisfaction: InclusionListSatisfaction,

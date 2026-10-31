@@ -2108,7 +2108,7 @@ where
 ///
 /// This is used when persisting the state of the fork choice to disk.
 #[superstruct(
-    variants(V28, V29),
+    variants(V28, V29, V33),
     variant_attributes(derive(Encode, Decode, Clone)),
     no_enum
 )]
@@ -2117,11 +2117,29 @@ pub struct PersistedForkChoice {
     pub proto_array_v28: proto_array::core::SszContainerV28,
     #[superstruct(only(V29))]
     pub proto_array: proto_array::core::SszContainerV29,
+    #[superstruct(only(V33))]
+    pub proto_array: proto_array::core::SszContainerV33,
     #[superstruct(only(V28))]
     pub queued_attestations_v28: Vec<QueuedAttestationV28>,
 }
 
-pub type PersistedForkChoice = PersistedForkChoiceV29;
+pub type PersistedForkChoice = PersistedForkChoiceV33;
+
+impl From<PersistedForkChoiceV29> for PersistedForkChoiceV33 {
+    fn from(v29: PersistedForkChoiceV29) -> Self {
+        Self {
+            proto_array: v29.proto_array.into(),
+        }
+    }
+}
+
+impl From<PersistedForkChoiceV33> for PersistedForkChoiceV29 {
+    fn from(v33: PersistedForkChoiceV33) -> Self {
+        Self {
+            proto_array: v33.proto_array.into(),
+        }
+    }
+}
 
 impl From<PersistedForkChoiceV28> for PersistedForkChoiceV29 {
     fn from(v28: PersistedForkChoiceV28) -> Self {

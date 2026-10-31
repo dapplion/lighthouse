@@ -6,7 +6,9 @@ mod votes;
 
 use crate::error::Error;
 use crate::proto_array_fork_choice::{Block, ExecutionStatus, PayloadStatus, ProtoArrayForkChoice};
-use crate::{InvalidationOperation, JustifiedBalances, ParentPayloadStatus};
+use crate::{
+    InclusionListSatisfaction, InvalidationOperation, JustifiedBalances, ParentPayloadStatus,
+};
 use fixed_bytes::FixedBytesExtended;
 use serde::{Deserialize, Serialize};
 use ssz::BitVector;
@@ -113,6 +115,10 @@ pub enum Operation {
     AssertPayloadReceived {
         block_root: Hash256,
         expected: bool,
+    },
+    SetInclusionListSatisfaction {
+        block_root: Hash256,
+        inclusion_list_satisfaction: InclusionListSatisfaction,
     },
     AssertPayloadStatusByWeight {
         block_root: Hash256,
@@ -587,6 +593,29 @@ impl ForkChoiceTestDefinition {
                                 op_index, e
                             )
                         });
+                    check_bytes_round_trip(&fork_choice);
+                }
+                Operation::SetInclusionListSatisfaction {
+                    block_root,
+                    inclusion_list_satisfaction,
+                } => {
+                    fork_choice
+                        .on_payload_inclusion_list_satisfaction(
+                            block_root,
+                            inclusion_list_satisfaction,
+                        )
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "set inclusion list satisfaction op at index {} returned error: {}",
+                                op_index, e
+                            )
+                        });
+                    assert_eq!(
+                        fork_choice.inclusion_list_satisfaction(&block_root),
+                        Some(inclusion_list_satisfaction),
+                        "inclusion list satisfaction mismatch at op index {}",
+                        op_index
+                    );
                     check_bytes_round_trip(&fork_choice);
                 }
                 Operation::AssertPayloadReceived {
