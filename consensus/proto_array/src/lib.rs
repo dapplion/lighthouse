@@ -7,7 +7,8 @@ mod ssz_container;
 
 pub use crate::justified_balances::JustifiedBalances;
 pub use crate::proto_array::{
-    InvalidationOperation, ParentPayloadStatus, calculate_committee_fraction,
+    InclusionListSatisfaction, InvalidationOperation, ParentPayloadStatus,
+    calculate_committee_fraction,
 };
 pub use crate::proto_array_fork_choice::{
     Block, DoNotReOrg, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, LatestMessage,
@@ -18,5 +19,7 @@ pub use error::Error;
 pub mod core {
     pub use super::proto_array::{ProposerBoost, ProtoArray, ProtoNode};
     pub use super::proto_array_fork_choice::VoteTracker;
-    pub use super::ssz_container::{SszContainer, SszContainerV28, SszContainerV29};
+    pub use super::ssz_container::{
+        SszContainer, SszContainerV28, SszContainerV29, SszContainerV33,
+    };
 }

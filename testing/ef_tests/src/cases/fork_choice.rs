@@ -2,12 +2,15 @@ use super::common::{load_config, testing_spec_with_config};
 use super::*;
 use crate::decode::{ssz_decode_file, ssz_decode_file_with, ssz_decode_state, yaml_decode_file};
 use ::fork_choice::{
-    AttestationFromBlock, ForkChoiceStore, PayloadStatus as FcPayloadStatus, ProposerHeadError,
+    AttestationFromBlock, ForkChoiceStore, InclusionListSatisfaction,
+    PayloadStatus as FcPayloadStatus, ProposerHeadError,
 };
 use beacon_chain::beacon_proposer_cache::compute_proposer_duties_from_head;
 use beacon_chain::block_verification_types::LookupBlock;
 use beacon_chain::chain_config::FastConfirmationMode;
 use beacon_chain::data_column_verification::GossipVerifiedDataColumn;
+use beacon_chain::inclusion_list_store::InsertOutcome;
+use beacon_chain::slot_clock::SlotClock;
 use beacon_chain::{
     AvailabilityProcessingStatus, BeaconChainTypes, CachedHead, ChainConfig, NotifyExecutionLayer,
     PayloadVerificationStatus,
@@ -42,7 +45,7 @@ use types::{
     BlobSidecar, BlobsList, BlockImportSource, Checkpoint, DataColumnSidecar,
     DataColumnSidecarList, DataColumnSubnetId, ExecutionBlockHash, Hash256, IndexedAttestation,
     IndexedPayloadAttestation, KzgProof, PayloadAttestationMessage, ProposerPreparationData,
-    SignedBeaconBlock, SignedExecutionPayloadEnvelope, Slot, Uint256,
+    SignedBeaconBlock, SignedExecutionPayloadEnvelope, SignedInclusionList, Slot, Uint256,
 };
 
 // When set to true, cache any states fetched from the db.
@@ -80,6 +83,23 @@ pub struct PayloadVoteCheck {
     votes: Vec<Option<bool>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PayloadInclusionListSatisfactionCheck {
+    block_root: Hash256,
+    satisfied: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InclusionListEntryCheck {
+    slot: Slot,
+    dependent_root: Hash256,
+    validator_index: u64,
+    timely: bool,
+    equivocator: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Checks {
@@ -106,6 +126,8 @@ pub struct Checks {
     payload_timeliness_vote: Option<PayloadVoteCheck>,
     payload_data_availability_vote: Option<PayloadVoteCheck>,
     viable_for_head_roots_and_weights: Option<Vec<RootAndWeight>>,
+    payload_inclusion_list_satisfaction: Option<PayloadInclusionListSatisfactionCheck>,
+    inclusion_list_entry: Option<InclusionListEntryCheck>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -145,6 +167,7 @@ pub enum Step<
     TPowBlock,
     TExecutionPayload = String,
     TPayloadAttestationMessage = String,
+    TInclusionList = String,
 > {
     Tick {
         tick: u64,
@@ -194,6 +217,11 @@ pub enum Step<
         #[serde(default = "default_true")]
         valid: bool,
     },
+    InclusionList {
+        inclusion_list: TInclusionList,
+        #[serde(default = "default_true")]
+        valid: bool,
+    },
 }
 
 fn default_true() -> bool {
@@ -229,6 +257,7 @@ pub struct ForkChoiceTest<E: EthSpec> {
             PowBlock,
             SignedExecutionPayloadEnvelope<E>,
             PayloadAttestationMessage,
+            SignedInclusionList,
         >,
     >,
 }
@@ -250,7 +279,7 @@ impl<E: EthSpec> LoadCase for ForkChoiceTest<E> {
 
         #[allow(clippy::type_complexity)]
         let steps: Vec<
-            Step<String, String, Vec<String>, String, String, String, String, String>,
+            Step<String, String, Vec<String>, String, String, String, String, String, String>,
         > = yaml_decode_file(&path.join("steps.yaml"))?;
 
         // Resolve the object names in `steps.yaml` into actual decoded block/attestation objects.
@@ -400,6 +429,17 @@ impl<E: EthSpec> LoadCase for ForkChoiceTest<E> {
                         valid,
                     })
                 }
+                Step::InclusionList {
+                    inclusion_list,
+                    valid,
+                } => {
+                    let signed_inclusion_list =
+                        ssz_decode_file(&path.join(format!("{inclusion_list}.ssz_snappy")))?;
+                    Ok(Step::InclusionList {
+                        inclusion_list: signed_inclusion_list,
+                        valid,
+                    })
+                }
             })
             .collect::<Result<_, _>>()?;
         let anchor_state = ssz_decode_state(&path.join("anchor_state.ssz_snappy"), spec)?;
@@ -532,6 +572,8 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
                         payload_timeliness_vote,
                         payload_data_availability_vote,
                         viable_for_head_roots_and_weights,
+                        payload_inclusion_list_satisfaction,
+                        inclusion_list_entry,
                     } = checks.as_ref();
 
                     if let Some(expected_head) = head {
@@ -615,6 +657,14 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
                     if let Some(expected) = viable_for_head_roots_and_weights {
                         tester.check_viable_for_head_roots_and_weights(expected)?;
                     }
+
+                    if let Some(expected) = payload_inclusion_list_satisfaction {
+                        tester.check_payload_inclusion_list_satisfaction(*expected)?;
+                    }
+
+                    if let Some(expected) = inclusion_list_entry {
+                        tester.check_inclusion_list_entry(*expected)?;
+                    }
                 }
 
                 Step::MaybeValidBlockAndColumns {
@@ -636,6 +686,12 @@ impl<E: EthSpec> Case for ForkChoiceTest<E> {
                 } => {
                     tester
                         .process_payload_attestation_message(payload_attestation_message, *valid)?;
+                }
+                Step::InclusionList {
+                    inclusion_list,
+                    valid,
+                } => {
+                    tester.process_inclusion_list(inclusion_list, *valid)?;
                 }
             }
         }
@@ -1359,6 +1415,8 @@ impl<E: EthSpec> Tester<E> {
                         block_root, e
                     ))
                 })?;
+
+            self.record_payload_inclusion_list_satisfaction(signed_envelope)?;
         } else if verification_result.is_ok() {
             return Err(Error::DidntFail(format!(
                 "on_execution_payload envelope for block root {} should have failed",
@@ -1702,6 +1760,149 @@ impl<E: EthSpec> Tester<E> {
         }
 
         Ok(())
+    }
+
+    /// Feed the inclusion list through gossip verification and store import, as if received on
+    /// gossip at the current store time.
+    pub fn process_inclusion_list(
+        &self,
+        signed_inclusion_list: &SignedInclusionList,
+        valid: bool,
+    ) -> Result<(), Error> {
+        let chain = &self.harness.chain;
+        let seen_timestamp = chain
+            .slot_clock
+            .now_duration()
+            .ok_or_else(|| Error::InternalError("Unable to read the slot clock".into()))?;
+        let result = chain
+            .verify_inclusion_list_for_gossip(signed_inclusion_list.clone(), seen_timestamp)
+            .map_err(|e| format!("gossip verification failed: {e:?}"))
+            .and_then(|verified| match chain.import_inclusion_list(verified) {
+                InsertOutcome::New
+                | InsertOutcome::Seen
+                | InsertOutcome::Equivocating
+                | InsertOutcome::SubsequentEquivocation => Ok(()),
+                InsertOutcome::Old => Err("import returned InsertOutcome::Old".to_string()),
+            });
+
+        let message = &signed_inclusion_list.message;
+        match (result, valid) {
+            (Ok(()), true) | (Err(_), false) => Ok(()),
+            (Err(e), true) => Err(Error::InternalError(format!(
+                "inclusion list for slot {} validator {} rejected: {e}",
+                message.slot, message.validator_index
+            ))),
+            (Ok(()), false) => Err(Error::DidntFail(format!(
+                "inclusion list for slot {} validator {} marked valid=false was accepted",
+                message.slot, message.validator_index
+            ))),
+        }
+    }
+
+    pub fn check_inclusion_list_entry(
+        &self,
+        expected: InclusionListEntryCheck,
+    ) -> Result<(), Error> {
+        let inclusion_list_store = self.harness.chain.inclusion_list_store.read();
+        let timely = inclusion_list_store
+            .is_timely(
+                expected.slot,
+                expected.dependent_root,
+                expected.validator_index,
+            )
+            .ok_or_else(|| {
+                Error::NotEqual(format!(
+                    "inclusion_list_entry: no stored inclusion list for slot {} dependent_root \
+                     {:?} validator {}",
+                    expected.slot, expected.dependent_root, expected.validator_index
+                ))
+            })?;
+        let equivocator = inclusion_list_store.seen_twice(
+            expected.slot,
+            expected.dependent_root,
+            expected.validator_index,
+        );
+        drop(inclusion_list_store);
+
+        check_equal("inclusion_list_entry.timely", timely, expected.timely)?;
+        check_equal(
+            "inclusion_list_entry.equivocator",
+            equivocator,
+            expected.equivocator,
+        )
+    }
+
+    /// Simulate the EL's inclusion list check for a valid envelope: the payload satisfies the
+    /// timely inclusion lists if and only if it contains all of their transactions.
+    fn record_payload_inclusion_list_satisfaction(
+        &self,
+        signed_envelope: &SignedExecutionPayloadEnvelope<E>,
+    ) -> Result<(), Error> {
+        let block_root = signed_envelope.message.beacon_block_root;
+        let chain = &self.harness.chain;
+        let block = chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .get_block(&block_root)
+            .ok_or_else(|| Error::InternalError(format!("Block not found for {block_root:?}")))?;
+        if !chain.spec.fork_name_at_slot::<E>(block.slot).heze_enabled() {
+            return Ok(());
+        }
+        let parent_root = block
+            .parent_root
+            .ok_or_else(|| Error::InternalError(format!("Block {block_root:?} has no parent")))?;
+
+        let inclusion_list_transactions = chain
+            .get_inclusion_list_transactions(parent_root, block.slot.saturating_sub(1u64), true)
+            .map_err(|e| {
+                Error::InternalError(format!("Failed to get inclusion list transactions: {e:?}"))
+            })?;
+        let inclusion_list_satisfaction = if inclusion_list_transactions.iter().all(|transaction| {
+            signed_envelope
+                .message
+                .payload
+                .transactions
+                .iter()
+                .any(|payload_transaction| payload_transaction[..] == transaction[..])
+        }) {
+            InclusionListSatisfaction::Satisfied
+        } else {
+            InclusionListSatisfaction::Unsatisfied
+        };
+
+        chain
+            .canonical_head
+            .fork_choice_write_lock()
+            .on_payload_inclusion_list_satisfaction(block_root, inclusion_list_satisfaction)
+            .map_err(|e| {
+                Error::InternalError(format!(
+                    "Failed to record inclusion list satisfaction for {block_root:?}: {e:?}"
+                ))
+            })
+    }
+
+    pub fn check_payload_inclusion_list_satisfaction(
+        &self,
+        expected: PayloadInclusionListSatisfactionCheck,
+    ) -> Result<(), Error> {
+        let satisfied = self
+            .harness
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .inclusion_list_satisfaction(&expected.block_root)
+            .ok_or_else(|| {
+                Error::InternalError(format!(
+                    "No inclusion list satisfaction for {:?}",
+                    expected.block_root
+                ))
+            })?
+            .is_satisfied();
+        check_equal(
+            "payload_inclusion_list_satisfaction",
+            satisfied,
+            expected.satisfied,
+        )
     }
 
     pub fn check_payload_timeliness_vote(&self, expected: &PayloadVoteCheck) -> Result<(), Error> {

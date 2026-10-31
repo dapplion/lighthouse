@@ -1,7 +1,7 @@
 use crate::proto_array::ProposerBoost;
 use crate::{
     Error, JustifiedBalances,
-    proto_array::{ProtoArray, ProtoNode, ProtoNodeV17},
+    proto_array::{InclusionListSatisfaction, ProtoArray, ProtoNode, ProtoNodeV17},
     proto_array_fork_choice::{ElasticList, ProtoArrayForkChoice, VoteTracker, VoteTrackerV28},
 };
 use ssz::{Encode, four_byte_option_impl};
@@ -14,17 +14,17 @@ use types::{Checkpoint, Hash256};
 // selector.
 four_byte_option_impl!(four_byte_option_checkpoint, Checkpoint);
 
-pub type SszContainer = SszContainerV29;
+pub type SszContainer = SszContainerV33;
 
 #[superstruct(
-    variants(V28, V29),
+    variants(V28, V29, V33),
     variant_attributes(derive(Encode, Decode, Clone)),
     no_enum
 )]
 pub struct SszContainer {
     #[superstruct(only(V28))]
     pub votes_v28: Vec<VoteTrackerV28>,
-    #[superstruct(only(V29))]
+    #[superstruct(only(V29, V33))]
     pub votes: Vec<VoteTracker>,
     pub prune_threshold: usize,
     // Deprecated, remove in a future schema migration
@@ -35,14 +35,18 @@ pub struct SszContainer {
     finalized_checkpoint: Checkpoint,
     #[superstruct(only(V28))]
     pub nodes: Vec<ProtoNodeV17>,
-    #[superstruct(only(V29))]
+    #[superstruct(only(V29, V33))]
     pub nodes: Vec<ProtoNode>,
     pub indices: Vec<(Hash256, usize)>,
+    /// The `inclusion_list_satisfaction` of each node in `nodes`, which the node itself does not
+    /// encode. Pre-Gloas nodes have the default.
+    #[superstruct(only(V33))]
+    pub inclusion_list_satisfaction: Vec<InclusionListSatisfaction>,
     #[superstruct(only(V28))]
     pub previous_proposer_boost: ProposerBoost,
 }
 
-impl SszContainerV29 {
+impl SszContainerV33 {
     pub fn from_proto_array(from: &ProtoArrayForkChoice) -> Self {
         let proto_array = &from.proto_array;
 
@@ -51,17 +55,37 @@ impl SszContainerV29 {
             prune_threshold: proto_array.prune_threshold,
             nodes: proto_array.nodes.clone(),
             indices: proto_array.indices.iter().map(|(k, v)| (*k, *v)).collect(),
+            inclusion_list_satisfaction: proto_array
+                .nodes
+                .iter()
+                .map(|node| node.inclusion_list_satisfaction().unwrap_or_default())
+                .collect(),
         }
     }
 }
 
-impl TryFrom<(SszContainerV29, JustifiedBalances)> for ProtoArrayForkChoice {
+impl TryFrom<(SszContainerV33, JustifiedBalances)> for ProtoArrayForkChoice {
     type Error = Error;
 
-    fn try_from((from, balances): (SszContainerV29, JustifiedBalances)) -> Result<Self, Error> {
+    fn try_from((from, balances): (SszContainerV33, JustifiedBalances)) -> Result<Self, Error> {
+        if from.inclusion_list_satisfaction.len() != from.nodes.len() {
+            return Err(Error::InvalidInclusionListSatisfactionLength {
+                nodes: from.nodes.len(),
+                inclusion_list_satisfaction: from.inclusion_list_satisfaction.len(),
+            });
+        }
+        let mut nodes = from.nodes;
+        for (node, inclusion_list_satisfaction) in
+            nodes.iter_mut().zip(from.inclusion_list_satisfaction)
+        {
+            if let Ok(node_inclusion_list_satisfaction) = node.inclusion_list_satisfaction_mut() {
+                *node_inclusion_list_satisfaction = inclusion_list_satisfaction;
+            }
+        }
+
         let mut proto_array = ProtoArray {
             prune_threshold: from.prune_threshold,
-            nodes: from.nodes,
+            nodes,
             indices: from.indices.into_iter().collect::<HashMap<_, _>>(),
             children: Vec::new(),
         };
@@ -97,7 +121,35 @@ impl From<SszContainerV28> for SszContainerV29 {
     }
 }
 
-// Downgrade current V29 to legacy V28 (lossy: V29 nodes lose payload-specific fields).
+// Convert legacy V29 to current V33. No V29 node has recorded inclusion list satisfaction.
+impl From<SszContainerV29> for SszContainerV33 {
+    fn from(v29: SszContainerV29) -> Self {
+        Self {
+            inclusion_list_satisfaction: vec![
+                InclusionListSatisfaction::Satisfied;
+                v29.nodes.len()
+            ],
+            votes: v29.votes,
+            prune_threshold: v29.prune_threshold,
+            nodes: v29.nodes,
+            indices: v29.indices,
+        }
+    }
+}
+
+// Downgrade current V33 to legacy V29 (lossy: nodes lose inclusion list satisfaction).
+impl From<SszContainerV33> for SszContainerV29 {
+    fn from(v33: SszContainerV33) -> Self {
+        Self {
+            votes: v33.votes,
+            prune_threshold: v33.prune_threshold,
+            nodes: v33.nodes,
+            indices: v33.indices,
+        }
+    }
+}
+
+// Downgrade legacy V29 to legacy V28 (lossy: V29 nodes lose payload-specific fields).
 impl From<SszContainerV29> for SszContainerV28 {
     fn from(v29: SszContainerV29) -> Self {
         Self {

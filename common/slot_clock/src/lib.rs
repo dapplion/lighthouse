@@ -72,7 +72,9 @@ pub trait SlotClock: Send + Sync + Sized + Clone {
 
     /// Returns the slot if the internal clock were reversed by `duration`.
     fn now_with_past_tolerance(&self, tolerance: Duration) -> Option<Slot> {
-        self.slot_of(self.now_duration()?.checked_sub(tolerance)?)
+        self.now_duration()?
+            .checked_sub(tolerance)
+            .and_then(|now| self.slot_of(now))
             .or_else(|| Some(self.genesis_slot()))
     }
 

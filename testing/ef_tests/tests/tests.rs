@@ -847,6 +847,16 @@ fn fork_choice_payload_data_availability() {
 }
 
 #[test]
+fn fork_choice_inclusion_list_satisfaction() {
+    ForkChoiceHandler::<Spec>::new("inclusion_list_satisfaction").run();
+}
+
+#[test]
+fn fork_choice_on_inclusion_list() {
+    ForkChoiceHandler::<Spec>::new("on_inclusion_list").run();
+}
+
+#[test]
 #[cfg(feature = "spec-minimal")]
 fn fork_choice_should_apply_proposer_boost() {
     ForkChoiceHandler::<Spec>::new("should_apply_proposer_boost").run();

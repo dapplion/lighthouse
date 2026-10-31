@@ -3,9 +3,9 @@ use crate::{ForkChoiceStore, InvalidationOperation};
 use fixed_bytes::FixedBytesExtended;
 use logging::crit;
 use proto_array::{
-    Block as ProtoBlock, ExecutionStatus, ExecutionVerdict, ForkChoiceNode, JustifiedBalances,
-    LatestMessage, PayloadBlockHash, PayloadStatus, ProposerHeadError, ProposerHeadInfo,
-    ProtoArrayForkChoice,
+    Block as ProtoBlock, ExecutionStatus, ExecutionVerdict, ForkChoiceNode,
+    InclusionListSatisfaction, JustifiedBalances, LatestMessage, PayloadBlockHash, PayloadStatus,
+    ProposerHeadError, ProposerHeadInfo, ProtoArrayForkChoice,
 };
 use ssz_derive::{Decode, Encode};
 use state_processing::{
@@ -729,6 +729,19 @@ where
             .map_err(Error::FailedToProcessValidExecutionPayload)?;
 
         Ok(())
+    }
+
+    /// Record whether the payload of `block_root` satisfied the timely inclusion lists.
+    ///
+    /// Equivalent to the end of spec's `record_payload_inclusion_list_satisfaction`.
+    pub fn on_payload_inclusion_list_satisfaction(
+        &mut self,
+        block_root: Hash256,
+        inclusion_list_satisfaction: InclusionListSatisfaction,
+    ) -> Result<(), Error<T::Error>> {
+        self.proto_array
+            .on_payload_inclusion_list_satisfaction(block_root, inclusion_list_satisfaction)
+            .map_err(Error::ProtoArrayStringError)
     }
 
     /// Mark the payload `block_hash` valid, as judged by a forkchoiceUpdated.
@@ -1631,6 +1644,16 @@ where
             && self.is_finalized_checkpoint_or_descendant(*block_root)
     }
 
+    /// Returns the inclusion list satisfaction recorded for the payload of `block_root`.
+    ///
+    /// Returns `None` for unknown blocks and pre-Gloas nodes.
+    pub fn inclusion_list_satisfaction(
+        &self,
+        block_root: &Hash256,
+    ) -> Option<InclusionListSatisfaction> {
+        self.proto_array.inclusion_list_satisfaction(block_root)
+    }
+
     /// Returns `true` if the PTC majority voted that the payload for `block_root` was timely,
     /// regardless of whether this node has received the payload itself.
     ///
@@ -2085,7 +2108,7 @@ where
 ///
 /// This is used when persisting the state of the fork choice to disk.
 #[superstruct(
-    variants(V28, V29),
+    variants(V28, V29, V33),
     variant_attributes(derive(Encode, Decode, Clone)),
     no_enum
 )]
@@ -2094,11 +2117,29 @@ pub struct PersistedForkChoice {
     pub proto_array_v28: proto_array::core::SszContainerV28,
     #[superstruct(only(V29))]
     pub proto_array: proto_array::core::SszContainerV29,
+    #[superstruct(only(V33))]
+    pub proto_array: proto_array::core::SszContainerV33,
     #[superstruct(only(V28))]
     pub queued_attestations_v28: Vec<QueuedAttestationV28>,
 }
 
-pub type PersistedForkChoice = PersistedForkChoiceV29;
+pub type PersistedForkChoice = PersistedForkChoiceV33;
+
+impl From<PersistedForkChoiceV29> for PersistedForkChoiceV33 {
+    fn from(v29: PersistedForkChoiceV29) -> Self {
+        Self {
+            proto_array: v29.proto_array.into(),
+        }
+    }
+}
+
+impl From<PersistedForkChoiceV33> for PersistedForkChoiceV29 {
+    fn from(v33: PersistedForkChoiceV33) -> Self {
+        Self {
+            proto_array: v33.proto_array.into(),
+        }
+    }
+}
 
 impl From<PersistedForkChoiceV28> for PersistedForkChoiceV29 {
     fn from(v28: PersistedForkChoiceV28) -> Self {

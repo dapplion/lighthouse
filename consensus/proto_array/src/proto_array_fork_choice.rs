@@ -2,8 +2,8 @@ use crate::{
     JustifiedBalances,
     error::Error,
     proto_array::{
-        InvalidationOperation, Iter, NodeDelta, ParentPayloadStatus, ProtoArray, ProtoNode,
-        calculate_committee_fraction,
+        InclusionListSatisfaction, InvalidationOperation, Iter, NodeDelta, ParentPayloadStatus,
+        ProtoArray, ProtoNode, calculate_committee_fraction,
     },
     ssz_container::SszContainer,
 };
@@ -659,6 +659,17 @@ impl ProtoArrayForkChoice {
             .map_err(|e| format!("Failed to process execution payload: {:?}", e))
     }
 
+    /// See `ProtoArray::on_payload_inclusion_list_satisfaction` for documentation.
+    pub fn on_payload_inclusion_list_satisfaction(
+        &mut self,
+        block_root: Hash256,
+        inclusion_list_satisfaction: InclusionListSatisfaction,
+    ) -> Result<(), String> {
+        self.proto_array
+            .on_payload_inclusion_list_satisfaction(block_root, inclusion_list_satisfaction)
+            .map_err(|e| format!("Failed to record inclusion list satisfaction: {:?}", e))
+    }
+
     /// See `ProtoArray::propagate_execution_payload_validation` for documentation.
     pub fn process_execution_payload_validation(
         &mut self,
@@ -1217,6 +1228,17 @@ impl ProtoArrayForkChoice {
         self.get_proto_node(block_root)
             .and_then(|node| node.payload_received().ok())
             .unwrap_or(false)
+    }
+
+    /// Returns the inclusion list satisfaction recorded for the payload of `block_root`.
+    ///
+    /// Returns `None` for pre-Gloas (V17) nodes or unknown blocks.
+    pub fn inclusion_list_satisfaction(
+        &self,
+        block_root: &Hash256,
+    ) -> Option<InclusionListSatisfaction> {
+        self.get_proto_node(block_root)
+            .and_then(|node| node.inclusion_list_satisfaction().ok())
     }
 
     /// Returns `true` if more than `PAYLOAD_TIMELY_THRESHOLD` PTC members voted that the payload

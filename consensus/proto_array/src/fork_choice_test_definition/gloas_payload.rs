@@ -53,6 +53,11 @@ pub fn get_gloas_chain_following_test_definition() -> ForkChoiceTestDefinition {
         Operation::ProcessExecutionPayloadEnvelope {
             block_root: get_root(1),
         },
+        // A non-default inclusion list satisfaction survives the bytes round trip.
+        Operation::SetInclusionListSatisfaction {
+            block_root: get_root(1),
+            inclusion_list_satisfaction: InclusionListSatisfaction::Optimistic,
+        },
         Operation::AssertParentPayloadStatus {
             block_root: get_root(1),
             expected_status: ParentPayloadStatus::Full,
