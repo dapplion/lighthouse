@@ -77,7 +77,7 @@ impl InvalidationOperation {
 }
 
 #[superstruct(
-    variants(V17, V29, V33),
+    variants(V17, V33),
     variant_attributes(derive(Clone, PartialEq, Debug, Encode, Decode, Serialize, Deserialize))
 )]
 #[derive(PartialEq, Debug, Encode, Decode, Serialize, Deserialize, Clone)]
@@ -105,9 +105,9 @@ pub struct ProtoNode {
     #[superstruct(getter(copy))]
     #[ssz(with = "four_byte_option_usize")]
     pub parent: Option<usize>,
-    #[superstruct(only(V17, V29, V33), partial_getter(copy))]
+    #[superstruct(only(V17, V33), partial_getter(copy))]
     pub justified_checkpoint: Checkpoint,
-    #[superstruct(only(V17, V29, V33), partial_getter(copy))]
+    #[superstruct(only(V17, V33), partial_getter(copy))]
     pub finalized_checkpoint: Checkpoint,
     #[superstruct(getter(copy))]
     pub weight: u64,
@@ -133,41 +133,41 @@ pub struct ProtoNode {
     pub unrealized_finalized_checkpoint: Option<Checkpoint>,
 
     /// We track the parent payload status from which the current node was extended.
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub parent_payload_status: ParentPayloadStatus,
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub empty_payload_weight: u64,
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub full_payload_weight: u64,
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub execution_payload_block_hash: ExecutionBlockHash,
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub execution_payload_parent_hash: ExecutionBlockHash,
     /// Equivalent to spec's `block_timeliness[root][ATTESTATION_TIMELINESS_INDEX]`.
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub block_timeliness_attestation_threshold: bool,
     /// Equivalent to spec's `block_timeliness[root][PTC_TIMELINESS_INDEX]`.
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub block_timeliness_ptc_threshold: bool,
     /// Equivalent to spec's `store.payload_timeliness_vote[root]`.
     /// PTC timeliness vote bitfield, indexed by PTC committee position.
     /// Bit i set means PTC member i voted `payload_present = true`.
     /// Tiebreak derived as: `num_set_bits() > ptc_size / 2`.
-    #[superstruct(only(V29, V33))]
+    #[superstruct(only(V33))]
     pub payload_timeliness_votes: BitVector<U512>,
     /// Equivalent to spec's `store.payload_data_availability_vote[root]`.
     /// PTC data availability vote bitfield, indexed by PTC committee position.
     /// Bit i set means PTC member i voted `blob_data_available = true`.
     /// Tiebreak derived as: `num_set_bits() > ptc_size / 2`.
-    #[superstruct(only(V29, V33))]
+    #[superstruct(only(V33))]
     pub payload_data_availability_votes: BitVector<U512>,
     /// Tracks which PTC members have cast a vote.
     /// Bit i set means PTC member i has submitted a payload attestation.
-    #[superstruct(only(V29, V33))]
+    #[superstruct(only(V33))]
     pub ptc_participation: BitVector<U512>,
     /// Whether the execution payload for this block has been received and validated locally.
     /// Maps to `root in store.payload_states` in the spec.
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub payload_received: bool,
     /// Whether the execution payload satisfies the inclusion list constraints. Maps to
     /// `store.payload_inclusion_list_satisfaction[root]` in the spec.
@@ -175,12 +175,12 @@ pub struct ProtoNode {
     pub payload_inclusion_list_satisfied: bool,
     /// The proposer index for this block, used by `should_apply_proposer_boost`
     /// to detect equivocations at the parent's slot.
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub proposer_index: u64,
     /// Weight from equivocating validators that voted for this block.
     /// Used by `is_head_weak` to match the spec's monotonicity guarantee:
     /// more attestations can only increase head weight, never decrease it.
-    #[superstruct(only(V29, V33), partial_getter(copy))]
+    #[superstruct(only(V33), partial_getter(copy))]
     pub equivocating_attestation_score: u64,
 }
 
@@ -250,7 +250,6 @@ impl ProtoNode {
                 ExecutionStatus::Irrelevant(_) => PayloadBlockHash::PreMerge,
                 ExecutionStatus::NotYetRevealed(hash) => PayloadBlockHash::Hash(hash),
             },
-            ProtoNode::V29(node) => PayloadBlockHash::Hash(node.execution_payload_block_hash),
             ProtoNode::V33(node) => PayloadBlockHash::Hash(node.execution_payload_block_hash),
         }
     }
@@ -530,11 +529,6 @@ impl ProtoArray {
                         node_delta.delta
                     }
                 }
-                ProtoNode::V29(node) => {
-                    return Err(Error::InvalidNodeVariant {
-                        block_root: node.root,
-                    });
-                }
                 ProtoNode::V33(node) => {
                     // The empty side and equivocation score stay live whatever the verdict.
                     node.equivocating_attestation_score = node
@@ -682,11 +676,6 @@ impl ProtoArray {
             let parent_payload_status: ParentPayloadStatus =
                 if let Some(parent_node) = parent_index.and_then(|idx| self.nodes.get(idx)) {
                     match parent_node {
-                        ProtoNode::V29(v29) => {
-                            return Err(Error::InvalidNodeVariant {
-                                block_root: v29.root,
-                            });
-                        }
                         ProtoNode::V33(v33) => {
                             // Both parent and child are Gloas blocks. The parent is full if the
                             // block hash in the parent node matches the parent block hash in the
@@ -990,7 +979,7 @@ impl ProtoArray {
                 .ok_or(Error::InvalidNodeIndex(index))?
             {
                 ProtoNode::V17(_) => ParentPayloadStatus::PreGloas,
-                ProtoNode::V29(_) | ProtoNode::V33(_) => ParentPayloadStatus::Full,
+                ProtoNode::V33(_) => ParentPayloadStatus::Full,
             };
             self.propagate_execution_payload_validation_from(index, start_status)?;
         }
@@ -1383,11 +1372,6 @@ impl ProtoArray {
             // post-Gloas the one its bid names.
             let latest_payload_invalid = match node {
                 ProtoNode::V17(_) => node.is_invalid(),
-                ProtoNode::V29(v29) => {
-                    return Err(Error::InvalidNodeVariant {
-                        block_root: v29.root,
-                    });
-                }
                 ProtoNode::V33(gloas_node) => {
                     invalid_payloads.contains(&gloas_node.execution_payload_parent_hash)
                 }
@@ -1663,11 +1647,6 @@ impl ProtoArray {
             // own payload — it is the executed node.
             let gloas_node = match node {
                 ProtoNode::V17(_) => break node,
-                ProtoNode::V29(v29) => {
-                    return Err(Error::InvalidNodeVariant {
-                        block_root: v29.root,
-                    });
-                }
                 ProtoNode::V33(gloas_node) => gloas_node,
             };
 

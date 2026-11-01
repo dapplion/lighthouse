@@ -1010,10 +1010,6 @@ impl ProtoArrayForkChoice {
         for node in self.proto_array.nodes.iter_mut() {
             *node.weight_mut() = 0;
             match node {
-                ProtoNode::V29(node) => {
-                    node.full_payload_weight = 0;
-                    node.empty_payload_weight = 0;
-                }
                 ProtoNode::V33(node) => {
                     node.full_payload_weight = 0;
                     node.empty_payload_weight = 0;

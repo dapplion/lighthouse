@@ -131,7 +131,10 @@ pub fn downgrade_from_v29<T: BeaconChainTypes>(
         .proto_array
         .nodes
         .iter()
-        .any(|node| matches!(node, proto_array::core::ProtoNode::V29(_)));
+        .any(|node| match node {
+            proto_array::core::LegacyProtoNode::V29(_) => true,
+            proto_array::core::LegacyProtoNode::V17(_) => false,
+        });
 
     if has_v29_node {
         return Err(StoreError::MigrationError(

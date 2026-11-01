@@ -1,6 +1,5 @@
 use crate::beacon_chain::{BeaconChainTypes, FORK_CHOICE_DB_KEY};
-use crate::persisted_fork_choice::PersistedForkChoiceV29;
-use proto_array::core::{ProtoNode, ProtoNodeV29, ProtoNodeV33};
+use crate::persisted_fork_choice::{PersistedForkChoiceV29, PersistedForkChoiceV33};
 use store::hot_cold_store::HotColdDB;
 use store::{DBColumn, Error as StoreError, KeyValueStore, KeyValueStoreOp};
 
@@ -13,10 +12,24 @@ use store::{DBColumn, Error as StoreError, KeyValueStore, KeyValueStoreOp};
 pub fn upgrade_to_v33<T: BeaconChainTypes>(
     db: &HotColdDB<T::EthSpec, T::HotStore, T::ColdStore>,
 ) -> Result<Vec<KeyValueStoreOp>, StoreError> {
-    rewrite_proto_nodes::<T>(db, "upgrade from v32 to v33", |node| match node {
-        ProtoNode::V29(v29) => ProtoNode::V33(upgrade_node(v29)),
-        node => node,
-    })
+    let Some(fc_bytes) = db
+        .hot_db
+        .get_bytes(DBColumn::ForkChoice, FORK_CHOICE_DB_KEY.as_slice())?
+    else {
+        return Ok(vec![]);
+    };
+
+    let persisted_v29 =
+        PersistedForkChoiceV29::from_bytes(&fc_bytes, db.get_config()).map_err(|e| {
+            StoreError::MigrationError(format!(
+                "cannot upgrade from v32 to v33: failed to decode fork choice: {e:?}"
+            ))
+        })?;
+    let persisted_v33 = PersistedForkChoiceV33::from(persisted_v29);
+
+    Ok(vec![
+        persisted_v33.as_kv_store_op(FORK_CHOICE_DB_KEY, db.get_config())?,
+    ])
 }
 
 /// Downgrade from schema v33 to v32.
@@ -27,17 +40,6 @@ pub fn upgrade_to_v33<T: BeaconChainTypes>(
 pub fn downgrade_from_v33<T: BeaconChainTypes>(
     db: &HotColdDB<T::EthSpec, T::HotStore, T::ColdStore>,
 ) -> Result<Vec<KeyValueStoreOp>, StoreError> {
-    rewrite_proto_nodes::<T>(db, "downgrade from v33 to v32", |node| match node {
-        ProtoNode::V33(v33) => ProtoNode::V29(downgrade_node(v33)),
-        node => node,
-    })
-}
-
-fn rewrite_proto_nodes<T: BeaconChainTypes>(
-    db: &HotColdDB<T::EthSpec, T::HotStore, T::ColdStore>,
-    migration: &str,
-    convert: impl Fn(ProtoNode) -> ProtoNode,
-) -> Result<Vec<KeyValueStoreOp>, StoreError> {
     let Some(fc_bytes) = db
         .hot_db
         .get_bytes(DBColumn::ForkChoice, FORK_CHOICE_DB_KEY.as_slice())?
@@ -45,80 +47,15 @@ fn rewrite_proto_nodes<T: BeaconChainTypes>(
         return Ok(vec![]);
     };
 
-    let mut persisted =
-        PersistedForkChoiceV29::from_bytes(&fc_bytes, db.get_config()).map_err(|e| {
+    let persisted_v33 =
+        PersistedForkChoiceV33::from_bytes(&fc_bytes, db.get_config()).map_err(|e| {
             StoreError::MigrationError(format!(
-                "cannot {migration}: failed to decode fork choice: {e:?}"
+                "cannot downgrade from v33 to v32: failed to decode fork choice: {e:?}"
             ))
         })?;
-
-    let nodes = &mut persisted.fork_choice.proto_array.nodes;
-    *nodes = std::mem::take(nodes).into_iter().map(convert).collect();
+    let persisted_v29 = PersistedForkChoiceV29::from(persisted_v33);
 
     Ok(vec![
-        persisted.as_kv_store_op(FORK_CHOICE_DB_KEY, db.get_config())?,
+        persisted_v29.as_kv_store_op(FORK_CHOICE_DB_KEY, db.get_config())?,
     ])
-}
-
-fn upgrade_node(v29: ProtoNodeV29) -> ProtoNodeV33 {
-    ProtoNodeV33 {
-        slot: v29.slot,
-        state_root: v29.state_root,
-        target_root: v29.target_root,
-        current_epoch_shuffling_id: v29.current_epoch_shuffling_id,
-        next_epoch_shuffling_id: v29.next_epoch_shuffling_id,
-        root: v29.root,
-        parent: v29.parent,
-        justified_checkpoint: v29.justified_checkpoint,
-        finalized_checkpoint: v29.finalized_checkpoint,
-        weight: v29.weight,
-        execution_status: v29.execution_status,
-        unrealized_justified_checkpoint: v29.unrealized_justified_checkpoint,
-        unrealized_finalized_checkpoint: v29.unrealized_finalized_checkpoint,
-        parent_payload_status: v29.parent_payload_status,
-        empty_payload_weight: v29.empty_payload_weight,
-        full_payload_weight: v29.full_payload_weight,
-        execution_payload_block_hash: v29.execution_payload_block_hash,
-        execution_payload_parent_hash: v29.execution_payload_parent_hash,
-        block_timeliness_attestation_threshold: v29.block_timeliness_attestation_threshold,
-        block_timeliness_ptc_threshold: v29.block_timeliness_ptc_threshold,
-        payload_timeliness_votes: v29.payload_timeliness_votes,
-        payload_data_availability_votes: v29.payload_data_availability_votes,
-        ptc_participation: v29.ptc_participation,
-        payload_received: v29.payload_received,
-        payload_inclusion_list_satisfied: true,
-        proposer_index: v29.proposer_index,
-        equivocating_attestation_score: v29.equivocating_attestation_score,
-    }
-}
-
-fn downgrade_node(v33: ProtoNodeV33) -> ProtoNodeV29 {
-    ProtoNodeV29 {
-        slot: v33.slot,
-        state_root: v33.state_root,
-        target_root: v33.target_root,
-        current_epoch_shuffling_id: v33.current_epoch_shuffling_id,
-        next_epoch_shuffling_id: v33.next_epoch_shuffling_id,
-        root: v33.root,
-        parent: v33.parent,
-        justified_checkpoint: v33.justified_checkpoint,
-        finalized_checkpoint: v33.finalized_checkpoint,
-        weight: v33.weight,
-        execution_status: v33.execution_status,
-        unrealized_justified_checkpoint: v33.unrealized_justified_checkpoint,
-        unrealized_finalized_checkpoint: v33.unrealized_finalized_checkpoint,
-        parent_payload_status: v33.parent_payload_status,
-        empty_payload_weight: v33.empty_payload_weight,
-        full_payload_weight: v33.full_payload_weight,
-        execution_payload_block_hash: v33.execution_payload_block_hash,
-        execution_payload_parent_hash: v33.execution_payload_parent_hash,
-        block_timeliness_attestation_threshold: v33.block_timeliness_attestation_threshold,
-        block_timeliness_ptc_threshold: v33.block_timeliness_ptc_threshold,
-        payload_timeliness_votes: v33.payload_timeliness_votes,
-        payload_data_availability_votes: v33.payload_data_availability_votes,
-        ptc_participation: v33.ptc_participation,
-        payload_received: v33.payload_received,
-        proposer_index: v33.proposer_index,
-        equivocating_attestation_score: v33.equivocating_attestation_score,
-    }
 }
