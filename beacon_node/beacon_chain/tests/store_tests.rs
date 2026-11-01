@@ -6330,39 +6330,30 @@ async fn proto_node_schema_v33_migration() {
     let store = get_store_generic(&db_path, StoreConfig::default(), spec.clone());
     let harness = get_harness(store.clone(), LOW_VALIDATOR_COUNT);
     harness.extend_to_slot(Slot::new(4)).await;
-
-    // The downgrade drops the inclusion list verdict, so the upgrade records it as satisfied.
-    let head_root = harness.head_block_root();
-    {
-        let mut fork_choice = harness.chain.canonical_head.fork_choice_write_lock();
-        let proto_array = fork_choice.proto_array_mut().core_proto_array_mut();
-        let index = *proto_array.indices.get(&head_root).unwrap();
-        proto_array.nodes[index]
-            .as_v33_mut()
-            .unwrap()
-            .payload_inclusion_list_satisfied = false;
-    }
     harness.chain.persist_fork_choice().unwrap();
+
+    let load_nodes = || {
+        BeaconChain::<DiskHarnessType<E>>::load_fork_choice(
+            store.clone(),
+            ResetPayloadStatuses::OnlyWithInvalidPayload,
+            &spec,
+        )
+        .unwrap()
+        .unwrap()
+        .proto_array()
+        .core_proto_array()
+        .nodes
+        .clone()
+    };
+    let nodes = load_nodes();
 
     migrate_schema::<DiskHarnessType<E>>(store.clone(), SchemaVersion(33), SchemaVersion(32))
         .expect("schema downgrade to v32 should succeed");
     migrate_schema::<DiskHarnessType<E>>(store.clone(), SchemaVersion(32), SchemaVersion(33))
         .expect("schema upgrade to v33 should succeed");
 
-    let fork_choice = BeaconChain::<DiskHarnessType<E>>::load_fork_choice(
-        store,
-        ResetPayloadStatuses::OnlyWithInvalidPayload,
-        &spec,
-    )
-    .unwrap()
-    .unwrap();
-    let nodes = &fork_choice.proto_array().core_proto_array().nodes;
-    assert!(nodes.iter().all(|node| node.as_v33().is_ok()));
-    assert!(
-        nodes
-            .iter()
-            .all(|node| node.payload_inclusion_list_satisfied() == Ok(true))
-    );
+    // Every payload satisfied the inclusion lists, so the verdict the downgrade drops comes back.
+    assert_eq!(load_nodes(), nodes);
 }
 
 /// Check that blob pruning prunes blobs older than the data availability boundary.
