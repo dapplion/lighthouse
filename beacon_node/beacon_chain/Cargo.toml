@@ -97,6 +97,10 @@ types = { workspace = true, features = ["arbitrary"] }
 name = "benches"
 harness = false
 
+[[bench]]
+name = "fork_choice_persist"
+harness = false
+
 [[test]]
 name = "beacon_chain_tests"
 path = "tests/main.rs"
