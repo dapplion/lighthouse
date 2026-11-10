@@ -73,6 +73,22 @@ pub static BEACON_PROCESSOR_QUEUE_LENGTH: LazyLock<Result<HistogramVec>> = LazyL
         &["type"],
     )
 });
+pub static BEACON_PROCESSOR_GOSSIP_ATTESTATION_BATCH_SIZE: LazyLock<Result<Histogram>> =
+    LazyLock::new(|| {
+        try_create_histogram_with_buckets(
+            "beacon_processor_gossip_attestation_batch_size",
+            "Number of unaggregated gossip attestations handed to a single worker.",
+            Ok(vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0]),
+        )
+    });
+pub static BEACON_PROCESSOR_GOSSIP_ATTESTATION_RELEASE_TOTAL: LazyLock<Result<IntCounterVec>> =
+    LazyLock::new(|| {
+        try_create_int_counter_vec(
+            "beacon_processor_gossip_attestation_release_total",
+            "Count of times queued unaggregated gossip attestations were handed to a worker, by the condition that released them.",
+            &["reason"],
+        )
+    });
 
 /*
  * Attestation reprocessing queue metrics.

@@ -1663,6 +1663,16 @@ pub fn cli_app() -> Command {
                 .display_order(0)
         )
         .arg(
+            Arg::new("beacon-processor-attestation-batch-hold-ms")
+                .long("beacon-processor-attestation-batch-hold-ms")
+                .value_name("MILLISECONDS")
+                .help("Specifies the longest time gossip attestations are kept queued while a worker is free, so that they can be verified in a batch. Attestations are only held while another attestation worker is running. Higher values may reduce CPU usage whilst lower values reduce the worst-case delay added to an attestation. Set to 0 to verify an attestation as soon as a worker is free.")
+                .hide(true)
+                .default_value("50")
+                .action(ArgAction::Set)
+                .display_order(0)
+        )
+        .arg(
             Arg::new("beacon-processor-aggregate-batch-size")
                 .long("beacon-processor-aggregate-batch-size")
                 .value_name("INTEGER")

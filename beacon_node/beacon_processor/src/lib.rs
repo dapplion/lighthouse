@@ -39,7 +39,8 @@
 //! task.
 
 pub use crate::scheduler::BeaconProcessorQueueLengths;
-use crate::scheduler::work_queue::WorkQueues;
+use crate::scheduler::attestation_hold::{AttestationHold, HoldDecision};
+use crate::scheduler::work_queue::{LifoQueue, WorkQueues};
 use crate::work_reprocessing_queue::{
     QueuedBackfillBatch, QueuedColumnReconstruction, QueuedGossipBlock, QueuedGossipDataColumn,
     QueuedGossipEnvelope, ReprocessQueueMessage,
@@ -110,6 +111,13 @@ const WORKER_TASK_NAME: &str = "beacon_processor_worker";
 const DEFAULT_MAX_GOSSIP_ATTESTATION_BATCH_SIZE: usize = 64;
 const DEFAULT_MAX_GOSSIP_AGGREGATE_BATCH_SIZE: usize = 64;
 
+/// The longest time unaggregated gossip attestations are kept queued while a worker is free, so
+/// that they can be verified in a batch with the attestations that arrive in the meantime.
+///
+/// Attestations are only held while another attestation worker is running, see
+/// `scheduler::attestation_hold`. Zero disables holding.
+const DEFAULT_MAX_GOSSIP_ATTESTATION_BATCH_HOLD_MS: u64 = 50;
+
 /// Unique IDs used for metrics and testing.
 pub const WORKER_FREED: &str = "worker_freed";
 pub const NOTHING_TO_DO: &str = "nothing_to_do";
@@ -121,6 +129,7 @@ pub struct BeaconProcessorConfig {
     pub max_scheduled_work_queue_len: usize,
     pub max_gossip_attestation_batch_size: usize,
     pub max_gossip_aggregate_batch_size: usize,
+    pub max_gossip_attestation_batch_hold_ms: u64,
     pub enable_backfill_rate_limiting: bool,
 }
 
@@ -132,6 +141,7 @@ impl Default for BeaconProcessorConfig {
             max_scheduled_work_queue_len: DEFAULT_MAX_SCHEDULED_WORK_QUEUE_LEN,
             max_gossip_attestation_batch_size: DEFAULT_MAX_GOSSIP_ATTESTATION_BATCH_SIZE,
             max_gossip_aggregate_batch_size: DEFAULT_MAX_GOSSIP_AGGREGATE_BATCH_SIZE,
+            max_gossip_attestation_batch_hold_ms: DEFAULT_MAX_GOSSIP_ATTESTATION_BATCH_HOLD_MS,
             enable_backfill_rate_limiting: true,
         }
     }
@@ -652,6 +662,93 @@ struct WorkerCompletion {
     peer_id: Option<PeerId>,
 }
 
+/// Pops the next unaggregated attestation work from `queue`, if the queue is non-empty and
+/// `attestation_hold` releases it.
+///
+/// The caller must spawn a worker for the returned work. The returned instant is the earliest time
+/// at which any of the returned attestations may have been queued.
+fn pop_released_attestations<E: EthSpec>(
+    queue: &mut LifoQueue<Work<E>>,
+    attestation_hold: &mut AttestationHold,
+    max_batch_size: usize,
+) -> Option<(Work<E>, Instant)> {
+    let now = tokio::time::Instant::now().into_std();
+    let reason = match attestation_hold.decide(queue.len(), max_batch_size, now)? {
+        HoldDecision::Release(reason) => reason,
+        HoldDecision::Hold { deadline: _ } => return None,
+    };
+    let (work, batch_size) = pop_attestation_work(queue, max_batch_size)?;
+    let queued_since = attestation_hold.on_released(queue.len(), now);
+    metrics::inc_counter_vec(
+        &metrics::BEACON_PROCESSOR_GOSSIP_ATTESTATION_RELEASE_TOTAL,
+        &[reason.into()],
+    );
+    metrics::observe(
+        &metrics::BEACON_PROCESSOR_GOSSIP_ATTESTATION_BATCH_SIZE,
+        batch_size as f64,
+    );
+    Some((work, queued_since))
+}
+
+/// Pops up to `max_batch_size` unaggregated attestations from `queue` and returns them as a single
+/// work item, along with the number of attestations in it.
+fn pop_attestation_work<E: EthSpec>(
+    queue: &mut LifoQueue<Work<E>>,
+    max_batch_size: usize,
+) -> Option<(Work<E>, usize)> {
+    let batch_size = cmp::min(queue.len(), max_batch_size);
+
+    if batch_size < 2 {
+        // One single attestation is in the queue, process it individually.
+        return queue.pop().map(|work| (work, 1));
+    }
+
+    // Collect two or more attestations into a batch, so they can take
+    // advantage of batch signature verification.
+    //
+    // Note: this will convert the `Work::GossipAttestation` item into a
+    // `Work::GossipAttestationBatch` item.
+    let mut attestations = Vec::with_capacity(batch_size);
+    let mut process_batch_opt = None;
+    for _ in 0..batch_size {
+        if let Some(item) = queue.pop() {
+            match item {
+                Work::GossipAttestation {
+                    attestation,
+                    process_individual: _,
+                    process_batch,
+                } => {
+                    attestations.push(*attestation);
+                    if process_batch_opt.is_none() {
+                        process_batch_opt = Some(process_batch);
+                    }
+                }
+                _ => error!("Invalid item in attestation queue"),
+            }
+        }
+    }
+
+    if let Some(process_batch) = process_batch_opt {
+        let batch_size = attestations.len();
+        // Process all attestations with a single worker.
+        Some((
+            Work::GossipAttestationBatch {
+                attestations,
+                process_batch,
+            },
+            batch_size,
+        ))
+    } else {
+        // There is no good reason for this to
+        // happen, it is a serious logic error.
+        // Since we only form batches when multiple
+        // work items exist, we should always have a
+        // work closure at this point.
+        crit!("Missing attestations work");
+        None
+    }
+}
+
 /// Returns true if the `peer_id` is connected and false otherwise.
 fn is_connected<E: EthSpec>(network_globals: &NetworkGlobals<E>, peer_id: &PeerId) -> bool {
     network_globals.peers.read().is_connected(peer_id)
@@ -666,6 +763,8 @@ enum InboundEvent<E: EthSpec> {
     WorkEvent((WorkEvent<E>, Instant)),
     /// A work event that was queued for re-processing has become ready.
     ReprocessingWork((WorkEvent<E>, Instant)),
+    /// The queued unaggregated attestations must be looked at again.
+    AttestationHoldWakeup,
 }
 
 /// Combines the various incoming event streams for the `BeaconProcessor` into a single stream.
@@ -679,6 +778,31 @@ struct InboundEvents<E: EthSpec> {
     event_rx: mpsc::Receiver<WorkEvent<E>>,
     /// Used internally for queuing work ready to be re-processed.
     ready_work_rx: mpsc::Receiver<ReadyWork>,
+    /// Fires when the queued unaggregated attestations must be looked at again.
+    attestation_hold_timer: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// `false` when `attestation_hold_timer` must not fire.
+    attestation_hold_timer_armed: bool,
+}
+
+impl<E: EthSpec> InboundEvents<E> {
+    /// Arms the attestation hold timer to fire at `wakeup`, or disarms it if `wakeup` is `None`.
+    fn set_attestation_hold_wakeup(&mut self, wakeup: Option<tokio::time::Instant>) {
+        let Some(wakeup) = wakeup else {
+            self.attestation_hold_timer_armed = false;
+            return;
+        };
+        self.attestation_hold_timer_armed = true;
+        match self.attestation_hold_timer.as_mut() {
+            Some(timer) => {
+                if timer.deadline() != wakeup {
+                    timer.as_mut().reset(wakeup);
+                }
+            }
+            None => {
+                self.attestation_hold_timer = Some(Box::pin(tokio::time::sleep_until(wakeup)));
+            }
+        }
+    }
 }
 
 impl<E: EthSpec> Stream for InboundEvents<E> {
@@ -695,6 +819,20 @@ impl<E: EthSpec> Stream for InboundEvents<E> {
                 return Poll::Ready(None);
             }
             Poll::Pending => {}
+        }
+
+        // Check the attestation hold timer before new work, so that a big stream of new events
+        // cannot keep attestations queued past their deadline.
+        if self.attestation_hold_timer_armed
+            && let Some(timer) = self.attestation_hold_timer.as_mut()
+        {
+            match timer.as_mut().poll(cx) {
+                Poll::Ready(()) => {
+                    self.attestation_hold_timer_armed = false;
+                    return Poll::Ready(Some(InboundEvent::AttestationHoldWakeup));
+                }
+                Poll::Pending => {}
+            }
         }
 
         // Poll for delayed blocks before polling for new work. It might be the case that a delayed
@@ -789,7 +927,13 @@ impl<E: EthSpec> BeaconProcessor<E> {
                 idle_rx,
                 event_rx,
                 ready_work_rx,
+                attestation_hold_timer: None,
+                attestation_hold_timer_armed: false,
             };
+
+            let mut attestation_hold = AttestationHold::new(Duration::from_millis(
+                self.config.max_gossip_attestation_batch_hold_ms,
+            ));
 
             let enable_backfill_rate_limiting = self.config.enable_backfill_rate_limiting;
 
@@ -797,9 +941,43 @@ impl<E: EthSpec> BeaconProcessor<E> {
             let mut reprocess_queue_debounce = TimeLatch::default();
 
             loop {
-                let (work_event, created_timestamp) = match inbound_events.next().await {
+                // Held attestations are released by a worker finishing, by a new attestation
+                // filling the batch, or by this timer. The timer is only needed while a worker is
+                // free: when none is, the next worker to finish looks at the queue.
+                let attestation_hold_wakeup = if self.current_workers < self.config.max_workers {
+                    let now = tokio::time::Instant::now();
+                    attestation_hold
+                        .next_wakeup(
+                            work_queues.attestation_queue.len(),
+                            self.config.max_gossip_attestation_batch_size,
+                            now.into_std(),
+                        )
+                        .map(tokio::time::Instant::from_std)
+                } else {
+                    None
+                };
+                inbound_events.set_attestation_hold_wakeup(attestation_hold_wakeup);
+
+                let (work_event, mut created_timestamp) = match inbound_events.next().await {
+                    Some(InboundEvent::AttestationHoldWakeup) => {
+                        if self.current_workers < self.config.max_workers
+                            && let Some((work, queued_since)) = pop_released_attestations(
+                                &mut work_queues.attestation_queue,
+                                &mut attestation_hold,
+                                self.config.max_gossip_attestation_batch_size,
+                            )
+                        {
+                            self.spawn_worker(work, queued_since, idle_tx.clone());
+                        }
+                        continue;
+                    }
                     Some(InboundEvent::WorkerFinished(completion)) => {
                         self.current_workers = self.current_workers.saturating_sub(1);
+                        if completion.work_type == WorkType::GossipAttestation
+                            || completion.work_type == WorkType::GossipAttestationBatch
+                        {
+                            attestation_hold.on_worker_finished();
+                        }
                         if let Some(peer_id) = completion.peer_id {
                             if completion.work_type == WorkType::GossipBlock {
                                 work_queues.gossip_block_queue.worker_finished(&peer_id)
@@ -1014,57 +1192,13 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         // Check the unaggregated attestation queue.
                         //
                         // Potentially use batching.
-                        } else if !work_queues.attestation_queue.is_empty() {
-                            let batch_size = cmp::min(
-                                work_queues.attestation_queue.len(),
-                                self.config.max_gossip_attestation_batch_size,
-                            );
-
-                            if batch_size < 2 {
-                                // One single attestation is in the queue, process it individually.
-                                work_queues.attestation_queue.pop()
-                            } else {
-                                // Collect two or more attestations into a batch, so they can take
-                                // advantage of batch signature verification.
-                                //
-                                // Note: this will convert the `Work::GossipAttestation` item into a
-                                // `Work::GossipAttestationBatch` item.
-                                let mut attestations = Vec::with_capacity(batch_size);
-                                let mut process_batch_opt = None;
-                                for _ in 0..batch_size {
-                                    if let Some(item) = work_queues.attestation_queue.pop() {
-                                        match item {
-                                            Work::GossipAttestation {
-                                                attestation,
-                                                process_individual: _,
-                                                process_batch,
-                                            } => {
-                                                attestations.push(*attestation);
-                                                if process_batch_opt.is_none() {
-                                                    process_batch_opt = Some(process_batch);
-                                                }
-                                            }
-                                            _ => error!("Invalid item in attestation queue"),
-                                        }
-                                    }
-                                }
-
-                                if let Some(process_batch) = process_batch_opt {
-                                    // Process all attestations with a single worker.
-                                    Some(Work::GossipAttestationBatch {
-                                        attestations,
-                                        process_batch,
-                                    })
-                                } else {
-                                    // There is no good reason for this to
-                                    // happen, it is a serious logic error.
-                                    // Since we only form batches when multiple
-                                    // work items exist, we should always have a
-                                    // work closure at this point.
-                                    crit!("Missing attestations work");
-                                    None
-                                }
-                            }
+                        } else if let Some((item, queued_since)) = pop_released_attestations(
+                            &mut work_queues.attestation_queue,
+                            &mut attestation_hold,
+                            self.config.max_gossip_attestation_batch_size,
+                        ) {
+                            created_timestamp = queued_since;
+                            Some(item)
                         // Check payload attestation messages after attestations. They dont give rewards
                         // but they influence fork choice.
                         } else if let Some(item) =
@@ -1287,9 +1421,26 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                 // Notifications must not wait behind the work they release.
                                 process_fn();
                             }
+                            // Unaggregated attestations always go through the queue while
+                            // holding is enabled, so that a free worker does not prevent a batch
+                            // from forming.
+                            Work::GossipAttestation { .. } if attestation_hold.is_enabled() => {
+                                work_queues.attestation_queue.push(work);
+                                attestation_hold.on_queued(tokio::time::Instant::now().into_std());
+                                if can_spawn
+                                    && let Some((work, queued_since)) = pop_released_attestations(
+                                        &mut work_queues.attestation_queue,
+                                        &mut attestation_hold,
+                                        self.config.max_gossip_attestation_batch_size,
+                                    )
+                                {
+                                    self.spawn_worker(work, queued_since, idle_tx);
+                                }
+                            }
                             _ if can_spawn => self.spawn_worker(work, created_timestamp, idle_tx),
                             Work::GossipAttestation { .. } => {
-                                work_queues.attestation_queue.push(work)
+                                work_queues.attestation_queue.push(work);
+                                attestation_hold.on_queued(tokio::time::Instant::now().into_std());
                             }
                             // Attestation batches are formed internally within the
                             // `BeaconProcessor`, they are not sent from external services.
@@ -1963,5 +2114,274 @@ mod tests {
         assert_eq!(completion.peer_id, Some(peer));
         assert_eq!(completion.work_type, WorkType::RpcBlock);
         assert!(rx.try_recv().is_err());
+    }
+
+    /// Drives a `BeaconProcessor` manager with unaggregated attestations whose workers block until
+    /// the test lets them finish.
+    struct AttestationHoldRig {
+        event_tx: mpsc::Sender<WorkEvent<MainnetEthSpec>>,
+        journal_rx: mpsc::Receiver<&'static str>,
+        /// Receives the number of attestations given to each worker, when the worker starts.
+        started_rx: mpsc::UnboundedReceiver<usize>,
+        started_tx: mpsc::UnboundedSender<usize>,
+        /// Each message lets one blocked worker finish.
+        finish_tx: std::sync::mpsc::Sender<()>,
+        finish_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+        _runtime: task_executor::test_utils::TestRuntime,
+    }
+
+    impl AttestationHoldRig {
+        fn new(config: BeaconProcessorConfig) -> Self {
+            let spec = Arc::new(MainnetEthSpec::default_spec());
+            let state =
+                types::BeaconState::<MainnetEthSpec>::new(0, types::Eth1Data::default(), &spec);
+            let queue_lengths = BeaconProcessorQueueLengths::from_state(&state, &spec).unwrap();
+            let network_globals = Arc::new(NetworkGlobals::new_test_globals(
+                vec![],
+                Arc::new(lighthouse_network::NetworkConfig::default()),
+                spec,
+            ));
+            let runtime = task_executor::test_utils::TestRuntime::default();
+            let (event_tx, event_rx) = mpsc::channel(config.max_work_event_queue_len);
+            let (journal_tx, journal_rx) = mpsc::channel(1024);
+            BeaconProcessor {
+                network_globals,
+                executor: runtime.task_executor.clone(),
+                current_workers: 0,
+                config,
+            }
+            .spawn_manager(
+                event_rx,
+                Some(journal_tx),
+                slot_clock::TestingSlotClock::new(
+                    Slot::new(0),
+                    Duration::from_secs(0),
+                    Duration::from_secs(12),
+                ),
+                Duration::from_millis(500),
+                queue_lengths,
+            )
+            .unwrap();
+
+            let (started_tx, started_rx) = mpsc::unbounded_channel();
+            let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+            Self {
+                event_tx,
+                journal_rx,
+                started_rx,
+                started_tx,
+                finish_tx,
+                finish_rx: Arc::new(Mutex::new(finish_rx)),
+                _runtime: runtime,
+            }
+        }
+
+        /// Returns a closure that reports `len` attestations as started, then blocks until the
+        /// test lets one worker finish.
+        fn blocking_worker(&self, len: usize) -> impl FnOnce() + Send + Sync + 'static {
+            let started_tx = self.started_tx.clone();
+            let finish_rx = self.finish_rx.clone();
+            move || {
+                let _ = started_tx.send(len);
+                let _ = finish_rx.lock().recv();
+            }
+        }
+
+        /// Sends `work` and waits until the manager has handled it.
+        async fn send(&mut self, work: Work<MainnetEthSpec>) {
+            let work_id = work.str_id();
+            self.event_tx
+                .send(WorkEvent {
+                    drop_during_sync: false,
+                    work,
+                })
+                .await
+                .unwrap();
+            // The manager journals an event and then handles it without yielding, so on the
+            // single-threaded test runtime the event is fully handled once the journal entry is
+            // visible here.
+            loop {
+                if self.journal_rx.recv().await.unwrap() == work_id {
+                    break;
+                }
+            }
+        }
+
+        async fn send_attestation(&mut self) {
+            let individual_started_tx = self.started_tx.clone();
+            let individual_finish_rx = self.finish_rx.clone();
+            let batch_started_tx = self.started_tx.clone();
+            let batch_finish_rx = self.finish_rx.clone();
+            self.send(Work::GossipAttestation {
+                attestation: Box::new(GossipAttestationPackage {
+                    message_id: MessageId::new(&[]),
+                    peer_id: PeerId::random(),
+                    attestation: Box::new(SingleAttestation {
+                        committee_index: 0,
+                        attester_index: 0,
+                        data: types::AttestationData::default(),
+                        signature: bls::AggregateSignature::infinity(),
+                    }),
+                    subnet_id: SubnetId::new(0),
+                    should_import: true,
+                    seen_timestamp: Duration::ZERO,
+                }),
+                process_individual: Box::new(move |_| {
+                    let _ = individual_started_tx.send(1);
+                    let _ = individual_finish_rx.lock().recv();
+                }),
+                process_batch: Box::new(move |attestations| {
+                    let _ = batch_started_tx.send(attestations.len());
+                    let _ = batch_finish_rx.lock().recv();
+                }),
+            })
+            .await;
+        }
+
+        /// Waits for the next worker to start and returns how many attestations it was given.
+        async fn next_started(&mut self) -> usize {
+            self.started_rx.recv().await.unwrap()
+        }
+
+        /// Lets one blocked worker finish.
+        fn finish_one(&self) {
+            self.finish_tx.send(()).unwrap();
+        }
+    }
+
+    fn hold_config(max_workers: usize, batch_size: usize, hold_ms: u64) -> BeaconProcessorConfig {
+        BeaconProcessorConfig {
+            max_workers,
+            max_gossip_attestation_batch_size: batch_size,
+            max_gossip_attestation_batch_hold_ms: hold_ms,
+            ..BeaconProcessorConfig::default()
+        }
+    }
+
+    /// With no attestation worker running an attestation is verified at once, without waiting for
+    /// any timer.
+    #[tokio::test(start_paused = true)]
+    async fn attestation_hold_does_not_delay_a_lone_attestation() {
+        let start = tokio::time::Instant::now();
+        let mut rig = AttestationHoldRig::new(hold_config(8, 64, 50));
+
+        for _ in 0..3 {
+            rig.send_attestation().await;
+            assert_eq!(rig.next_started().await, 1);
+            rig.finish_one();
+            // Wait for the worker to be freed before sending the next attestation.
+            loop {
+                if rig.journal_rx.recv().await.unwrap() == WORKER_FREED {
+                    break;
+                }
+            }
+        }
+        assert_eq!(tokio::time::Instant::now(), start);
+    }
+
+    /// Attestations that arrive while an attestation worker is running are held although workers
+    /// are free, and are verified as one batch when that worker finishes.
+    #[tokio::test(start_paused = true)]
+    async fn attestation_hold_batches_arrivals_during_verification() {
+        let start = tokio::time::Instant::now();
+        let mut rig = AttestationHoldRig::new(hold_config(8, 64, 50));
+
+        rig.send_attestation().await;
+        assert_eq!(rig.next_started().await, 1);
+        for _ in 0..3 {
+            rig.send_attestation().await;
+        }
+        rig.finish_one();
+        assert_eq!(rig.next_started().await, 3);
+        // The batch was released by the worker finishing, not by the deadline.
+        assert_eq!(tokio::time::Instant::now(), start);
+    }
+
+    /// A full batch is verified at once, even while another attestation worker is running.
+    #[tokio::test(start_paused = true)]
+    async fn attestation_hold_releases_a_full_batch() {
+        let start = tokio::time::Instant::now();
+        let mut rig = AttestationHoldRig::new(hold_config(8, 4, 50));
+
+        rig.send_attestation().await;
+        assert_eq!(rig.next_started().await, 1);
+        for _ in 0..4 {
+            rig.send_attestation().await;
+        }
+        assert_eq!(rig.next_started().await, 4);
+        assert_eq!(tokio::time::Instant::now(), start);
+    }
+
+    /// Held attestations are verified once the oldest of them has waited for the maximum hold
+    /// time, even if the running attestation worker never finishes.
+    #[tokio::test(start_paused = true)]
+    async fn attestation_hold_releases_at_the_deadline() {
+        let mut rig = AttestationHoldRig::new(hold_config(8, 64, 50));
+
+        rig.send_attestation().await;
+        assert_eq!(rig.next_started().await, 1);
+
+        rig.send_attestation().await;
+        tokio::time::advance(Duration::from_millis(49)).await;
+        // This attestation is released with the previous one. If the previous one had already
+        // been released, or if this arrival had extended the deadline, the batch below would not
+        // hold two attestations 50ms after the first was queued.
+        rig.send_attestation().await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert_eq!(rig.next_started().await, 2);
+    }
+
+    /// With a hold time of zero an attestation is verified as soon as a worker is free.
+    #[tokio::test(start_paused = true)]
+    async fn attestation_hold_disabled_spawns_immediately() {
+        let start = tokio::time::Instant::now();
+        let mut rig = AttestationHoldRig::new(hold_config(8, 64, 0));
+
+        for _ in 0..3 {
+            rig.send_attestation().await;
+            assert_eq!(rig.next_started().await, 1);
+        }
+        assert_eq!(tokio::time::Instant::now(), start);
+    }
+
+    /// Held attestations do not occupy a worker: other work is started while they wait.
+    #[tokio::test(start_paused = true)]
+    async fn attestation_hold_does_not_block_other_work() {
+        let start = tokio::time::Instant::now();
+        let mut rig = AttestationHoldRig::new(hold_config(2, 64, 50));
+
+        rig.send_attestation().await;
+        assert_eq!(rig.next_started().await, 1);
+        rig.send_attestation().await;
+
+        let other_work = rig.blocking_worker(1000);
+        rig.send(Work::GossipVoluntaryExit(Box::new(other_work)))
+            .await;
+        assert_eq!(rig.next_started().await, 1000);
+        assert_eq!(tokio::time::Instant::now(), start);
+    }
+
+    /// When the deadline passes while every worker is busy, the held attestations are verified by
+    /// the next worker to be freed.
+    #[tokio::test(start_paused = true)]
+    async fn attestation_hold_past_deadline_waits_for_a_worker() {
+        let mut rig = AttestationHoldRig::new(hold_config(2, 64, 50));
+
+        rig.send_attestation().await;
+        assert_eq!(rig.next_started().await, 1);
+        let other_work = rig.blocking_worker(1000);
+        rig.send(Work::GossipVoluntaryExit(Box::new(other_work)))
+            .await;
+        assert_eq!(rig.next_started().await, 1000);
+
+        // Both workers are busy. These attestations are queued by saturation.
+        rig.send_attestation().await;
+        rig.send_attestation().await;
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        // One worker finishes. It is not known which one, but either way the queued attestations
+        // are released: no attestation worker is running, or the deadline has passed.
+        rig.finish_one();
+        assert_eq!(rig.next_started().await, 2);
     }
 }
