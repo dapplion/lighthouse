@@ -1047,6 +1047,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
                     .as_ref()
                     .is_some_and(|event| event.drop_during_sync);
 
+                let flush_idle_tx = idle_tx.clone();
                 let idle_tx = idle_tx.clone();
                 let modified_queue_id = match work_event {
                     // There is no new work event, but we are able to spawn a new worker.
@@ -1598,6 +1599,21 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         queue_len = work_queues.attestation_queue.max_length,
                         "Attestation queue full"
                     )
+                }
+
+                // Flush a ready batch if a worker is free. The age timer cannot be the only
+                // trigger: it is polled last, so another event can pre-empt its expiry, and an
+                // expired deadline is not re-armed below.
+                if att_batch_trigger_enabled
+                    && self.current_workers < self.config.max_workers
+                    && let Some(batch) = take_ready_attestation_batch(
+                        &mut work_queues.attestation_queue,
+                        att_batch_trigger,
+                        att_batch_max_age,
+                        att_batch_cap,
+                    )
+                {
+                    self.spawn_worker(batch, Instant::now(), flush_idle_tx);
                 }
 
                 // (Re)arm the age-bound timer.
