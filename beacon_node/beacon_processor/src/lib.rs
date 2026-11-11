@@ -876,23 +876,38 @@ fn take_aggregate_batch<E: EthSpec>(
     )
 }
 
-/// Whether the attestation queue should be flushed now: at least `trigger` are pending (a
-/// `trigger` of `1` means any non-empty queue), or the oldest reached `max_age`.
-fn attestation_flush_ready<E: EthSpec>(
+/// What to do with the queued unaggregated attestations.
+#[derive(Debug, PartialEq)]
+enum AttestationBatchState {
+    /// Nothing is queued.
+    Empty,
+    /// Dispatch now: at least `trigger` are queued, or the oldest reached `max_age`.
+    Ready,
+    /// Keep collecting. `until` is when the oldest reaches `max_age`, if there is an age bound.
+    Hold { until: Option<Instant> },
+}
+
+/// Above a `trigger` of 1, attestations are always held, even when workers are free. The added
+/// latency, up to `max_age`, is the deliberate price for less BLS CPU. No attestation waits
+/// longer than that while a worker is free.
+fn attestation_batch_state<E: EthSpec>(
     attestation_queue: &LifoQueue<Work<E>>,
     trigger: usize,
     max_age: Option<Duration>,
-) -> bool {
-    let queue_len = attestation_queue.len();
-    if queue_len == 0 {
-        return false;
+    now: Instant,
+) -> AttestationBatchState {
+    let Some((oldest_enqueued_at, _)) = attestation_queue.back() else {
+        return AttestationBatchState::Empty;
+    };
+    if attestation_queue.len() >= trigger {
+        return AttestationBatchState::Ready;
     }
-    if queue_len >= trigger {
-        return true;
-    }
-    match (max_age, attestation_queue.back()) {
-        (Some(max_age), Some((enqueued_at, _))) => enqueued_at.elapsed() >= max_age,
-        _ => false,
+    let Some(max_age) = max_age else {
+        return AttestationBatchState::Hold { until: None };
+    };
+    match oldest_enqueued_at.checked_add(max_age) {
+        Some(until) if until > now => AttestationBatchState::Hold { until: Some(until) },
+        Some(_) | None => AttestationBatchState::Ready,
     }
 }
 
@@ -903,11 +918,11 @@ fn take_ready_attestation_batch<E: EthSpec>(
     trigger: usize,
     max_age: Option<Duration>,
     batch_cap: usize,
+    now: Instant,
 ) -> Option<(Instant, Work<E>)> {
-    if attestation_flush_ready(attestation_queue, trigger, max_age) {
-        take_attestation_batch(attestation_queue, batch_cap)
-    } else {
-        None
+    match attestation_batch_state(attestation_queue, trigger, max_age, now) {
+        AttestationBatchState::Ready => take_attestation_batch(attestation_queue, batch_cap),
+        AttestationBatchState::Empty | AttestationBatchState::Hold { until: _ } => None,
     }
 }
 
@@ -1120,6 +1135,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
                     .as_ref()
                     .is_some_and(|event| event.drop_during_sync);
 
+                let flush_idle_tx = idle_tx.clone();
                 let idle_tx = idle_tx.clone();
                 let modified_queue_id = match work_event {
                     // There is no new work event, but we are able to spawn a new worker.
@@ -1197,6 +1213,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             att_batch_trigger,
                             att_batch_max_age,
                             att_batch_cap,
+                            Instant::now(),
                         ) {
                             Some(batch)
                         // Check payload attestation messages after attestations. They dont give rewards
@@ -1446,6 +1463,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
                                         att_batch_trigger,
                                         att_batch_max_age,
                                         att_batch_cap,
+                                        Instant::now(),
                                     )
                                 {
                                     self.spawn_worker(batch, enqueued_at, idle_tx);
@@ -1741,17 +1759,34 @@ impl<E: EthSpec> BeaconProcessor<E> {
                     )
                 }
 
+                // Dispatch a batch that became ready while another event was handled. An expired
+                // deadline is not re-armed below.
+                let now = Instant::now();
+                if att_batch_trigger_enabled
+                    && self.current_workers < self.config.max_workers
+                    && let Some((enqueued_at, batch)) = take_ready_attestation_batch(
+                        &mut work_queues.attestation_queue,
+                        att_batch_trigger,
+                        att_batch_max_age,
+                        att_batch_cap,
+                        now,
+                    )
+                {
+                    self.spawn_worker(batch, enqueued_at, flush_idle_tx);
+                }
+
                 // (Re)arm the age-bound timer.
-                let attestation_timer_deadline =
-                    match (att_batch_max_age, work_queues.attestation_queue.back()) {
-                        (Some(max_age), Some((enqueued_at, _)))
-                            if work_queues.attestation_queue.len() < att_batch_trigger =>
-                        {
-                            let deadline = tokio::time::Instant::from_std(*enqueued_at + max_age);
-                            (deadline > tokio::time::Instant::now()).then_some(deadline)
-                        }
-                        _ => None,
-                    };
+                let attestation_timer_deadline = match attestation_batch_state(
+                    &work_queues.attestation_queue,
+                    att_batch_trigger,
+                    att_batch_max_age,
+                    now,
+                ) {
+                    AttestationBatchState::Empty | AttestationBatchState::Ready => None,
+                    AttestationBatchState::Hold { until } => {
+                        until.map(tokio::time::Instant::from_std)
+                    }
+                };
                 inbound_events.set_attestation_timer(attestation_timer_deadline);
             }
         };
@@ -2140,42 +2175,64 @@ mod tests {
     }
 
     #[test]
-    fn flush_not_ready_when_queue_empty() {
+    fn batch_state_empty_queue() {
         let queue = attestation_queue_with(0);
-        assert!(!attestation_flush_ready(&queue, 1, None));
-        assert!(!attestation_flush_ready(&queue, 16, Some(Duration::ZERO)));
+        let now = Instant::now();
+        assert_eq!(
+            attestation_batch_state(&queue, 1, None, now),
+            AttestationBatchState::Empty
+        );
+        assert_eq!(
+            attestation_batch_state(&queue, 16, Some(Duration::ZERO), now),
+            AttestationBatchState::Empty
+        );
     }
 
     #[test]
-    fn flush_ready_for_any_nonempty_queue_with_trigger_one() {
+    fn batch_state_ready_for_any_nonempty_queue_with_trigger_one() {
         // Legacy behaviour (no batch trigger): dispatch whenever the queue is non-empty.
         let queue = attestation_queue_with(1);
-        assert!(attestation_flush_ready(&queue, 1, None));
+        assert_eq!(
+            attestation_batch_state(&queue, 1, None, Instant::now()),
+            AttestationBatchState::Ready
+        );
     }
 
     #[test]
-    fn flush_ready_when_trigger_reached() {
+    fn batch_state_ready_when_trigger_reached() {
         let queue = attestation_queue_with(16);
-        assert!(attestation_flush_ready(&queue, 16, None));
+        assert_eq!(
+            attestation_batch_state(&queue, 16, None, Instant::now()),
+            AttestationBatchState::Ready
+        );
     }
 
     #[test]
-    fn flush_not_ready_below_trigger_without_age_bound() {
+    fn batch_state_holds_below_trigger_without_age_bound() {
         let queue = attestation_queue_with(15);
-        assert!(!attestation_flush_ready(&queue, 16, None));
+        assert_eq!(
+            attestation_batch_state(&queue, 16, None, Instant::now()),
+            AttestationBatchState::Hold { until: None }
+        );
     }
 
     #[test]
-    fn flush_readiness_below_trigger_follows_age_bound() {
+    fn batch_state_below_trigger_follows_age_bound() {
         let queue = attestation_queue_with(15);
-        // The items were just enqueued: not ready under a large age bound, ready once the oldest
-        // exceeds the bound (zero here, so immediately).
-        assert!(!attestation_flush_ready(
-            &queue,
-            16,
-            Some(Duration::from_secs(3600))
-        ));
-        assert!(attestation_flush_ready(&queue, 16, Some(Duration::ZERO)));
+        let max_age = Duration::from_millis(10);
+        let (oldest_enqueued_at, _) = queue.back().expect("queue is not empty");
+        let deadline = *oldest_enqueued_at + max_age;
+        // Held until the oldest attestation reaches the age bound, then ready from that instant.
+        assert_eq!(
+            attestation_batch_state(&queue, 16, Some(max_age), *oldest_enqueued_at),
+            AttestationBatchState::Hold {
+                until: Some(deadline)
+            }
+        );
+        assert_eq!(
+            attestation_batch_state(&queue, 16, Some(max_age), deadline),
+            AttestationBatchState::Ready
+        );
     }
 
     fn rpc_block(peer_id: PeerId, ignored: Arc<AtomicUsize>) -> Work<MainnetEthSpec> {
