@@ -40,7 +40,7 @@ jobs:
         run: |
           echo "deb [trusted=yes] https://sdk.kurtosis.com/kurtosis-cli-release-artifacts/ /" | sudo tee /etc/apt/sources.list.d/kurtosis.list
           sudo apt update
-          sudo apt install -y kurtosis-cli
+          sudo apt install -y kurtosis-cli=1.22.2
           kurtosis analytics disable
 
       - name: Download Docker image artifact
@@ -108,7 +108,7 @@ jobs:
         run: |
           echo "deb [trusted=yes] https://sdk.kurtosis.com/kurtosis-cli-release-artifacts/ /" | sudo tee /etc/apt/sources.list.d/kurtosis.list
           sudo apt update
-          sudo apt install -y kurtosis-cli
+          sudo apt install -y kurtosis-cli=1.22.2
           kurtosis analytics disable
 
       - name: Download Docker image artifact
@@ -144,7 +144,7 @@ jobs:
         run: |
           echo "deb [trusted=yes] https://sdk.kurtosis.com/kurtosis-cli-release-artifacts/ /" | sudo tee /etc/apt/sources.list.d/kurtosis.list
           sudo apt update
-          sudo apt install -y kurtosis-cli
+          sudo apt install -y kurtosis-cli=1.22.2
           kurtosis analytics disable
 
       - name: Download Docker image artifact
@@ -187,7 +187,7 @@ jobs:
         run: |
           echo "deb [trusted=yes] https://sdk.kurtosis.com/kurtosis-cli-release-artifacts/ /" | sudo tee /etc/apt/sources.list.d/kurtosis.list
           sudo apt update
-          sudo apt install -y kurtosis-cli
+          sudo apt install -y kurtosis-cli=1.22.2
           kurtosis analytics disable
 
       - name: Download Docker image artifact
@@ -229,7 +229,7 @@ jobs:
         run: |
           echo "deb [trusted=yes] https://sdk.kurtosis.com/kurtosis-cli-release-artifacts/ /" | sudo tee /etc/apt/sources.list.d/kurtosis.list
           sudo apt update
-          sudo apt install -y kurtosis-cli
+          sudo apt install -y kurtosis-cli=1.22.2
           kurtosis analytics disable
 
       - name: Download Docker image artifact
