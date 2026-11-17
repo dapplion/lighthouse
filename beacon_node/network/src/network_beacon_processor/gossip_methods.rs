@@ -3972,6 +3972,17 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                                 "Failed to defer envelope import"
                             );
                         }
+
+                        // The block may have been imported after verification failed and before
+                        // the envelope was queued, in which case the queue missed `BlockImported`.
+                        if self
+                            .chain
+                            .canonical_head
+                            .fork_choice_read_lock()
+                            .contains_block(&block_root)
+                        {
+                            self.notify_block_imported(block_root, EnvelopeSource::Gossip);
+                        }
                     }
 
                     EnvelopeError::PriorToFinalization { .. }
