@@ -328,13 +328,17 @@ impl<E: EthSpec> LocalNetwork<E> {
     // sync.
     pub async fn add_beacon_node_with_delay(
         &self,
-        beacon_config: ClientConfig,
+        mut beacon_config: ClientConfig,
         mock_execution_config: MockExecutionConfig,
         wait_until_epoch: u64,
         slot_duration: Duration,
         slots_per_epoch: u64,
     ) -> Result<(), String> {
         epoch_delay(Epoch::new(wait_until_epoch), slot_duration, slots_per_epoch).await;
+
+        // All nodes share one process. A supernode range sync takes enough CPU to delay block
+        // import on the validating nodes past the sync message deadline.
+        beacon_config.chain.node_custody_type = NodeCustodyType::Fullnode;
 
         self.add_beacon_node(beacon_config, mock_execution_config, false)
             .await?;
